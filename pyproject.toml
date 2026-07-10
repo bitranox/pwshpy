@@ -259,6 +259,11 @@ default-remote = "origin"
 pytest-verbosity = "-vv"
 coverage-report-file = "coverage.xml"
 src-path = "src"
+# Exclude host-mutating / dev-env tests from `make test`, matching CI
+# (`pytest -m "not local_only"`). Without this, bmk's default excludes only the
+# `integration` marker - which this project never uses - so `make test` would run
+# the local_only mutating suite against the dev box.
+exclude-markers = "local_only"
 
 [tool.importlinter]
 root_package = "pwshpy"

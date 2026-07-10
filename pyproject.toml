@@ -259,11 +259,13 @@ default-remote = "origin"
 pytest-verbosity = "-vv"
 coverage-report-file = "coverage.xml"
 src-path = "src"
-# Exclude host-mutating / dev-env tests from `make test`, matching CI
-# (`pytest -m "not local_only"`). Without this, bmk's default excludes only the
-# `integration` marker - which this project never uses - so `make test` would run
-# the local_only mutating suite against the dev box.
-exclude-markers = "local_only"
+# `make test` skips only host-MUTATING tests (the `mutating` marker). The quick local
+# gate still runs the safe `local_only` tests: the Windows-oracle reads skip on Linux,
+# and the .NET / live-journald tests skip when their runtime / journal is absent. This
+# follows bmk's design (`make test` runs `local_only`, excludes only the named marker)
+# while keeping host mutation off the dev box. The mutating suite runs on the disposable
+# throwaway VM (`pytest -m mutating`); CI runs `pytest -m "not local_only"`.
+exclude-markers = "mutating"
 
 [tool.importlinter]
 root_package = "pwshpy"

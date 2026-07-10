@@ -24,6 +24,7 @@ _GROUP = "pwshpy-pytest-group"
 
 pytestmark = [
     pytest.mark.local_only,
+    pytest.mark.mutating,
     pytest.mark.os_linux,
     pytest.mark.skipif(
         not sys.platform.startswith("linux") or os.geteuid() != 0,  # type: ignore[attr-defined]

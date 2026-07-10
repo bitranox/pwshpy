@@ -14,6 +14,7 @@ import pytest
 
 from pwshpy.adapters.native.journald import iter_event_log, to_entry, to_event_level
 from pwshpy.domain.enums import EventLevel
+from pwshpy.domain.errors import NativeCallError, PlatformUnsupportedError
 from pwshpy.domain.records import EventLogEntry
 
 
@@ -74,6 +75,11 @@ def test_marshal_entry_missing_fields_are_safe() -> None:
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="journald is Linux-only")
 def test_live_read_streams_entries() -> None:
     """Reading the real journal yields EventLogEntry records (needs root / systemd-journal group)."""
-    first = next(iter(iter_event_log("System")))
+    try:
+        first = next(iter(iter_event_log("System")))
+    except (PlatformUnsupportedError, NativeCallError) as exc:
+        # a local resource this box may lack: the [journald] extra (systemd-python) is not
+        # installed, or the journal is not readable by this user (root / systemd-journal group).
+        pytest.skip(f"live journald read unavailable here ({exc})")
     assert isinstance(first, EventLogEntry)
     assert first.time_created is not None

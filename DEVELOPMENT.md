@@ -2,26 +2,26 @@
 
 ## Make Targets
 
-| Target            | Description                                                                                |
-|-------------------|--------------------------------------------------------------------------------------------|
-| `help`            | Show help                                                                                  |
-| `install`         | Install package editable                                                                   |
-| `dev`             | Install package with dev extras                                                            |
-| `test`            | Lint, type-check, run tests with coverage, upload to Codecov                               |
-| `run`             | Run module CLI (requires dev install or src on PYTHONPATH)                                 |
-| `version-current` | Print current version from pyproject.toml                                                  |
-| `bump`            | Bump version (updates pyproject.toml and CHANGELOG.md)                                     |
-| `bump-patch`      | Bump patch version (X.Y.Z -> X.Y.(Z+1))                                                    |
-| `bump-minor`      | Bump minor version (X.Y.Z -> X.(Y+1).0)                                                    |
-| `bump-major`      | Bump major version ((X+1).0.0)                                                             |
-| `clean`           | Remove caches, build artifacts, and coverage                                               |
-| `push`            | Run tests, prompt for/accept a commit message, create (allow-empty) commit, push to remote |
-| `build`           | Build wheel/sdist artifacts via `python -m build`                                          |
-| `coverage`        | Generate coverage reports                                                                  |
-| `testintegration`       | Run integration tests (external / local-only resources)                                        |
-| `dependencies`    | Check and list project dependencies                                                        |
-| `dependencies-update` | Update dependencies to latest versions                                                |
-| `menu`            | Interactive TUI to run targets and edit parameters (requires dev dep: textual)             |
+| Target                | Description                                                                                |
+|-----------------------|--------------------------------------------------------------------------------------------|
+| `help`                | Show help                                                                                  |
+| `install`             | Install package editable                                                                   |
+| `dev`                 | Install package with dev extras                                                            |
+| `test`                | Lint, type-check, run tests with coverage, upload to Codecov                               |
+| `run`                 | Run module CLI (requires dev install or src on PYTHONPATH)                                 |
+| `version-current`     | Print current version from pyproject.toml                                                  |
+| `bump`                | Bump version (updates pyproject.toml and CHANGELOG.md)                                     |
+| `bump-patch`          | Bump patch version (X.Y.Z -> X.Y.(Z+1))                                                    |
+| `bump-minor`          | Bump minor version (X.Y.Z -> X.(Y+1).0)                                                    |
+| `bump-major`          | Bump major version ((X+1).0.0)                                                             |
+| `clean`               | Remove caches, build artifacts, and coverage                                               |
+| `push`                | Run tests, prompt for/accept a commit message, create (allow-empty) commit, push to remote |
+| `build`               | Build wheel/sdist artifacts via `python -m build`                                          |
+| `coverage`            | Generate coverage reports                                                                  |
+| `testintegration`     | Run `@pytest.mark.integration` tests only (`-m integration`; long-running / external)      |
+| `dependencies`        | Check and list project dependencies                                                        |
+| `dependencies-update` | Update dependencies to latest versions                                                     |
+| `menu`                | Interactive TUI to run targets and edit parameters (requires dev dep: textual)             |
 
 ### Target Parameters (env vars)
 
@@ -93,45 +93,44 @@ make menu
 - `bump`: updates `pyproject.toml` version and inserts a new section in `CHANGELOG.md`. Use `VERSION=X.Y.Z make bump` or `make bump-minor`/`bump-major`/`bump-patch`.
 - Additional scripts (`pipx-*`, `uv-*`, `which-cmd`, `verify-install`) provide install/run diagnostics.
 
-## Running Integration Tests
+## Test Markers and What Each Command Runs
 
-Some tests require external resources (Windows hosts, external services) and are excluded from the default test run. These are marked with `@pytest.mark.local_only`.
+Tests are gated by pytest markers so the local gate, the integration lane, and CI each run the
+right subset:
+
+- **`local_only`** - needs a local resource the CI runners lack (a Windows host + pwsh for the
+  read-only oracles, the `[full]` .NET runtime, a readable journald). `make test` **runs** these
+  locally and they skip cleanly when the resource is absent; CI **excludes** them
+  (`pytest -m "not local_only"`). The local-vs-CI difference is intentional.
+- **`mutating`** - **changes** real host state (creates users/services/tasks, writes the registry,
+  clears an event log). `make test` **skips** these: this project sets
+  `[tool.scripts.test].exclude-markers = "mutating"`. They run only on a disposable throwaway host.
+- **`os_agnostic` / `os_windows` / `os_macos` / `os_posix` / `os_linux`** - label the target OS. The
+  marker itself does not skip; each such test also carries its own `skipif(sys.platform ...)`.
 
 ### Quick Reference
 
-| Command | What it runs |
-|---------|--------------|
-| `make test` | All tests EXCEPT `local_only` (default for CI) |
-| `make test-slow` | ONLY `local_only` integration tests |
-| `pytest tests/` | ALL tests (no marker filter) |
+| Command                      | What it runs                                                                                    |
+|------------------------------|-------------------------------------------------------------------------------------------------|
+| `make test`                  | Everything EXCEPT `mutating` (unit + safe `local_only`, which skip when the resource is absent) |
+| `make testintegration`       | Only `@pytest.mark.integration` (long-running / external; aliases `testi`, `ti`)                |
+| `pytest -m "not local_only"` | The CI gate - unit tests only                                                                   |
+| `pytest -m mutating`         | The host-mutating suite - a disposable throwaway host ONLY, never your dev box                  |
+| `pytest tests/`              | ALL tests, no filter - never on your dev box (it runs `mutating`)                               |
 
-### Local-Only / Windows Integration Tests
+### Adding a host-mutating test
 
-Mutating or host-dependent tests (the Windows-only native adapters and .NET hosting) are marked
-`@pytest.mark.local_only` and skipped by `make test`. Run them deliberately, and only on a disposable
-host - see the "Development Safety" note in CLAUDE.md.
-
-```bash
-# run all local-only integration tests
-make testintegration
-
-# or a specific module
-pytest tests/test_native_process.py -v
-```
-
-### Adding New Integration Tests
-
-Mark tests that require external resources:
+Mark it `mutating` (alongside `local_only` and the OS marker) so `make test` skips it and only the
+throwaway host runs it - see the "Development Safety" note in CLAUDE.md:
 
 ```python
 @pytest.mark.local_only
-@pytest.mark.os_agnostic
-def test_real_external_service(...):
-    """Integration test requiring external service."""
+@pytest.mark.mutating
+@pytest.mark.os_windows
+def test_real_windows_mutation(...):
+    """Mutating test requiring a (disposable) Windows host."""
     ...
 ```
-
-These tests will be skipped in CI but run with `make test-slow`.
 
 ## Development Workflow
 

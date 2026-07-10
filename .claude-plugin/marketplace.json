@@ -1,0 +1,14 @@
+{
+  "name": "pwshpy",
+  "owner": { "name": "bitranox" },
+  "metadata": {
+    "description": "pwshpy delivered as a single Claude Code plugin: the using-pwsh skill for using pwshpy (a Pythonic PowerShell) instead of writing or debugging PowerShell / .ps1."
+  },
+  "plugins": [
+    {
+      "name": "pwshpy",
+      "source": ".",
+      "description": "Use pwshpy - a genuinely Pythonic PowerShell (typed records + a lazy pipeline, as a library and a CLI) - instead of writing, modifying, or debugging pwsh / .ps1; and translate cmdlets and .ps1 scripts to it."
+    }
+  ]
+}

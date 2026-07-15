@@ -1,4 +1,4 @@
-# BMK MAKEFILE 3.7.1
+# BMK MAKEFILE 3.9.0
 # do not alter this file - it might be overwritten on new versions of BMK
 # if You want to alter it, remove the first line # BMK MAKEFILE 1.0 - then it is a custom makefile and will not be overwritten
 # bmk Makefile — thin wrapper using `uv tool install` for persistent bmk
@@ -13,14 +13,22 @@
 #   make custom deploy                # run custom command
 #   make custom deploy --dry-run
 #
-# bmk is installed into THIS PROJECT's own tool env (.venv-bmk) together with the
-# project's dependencies (read from ./pyproject.toml), so pyright, pytest,
-# pip-audit etc. resolve the full dependency tree without PYTHONPATH hacks. The
-# env belongs to this repo alone, so projects cannot overwrite each other's
-# dependencies. It is re-resolved on every invocation, so a new bmk release and any
-# dependency change are picked up automatically.
+# bmk is installed ONCE per machine, in uv's own tool dir, and holds NOTHING of this
+# project: only bmk and its toolchain. Your project's dependencies live in the project's
+# own venv (.venv), which bmk provisions and syncs from ./pyproject.toml, and that is the
+# env your tests, pyright and pip-audit all run against.
 #
-# .venv-bmk is disposable - delete it and the next make rebuilds it.
+# That separation is the point. bmk used to be installed together with the project's
+# dependencies in one env that resolved them TOGETHER, and every consequence of that was
+# a bug: a project dependency capping one of bmk's silently backtracked bmk to an ancient
+# release; a yanked transitive dependency made bmk itself uninstallable, bricking `make`
+# fleet-wide; and the tests ran in that co-resolved env while pyright and pip-audit
+# inspected the project's real venv - so the suite and the audit described different
+# environments. With no project dependencies in bmk's env, none of that can happen, and
+# one shared env serves every repo (it is identical for all of them).
+#
+# The env is disposable - delete it and the next make rebuilds it. It is re-resolved on
+# every invocation, so a new bmk release is picked up automatically.
 #
 # Arguments after the target name are forwarded automatically.
 # You can also use ARGS="..." explicitly if preferred.
@@ -39,13 +47,22 @@ else
   BMK_EXE :=
 endif
 
-# bmk lives in a venv OF THIS PROJECT, not in a machine-wide one. The tool env
-# holds bmk's toolchain PLUS this project's dependencies, so a single
-# shared env cannot serve two projects: whichever ran `make` last wins, and the
-# other silently gets the wrong dependency tree. Per-project is the only layout
-# where "the env is correct" is a question about THIS repo alone.
-BMK_TOOL_DIR := $(CURDIR)/.venv-bmk
-BMK := $(BMK_TOOL_DIR)/bin/bmk$(BMK_EXE)
+# ONE bmk per machine, in uv's own tool dir - not a copy per project.
+#
+# A per-project env was necessary only while the env also carried the PROJECT's
+# dependencies: two projects then fought over one env, whichever ran `make` last winning
+# (measured - a `six` project and a `chardet` project overwrote each other). bmk's env now
+# holds bmk alone, so it is byte-identical for every repo and there is nothing left to
+# collide. Sharing it costs nothing and stops ~300MB (mostly pyright's bundled Node) from
+# being duplicated into all ~46 repos.
+#
+# Ask uv where it puts entry points rather than trusting PATH: `uv tool install` warns
+# (and does nothing about it) when its bin dir is not on PATH, which is the default state
+# on a fresh machine, and a bare `bmk` would then fail with "command not found" from a
+# Makefile that had just installed it. Falling back to the bare name keeps the old
+# behaviour if uv is too old to answer.
+BMK_BIN_DIR := $(shell uv tool dir --bin 2>/dev/null)
+BMK := $(if $(BMK_BIN_DIR),$(BMK_BIN_DIR)/bmk$(BMK_EXE),bmk$(BMK_EXE))
 ARGS ?=
 
 # ──────────────────────────────────────────────────────────────
@@ -87,52 +104,60 @@ ifneq (,$(findstring $(_BMK_NEWLINE),$(ARGS)))
 endif
 
 # ──────────────────────────────────────────────────────────────
-# Ensure bmk + project deps are installed in this project's tool env
+# Ensure bmk (and ONLY bmk) is installed, once per machine
 # ──────────────────────────────────────────────────────────────
-# This runs before EVERY target, on purpose. `uv tool install --reinstall bmk`
-# re-resolves the unpinned `bmk` spec against PyPI, so each make picks up a new bmk
-# release and any change to this project's dependencies, with nothing to remember and
-# no version marker to go stale. It costs a couple of seconds per invocation; that is
-# the price of never running against a bmk or a dependency tree that has quietly
-# drifted, and it is cheap next to a wrong test result.
+# This runs before EVERY target, on purpose: `--reinstall` re-resolves the `bmk` spec so
+# each make picks up a new bmk release with nothing to remember and no version marker to
+# go stale. It costs a couple of seconds; that is the price of never running against a bmk
+# that has quietly drifted.
 #
-# Every part of the recipe is load-bearing. Do not:
+# `--reinstall` alone does NOT deliver that, which is why $(BMK_REFRESH) exists: uv
+# re-resolves against its CACHED package index, so a release published minutes ago is
+# invisible and you silently keep the old bmk until the cache revalidates (measured: with
+# 3.8.0 on PyPI, `uv tool install "bmk>=3.7.1"` still installed 3.7.1). Refreshing just
+# bmk's own metadata makes "picked up automatically" true immediately, for ~1s per make.
 #
-#   * drop `.[dev]` from either attempt, or add a `|| --with .` fallback. A project
-#     with no [dev] extra does not fail here - uv warns and installs the base deps -
-#     so such a fallback can only ever produce an env WITHOUT the test deps, which
-#     surfaces as a ModuleNotFoundError (hypothesis, starlette.testclient) far from
-#     the install that caused it.
-#   * change `--with-editable` to `--with`. Editable keeps the project's code in the
-#     env identical to the working tree. A non-editable `--with .` installs a SNAPSHOT;
-#     it happens to work because tools run with cwd=<project>, whose source shadows the
-#     snapshot on sys.path, but that is a coincidence of import order and would serve
-#     stale code to anything running from another directory.
-#   * drop `--reinstall` from either attempt. `uv tool install` without it NO-OPS when
-#     the tool is already present, ignoring `--with` and the available version
-#     entirely, and keeps a stale env.
-#   * drop `--force`. The entry points exist in this project's bin dir on every rebuild.
-#   * add `2>/dev/null`. A real failure must reach the terminal; a suppressed one
-#     surfaces later, somewhere unrelated.
-#   * collapse the retry. It covers the transient __pycache__ removal race
-#     ("Directory not empty", os error 39). If BOTH attempts fail, make fails loudly -
-#     correct, because there is no safe degraded state to continue from.
-#   * drop the FLOOR from `bmk>=$(BMK_MIN)`. bmk and the project's deps resolve TOGETHER,
-#     so a project dependency that caps something bmk requires does not fail - uv simply
-#     backtracks BMK to an older release that fits, silently. That is not hypothetical:
-#     `codecov-cli` caps click<8.3.0 while bmk requires click>=8.4.2 (CVE-2026-7246), so an
-#     unpinned `bmk` resolves to 3.1.7 and the repo never sees another bmk update, with no
-#     error at all. The floor turns that into an unsatisfiable-requirements error that names
-#     the offending package. If it fires, remove the capping dependency - do not lower the
-#     floor, or you are back to a silently ancient bmk.
-BMK_MIN := 3.7.1
+# NOTE what is NOT here: the project. bmk is installed on its own, so its env holds bmk's
+# toolchain and nothing else. The project's dependencies live in the project's own venv
+# (.venv), which bmk provisions from ./pyproject.toml and runs the tests, pyright and
+# pip-audit against. Do NOT "restore" a `--with .` / `--with-editable ".[dev]"`: that is
+# what made bmk and the project resolve TOGETHER, and it caused, in order - a project
+# dependency capping one of bmk's silently backtracking bmk to an ancient release
+# (codecov-cli capped click<8.3.0 against bmk's click>=8.4.2, pinning bmk at 3.1.7 with no
+# error); a yanked transitive dependency making bmk itself uninstallable and bricking
+# `make` in every repo; and the suite running in that co-resolved env while pyright and
+# pip-audit inspected the project's real venv, so the tests and the audit described
+# different environments. It also forced an env per project, duplicating ~300MB per repo.
+#
+# The rest of the recipe is load-bearing. Do not:
+#
+#   * drop `--reinstall` from either attempt. `uv tool install` without it NO-OPS when the
+#     tool is already present, ignoring the available version entirely, and keeps a stale env.
+#   * drop `--force`. The entry point already exists in uv's bin dir on every rebuild.
+#   * add `2>/dev/null`. A real failure must reach the terminal; a suppressed one surfaces
+#     later, somewhere unrelated.
+#   * collapse the retry. It covers the transient __pycache__ removal race ("Directory not
+#     empty", os error 39). If BOTH attempts fail, make fails loudly - correct, because
+#     there is no safe degraded state to continue from.
+#   * add UV_TOOL_DIR/UV_TOOL_BIN_DIR back. uv's default location is shared by every repo,
+#     which is now correct: with no project dependencies in it, the env is identical for
+#     all of them and there is nothing left to collide.
+#
+# BMK_MIN is kept as a floor even though nothing can cap bmk any more (that needed the
+# co-resolution this recipe no longer does). It is inert insurance and costs nothing.
+BMK_MIN := 3.9.0
+
+# Refresh bmk's cached index metadata so a new release is seen the moment it exists -
+# EXCEPT when uv is in offline mode, where uv refuses the combination outright ("the
+# argument UV_OFFLINE cannot be used with --refresh") and would fail every single make
+# with an error blaming an env var the user never connected to this flag. Offline then
+# keeps working from the cache, which is exactly what an offline user wants anyway.
+BMK_REFRESH := $(if $(UV_OFFLINE),,--refresh-package bmk)
 
 .PHONY: _ensure_bmk
 _ensure_bmk:
-	@UV_TOOL_DIR="$(BMK_TOOL_DIR)" UV_TOOL_BIN_DIR="$(BMK_TOOL_DIR)/bin" \
-	  uv tool install --reinstall --force "bmk>=$(BMK_MIN)" --with-editable ".[dev]" \
-	  || UV_TOOL_DIR="$(BMK_TOOL_DIR)" UV_TOOL_BIN_DIR="$(BMK_TOOL_DIR)/bin" \
-	  uv tool install --reinstall --force "bmk>=$(BMK_MIN)" --with-editable ".[dev]"
+	@uv tool install --reinstall --force $(BMK_REFRESH) "bmk>=$(BMK_MIN)" \
+	  || uv tool install --reinstall --force $(BMK_REFRESH) "bmk>=$(BMK_MIN)"
 
 # ──────────────────────────────────────────────────────────────
 # Argument forwarding via MAKECMDGOALS

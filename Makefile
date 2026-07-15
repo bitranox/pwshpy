@@ -1,42 +1,138 @@
-# BMK MAKEFILE 3.1.7
+# BMK MAKEFILE 3.7.1
 # do not alter this file - it might be overwritten on new versions of BMK
 # if You want to alter it, remove the first line # BMK MAKEFILE 1.0 - then it is a custom makefile and will not be overwritten
 # bmk Makefile — thin wrapper using `uv tool install` for persistent bmk
 #
 # Usage:
 #   make test                        # run test suite
-#   make test --verbose              # forward extra flags
+#   make test ARGS="--verbose"       # forward extra FLAGS (bare --verbose would be parsed
+#                                    #   by make itself, not forwarded: "unknown option")
 #   make bump-patch                  # bump patch version
-#   make push fix login bug          # push with commit message
+#   make push fix login bug          # push with a plain one-line commit message
+#   make push MSG="fix(cli): x"      # push with ANY message: punctuation, newlines, $ - all safe
 #   make custom deploy                # run custom command
 #   make custom deploy --dry-run
 #
-# On every invocation, bmk is (re-)installed as a persistent uv tool
-# together with the current project's dependencies (read from ./pyproject.toml).
-# This ensures pyright, pytest, pip-audit etc. can resolve the full
-# dependency tree without PYTHONPATH hacks or a local .venv.
+# bmk is installed into THIS PROJECT's own tool env (.venv-bmk) together with the
+# project's dependencies (read from ./pyproject.toml), so pyright, pytest,
+# pip-audit etc. resolve the full dependency tree without PYTHONPATH hacks. The
+# env belongs to this repo alone, so projects cannot overwrite each other's
+# dependencies. It is re-resolved on every invocation, so a new bmk release and any
+# dependency change are picked up automatically.
+#
+# .venv-bmk is disposable - delete it and the next make rebuilds it.
 #
 # Arguments after the target name are forwarded automatically.
 # You can also use ARGS="..." explicitly if preferred.
+#
+# For a COMMIT MESSAGE prefer MSG="..." over ARGS="..." - ARGS is re-parsed by bash, so
+# punctuation like ( ) ; ` $ * breaks or executes, and a newline is impossible. See the
+# "Commit messages" section below.
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-# Use absolute path to the uv tool binary so active virtualenvs cannot shadow it.
-BMK := $(HOME)/.local/bin/bmk
+# uv names the executable bmk.exe on Windows.
+ifeq ($(OS),Windows_NT)
+  BMK_EXE := .exe
+else
+  BMK_EXE :=
+endif
+
+# bmk lives in a venv OF THIS PROJECT, not in a machine-wide one. The tool env
+# holds bmk's toolchain PLUS this project's dependencies, so a single
+# shared env cannot serve two projects: whichever ran `make` last wins, and the
+# other silently gets the wrong dependency tree. Per-project is the only layout
+# where "the env is correct" is a question about THIS repo alone.
+BMK_TOOL_DIR := $(CURDIR)/.venv-bmk
+BMK := $(BMK_TOOL_DIR)/bin/bmk$(BMK_EXE)
 ARGS ?=
 
 # ──────────────────────────────────────────────────────────────
-# Ensure bmk + project deps are installed as a persistent uv tool
+# Commit messages: MSG= is the safe channel, ARGS= is not
 # ──────────────────────────────────────────────────────────────
-# --reinstall re-resolves deps on every call (fast when cached).
-# Prefer the project's [dev] extra so test-only deps (test-import libraries,
-# fakes, property-test helpers) land in bmk's tool venv and `make test` matches
-# CI; fall back to base deps when the project has no [dev] extra, and to a plain
-# install on first run where --reinstall would fail.
+# A commit message is free-form PROSE, and prose does not survive a shell command line.
+# make expands $(ARGS) into the recipe text and hands the RESULT to /bin/bash, which then
+# applies its full grammar to words that were never escaped for it. The quotes you typed
+# were eaten by your own shell long before make saw them. So a bare ARGS= message means
+# bash parses your prose as code: "fix(cli): x" is a syntax error, "a; b" runs b, and a
+# backtick or $(...) EXECUTES. A newline is the worst case - it ends the recipe LINE, so
+# make commits a truncated subject on line 1 and then runs the rest as a command.
+#
+# MSG= avoids all of it by never touching a command line. make's `export` puts the value
+# straight into the child process environment, where nothing is word-split or re-parsed,
+# and bmk already prefers args -> BMK_COMMIT_MESSAGE -> prompt (git_ops.resolve_message).
+# git commit -m accepts embedded newlines, so a MSG= body becomes a real commit body.
+#
+#   make push MSG="fix(cli): subject line
+#
+#   Body with (parens), a ; and a $HOME, all safe."
+#
+# $(value MSG) is deliberate: it yields the UNEXPANDED value, so a literal $ in the message
+# survives. Plain $(MSG) would make-expand it first and silently turn $HOME into OME.
+ifdef MSG
+export BMK_COMMIT_MESSAGE := $(value MSG)
+endif
+
+# A newline in ARGS cannot be made safe (see above), so refuse it up front rather than
+# commit half of it. $(error) fires during parsing, before any recipe runs, so nothing is
+# staged, committed or pushed. This guard exists because the truncate-then-push failure is
+# silent and has already shipped wrong commit messages more than once.
+define _BMK_NEWLINE
+
+
+endef
+ifneq (,$(findstring $(_BMK_NEWLINE),$(ARGS)))
+  $(error ARGS contains a newline, which make cannot pass to a recipe safely. Use MSG="..." for a multi-line commit message)
+endif
+
+# ──────────────────────────────────────────────────────────────
+# Ensure bmk + project deps are installed in this project's tool env
+# ──────────────────────────────────────────────────────────────
+# This runs before EVERY target, on purpose. `uv tool install --reinstall bmk`
+# re-resolves the unpinned `bmk` spec against PyPI, so each make picks up a new bmk
+# release and any change to this project's dependencies, with nothing to remember and
+# no version marker to go stale. It costs a couple of seconds per invocation; that is
+# the price of never running against a bmk or a dependency tree that has quietly
+# drifted, and it is cheap next to a wrong test result.
+#
+# Every part of the recipe is load-bearing. Do not:
+#
+#   * drop `.[dev]` from either attempt, or add a `|| --with .` fallback. A project
+#     with no [dev] extra does not fail here - uv warns and installs the base deps -
+#     so such a fallback can only ever produce an env WITHOUT the test deps, which
+#     surfaces as a ModuleNotFoundError (hypothesis, starlette.testclient) far from
+#     the install that caused it.
+#   * change `--with-editable` to `--with`. Editable keeps the project's code in the
+#     env identical to the working tree. A non-editable `--with .` installs a SNAPSHOT;
+#     it happens to work because tools run with cwd=<project>, whose source shadows the
+#     snapshot on sys.path, but that is a coincidence of import order and would serve
+#     stale code to anything running from another directory.
+#   * drop `--reinstall` from either attempt. `uv tool install` without it NO-OPS when
+#     the tool is already present, ignoring `--with` and the available version
+#     entirely, and keeps a stale env.
+#   * drop `--force`. The entry points exist in this project's bin dir on every rebuild.
+#   * add `2>/dev/null`. A real failure must reach the terminal; a suppressed one
+#     surfaces later, somewhere unrelated.
+#   * collapse the retry. It covers the transient __pycache__ removal race
+#     ("Directory not empty", os error 39). If BOTH attempts fail, make fails loudly -
+#     correct, because there is no safe degraded state to continue from.
+#   * drop the FLOOR from `bmk>=$(BMK_MIN)`. bmk and the project's deps resolve TOGETHER,
+#     so a project dependency that caps something bmk requires does not fail - uv simply
+#     backtracks BMK to an older release that fits, silently. That is not hypothetical:
+#     `codecov-cli` caps click<8.3.0 while bmk requires click>=8.4.2 (CVE-2026-7246), so an
+#     unpinned `bmk` resolves to 3.1.7 and the repo never sees another bmk update, with no
+#     error at all. The floor turns that into an unsatisfiable-requirements error that names
+#     the offending package. If it fires, remove the capping dependency - do not lower the
+#     floor, or you are back to a silently ancient bmk.
+BMK_MIN := 3.7.1
+
 .PHONY: _ensure_bmk
 _ensure_bmk:
-	@uv tool install --reinstall bmk --with ".[dev]" 2>/dev/null || uv tool install --reinstall bmk --with . 2>/dev/null || uv tool install bmk --with .
+	@UV_TOOL_DIR="$(BMK_TOOL_DIR)" UV_TOOL_BIN_DIR="$(BMK_TOOL_DIR)/bin" \
+	  uv tool install --reinstall --force "bmk>=$(BMK_MIN)" --with-editable ".[dev]" \
+	  || UV_TOOL_DIR="$(BMK_TOOL_DIR)" UV_TOOL_BIN_DIR="$(BMK_TOOL_DIR)/bin" \
+	  uv tool install --reinstall --force "bmk>=$(BMK_MIN)" --with-editable ".[dev]"
 
 # ──────────────────────────────────────────────────────────────
 # Argument forwarding via MAKECMDGOALS
@@ -147,17 +243,26 @@ bump: bump-patch  ## Bump patch version (default for bump)
 # Git Operations
 # ──────────────────────────────────────────────────────────────
 
+# The "$(ARGS)" quoting on commit/push is LOAD-BEARING - do not "tidy" it back to a bare
+# $(ARGS) to match the other targets. These two take a MESSAGE and nothing else (both
+# CLIs declare it as nargs=-1 with no options), so passing it as one quoted word costs
+# nothing: bmk does
+# " ".join(args).strip(), which round-trips a single arg unchanged, and empty ARGS still
+# yields "" and falls through to BMK_COMMIT_MESSAGE / the prompt. What it buys is that
+# bash stops parsing the message as code, so "fix(cli): x", "a; b" and *globs* survive.
+# Flag-taking targets (test, run, custom, ...) must stay UNQUOTED - quoting them would
+# collapse "--human -k foo" into a single argv element and break them.
 .PHONY: commit c
 commit: _ensure_bmk  ## Create a git commit with timestamped message [alias: c]
-	$(BMK) commit $(ARGS)
+	$(BMK) commit "$(ARGS)"
 c: _ensure_bmk
-	$(BMK) commit $(ARGS)
+	$(BMK) commit "$(ARGS)"
 
 .PHONY: push psh p
 push: _ensure_bmk  ## Run tests, commit, and push to remote [aliases: psh, p]
-	$(BMK) push $(ARGS)
+	$(BMK) push "$(ARGS)"
 psh p: _ensure_bmk
-	$(BMK) push $(ARGS)
+	$(BMK) push "$(ARGS)"
 
 .PHONY: release rel r
 release: _ensure_bmk  ## Create a versioned release (tag + GitHub release) [aliases: rel, r]
@@ -165,6 +270,9 @@ release: _ensure_bmk  ## Create a versioned release (tag + GitHub release) [alia
 rel r: _ensure_bmk
 	$(BMK) release $(ARGS)
 
+# ship stays UNQUOTED although it does take a commit message, because unlike commit/push it
+# also takes options (--ci-workflow, --release-workflow); one quoted word would swallow them.
+# So give ship its message via MSG="..." (the env channel) and keep ARGS for its flags.
 .PHONY: ship sh
 ship: _ensure_bmk  ## Push, wait for CI, release, wait for release CI (CI-gated) [alias: sh]
 	$(BMK) ship $(ARGS)

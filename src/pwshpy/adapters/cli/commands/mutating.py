@@ -4,7 +4,13 @@ Top-level verb-noun commands mirroring PowerShell (``start-service``,
 ``set-registry-value``, ``new-local-user``, ``add-acl-ace``,
 ``register-scheduled-task`` ...).  Each is a thin front end over the ``ps`` facade
 and echoes a one-line status.  **These change host state** - see CLAUDE.md
-"Development Safety"; they are Windows-only and raise off Windows.
+"Development Safety".
+
+Most are portable and dispatch by OS: the service verbs, the scheduled-task verbs, the
+local-account verbs and the ACL verbs all run on win32 on Windows and on the honest Linux
+backend (systemd, systemd timers, shadow-utils, POSIX ACL xattr + chown) on Linux. Only the
+registry verbs and ``clear_event_log`` are Windows-only and raise
+:class:`~pwshpy.domain.errors.PlatformUnsupportedError` off Windows.
 
 Contents:
     * the ``cli_*`` mutating commands, grouped by subsystem below.

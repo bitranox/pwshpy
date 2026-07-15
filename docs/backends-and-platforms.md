@@ -12,8 +12,11 @@ common cmdlets.
 
 - The **portable subset** (psutil + stdlib socket / os.environ) works on every OS: processes,
   connections, disks, uptime, resolve, test-connection, env, network adapters, computer info.
-- The **win32/wmi bulk** is Windows-only: services, registry, event log, CIM, scheduled tasks,
-  local accounts, ACLs, hotfixes - read and mutating verbs.
+- The **portable native subsystems** dispatch by OS - win32 on Windows, an honest Linux backend
+  on Linux: services (systemd D-Bus), event log (journald), scheduled tasks (systemd timers),
+  local accounts (pwd / grp / shadow-utils), ACLs (POSIX ACL xattr) - read and mutating verbs.
+- Only three are **Windows-only**, having no honest Linux analog: the registry (Linux config is
+  files), CIM/WMI, and hotfixes.
 
 ## .NET (hosts PowerShell 7.6 in-process)
 
@@ -24,10 +27,11 @@ clear `FeatureUnavailableError` and loads no .NET.
 
 ## Platform support
 
-- **Linux / macOS:** the portable native subset, plus .NET when `[full]` and the .NET 10 runtime
-  are present.
-- **Windows:** the portable subset, plus the win32/wmi native bulk, the Windows-only power tools
-  (self-elevation relaunch, credential vault), and .NET.
+- **Linux / macOS:** the portable native subset, the portable native subsystems on their Linux
+  backends (systemd, journald, pwd/grp, POSIX ACL, Secret Service, sudo), and .NET when `[full]`
+  and the .NET 10 runtime are present.
+- **Windows:** the same surface on win32 backends, plus the three Windows-only subsystems
+  (registry, CIM/WMI, hotfixes), and .NET.
 - **Every OS:** the portable power tools `ps.exec`, `ps.write_text` / `ps.write_text_stream` /
   `ps.write_records`, `ps.get_content_lines`, `ps.download_file`, `ps.is_elevated`, and
   `ps.get_credential`.
@@ -43,11 +47,11 @@ clear `FeatureUnavailableError` and loads no .NET.
 
 ## Status
 
-The portable native surface and CLI are implemented; the win32/wmi native bulk and the real
-in-process .NET host are the Windows/.NET integration targets. Develop the portable core on Linux
-for a fast loop; Windows is the authoritative integration target for the win32/wmi bulk and real
-.NET.
+The native surface, the CLI and the in-process .NET host are all implemented. Develop the portable
+core on Linux for a fast loop; Windows remains the authoritative integration target for the win32
+backends and real .NET, since neither installs on Linux.
 
-Making the Windows-only subsystems (services, event log, scheduled tasks, elevation relaunch,
-credentials) portable to Linux via systemd / journald / D-Bus / stdlib is tracked in the
-[portability roadmap](portability-roadmap.md).
+Making services, event log, scheduled tasks, local accounts, ACLs, elevation relaunch and the
+credential store portable to Linux is **done** - each dispatches by OS. Only the registry, CIM/WMI
+and hotfixes remain Windows-only, deliberately: they have no honest Linux equivalent. The
+[portability roadmap](portability-roadmap.md) tracks the detail.

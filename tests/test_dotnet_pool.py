@@ -5,6 +5,12 @@ The host is a per-process singleton opened once, so pool mode (opt-in via
 opened a single runspace.  Each test therefore runs a tiny driver in a subprocess with
 the env var set, and asserts on its output.  ``local_only`` - needs the ``[full]`` extra
 plus the .NET 10 / PowerShell 7.6 host.
+
+Guarded on ``is_runtime_available()`` rather than ``is_available()``: the latter reports
+only that the extra is importable, so it stays True on a box with pythonnet and no .NET
+runtime and the driver subprocess then fails instead of skipping. The guard initializing
+the host in THIS process is harmless here - every test spawns its own subprocess precisely
+because the host is a per-process singleton.
 """
 
 from __future__ import annotations
@@ -15,11 +21,14 @@ import sys
 
 import pytest
 
-from pwshpy.adapters.powershell import is_available
+from pwshpy.adapters.powershell import is_runtime_available
 
 pytestmark = [
     pytest.mark.local_only,
-    pytest.mark.skipif(not is_available(), reason=".NET needs the [full] extra (pythonnet)"),
+    pytest.mark.skipif(
+        not is_runtime_available(),
+        reason=".NET needs the [full] extra AND the .NET 10 runtime AND the PowerShell 7.6 SDK",
+    ),
 ]
 
 _CONCURRENT_DRIVER = """

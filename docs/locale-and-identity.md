@@ -57,10 +57,10 @@ Windows runs identically on German Windows:
 
 ```python
 # Portable - works on any locale.
-admins = ps.acl(path).where(lambda e: e.trustee_sid == WellKnownSid.ADMINISTRATORS)
+admins = ps.get_acl(path).where(lambda e: e.trustee_sid == WellKnownSid.ADMINISTRATORS)
 
 # Fragile - matches only on the box's own language.
-admins = ps.acl(path).where(lambda e: e.trustee_name == "Administrators")
+admins = ps.get_acl(path).where(lambda e: e.trustee_name == "Administrators")
 ```
 
 `EventLogEntry.user_id` already follows this: it is the raw SID from the event

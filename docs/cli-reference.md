@@ -36,7 +36,7 @@ lazy end to end), and a default human table; most take `--limit N`.
 | `pwshpy get_local_group`    | local groups                | win32net       | `grp`           |
 | `pwshpy get_acl PATH`       | ACL entries                 | win32security  | POSIX ACL xattr |
 
-**Windows only** - no honest Linux analog: `pwshpy registry values KEY` / `pwshpy registry keys KEY`,
+**Windows only** - no honest Linux analog: `pwshpy get_item_property KEY` / `pwshpy registry_keys KEY`,
 `pwshpy get_cim_instance CLASS`, `pwshpy get_hotfix`.
 
 ```bash
@@ -80,7 +80,7 @@ pwshpy get_content huge.log | head                           # streamed file rea
 pwshpy save_credential prod-db svc                           # hidden prompt for the secret
 pwshpy run "Get-Date"                                         # .NET (needs [full])
 pwshpy cmdlet Get-Service -p Name=sshd                       # one cmdlet, safely-bound params
-pwshpy get_ad_user -p Filter=* --jsonl                       # .NET module shortcut (Get-ADUser)
+pwshpy get_ad_user -p Filter=*                               # .NET module shortcut (Get-ADUser); JSON only
 ```
 
 The `.NET` commands need the `[full]` extra (else a clear `FeatureUnavailableError`). `run` executes

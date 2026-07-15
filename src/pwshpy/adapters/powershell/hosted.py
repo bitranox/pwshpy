@@ -83,11 +83,43 @@ def _pool_size() -> int:
 def is_available() -> bool:
     """Return whether the ``[full]`` extra (pythonnet) is importable.
 
+    This answers "is the EXTRA installed", NOT "does .NET work" - the extra is only the
+    first of three requirements (extra, .NET 10 runtime, PowerShell 7.6 SDK). Use
+    :func:`is_runtime_available` when you need to know whether a call would actually
+    succeed; a guard built on this one passes on a box that has pythonnet but no runtime,
+    and the call then raises :class:`FeatureUnavailableError`.
+
     Example:
         >>> isinstance(is_available(), bool)
         True
     """
     return importlib.util.find_spec("pythonnet") is not None
+
+
+def is_runtime_available() -> bool:
+    """Return whether .NET can actually start (extra AND runtime AND SDK all present).
+
+    :func:`is_available` only reports the extra, so it says True on a machine carrying
+    pythonnet without a .NET runtime - exactly the shape of the dev box, where the
+    project venv installs ``[full]`` but no runtime exists. The honest way to answer
+    "would a call work" is to attempt the one-time init and see, so this delegates to
+    :func:`_init` rather than re-deriving its preconditions, which would drift from it.
+
+    Cost is bounded: it short-circuits on a spec lookup when the extra is absent, and
+    ``_init`` caches success in ``_ready``, so a box that HAS .NET pays the
+    initialization it was going to pay anyway. A box that lacks it pays one failed load.
+
+    Example:
+        >>> isinstance(is_runtime_available(), bool)
+        True
+    """
+    if not is_available():
+        return False
+    try:
+        _init()
+    except FeatureUnavailableError:
+        return False
+    return True
 
 
 def _powershell_home() -> Path:

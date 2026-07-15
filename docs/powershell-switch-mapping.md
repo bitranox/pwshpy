@@ -30,7 +30,7 @@ Decided once here; per-command sections list only cmdlet-specific parameters.
 | `-WarningAction/-Variable`, `-InformationAction/-Variable`, `-ProgressAction` | PYTHON   | stream routing is a logging concern                                                       |
 | `-OutVariable`, `-OutBuffer`, `-PipelineVariable`                             | PYTHON   | capture is a Python variable; the pwshpy pipeline is already lazy                         |
 
-## Get-Service  ->  `pwshpy services` / `ps.services()`
+## Get-Service  ->  `pwshpy get_service` / `ps.get_service()`
 
 Parameter sets (PS 7.x): Default (`-Name`), DisplayName, InputObject. PS 7 has
 **no `-ComputerName`** (removed for cross-platform; use remoting).
@@ -74,5 +74,7 @@ Read commands whose full parameter analysis is still TODO (same table format):
   input), Get-NetTCPConnection, Get-Uptime, Test-Connection.
 - Registry: Get-ItemProperty / Get-ChildItem (note `-Recurse` is INTEGRATE - a
   scope the flat pipeline cannot emulate).
-- Future Windows-only: Get-WinEvent, Get-CimInstance, scheduled tasks, local
-  accounts, ACLs.
+- Windows-only, no honest Linux analog: Get-CimInstance, Get-HotFix, and the
+  registry verbs. Get-WinEvent, scheduled tasks, local accounts and ACLs are
+  portable (journald / systemd timers / pwd+grp / POSIX ACL xattr on Linux) -
+  see docs/portability-roadmap.md.

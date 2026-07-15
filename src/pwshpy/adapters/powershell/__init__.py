@@ -8,10 +8,11 @@ Contents:
     * :func:`invoke` — run a single cmdlet with safely bound parameters.
     * :func:`get_command` — introspect a command's parameter metadata.
     * :func:`is_available` — whether the ``[full]`` extra is importable.
+    * :func:`is_runtime_available` — whether .NET can actually start (extra AND runtime AND SDK).
 """
 
 from __future__ import annotations
 
-from .hosted import get_command, invoke, is_available, run
+from .hosted import get_command, invoke, is_available, is_runtime_available, run
 
-__all__ = ["get_command", "invoke", "is_available", "run"]
+__all__ = ["get_command", "invoke", "is_available", "is_runtime_available", "run"]

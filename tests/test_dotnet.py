@@ -1,9 +1,15 @@
 """.NET hosted PowerShell: real in-process execution.
 
 ``local_only`` - requires the ``[full]`` extra (pythonnet) plus the .NET 10 runtime
-and the PowerShell 7.6 SDK, which only the dev box has; ``make test`` skips it. The
-``skipif not is_available()`` guard is cheap (a spec lookup, no runtime init), so
-collecting this module on a base install costs nothing.
+and the PowerShell 7.6 SDK, which only the dev box has; ``make test`` skips it.
+
+The guard is ``is_runtime_available()``, NOT ``is_available()``: the latter reports only
+whether the extra is importable, so it says True on a box that has pythonnet but no .NET
+runtime - and every test here then fails with FeatureUnavailableError instead of skipping.
+That is not hypothetical: the project venv installs ``[full]`` while this box has no
+runtime, so these 16 tests fail the moment they are run from it. Collection on a base
+install still costs only a spec lookup, since the check short-circuits when the extra
+is absent.
 """
 
 from __future__ import annotations
@@ -11,13 +17,16 @@ from __future__ import annotations
 import pytest
 
 from pwshpy import ps
-from pwshpy.adapters.powershell import is_available
+from pwshpy.adapters.powershell import is_runtime_available
 from pwshpy.domain.errors import PowerShellError
 from pwshpy.domain.records import PSInvocationResult, PSObjectRecord
 
 pytestmark = [
     pytest.mark.local_only,
-    pytest.mark.skipif(not is_available(), reason=".NET needs the [full] extra (pythonnet)"),
+    pytest.mark.skipif(
+        not is_runtime_available(),
+        reason=".NET needs the [full] extra AND the .NET 10 runtime AND the PowerShell 7.6 SDK",
+    ),
 ]
 
 

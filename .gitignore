@@ -194,3 +194,6 @@ prompts.md
 .claude-bx-selflearning/
 CLAUDE.local.md
 /docs/systemdesign/
+
+# Python virtual environments (managed by bmk)
+.venv-bmk/

@@ -1,7 +1,7 @@
 {
   "name": "pwshpy",
   "description": "A genuinely Pythonic PowerShell: typed records and a lazy pipeline over native OS bindings, never a pwsh.exe subprocess and never text parsing. Ships the using-pwsh skill: use pwshpy (the `from pwshpy import ps` library and the `pwshpy` CLI) instead of writing or debugging PowerShell / .ps1, and translate cmdlets and .ps1 scripts to it.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": { "name": "bitranox" },
   "homepage": "https://github.com/bitranox/pwshpy",
   "repository": "https://github.com/bitranox/pwshpy",

@@ -140,10 +140,13 @@ pip install "pwshpy[full]"        # + the .NET backend for ps.run / ps.cmdlet / 
 
 ## Further reading
 
-Open these on GitHub (https://github.com/bitranox/pwshpy) for the full detail; use the Read tool if
-they are present locally in the pwshpy repo.
+The CLI and library API are discoverable from the INSTALL (always your version): run
+`uvx pwshpy --help` (and `<subcommand> --help`) for per-command flags, and
+`python -c "import pwshpy; help(pwshpy)"`. The narrative docs below are NOT shipped in the wheel; open
+each on the default branch (latest, matching your `uv`-installed version) at
+`https://github.com/bitranox/pwshpy/blob/master/<path>`:
 
-| Topic                                                                   | Doc (in the pwshpy repo)            |
+| Topic                                                                   | Path under `.../blob/master/`       |
 |-------------------------------------------------------------------------|-------------------------------------|
 | Full cmdlet -> pwshpy table (every command, API + CLI columns)          | `COMMANDS.md`                       |
 | Per-switch / per-parameter porting rationale                            | `docs/powershell-switch-mapping.md` |

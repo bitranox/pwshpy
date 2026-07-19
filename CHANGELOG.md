@@ -6,6 +6,14 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.0.2] 2026-07-19 22:30:08
+
+### Fixed
+- **`config-deploy` no longer crashes on a legacy Windows console codepage (cp1252).** It printed a
+  Unicode checkmark per deployed path, which raised `UnicodeEncodeError` and exited 1 even though the
+  files had already been written, misreporting a successful deploy as a failure. It now prints a
+  plain ASCII marker.
+
 ## [1.0.1] 2026-07-15 15:35:59
 
 ### Added

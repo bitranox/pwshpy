@@ -130,6 +130,7 @@ include = [
     "src/pwshpy/py.typed",
     "src/pwshpy/adapters/config/defaultconfig.toml",
     "src/pwshpy/adapters/config/defaultconfig.d/*.toml",
+    "src/pwshpy/adapters/native/templates/*.ps1",
 ]
 
 [tool.ruff]
@@ -177,11 +178,15 @@ convention = "google"
 # Notebooks: unused imports are often intentional for side effects
 "notebooks/*.ipynb" = ["F401"]
 # Tests: assert is standard, test fixtures have passwords, magic values are clearer inline, temp paths are fine
-"tests/*.py" = ["T20", "S101", "S105", "S106", "S108", "FBT001", "FBT003", "PLR0913", "PLR2004"]
-# CLI: Click framework injects boolean params; commands have many options
-"src/pwshpy/adapters/cli/**/*.py" = ["FBT001", "FBT002", "PLR0913"]
+"tests/*.py" = ["T20", "S101", "S105", "S106", "S108", "FBT001", "FBT003", "PLR0913", "PLR0917", "PLR2004"]
+# CLI: Click framework injects boolean params; commands have many options, and Click passes
+# them positionally, so the option count trips PLR0917 as well as PLR0913.
+"src/pwshpy/adapters/cli/**/*.py" = ["FBT001", "FBT002", "PLR0913", "PLR0917"]
 # Protocols/adapters: many-param signatures by design
 "src/pwshpy/application/*.py" = ["PLR0913"]
+# Packer: pack_script and render_runner take one keyword per pack option, by design
+"src/pwshpy/adapters/native/packer.py" = ["PLR0913"]
+"src/pwshpy/domain/packing.py" = ["PLR0913"]
 "src/pwshpy/adapters/config/*.py" = ["PLR0913"]
 "src/pwshpy/adapters/memory/*.py" = ["PLR0913"]
 # Composition root: the ps facade wires one injected adapter per Tier-A subsystem

@@ -217,6 +217,18 @@ Always UTF-8, no BOM, LF by default - the same bytes on every OS (no `Out-File` 
 `argv` is a LIST (no shell, no quoting hell); `.exit_code` is always set, `.stderr` is data,
 `.check()` raises on nonzero.
 
+## Shipping a script to a machine without Python  *(portable)*
+
+| PowerShell                                     | pwshpy - Python (API)                              | pwshpy - CLI                   |
+|------------------------------------------------|----------------------------------------------------|--------------------------------|
+| *(no equivalent - hand-rolled base64 + `iex`)* | `ps.pack_script(entry, dest, with_packages=[...])` | `pwshpy pack ENTRY -o OUT.ps1` |
+| *(no equivalent)*                              | `ps.unpack_script(source, dest)`                   | `pwshpy unpack OUT.ps1 -o DIR` |
+
+The output is one `.ps1` carrying the entry and every local module it imports. It unpacks itself
+into a per-user cache, installs `uv` if the machine has none, runs the script, and exits with the
+script's own exit code - on Windows PowerShell 5.1 and pwsh 7 alike. Dependencies come from the
+entry's PEP 723 block or `--with`, so the target machine needs neither Python nor a venv.
+
 ## Web requests  *(portable)*
 
 | PowerShell                            | pwshpy - Python (API)                                             | pwshpy - CLI                                              |

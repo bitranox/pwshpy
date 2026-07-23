@@ -30,6 +30,7 @@ from .logging import cli_logdemo
 from .mutating import MUTATING_COMMANDS
 from .netcheck import cli_test_connection
 from .networking import NETWORKING_COMMANDS
+from .pack import PACK_COMMANDS
 from .proc import PROC_COMMANDS
 from .processes import cli_processes
 from .registry import cli_get_item_property, cli_registry_keys
@@ -43,6 +44,7 @@ __all__ = [
     "FILESYSTEM_COMMANDS",
     "MUTATING_COMMANDS",
     "NETWORKING_COMMANDS",
+    "PACK_COMMANDS",
     "CREDENTIAL_COMMANDS",
     "FILEIO_COMMANDS",
     "PROC_COMMANDS",

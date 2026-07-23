@@ -126,6 +126,8 @@ ps.write_text("/opt/app/config.toml", "port = 8080\n")            # UTF-8, no BO
 ps.download_file("https://host/tool.tgz", "/tmp/tool.tgz")         # streamed, memory-bounded
 sshd = ps.get_process().where(lambda p: p.name == "sshd").first()
 ps.get_service().where(lambda s: s.name.startswith("nginx")).first()   # win32service | systemd D-Bus
+
+ps.pack_script("setup.py")      # -> setup.ps1: one file that installs uv, unpacks, runs, returns the exit code
 ```
 
 Services, the event log, scheduled tasks, local accounts, ACLs, the credential vault, and the
@@ -236,7 +238,7 @@ Read it like a short book:
 
 1. **[Quick Start](docs/quickstart.md)** - install and the first five commands.
 2. **[Library & Pipeline](docs/library-usage.md)** - typed records, the lazy pipeline, the memory model.
-3. **[Power Tools](docs/power-tools.md)** - self-elevation, `exec`, predictable file I/O, credentials, .NET binding.
+3. **[Power Tools](docs/power-tools.md)** - self-elevation, `exec`, predictable file I/O, credentials, script packing, .NET binding.
 4. **[CLI Reference](docs/cli-reference.md)** - the full command surface and configuration commands.
 5. **[Backends & Platforms](docs/backends-and-platforms.md)** - native vs .NET, OS support, Python baseline, status.
 6. **[Porting from PowerShell](COMMANDS.md)** - the cmdlet-by-cmdlet translation table.

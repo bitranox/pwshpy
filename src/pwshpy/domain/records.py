@@ -659,6 +659,49 @@ class AclEntry(PSRecord):
     permissions: str = ""
 
 
+class PackedScript(PSRecord):
+    """The manifest of a packed (or unpacked) self-extracting PowerShell runner.
+
+    ``files`` lists the archive members as POSIX-style relative paths, sorted, so two
+    packs of the same sources compare equal.  ``payload_sha256`` is the digest of the
+    embedded zip: it keys the runner's extraction cache and anchors the integrity check
+    the runner performs before executing anything.
+
+    ``external_imports`` names the top-level imports that are neither standard library nor
+    local, so a dependency missing from the entry's PEP 723 block surfaces at pack time
+    rather than on the recipient's machine.  They are reported, never guessed at: an import
+    name is usually not a distribution name (``yaml`` is PyYAML, ``cv2`` is opencv-python).
+    ``has_script_metadata`` records whether the entry carried a PEP 723 block, which is what
+    tells a caller that ``external_imports`` are declared somewhere rather than forgotten.
+
+    Example:
+        >>> m = PackedScript(output_path="tool.ps1", entry="tool.py", files=["tool.py"],
+        ...                  payload_sha256="ab" * 32, payload_bytes=120)
+        >>> m.entry, m.file_count, m.external_imports
+        ('tool.py', 1, [])
+    """
+
+    output_path: str
+    entry: str
+    files: list[str]
+    payload_sha256: str
+    payload_bytes: int
+    uv_args: list[str] = Field(default_factory=list)
+    external_imports: list[str] = Field(default_factory=list)
+    has_script_metadata: bool = False
+
+    @property
+    def file_count(self) -> int:
+        """How many files the payload carries.
+
+        Example:
+            >>> PackedScript(output_path="o", entry="e", files=["a", "b"],
+            ...              payload_sha256="x", payload_bytes=1).file_count
+            2
+        """
+        return len(self.files)
+
+
 __all__ = [
     "AclEntry",
     "CimInstance",
@@ -678,6 +721,7 @@ __all__ = [
     "NetAdapter",
     "NetConnection",
     "NetIpAddress",
+    "PackedScript",
     "PSInvocationResult",
     "PSObjectRecord",
     "PSRecord",

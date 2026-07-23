@@ -81,7 +81,18 @@ pwshpy save_credential prod-db svc                           # hidden prompt for
 pwshpy run "Get-Date"                                         # .NET (needs [full])
 pwshpy cmdlet Get-Service -p Name=sshd                       # one cmdlet, safely-bound params
 pwshpy get_ad_user -p Filter=*                               # .NET module shortcut (Get-ADUser); JSON only
+pwshpy pack tool.py -o dist/tool.ps1                         # ship a script as one self-extracting file
+pwshpy unpack dist/tool.ps1 -o src/                          # get the sources back out
 ```
+
+`pack` embeds the entry plus every local module it imports into a `.ps1` that unpacks itself,
+installs `uv` if the target machine has none, runs the script and returns its exit code. Options:
+`-o/--out`, `--include PATH` (repeatable, for files no import reveals), `--with PKG` (repeatable
+extra dependency), `--root DIR`, `--force`. Third-party dependencies come from the entry's PEP 723
+block or `--with`; they are never inferred from import names. `unpack` restores the packed sources
+(`-o DIR`, `--force`) so a pack can be edited and packed again. See
+[Power Tools](power-tools.md) for the artefact's own switches (`-PwshPyInfo`, `-PwshPyClean`,
+`-PwshPyNoInstallUv`, `-PwshPyElevate`).
 
 The `.NET` commands need the `[full]` extra (else a clear `FeatureUnavailableError`). `run` executes
 an arbitrary script; `cmdlet NAME -p KEY=VALUE` runs one cmdlet with safely-bound params; and the

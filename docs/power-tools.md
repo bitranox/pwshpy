@@ -70,6 +70,70 @@ later = ps.load_credential("prod-db")                 # None if absent; secret s
 CLI: `pwshpy save_credential TARGET USER` (secret from a hidden prompt, never an argv flag),
 `pwshpy load_credential TARGET` (secret shown masked), `pwshpy delete_credential TARGET`.
 
+## Ship a script as one file - `ps.pack_script`
+
+Handing a Python tool to a Windows admin normally means "install Python, clone this, make a venv,
+pip install, then run it". Packing turns all of that into one `.ps1` they can just run: it unpacks
+itself into a per-user cache, installs `uv` if the machine has none, runs the script, and exits with
+the script's own exit code.
+
+```python
+ps.pack_script("tool.py")                                  # -> tool.ps1, next to the entry
+ps.pack_script("tool.py", "dist/tool.ps1", with_packages=["rich"])
+ps.unpack_script("dist/tool.ps1", "src/")                  # edit it and pack again
+```
+
+```bash
+pwshpy pack tool.py -o dist/tool.ps1        # embed the entry + the local modules it imports
+pwshpy pack tool.py --include data.json     # for what import analysis cannot see
+pwshpy unpack dist/tool.ps1 -o src/         # restore the sources
+```
+
+The entry and every local module it imports (transitively, including relative imports) are embedded.
+The standard library rides along with the interpreter uv provisions, and third-party dependencies
+come from the entry's [PEP 723](https://peps.python.org/pep-0723/) block or `--with` - **never**
+guessed from an import name, because an import name usually is not a package name (`yaml` is PyYAML,
+`cv2` is opencv-python). Imports that are neither stdlib nor local are listed in the manifest, and a
+script that imports third-party modules while declaring nothing at all gets a warning.
+
+```python
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["rich", "httpx"]
+# ///
+```
+
+With that block, uv resolves the dependencies **and** fetches a matching interpreter on the target
+machine, so "no Python installed" is not a problem either.
+
+On the recipient's side the artefact takes a few switches of its own; everything else is forwarded
+to your script untouched:
+
+| Switch               | Effect                                                                          |
+|----------------------|---------------------------------------------------------------------------------|
+| `-PwshPyInfo`        | print the manifest (entry, hash, file list, cache dir) without running anything |
+| `-PwshPyClean`       | discard the cached extraction and unpack again                                  |
+| `-PwshPyNoInstallUv` | fail with exit 127 instead of installing uv                                     |
+| `-PwshPyElevate`     | relaunch elevated first (UAC on Windows, `sudo` on POSIX)                       |
+| `-PwshPyHelp`        | show the artefact's own help                                                    |
+
+Details worth knowing:
+
+- **Runs on Windows PowerShell 5.1 and pwsh 7**, on any OS.
+- **Arguments arrive exactly as typed**, including empty strings, embedded quotes, and `-v` / `-d`
+  (which PowerShell would otherwise bind to `-Verbose` / `-Debug`). The argument vector travels
+  out of band, because 5.1 re-quotes arguments on their way to a native executable.
+  One caveat is outside pwshpy's reach: `pwsh -File tool.ps1 --path=C:\dir` is split by
+  PowerShell's own `-Name:Value` parsing before the script sees it. Use `--path C:\dir`, or call
+  `.\tool.ps1` from a PowerShell prompt, where it arrives intact.
+- **Self-elevation keeps working.** A packed script calling `ps.elevate()` re-execs the extracted
+  entry with the environment uv already built, so it elevates exactly as it would unpacked.
+- **The cache is verified before every run** against per-file hashes embedded in the artefact, and
+  re-extracted on any mismatch - a cache directory that may later be executed elevated must not be
+  tamperable between runs.
+- **Packing is deterministic**: identical sources produce identical bytes, so the payload hash is a
+  stable cache key and two builds are comparable.
+
 ## .NET - safe cmdlet binding and parameter discovery
 
 `ps.cmdlet` binds every parameter as data (never string-interpolated into a script), captures all

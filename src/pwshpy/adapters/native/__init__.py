@@ -36,6 +36,7 @@ from .local_account_control import NativeLocalAccountController
 from .local_accounts import iter_local_groups, iter_local_users
 from .netcheck import test_connection
 from .networking import iter_net_adapters, iter_net_ip_addresses, iter_net_udp_endpoints
+from .packer import pack_script, unpack_script
 from .posix_account_control import PosixLocalAccountController
 from .posix_accounts import iter_local_groups as posix_iter_local_groups
 from .posix_accounts import iter_local_users as posix_iter_local_users
@@ -106,8 +107,10 @@ __all__ = [
     "posix_iter_local_groups",
     "posix_iter_local_users",
     "prompt_credential",
+    "pack_script",
     "resolve",
     "run_process",
+    "unpack_script",
     "test_connection",
     "write_records",
     "write_text",

@@ -45,6 +45,7 @@ from pwshpy.domain.records import (
     NetAdapter,
     NetConnection,
     NetIpAddress,
+    PackedScript,
     ProcessInfo,
     ProcessResult,
     PSInvocationResult,
@@ -509,6 +510,32 @@ def test_build_ps_accepts_injected_adapters() -> None:  # noqa: PLR0915 - exerci
 
     fake_scheduled_task_controller = FakeScheduledTaskController()
 
+    pack_calls: list[tuple[object, ...]] = []
+
+    def fake_pack_script(
+        entry: str | Path,
+        dest: str | Path | None = None,
+        *,
+        include: Sequence[str | Path] = (),
+        with_packages: Sequence[str] = (),
+        root: str | Path | None = None,
+        force: bool = False,
+    ) -> PackedScript:
+        pack_calls.append((str(entry), str(dest), tuple(with_packages), force))
+        return PackedScript(
+            output_path=str(dest or "tool.ps1"),
+            entry=str(entry),
+            files=[str(entry)],
+            payload_sha256="ab",
+            payload_bytes=1,
+        )
+
+    def fake_unpack_script(source: str | Path, dest: str | Path, *, force: bool = False) -> PackedScript:
+        pack_calls.append(("unpack", str(source), str(dest), force))
+        return PackedScript(
+            output_path=str(dest), entry="tool.py", files=["tool.py"], payload_sha256="ab", payload_bytes=1
+        )
+
     facade = Ps(
         process_source=fake_source,
         connection_source=fake_connections,
@@ -553,6 +580,8 @@ def test_build_ps_accepts_injected_adapters() -> None:  # noqa: PLR0915 - exerci
         computer_info_source=fake_computer_info,
         elevation_check=fake_is_elevated,
         elevator=fake_elevate,
+        script_packer=fake_pack_script,
+        script_unpacker=fake_unpack_script,
     )
     assert facade.get_process().select(lambda p: p.pid).to_list() == [1, 2]
     assert facade.get_net_tcp_connection().to_list() == []
@@ -717,3 +746,9 @@ def test_build_ps_accepts_injected_adapters() -> None:  # noqa: PLR0915 - exerci
         facade.require_elevation()
     assert facade.elevate(["a", "b"], cwd="C:/work", wait=False) == 7
     assert elevate_calls == [(["a", "b"], None, "C:/work", False)]
+    assert facade.pack_script("tool.py", "out.ps1", with_packages=["rich"], force=True).entry == "tool.py"
+    assert facade.unpack_script("out.ps1", "restored").files == ["tool.py"]
+    assert pack_calls == [
+        ("tool.py", "out.ps1", ("rich",), True),
+        ("unpack", "out.ps1", "restored", False),
+    ]

@@ -13,6 +13,7 @@ Contents:
     * :class:`PlatformUnsupportedError` — a Windows-only adapter used off Windows.
     * :class:`ElevationRequiredError` — an operation needs administrative rights it lacks.
     * :class:`ConfigurationError` — missing, invalid, or incomplete configuration.
+    * :class:`PackError` — a script could not be packed into a self-extracting runner.
 """
 
 from __future__ import annotations
@@ -103,8 +104,22 @@ class ConfigurationError(PwshPyError):
     """
 
 
+class PackError(PwshPyError):
+    """A script could not be packed into a self-extracting runner.
+
+    Raised for an unreadable or non-existent entry script, a syntax error in a
+    module being packed, a local import that resolves outside the pack root, or
+    a destination that would clobber an input file.
+
+    Example:
+        >>> str(PackError("entry not found: tool.py"))
+        'entry not found: tool.py'
+    """
+
+
 __all__ = [
     "ConfigurationError",
+    "PackError",
     "ElevationRequiredError",
     "FeatureUnavailableError",
     "NativeCallError",

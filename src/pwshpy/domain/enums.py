@@ -346,6 +346,31 @@ class FileItemType(str, Enum):
     DIRECTORY = "directory"
 
 
+class ImportKind(str, Enum):
+    """Where an imported module comes from, as seen by the script packer.
+
+    Only :attr:`LOCAL` modules are embedded in a pack: the standard library
+    travels with the interpreter uv provisions, and third-party distributions
+    are declared in the entry's PEP 723 block (or via ``--with``), never guessed
+    from an import name.
+
+    Attributes:
+        STDLIB: Part of the standard library for the packing interpreter.
+        LOCAL: A module resolvable to a file under the pack root; gets embedded.
+        EXTERNAL: Neither of the above; left to uv's dependency resolution.
+
+    Example:
+        >>> ImportKind.LOCAL.value
+        'local'
+        >>> ImportKind("stdlib") is ImportKind.STDLIB
+        True
+    """
+
+    STDLIB = "stdlib"
+    LOCAL = "local"
+    EXTERNAL = "external"
+
+
 __all__ = [
     "AceType",
     "AclEntryKind",
@@ -354,6 +379,7 @@ __all__ = [
     "DeployTarget",
     "EventLevel",
     "FileItemType",
+    "ImportKind",
     "OutputFormat",
     "ProcessStatus",
     "RegistryHive",

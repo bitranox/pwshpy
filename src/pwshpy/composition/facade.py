@@ -56,6 +56,7 @@ from ..adapters.native import iter_registry_values as _iter_registry_values
 from ..adapters.native import iter_scheduled_tasks as _iter_scheduled_tasks
 from ..adapters.native import iter_services as _iter_services
 from ..adapters.native import journald_iter_event_log as _journald_iter_event_log
+from ..adapters.native import pack_script as _pack_script
 from ..adapters.native import posix_iter_acl as _posix_iter_acl
 from ..adapters.native import posix_iter_local_groups as _posix_iter_local_groups
 from ..adapters.native import posix_iter_local_users as _posix_iter_local_users
@@ -65,6 +66,7 @@ from ..adapters.native import run_process as _run_process
 from ..adapters.native import systemd_iter_services as _systemd_iter_services
 from ..adapters.native import systemd_iter_timers as _systemd_iter_timers
 from ..adapters.native import test_connection as _test_connection
+from ..adapters.native import unpack_script as _unpack_script
 from ..adapters.native import write_records as _write_records
 from ..adapters.native import write_text as _write_text
 from ..adapters.native import write_text_stream as _write_text_stream
@@ -109,6 +111,8 @@ from ..application.ports import (
     RestInvoker,
     ScheduledTaskController,
     ScheduledTaskSource,
+    ScriptPacker,
+    ScriptUnpacker,
     ServiceController,
     ServiceSource,
     TextStreamWriter,
@@ -137,6 +141,7 @@ from ..domain.records import (
     NetAdapter,
     NetConnection,
     NetIpAddress,
+    PackedScript,
     ProcessInfo,
     ProcessResult,
     PSInvocationResult,
@@ -209,6 +214,8 @@ class Ps:
         computer_info_source: ComputerInfoSource,
         elevation_check: ElevationCheck,
         elevator: Elevator,
+        script_packer: ScriptPacker,
+        script_unpacker: ScriptUnpacker,
     ) -> None:
         self._process_source = process_source
         self._connection_source = connection_source
@@ -239,6 +246,8 @@ class Ps:
         self._cmdlet_runner = cmdlet_runner
         self._command_introspector = command_introspector
         self._process_runner = process_runner
+        self._script_packer = script_packer
+        self._script_unpacker = script_unpacker
         self._text_writer = text_writer
         self._text_stream_writer = text_stream_writer
         self._record_writer = record_writer
@@ -873,6 +882,41 @@ class Ps:
         """
         return self._process_runner(argv, cwd=cwd, timeout=timeout, env=env, input_text=input_text)
 
+    def pack_script(
+        self,
+        entry: str | Path,
+        dest: str | Path | None = None,
+        *,
+        include: Sequence[str | Path] = (),
+        with_packages: Sequence[str] = (),
+        root: str | Path | None = None,
+        force: bool = False,
+    ) -> PackedScript:
+        """Pack a Python script and its local modules into a self-extracting ``.ps1`` (portable).
+
+        The artefact is one file: it unpacks itself into a per-user cache, provisions ``uv``
+        if the machine has none, runs the script, and exits with the script's own exit code.
+        Third-party dependencies come from the entry's PEP 723 block or ``with_packages`` -
+        never guessed from an import name.  Runs on Windows PowerShell 5.1 and pwsh 7 alike.
+
+        Example:
+            >>> callable(build_ps().pack_script)
+            True
+        """
+        return self._script_packer(entry, dest, include=include, with_packages=with_packages, root=root, force=force)
+
+    def unpack_script(self, source: str | Path, dest: str | Path, *, force: bool = False) -> PackedScript:
+        """Restore the sources a packed ``.ps1`` carries, ready to edit and pack again (portable).
+
+        The inverse of :meth:`pack_script`.  The generated ``__main__`` shim is machinery, not
+        source, so it is left out of the restored tree.
+
+        Example:
+            >>> callable(build_ps().unpack_script)
+            True
+        """
+        return self._script_unpacker(source, dest, force=force)
+
     def write_text(
         self, path: str | Path, text: str, *, encoding: str = "utf-8", newline: str = "\n", bom: bool = False
     ) -> Path:
@@ -1266,6 +1310,8 @@ def build_ps() -> Ps:
         computer_info_source=_get_computer_info,
         elevation_check=_is_elevated,
         elevator=_elevate,
+        script_packer=_pack_script,
+        script_unpacker=_unpack_script,
     )
 
 

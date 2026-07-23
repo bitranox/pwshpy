@@ -35,6 +35,7 @@ from ..domain.records import (
     NetAdapter,
     NetConnection,
     NetIpAddress,
+    PackedScript,
     ProcessInfo,
     ProcessResult,
     PSInvocationResult,
@@ -173,6 +174,27 @@ class TextStreamWriter(Protocol):
     def __call__(
         self, path: str | Path, chunks: Iterable[str], *, encoding: str = ..., newline: str = ..., bom: bool = ...
     ) -> Path: ...
+
+
+class ScriptPacker(Protocol):
+    """Pack a Python entry script and its local modules into a self-extracting ``.ps1`` (native)."""
+
+    def __call__(
+        self,
+        entry: str | Path,
+        dest: str | Path | None = ...,
+        *,
+        include: Sequence[str | Path] = ...,
+        with_packages: Sequence[str] = ...,
+        root: str | Path | None = ...,
+        force: bool = ...,
+    ) -> PackedScript: ...
+
+
+class ScriptUnpacker(Protocol):
+    """Restore the sources embedded in a packed ``.ps1`` (native, the inverse of packing)."""
+
+    def __call__(self, source: str | Path, dest: str | Path, *, force: bool = ...) -> PackedScript: ...
 
 
 class WebRequester(Protocol):
@@ -445,6 +467,8 @@ __all__ = [
     "FileDownloader",
     "HotfixSource",
     "ProcessControl",
+    "ScriptPacker",
+    "ScriptUnpacker",
     "DeployConfiguration",
     "FileSystem",
     "ElevationCheck",

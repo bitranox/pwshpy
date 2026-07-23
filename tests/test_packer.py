@@ -59,6 +59,23 @@ def test_third_party_imports_are_reported_not_embedded(tmp_path: Path) -> None:
 
 
 @pytest.mark.os_agnostic
+def test_importing_a_name_from_a_local_package_is_not_reported_external(tmp_path: Path) -> None:
+    """``from pkg import helper`` must not make 'pkg' look like a missing dependency.
+
+    The candidate ``pkg.helper.VALUE`` resolves to no file because it names an attribute,
+    which would otherwise mark its root external even though the package was just packed.
+    """
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "helper.py").write_text("VALUE = 1\n")
+    entry = tmp_path / "app.py"
+    entry.write_text("from pkg.helper import VALUE\n\nprint(VALUE)\n")
+    manifest = pack_script(entry)
+    assert manifest.external_imports == []
+    assert "pkg/helper.py" in manifest.files
+
+
+@pytest.mark.os_agnostic
 def test_pep723_block_is_copied_onto_the_shim(tmp_path: Path) -> None:
     """uv reads metadata from the file it runs, and it runs the shim - so the block must be there."""
     entry = tmp_path / "app.py"

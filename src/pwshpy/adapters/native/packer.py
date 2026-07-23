@@ -217,6 +217,10 @@ def _collect_sources(entry: Path, root: Path, include: Iterable[str | Path]) -> 
         found[_existing_file(Path(extra), "included file")] = None
     for path in found:
         _require_under_root(path, root)
+    # ``from pkg import thing`` yields the candidate ``pkg.thing``, which resolves to no file
+    # when ``thing`` is a function or a constant. Its root would then look external even though
+    # ``pkg`` was just packed, so drop any name whose root does resolve locally.
+    external = {name for name in external if _resolve_local(name, root) is None}
     return sorted(found), sorted(external)
 
 

@@ -60,10 +60,16 @@ def _run(runner: Path, *arguments: str, env: dict[str, str] | None = None) -> su
     # The uv the runner finds must be the one this test found, so a PATH-less environment
     # does not silently exercise the network installer.
     child_env["PATH"] = os.pathsep.join([str(Path(_UV or "uv").parent), child_env.get("PATH", "")])
+    # Pin the packed script's stdout to UTF-8 and decode it as UTF-8, so a non-ASCII argument
+    # round-trips through the assertion regardless of the host's console code page. Without this,
+    # `text=True` decodes the child's UTF-8 output as cp1252 on Windows and mangles it - a capture
+    # artefact, not a packer defect (the argument reaches sys.argv intact either way).
+    child_env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
         [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), *arguments],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
         check=False,
         env=child_env,

@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-from .enums import ImportKind
+from .enums import ImportKind, RunnerFormat
 from .errors import PackError
 
 
@@ -53,12 +53,15 @@ class PackOptions:
         with_packages: Distributions spliced into the runner's ``uv run`` as ``--with`` args.
         root: Directory local imports resolve against; defaults to the entry's parent.
         force: Overwrite the destination if it already exists.
+        format: Which runner to emit (see :class:`~pwshpy.domain.enums.RunnerFormat`); ``AUTO``
+            picks ``.sh`` for a ``.sh`` destination, else a PowerShell ``.ps1``.
     """
 
     include: Sequence[str | Path] = ()
     with_packages: Sequence[str] = ()
     root: str | Path | None = None
     force: bool = False
+    format: RunnerFormat = RunnerFormat.AUTO
 
 
 #: The all-defaults options, shared as an immutable singleton so it can be a parameter default
@@ -127,6 +130,17 @@ _PLACEHOLDERS = (
     "@@PWSHPY_FILE_HASHES@@",
     "@@PWSHPY_SHIM@@",
     "@@PWSHPY_ARGV_ENV@@",
+)
+
+#: Placeholders the POSIX ``.sh`` runner exposes.  It has no shim and no out-of-band argv channel
+#: (POSIX ``sh`` forwards ``"$@"`` intact and uv reads the entry's PEP 723 block directly), so its
+#: set is a subset of the PowerShell one.
+_SH_PLACEHOLDERS = (
+    "@@PWSHPY_PAYLOAD_B64@@",
+    "@@PWSHPY_PAYLOAD_SHA256@@",
+    "@@PWSHPY_ENTRY@@",
+    "@@PWSHPY_UV_ARGS@@",
+    "@@PWSHPY_FILE_HASHES@@",
 )
 
 #: The generated ``__main__`` shim.  It rebuilds ``sys.argv`` from the out-of-band
@@ -399,6 +413,56 @@ def _powershell_string_array(values: Sequence[str]) -> str:
     return ",".join("'" + value.replace("'", "''") + "'" for value in values)
 
 
+def render_posix_runner(template: str, content: RunnerContent) -> str:
+    """Substitute a payload into the POSIX ``.sh`` runner template.
+
+    Like :func:`render_runner` but for ``/bin/sh``: the shim/argv placeholders do not apply
+    (POSIX ``sh`` forwards ``"$@"`` and uv reads the entry's PEP 723 block directly), ``uv_args``
+    are single-quoted for ``sh``, and file hashes are emitted as ``<digest>  <path>`` lines.
+
+    Raises:
+        PackError: If the template is missing a ``@@PWSHPY_*@@`` placeholder.
+
+    Example:
+        >>> tpl = "B=@@PWSHPY_PAYLOAD_B64@@ S=@@PWSHPY_PAYLOAD_SHA256@@ E=@@PWSHPY_ENTRY@@ " \\
+        ...       "U=@@PWSHPY_UV_ARGS@@ H=@@PWSHPY_FILE_HASHES@@"
+        >>> content = RunnerContent(payload_b64="Ym9keQ==", payload_sha256="ab12", entry="t.py",
+        ...                         uv_args=["--with", "httpx>=2"], file_hashes=[FileDigest("ff", "t.py")])
+        >>> render_posix_runner(tpl, content)
+        "B=Ym9keQ== S=ab12 E=t.py U='--with' 'httpx>=2' H=ff  t.py"
+    """
+    missing = [token for token in _SH_PLACEHOLDERS if token not in template]
+    if missing:
+        raise PackError(f"POSIX runner template is missing placeholder(s): {', '.join(missing)}")
+    replacements = {
+        "@@PWSHPY_PAYLOAD_B64@@": content.payload_b64,
+        "@@PWSHPY_PAYLOAD_SHA256@@": content.payload_sha256,
+        "@@PWSHPY_ENTRY@@": content.entry,
+        "@@PWSHPY_UV_ARGS@@": _posix_shell_args(content.uv_args),
+        "@@PWSHPY_FILE_HASHES@@": "\n".join(f"{fh.digest}  {fh.path}" for fh in content.file_hashes),
+    }
+    rendered = template
+    for token, value in replacements.items():
+        rendered = rendered.replace(token, value)
+    return rendered
+
+
+def _posix_shell_args(values: Sequence[str]) -> str:
+    """Render values as a POSIX ``sh`` single-quoted list, escaping embedded single quotes.
+
+    A single-quoted ``sh`` word is fully literal (no ``$``, no globbing, no redirection), so a
+    dependency spec like ``httpx>=2`` is safe - unquoted, its ``>`` would be a redirect.  The one
+    character needing care is ``'`` itself, escaped the POSIX way as ``'\\''``.
+
+    Example:
+        >>> _posix_shell_args(["--with", "httpx>=2", "it's"])
+        "'--with' 'httpx>=2' 'it'\\\\''s'"
+        >>> _posix_shell_args([])
+        ''
+    """
+    return " ".join("'" + value.replace("'", "'\\''") + "'" for value in values)
+
+
 __all__ = [
     "ARGV_ENCODING_TAG",
     "ARGV_ENV_VAR",
@@ -413,6 +477,7 @@ __all__ = [
     "classify_import",
     "extract_script_metadata",
     "iter_import_candidates",
+    "render_posix_runner",
     "render_runner",
     "render_shim",
 ]

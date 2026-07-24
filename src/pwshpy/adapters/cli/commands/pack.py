@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import rich_click as click
 
+from ....domain.enums import RunnerFormat
 from ....domain.packing import PackOptions
 from ....domain.records import PackedScript
 from ..constants import CLICK_CONTEXT_SETTINGS
@@ -24,10 +25,23 @@ from ._common import resolve_format
 
 @click.command("pack", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("entry")
-@option("--out", "-o", "dest", default=None, help="Output .ps1 path (default: the entry with a .ps1 suffix).")
+@option(
+    "--out",
+    "-o",
+    "dest",
+    default=None,
+    help="Output path (default: the entry with a .ps1 suffix, or .sh for --format sh).",
+)
 @option("--include", "-i", multiple=True, help="Extra file to embed; repeatable (data files, dynamic imports).")
 @option("--with", "-w", "with_packages", multiple=True, help="Extra dependency for uv run; repeatable.")
 @option("--root", default=None, help="Directory local imports resolve against (default: the entry's parent).")
+@option(
+    "--format",
+    "runner_format",
+    type=click.Choice(["auto", "ps1", "sh"]),
+    default="auto",
+    help="Runner format: 'ps1' (PowerShell), 'sh' (POSIX shell), or 'auto' (by the -o extension).",
+)
 @option("--force", "-f", is_flag=True, default=False, help="Overwrite the output if it already exists.")
 @option("--json", "as_json", is_flag=True, default=False, help="Emit the manifest as a JSON array.")
 @option("--jsonl", "as_jsonl", is_flag=True, default=False, help="Emit the manifest as one JSON line.")
@@ -40,18 +54,25 @@ def cli_pack(
     include: tuple[str, ...],
     with_packages: tuple[str, ...],
     root: str | None,
+    runner_format: str,
     force: bool,
     as_json: bool,
     as_jsonl: bool,
 ) -> None:
-    """Pack ENTRY and its local modules into a self-extracting PowerShell script.
+    """Pack ENTRY and its local modules into a self-extracting PowerShell (.ps1) or shell (.sh) script.
 
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_pack, ["--help"]).exit_code
         0
     """
-    options = PackOptions(include=list(include), with_packages=list(with_packages), root=root, force=force)
+    options = PackOptions(
+        include=list(include),
+        with_packages=list(with_packages),
+        root=root,
+        force=force,
+        format=RunnerFormat(runner_format),
+    )
     manifest = get_cli_context(ctx).services.ps.pack_script(entry, dest, options=options)
     _warn_on_undeclared(manifest)
     emit([manifest], resolve_format(as_json, as_jsonl))

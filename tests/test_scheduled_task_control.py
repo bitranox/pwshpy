@@ -14,6 +14,7 @@ full lifecycle, and unregisters it - throwaway VM only.
 from __future__ import annotations
 
 import contextlib
+import sys
 from typing import Any
 
 import pytest
@@ -188,6 +189,7 @@ _TASK = "\\pwshpy_test_task"
 @pytest.mark.local_only
 @pytest.mark.mutating
 @pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only scheduled-task mutation; skip off Windows")
 def test_scheduled_task_lifecycle() -> None:
     """Register a scratch task, toggle/run it, then unregister - throwaway VM only."""
     from pwshpy.composition import build_ps

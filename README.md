@@ -88,14 +88,17 @@ against that tasting menu of betrayals, here is what you get instead:
   Windows; systemd, journald, `pwd`/`grp`, the ACL xattr, the desktop keyring, `sudo` on Linux),
   never a shelled-out fake. The second script, the `.sh` twin that always drifts, does not exist.
 - **Hand it over as one self-sufficient file.** `pwshpy pack tool.py` folds a Python script and
-  every local module it imports into a single `.ps1`. Give that one file to anyone: it unpacks
+  every local module it imports into a single self-extracting file - a `.ps1` for Windows or a
+  `.sh` for POSIX (`pwshpy pack tool.py -o tool.sh`). Give that one file to anyone: it unpacks
   itself into a per-user cache, installs `uv` if the machine has none, runs the script, and exits
-  with the script's own exit code - on a box with **no Python and nothing pre-installed**, on
-  Windows PowerShell 5.1 as well as pwsh 7. Third-party dependencies come from the script's PEP 723
-  block or `--with` (uv even fetches a matching interpreter); arguments, unicode, and exit codes
-  arrive intact. The file explains itself (`-PwshPyHelp`), and `pwshpy unpack tool.ps1` gives the
-  sources back so the recipient can read, edit, and repack it. No installer, no venv, no README of
-  setup steps - just a script that runs.
+  with the script's own exit code - on a box with **no Python and nothing pre-installed**. The
+  `.ps1` runs on Windows PowerShell 5.1 as well as pwsh 7; the `.sh` runs under **any POSIX
+  `/bin/sh`, not only bash** (dash, busybox ash, macOS `sh`, ...). Third-party dependencies come
+  from the script's PEP 723 block or `--with` (uv even fetches a matching interpreter); arguments,
+  unicode, and exit codes arrive intact. Packing and unpacking are pure Python, so you can build a
+  `.sh` on Windows and a `.ps1` on Linux, and `pwshpy unpack` reads either format on either OS to
+  give the sources back for editing and repacking. The file explains itself (`-PwshPyHelp` /
+  `--pwshpy-help`). No installer, no venv, no README of setup steps - just a script that runs.
 - **Built for LLMs and agents, on purpose.** pwshpy is deliberately shaped so a model can use it
   *optimally*: typed records, the obvious-code-is-the-correct-code discipline, and real exceptions
   give an agent an unambiguous surface with no text to re-parse and no silent failures. And it ships

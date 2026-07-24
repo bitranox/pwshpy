@@ -6,6 +6,26 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.2.0] 2026-07-24 14:48:10
+
+### Added
+- **Script packer: ship a Python tool as one self-extracting POSIX `.sh`, alongside the `.ps1`.**
+  `pwshpy pack ENTRY -o tool.sh` (and `PackOptions(format=RunnerFormat.SH)` / `--format sh`) emits a
+  strict-POSIX shell runner that runs under any `/bin/sh` - dash, busybox ash, macOS `sh`, bash -
+  not only bash, and independent of the login shell. It carries a base64 `tar` payload, unpacks into
+  a per-user cache with a `mkdir` lock, installs `uv` if the machine has none, runs the script and
+  returns its exit code, with no argument shim because POSIX `sh` forwards `"$@"` intact. The format
+  auto-detects from the `-o` suffix (`RunnerFormat.AUTO`); `--format ps1|sh` forces it. New public
+  API: `RunnerFormat`, `PackOptions.format`. Pack and unpack are pure Python, so a `.sh` builds on
+  Windows and a `.ps1` on Linux, and `pwshpy unpack` reads either format on either OS (it sniffs zip
+  vs tar). The artefact's own switches are spelled `--pwshpy-help` / `--pwshpy-info` /
+  `--pwshpy-clean` / `--pwshpy-no-install-uv` / `--pwshpy-elevate` on the `.sh`.
+
+### Fixed
+- The four Windows-only mutating controller tests (ACL, event log, local account, scheduled task)
+  now carry `skipif(sys.platform != "win32")`, so they skip cleanly off Windows under
+  `make test-all` (which does not exclude the `mutating` marker) instead of erroring.
+
 ## [1.1.0] 2026-07-24 12:48:10
 
 ### Added

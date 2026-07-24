@@ -224,10 +224,16 @@ Always UTF-8, no BOM, LF by default - the same bytes on every OS (no `Out-File` 
 | *(no equivalent - hand-rolled base64 + `iex`)* | `ps.pack_script(entry, dest, options=PackOptions(...))` | `pwshpy pack ENTRY -o OUT.ps1` |
 | *(no equivalent)*                              | `ps.unpack_script(source, dest)`                        | `pwshpy unpack OUT.ps1 -o DIR` |
 
-The output is one `.ps1` carrying the entry and every local module it imports. It unpacks itself
-into a per-user cache, installs `uv` if the machine has none, runs the script, and exits with the
-script's own exit code - on Windows PowerShell 5.1 and pwsh 7 alike. Dependencies come from the
-entry's PEP 723 block or `--with`, so the target machine needs neither Python nor a venv.
+The output is one file carrying the entry and every local module it imports. It unpacks itself into
+a per-user cache, installs `uv` if the machine has none, runs the script, and exits with the
+script's own exit code. Dependencies come from the entry's PEP 723 block or `--with`, so the target
+machine needs neither Python nor a venv.
+
+Pick the format for the target: a `.ps1` for Windows PowerShell 5.1 / pwsh 7, or a `.sh` for **any
+POSIX `/bin/sh` (not only bash - dash, busybox ash, macOS `sh`, ...)**. The format auto-detects from
+the `-o` suffix, or force it with `--format ps1|sh` (API: `PackOptions(format=RunnerFormat.SH)`).
+Both pack and unpack are pure Python, so you can build a `.sh` on Windows and a `.ps1` on Linux, and
+`unpack` reads either format on either OS.
 
 ## Web requests  *(portable)*
 

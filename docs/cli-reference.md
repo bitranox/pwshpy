@@ -81,18 +81,24 @@ pwshpy save_credential prod-db svc                           # hidden prompt for
 pwshpy run "Get-Date"                                         # .NET (needs [full])
 pwshpy cmdlet Get-Service -p Name=sshd                       # one cmdlet, safely-bound params
 pwshpy get_ad_user -p Filter=*                               # .NET module shortcut (Get-ADUser); JSON only
-pwshpy pack tool.py -o dist/tool.ps1                         # ship a script as one self-extracting file
-pwshpy unpack dist/tool.ps1 -o src/                          # get the sources back out
+pwshpy pack tool.py -o dist/tool.ps1                         # ship a script as one self-extracting .ps1
+pwshpy pack tool.py -o dist/tool.sh                          # ...or a POSIX .sh (any /bin/sh, not only bash)
+pwshpy unpack dist/tool.ps1 -o src/                          # get the sources back out (reads .ps1 or .sh)
 ```
 
-`pack` embeds the entry plus every local module it imports into a `.ps1` that unpacks itself,
-installs `uv` if the target machine has none, runs the script and returns its exit code. Options:
-`-o/--out`, `--include PATH` (repeatable, for files no import reveals), `--with PKG` (repeatable
-extra dependency), `--root DIR`, `--force`. Third-party dependencies come from the entry's PEP 723
-block or `--with`; they are never inferred from import names. `unpack` restores the packed sources
-(`-o DIR`, `--force`) so a pack can be edited and packed again. See
-[Power Tools](power-tools.md) for the artefact's own switches (`-PwshPyInfo`, `-PwshPyClean`,
-`-PwshPyNoInstallUv`, `-PwshPyElevate`).
+`pack` embeds the entry plus every local module it imports into a self-extracting runner that
+unpacks itself, installs `uv` if the target machine has none, runs the script and returns its exit
+code. Options: `-o/--out`, `--format auto|ps1|sh` (default `auto`: pick from the `-o` suffix - `.sh`
+gives a POSIX-shell runner, anything else a `.ps1`), `--include PATH` (repeatable, for files no
+import reveals), `--with PKG` (repeatable extra dependency), `--root DIR`, `--force`. Third-party
+dependencies come from the entry's PEP 723 block or `--with`; they are never inferred from import
+names. The `.ps1` runs on Windows PowerShell 5.1 / pwsh 7; the `.sh` runs under any POSIX `/bin/sh`
+(dash, busybox ash, macOS `sh`, bash). Both pack and unpack are pure Python, so a `.sh` can be built
+on Windows and a `.ps1` on Linux, and `unpack` sniffs the format on either OS. `unpack` restores the
+packed sources (`-o DIR`, `--force`) so a pack can be edited and packed again. See
+[Power Tools](power-tools.md) for the artefact's own switches (`-PwshPyInfo` / `--pwshpy-info`,
+`-PwshPyClean` / `--pwshpy-clean`, `-PwshPyNoInstallUv` / `--pwshpy-no-install-uv`,
+`-PwshPyElevate` / `--pwshpy-elevate`).
 
 The `.NET` commands need the `[full]` extra (else a clear `FeatureUnavailableError`). `run` executes
 an arbitrary script; `cmdlet NAME -p KEY=VALUE` runs one cmdlet with safely-bound params; and the

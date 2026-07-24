@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -188,6 +189,7 @@ _FILE_GENERIC_READ = 0x120089
 @pytest.mark.local_only
 @pytest.mark.mutating
 @pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only ACL mutation; skip off Windows")
 def test_acl_roundtrip_on_temp_file() -> None:
     """Add an ACE, confirm via ps.acl, remove it, and set the owner - on a temp file."""
     from pwshpy.composition import build_ps

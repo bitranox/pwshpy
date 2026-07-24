@@ -53,6 +53,22 @@ def test_pack_honours_the_output_option(
 
 
 @pytest.mark.os_agnostic
+def test_pack_format_sh_emits_a_shell_runner(
+    cli_runner: CliRunner, production_factory: Callable[[], AppServices], tmp_path: Path
+) -> None:
+    """--format sh writes a POSIX .sh runner, and unpack reads it straight back."""
+    entry = _project(tmp_path)
+    target = tmp_path / "app.sh"
+    packed = cli_runner.invoke(cli, ["pack", str(entry), "-o", str(target), "--format", "sh"], obj=production_factory)
+    assert packed.exit_code == 0, packed.output
+    assert target.read_text().startswith("#!/bin/sh")
+    out = tmp_path / "restored"
+    result = cli_runner.invoke(cli, ["unpack", str(target), "-o", str(out), "--json"], obj=production_factory)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)[0]["files"] == ["app.py", "pkg/__init__.py", "pkg/helper.py"]
+
+
+@pytest.mark.os_agnostic
 def test_pack_with_flag_reaches_the_manifest(
     cli_runner: CliRunner, production_factory: Callable[[], AppServices], tmp_path: Path
 ) -> None:

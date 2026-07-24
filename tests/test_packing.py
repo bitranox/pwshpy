@@ -20,6 +20,7 @@ from pwshpy.domain.packing import (
     classify_import,
     extract_script_metadata,
     iter_import_candidates,
+    render_posix_runner,
     render_runner,
     render_shim,
 )
@@ -27,6 +28,10 @@ from pwshpy.domain.packing import (
 _FULL_TEMPLATE = (
     "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|"
     "@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@|@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@"
+)
+
+_SH_TEMPLATE = (
+    "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@"
 )
 
 
@@ -191,3 +196,40 @@ def test_uv_args_are_single_quoted_for_powershell() -> None:
         RunnerContent(payload_b64="x", payload_sha256="y", entry="e", uv_args=["it's"]),
     )
     assert "'it''s'" in rendered
+
+
+@pytest.mark.os_agnostic
+def test_render_posix_runner_substitutes_its_placeholders() -> None:
+    """The .sh runner has no shim/argv placeholders; the rest must all be filled."""
+    rendered = render_posix_runner(
+        _SH_TEMPLATE,
+        RunnerContent(
+            payload_b64="Ym9keQ==",
+            payload_sha256="ab12",
+            entry="tool.py",
+            uv_args=["--with", "rich"],
+            file_hashes=[FileDigest("ff", "tool.py")],
+        ),
+    )
+    assert "@@PWSHPY" not in rendered
+    assert rendered.split("|") == ["Ym9keQ==", "ab12", "tool.py", "'--with' 'rich'", "ff  tool.py"]
+
+
+@pytest.mark.os_agnostic
+def test_render_posix_runner_rejects_a_template_missing_a_placeholder() -> None:
+    """A literal placeholder in a shipped .sh would break on the target host."""
+    with pytest.raises(PackError, match="@@PWSHPY_ENTRY@@"):
+        render_posix_runner(
+            _SH_TEMPLATE.replace("@@PWSHPY_ENTRY@@", ""),
+            RunnerContent(payload_b64="x", payload_sha256="y", entry="e"),
+        )
+
+
+@pytest.mark.os_agnostic
+def test_posix_uv_args_single_quote_and_escape_embedded_quotes() -> None:
+    """POSIX single-quoting ends the quote, inserts an escaped quote, reopens: ``'\\''``."""
+    rendered = render_posix_runner(
+        _SH_TEMPLATE,
+        RunnerContent(payload_b64="x", payload_sha256="y", entry="e", uv_args=["it's"]),
+    )
+    assert "'it'\\''s'" in rendered

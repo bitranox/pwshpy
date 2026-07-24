@@ -72,28 +72,45 @@ CLI: `pwshpy save_credential TARGET USER` (secret from a hidden prompt, never an
 
 ## Ship a script as one file - `ps.pack_script`
 
-Handing a Python tool to a Windows admin normally means "install Python, clone this, make a venv,
-pip install, then run it". Packing turns all of that into one `.ps1` they can just run: it unpacks
-itself into a per-user cache, installs `uv` if the machine has none, runs the script, and exits with
-the script's own exit code.
+Handing a Python tool to another admin normally means "install Python, clone this, make a venv,
+pip install, then run it". Packing turns all of that into one file they can just run - a `.ps1` for
+Windows or a `.sh` for POSIX: it unpacks itself into a per-user cache, installs `uv` if the machine
+has none, runs the script, and exits with the script's own exit code. Nothing needs to be installed
+first, not even Python.
 
 ```python
-from pwshpy import ps, PackOptions
+from pwshpy import ps, PackOptions, RunnerFormat
 
-ps.pack_script("tool.py")  # -> tool.ps1, next to the entry
+ps.pack_script("tool.py")  # -> tool.ps1, next to the entry (auto: PowerShell by default)
+ps.pack_script("tool.py", "tool.sh")  # -> a POSIX shell runner (auto-detected from the .sh suffix)
 ps.pack_script("tool.py", "dist/tool.ps1", options=PackOptions(with_packages=["rich"], force=True))
-ps.unpack_script("dist/tool.ps1", "src/")  # edit it and pack again
+ps.pack_script("tool.py", "run", options=PackOptions(format=RunnerFormat.SH))  # force .sh regardless of name
+ps.unpack_script("dist/tool.ps1", "src/")  # edit it and pack again - reads .ps1 OR .sh
 ```
 
 The how-to-pack choices live on one `PackOptions` value object (`include`, `with_packages`,
-`root`, `force`), so the call stays `pack_script(entry, dest, options=...)` rather than a long
-keyword list.
+`root`, `force`, `format`), so the call stays `pack_script(entry, dest, options=...)` rather than a
+long keyword list. `format` is `RunnerFormat.AUTO` by default (pick from the `-o` extension - `.sh`
+gives a shell runner, anything else a `.ps1`); `RunnerFormat.PS1` / `RunnerFormat.SH` force it.
 
 ```bash
 pwshpy pack tool.py -o dist/tool.ps1        # embed the entry + the local modules it imports
+pwshpy pack tool.py -o dist/tool.sh         # a POSIX shell runner instead (auto-detected)
+pwshpy pack tool.py -o run --format sh      # force the shell runner for a name without a suffix
 pwshpy pack tool.py --include data.json     # for what import analysis cannot see
-pwshpy unpack dist/tool.ps1 -o src/         # restore the sources
+pwshpy unpack dist/tool.sh -o src/          # restore the sources (format sniffed automatically)
 ```
+
+**The two runners are the same feature, one per world.** A `.ps1` runs on Windows PowerShell 5.1 and
+pwsh 7; a `.sh` runs under **any POSIX `/bin/sh`, not only bash** - dash, busybox ash, macOS `sh`,
+bash-as-sh, and regardless of your login shell (zsh, fish, ...) - because the runner is strict POSIX.
+Both embed the same sources and the same PEP 723 metadata, so which one you ship is purely which
+machine you are shipping to.
+
+**Pack and unpack are cross-OS - the format is about the TARGET, not the host you pack on.** The
+whole pipeline is Python (`zipfile`/`tarfile` + base64), so you can build a `.sh` on Windows and a
+`.ps1` on Linux, and `unpack` reads either format on either OS (it sniffs zip vs tar - it is never
+told the format). Only *running* the artefact needs the matching interpreter on the recipient's box.
 
 The entry and every local module it imports (transitively, including relative imports) are embedded.
 The standard library rides along with the interpreter uv provisions, and third-party dependencies
@@ -113,32 +130,38 @@ With that block, uv resolves the dependencies **and** fetches a matching interpr
 machine, so "no Python installed" is not a problem either.
 
 On the recipient's side the artefact takes a few switches of its own; everything else is forwarded
-to your script untouched:
+to your script untouched. The `.ps1` spells them `-PwshPy...`; the `.sh` spells the same switches
+`--pwshpy-...`:
 
-| Switch               | Effect                                                                          |
-|----------------------|---------------------------------------------------------------------------------|
-| `-PwshPyInfo`        | print the manifest (entry, hash, file list, cache dir) without running anything |
-| `-PwshPyClean`       | discard the cached extraction and unpack again                                  |
-| `-PwshPyNoInstallUv` | fail with exit 127 instead of installing uv                                     |
-| `-PwshPyElevate`     | relaunch elevated first (UAC on Windows, `sudo` on POSIX)                       |
-| `-PwshPyHelp`        | show the artefact's own help                                                    |
+| `.ps1` switch        | `.sh` switch             | Effect                                                                          |
+|----------------------|--------------------------|---------------------------------------------------------------------------------|
+| `-PwshPyInfo`        | `--pwshpy-info`          | print the manifest (entry, hash, file list, cache dir) without running anything |
+| `-PwshPyClean`       | `--pwshpy-clean`         | discard the cached extraction and unpack again                                  |
+| `-PwshPyNoInstallUv` | `--pwshpy-no-install-uv` | fail with exit 127 instead of installing uv                                     |
+| `-PwshPyElevate`     | `--pwshpy-elevate`       | relaunch elevated first (UAC on Windows, `sudo` on POSIX)                       |
+| `-PwshPyHelp`        | `--pwshpy-help`          | show the artefact's own help                                                    |
 
 Details worth knowing:
 
-- **Runs on Windows PowerShell 5.1 and pwsh 7**, on any OS.
-- **Arguments arrive exactly as typed**, including empty strings, embedded quotes, and `-v` / `-d`
-  (which PowerShell would otherwise bind to `-Verbose` / `-Debug`). The argument vector travels
-  out of band, because 5.1 re-quotes arguments on their way to a native executable.
-  One caveat is outside pwshpy's reach: `pwsh -File tool.ps1 --path=C:\dir` is split by
-  PowerShell's own `-Name:Value` parsing before the script sees it. Use `--path C:\dir`, or call
-  `.\tool.ps1` from a PowerShell prompt, where it arrives intact.
+- **The `.ps1` runs on Windows PowerShell 5.1 and pwsh 7** (any OS); **the `.sh` runs under any
+  POSIX `/bin/sh`** - dash, busybox ash, macOS `sh`, bash - not only bash, and independent of your
+  login shell.
+- **Arguments arrive exactly as typed**, including empty strings, embedded quotes, and unicode. On
+  the `.sh` that is free - POSIX `sh` forwards `"$@"` untouched, so there is no shim. On the `.ps1`
+  the argument vector travels out of band (because 5.1 re-quotes arguments on their way to a native
+  executable), which also protects `-v` / `-d` from binding to `-Verbose` / `-Debug`. One caveat is
+  outside pwshpy's reach: `pwsh -File tool.ps1 --path=C:\dir` is split by PowerShell's own
+  `-Name:Value` parsing before the script sees it - use `--path C:\dir`, or call `.\tool.ps1` from a
+  PowerShell prompt, where it arrives intact.
 - **Self-elevation keeps working.** A packed script calling `ps.elevate()` re-execs the extracted
   entry with the environment uv already built, so it elevates exactly as it would unpacked.
 - **The cache is verified before every run** against per-file hashes embedded in the artefact, and
   re-extracted on any mismatch - a cache directory that may later be executed elevated must not be
-  tamperable between runs.
-- **Packing is deterministic**: identical sources produce identical bytes, so the payload hash is a
-  stable cache key and two builds are comparable.
+  tamperable between runs. Both runners serialize a cold-cache extraction with an atomic lock
+  (`FileShare.None` on Windows, a `mkdir` lock on POSIX), so two concurrent first runs never race.
+- **Packing is deterministic**: identical sources produce identical bytes (the `.sh` tar is built
+  with fixed mtime/mode/order), so the payload hash is a stable cache key and two builds are
+  comparable.
 
 ## .NET - safe cmdlet binding and parameter discovery
 

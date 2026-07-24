@@ -6,12 +6,16 @@ actually runs is the job of ``test_pack_e2e.py``, which executes it under a real
 
 from __future__ import annotations
 
+import base64
+import io
+import tarfile
 import zipfile
 from pathlib import Path
 
 import pytest
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
+from pwshpy.domain.enums import RunnerFormat
 from pwshpy.domain.errors import PackError
 from pwshpy.domain.packing import SHIM_MODULE, PackOptions
 
@@ -259,11 +263,122 @@ def test_unpack_refuses_a_member_escaping_the_destination(tmp_path: Path) -> Non
         unpack_script(manifest.output_path, tmp_path / "out")
 
 
-def _archive_of(runner: Path) -> dict[str, bytes]:
-    """Read the payload a generated runner carries, as a name -> bytes mapping."""
-    import base64
-    import io
+# --- POSIX .sh format ---------------------------------------------------------------------
+# These stay hermetic (no shell is run): they assert what the .sh artefact CONTAINS and that the
+# Python unpacker reads its tar payload.  Running it under real shells is test_pack_sh_e2e.py.
 
+_SH = PackOptions(format=RunnerFormat.SH)
+
+
+@pytest.mark.os_agnostic
+def test_sh_pack_emits_a_shell_runner_without_the_shim(tmp_path: Path) -> None:
+    """The .sh runner needs no argv shim - POSIX sh forwards ``"$@"`` - so the embedded tree is pure source."""
+    manifest = pack_script(_project(tmp_path), tmp_path / "app.sh", options=_SH)
+    runner = Path(manifest.output_path)
+    assert runner.read_text().startswith("#!/bin/sh")
+    assert manifest.files == ["app.py", "pkg/__init__.py", "pkg/helper.py", "sibling.py"]
+    assert SHIM_MODULE not in manifest.files
+    assert SHIM_MODULE not in _tar_of(runner)
+
+
+@pytest.mark.os_agnostic
+def test_sh_pack_embeds_a_tar_not_a_zip(tmp_path: Path) -> None:
+    """POSIX ``sh`` has ``tar`` everywhere but not ``unzip``, so the .sh payload is a tar."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('hi')\n")
+    manifest = pack_script(entry, tmp_path / "app.sh", options=_SH)
+    members = _tar_of(Path(manifest.output_path))
+    assert members["app.py"] == b"print('hi')\n"
+
+
+@pytest.mark.os_agnostic
+def test_sh_pep723_block_rides_on_the_entry_itself(tmp_path: Path) -> None:
+    """No shim in the .sh, so uv reads the block straight off the packed entry - it must be intact."""
+    entry = tmp_path / "app.py"
+    entry.write_text(_PEP723 + "import cowsay\nprint(cowsay)\n")
+    manifest = pack_script(entry, tmp_path / "app.sh", options=_SH)
+    assert manifest.has_script_metadata
+    assert _tar_of(Path(manifest.output_path))["app.py"].decode().startswith(_PEP723)
+
+
+@pytest.mark.os_agnostic
+def test_sh_runner_has_no_unsubstituted_placeholders(tmp_path: Path) -> None:
+    """A literal @@PWSHPY placeholder shipped in the .sh would fail cryptically on the target."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('hi')\n")
+    manifest = pack_script(entry, tmp_path / "app.sh", options=_SH)
+    assert "@@PWSHPY" not in Path(manifest.output_path).read_text()
+
+
+@pytest.mark.os_agnostic
+def test_sh_pack_is_deterministic(tmp_path: Path) -> None:
+    """The tar is built reproducibly (fixed mtime/mode/order) so the cache key is stable."""
+    entry = _project(tmp_path)
+    first = pack_script(entry, tmp_path / "a.sh", options=_SH)
+    second = pack_script(entry, tmp_path / "b.sh", options=_SH)
+    assert first.payload_sha256 == second.payload_sha256
+    assert (tmp_path / "a.sh").read_bytes() == (tmp_path / "b.sh").read_bytes()
+
+
+@pytest.mark.os_agnostic
+def test_format_auto_detects_sh_by_the_output_extension(tmp_path: Path) -> None:
+    """`--format auto` (the default) picks the runner from the -o suffix."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('hi')\n")
+    assert Path(pack_script(entry, tmp_path / "app.sh").output_path).read_text().startswith("#!/bin/sh")
+
+
+@pytest.mark.os_agnostic
+def test_format_auto_defaults_to_ps1(tmp_path: Path) -> None:
+    """With no .sh signal, auto stays on the PowerShell runner and a bare name gets .ps1."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('hi')\n")
+    manifest = pack_script(entry)
+    assert manifest.output_path.endswith(".ps1")
+    assert "$PwshPyPayload" in Path(manifest.output_path).read_text()
+
+
+@pytest.mark.os_agnostic
+def test_explicit_sh_format_overrides_a_non_sh_extension(tmp_path: Path) -> None:
+    """`--format sh` wins even when the -o name does not end in .sh."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('hi')\n")
+    manifest = pack_script(entry, tmp_path / "runme", options=_SH)
+    assert Path(manifest.output_path).read_text().startswith("#!/bin/sh")
+
+
+@pytest.mark.os_agnostic
+def test_unpack_detects_the_sh_tar_format_automatically(tmp_path: Path) -> None:
+    """Unpack works on a .sh without being told the format - it sniffs zip vs tar."""
+    manifest = pack_script(_project(tmp_path), tmp_path / "app.sh", options=_SH)
+    restored = unpack_script(manifest.output_path, tmp_path / "restored")
+    assert restored.files == ["app.py", "pkg/__init__.py", "pkg/helper.py", "sibling.py"]
+    assert restored.entry == "app.py"
+
+
+@pytest.mark.os_agnostic
+def test_sh_unpack_round_trip_is_byte_identical(tmp_path: Path) -> None:
+    """Edit-and-repack a .sh only works if unpack gives back exactly what was packed."""
+    entry = _project(tmp_path)
+    manifest = pack_script(entry, tmp_path / "app.sh", options=_SH)
+    unpack_script(manifest.output_path, tmp_path / "restored")
+    for relative in ("app.py", "pkg/helper.py", "sibling.py"):
+        assert (tmp_path / relative).read_bytes() == (tmp_path / "restored" / relative).read_bytes()
+
+
+@pytest.mark.os_agnostic
+def test_sh_unpack_refuses_a_member_escaping_the_destination(tmp_path: Path) -> None:
+    """A hand-edited .sh tar must not write outside the target directory (tar slip)."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('hi')\n")
+    manifest = pack_script(entry, tmp_path / "app.sh", options=_SH)
+    _replace_tar_payload(Path(manifest.output_path), {"../escaped.py": b"X = 1\n"})
+    with pytest.raises(PackError, match="outside"):
+        unpack_script(manifest.output_path, tmp_path / "out")
+
+
+def _archive_of(runner: Path) -> dict[str, bytes]:
+    """Read the payload a generated .ps1 runner carries, as a name -> bytes mapping."""
     lines = runner.read_text().splitlines()
     start = next(i for i, line in enumerate(lines) if line.strip() == "$PwshPyPayload = @'")
     end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "'@")
@@ -272,11 +387,40 @@ def _archive_of(runner: Path) -> dict[str, bytes]:
         return {name: archive.read(name) for name in archive.namelist()}
 
 
-def _replace_payload(runner: Path, members: dict[str, bytes]) -> None:
-    """Swap a generated runner's payload for a hand-built archive (tamper simulation)."""
-    import base64
-    import io
+def _sh_payload_bounds(runner: Path) -> tuple[list[str], int, int]:
+    """Locate the base64 heredoc a .sh runner carries: (lines, first-body-index, terminator-index).
 
+    The opener is ``cat <<'__PWSHPY_PAYLOAD_B64__'``; the terminator is a bare marker line.
+    """
+    lines = runner.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip().endswith("<<'__PWSHPY_PAYLOAD_B64__'"))
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "__PWSHPY_PAYLOAD_B64__")
+    return lines, start + 1, end
+
+
+def _tar_of(runner: Path) -> dict[str, bytes]:
+    """Read the tar payload a generated .sh runner carries, as a name -> bytes mapping."""
+    lines, body, end = _sh_payload_bounds(runner)
+    blob = base64.b64decode("".join(lines[body:end]))
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:") as archive:
+        return {m.name: archive.extractfile(m).read() for m in archive.getmembers() if m.isfile()}  # type: ignore[union-attr]
+
+
+def _replace_tar_payload(runner: Path, members: dict[str, bytes]) -> None:
+    """Swap a generated .sh runner's tar payload for a hand-built one (tamper simulation)."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for name, body in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(body)
+            archive.addfile(info, io.BytesIO(body))
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+    lines, body_idx, end = _sh_payload_bounds(runner)
+    runner.write_text("\n".join([*lines[:body_idx], encoded, *lines[end:]]) + "\n")
+
+
+def _replace_payload(runner: Path, members: dict[str, bytes]) -> None:
+    """Swap a generated .ps1 runner's payload for a hand-built archive (tamper simulation)."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         for name, body in members.items():

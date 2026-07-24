@@ -16,6 +16,7 @@ the disposable throwaway VM.
 from __future__ import annotations
 
 import contextlib
+import sys
 from typing import Any
 
 import pytest
@@ -171,6 +172,7 @@ def _cleanup(ps: Any) -> None:
 @pytest.mark.local_only
 @pytest.mark.mutating
 @pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only local-account mutation; skip off Windows")
 def test_local_account_lifecycle() -> None:
     """Create a user + group, toggle enable, manage membership, then remove all (throwaway VM)."""
     from pwshpy.composition import build_ps

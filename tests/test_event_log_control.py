@@ -11,6 +11,7 @@ event log and runs only on the disposable throwaway VM.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
@@ -68,6 +69,7 @@ def test_clear_failure_wrapped_in_native_call_error(monkeypatch: pytest.MonkeyPa
 @pytest.mark.local_only
 @pytest.mark.mutating
 @pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only event-log mutation; skip off Windows")
 def test_clear_event_log_on_real_log() -> None:
     """Clear a real event log and confirm it drops to near-empty (throwaway VM only)."""
     from pwshpy.composition import build_ps

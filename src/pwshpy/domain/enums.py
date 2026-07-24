@@ -49,6 +49,25 @@ class DeployTarget(str, Enum):
     USER = "user"
 
 
+class RunnerFormat(str, Enum):
+    """Which self-extracting runner ``pack_script`` emits.
+
+    ``PS1`` is a PowerShell runner (Windows PowerShell 5.1 and pwsh 7); ``SH`` is a strict-POSIX
+    ``/bin/sh`` runner that works under every major shell's ``sh`` (dash, busybox ash, macOS sh,
+    bash). ``AUTO`` picks by the output file's extension (``.sh`` -> SH, else PS1).
+
+    Example:
+        >>> RunnerFormat.SH.value
+        'sh'
+        >>> RunnerFormat("ps1") is RunnerFormat.PS1
+        True
+    """
+
+    PS1 = "ps1"
+    SH = "sh"
+    AUTO = "auto"
+
+
 class ProcessStatus(str, Enum):
     """Operating-system process states, as reported by the native binding.
 
@@ -382,6 +401,7 @@ __all__ = [
     "ImportKind",
     "OutputFormat",
     "ProcessStatus",
+    "RunnerFormat",
     "RegistryHive",
     "RegistryValueType",
     "ServiceKind",

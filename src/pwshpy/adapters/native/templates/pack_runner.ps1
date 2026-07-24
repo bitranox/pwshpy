@@ -138,16 +138,26 @@ function Test-PwshPyTree {
     # Re-verify on every run, not just after extraction: the cache is a user-writable
     # directory whose contents may later be executed elevated, so a tampered file has to
     # be caught before it runs, not merely when it is unpacked.
-    foreach ($line in ($PwshPyFileHashes -split "`n")) {
-        $entry = $line.Trim()
-        if (-not $entry) { continue }
-        $parts = $entry -split ' \*', 2
-        if ($parts.Count -ne 2) { return $false }
-        $target = Join-Path $Root $parts[1]
-        if (-not (Test-Path -LiteralPath $target)) { return $false }
-        # PowerShell string comparison is case-insensitive, so Get-FileHash's uppercase
-        # digest compares equal to the lowercase hex the packer embedded.
-        if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $parts[0]) { return $false }
+    #
+    # The whole check is wrapped so ANY failure - a mismatch, a missing file, or a transient
+    # IO error from reading a file another process is mid-extraction on (this runs before the
+    # lock, so two cold starts DO overlap here) - resolves to "not verified" and re-extraction
+    # under the lock, never a terminating Get-FileHash error that would kill the run under
+    # $ErrorActionPreference = 'Stop'.
+    try {
+        foreach ($line in ($PwshPyFileHashes -split "`n")) {
+            $entry = $line.Trim()
+            if (-not $entry) { continue }
+            $parts = $entry -split ' \*', 2
+            if ($parts.Count -ne 2) { return $false }
+            $target = Join-Path $Root $parts[1]
+            if (-not (Test-Path -LiteralPath $target)) { return $false }
+            # PowerShell string comparison is case-insensitive, so Get-FileHash's uppercase
+            # digest compares equal to the lowercase hex the packer embedded.
+            if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $parts[0]) { return $false }
+        }
+    } catch {
+        return $false
     }
     return $true
 }

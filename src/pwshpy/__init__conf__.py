@@ -40,7 +40,7 @@ name = "pwshpy"
 #: Human-readable summary shown in CLI help output.
 title = "A Pythonic PowerShell: typed records + a fluent pipeline over native bindings, never a pwsh subprocess."
 #: Current release version pulled from ``pyproject.toml`` by automation.
-version = "1.0.2"
+version = "1.1.0"
 #: Repository homepage presented to users.
 homepage = "https://github.com/bitranox/pwshpy"
 #: Author attribution surfaced in CLI output.

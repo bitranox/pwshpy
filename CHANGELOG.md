@@ -6,6 +6,21 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.1.0] 2026-07-24 12:48:10
+
+### Added
+- **Script packer: ship a Python tool as one self-extracting `.ps1`.** `pwshpy pack ENTRY`
+  (and `ps.pack_script(...)`) embeds an entry script and every local module it imports into a
+  single PowerShell file that unpacks itself into a per-user cache, installs `uv` if the machine
+  has none, runs the script, and exits with the script's own exit code - on Windows PowerShell 5.1
+  and pwsh 7 alike, on a machine with no Python. `pwshpy unpack` (and `ps.unpack_script(...)`)
+  restores the sources to edit and repack. Third-party dependencies come from the entry's PEP 723
+  block or `--with`, never guessed from an import name. New public API: `PackOptions`,
+  `PackedScript`, `PackError`. Arguments (including empty strings, quotes, and unicode) and exit
+  codes round-trip intact; the artefact carries `-PwshPyHelp` / `-PwshPyInfo` / `-PwshPyClean` /
+  `-PwshPyNoInstallUv` / `-PwshPyElevate` switches, verifies its cache against per-file hashes
+  before running, and serializes concurrent cold-start extraction with a lock.
+
 ## [1.0.2] 2026-07-19 22:30:08
 
 ### Fixed

@@ -78,10 +78,16 @@ itself into a per-user cache, installs `uv` if the machine has none, runs the sc
 the script's own exit code.
 
 ```python
+from pwshpy import ps, PackOptions
+
 ps.pack_script("tool.py")  # -> tool.ps1, next to the entry
-ps.pack_script("tool.py", "dist/tool.ps1", with_packages=["rich"])
+ps.pack_script("tool.py", "dist/tool.ps1", options=PackOptions(with_packages=["rich"], force=True))
 ps.unpack_script("dist/tool.ps1", "src/")  # edit it and pack again
 ```
+
+The how-to-pack choices live on one `PackOptions` value object (`include`, `with_packages`,
+`root`, `force`), so the call stays `pack_script(entry, dest, options=...)` rather than a long
+keyword list.
 
 ```bash
 pwshpy pack tool.py -o dist/tool.ps1        # embed the entry + the local modules it imports

@@ -219,10 +219,10 @@ Always UTF-8, no BOM, LF by default - the same bytes on every OS (no `Out-File` 
 
 ## Shipping a script to a machine without Python  *(portable)*
 
-| PowerShell                                     | pwshpy - Python (API)                              | pwshpy - CLI                   |
-|------------------------------------------------|----------------------------------------------------|--------------------------------|
-| *(no equivalent - hand-rolled base64 + `iex`)* | `ps.pack_script(entry, dest, with_packages=[...])` | `pwshpy pack ENTRY -o OUT.ps1` |
-| *(no equivalent)*                              | `ps.unpack_script(source, dest)`                   | `pwshpy unpack OUT.ps1 -o DIR` |
+| PowerShell                                     | pwshpy - Python (API)                                   | pwshpy - CLI                   |
+|------------------------------------------------|---------------------------------------------------------|--------------------------------|
+| *(no equivalent - hand-rolled base64 + `iex`)* | `ps.pack_script(entry, dest, options=PackOptions(...))` | `pwshpy pack ENTRY -o OUT.ps1` |
+| *(no equivalent)*                              | `ps.unpack_script(source, dest)`                        | `pwshpy unpack OUT.ps1 -o DIR` |
 
 The output is one `.ps1` carrying the entry and every local module it imports. It unpacks itself
 into a per-user cache, installs `uv` if the machine has none, runs the script, and exits with the

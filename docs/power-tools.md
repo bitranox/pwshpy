@@ -12,9 +12,9 @@ Checking for admin and relaunching elevated is normally a `WindowsPrincipal` / `
 one call, and the elevated child keeps your cwd and argv:
 
 ```python
-ps.is_elevated()          # bool - cross-platform (Windows token / POSIX euid 0)
-ps.require_elevation()    # raises ElevationRequiredError if not admin (an honest #Requires)
-ps.elevate()              # relaunch THIS process elevated (UAC), preserving cwd + argv
+ps.is_elevated()  # bool - cross-platform (Windows token / POSIX euid 0)
+ps.require_elevation()  # raises ElevationRequiredError if not admin (an honest #Requires)
+ps.elevate()  # relaunch THIS process elevated (UAC), preserving cwd + argv
 ```
 
 ```bash
@@ -30,9 +30,9 @@ data, never mistaken for a terminating error:
 
 ```python
 r = ps.exec(["git", "status", "--short"], cwd="/repo")
-r.exit_code           # always populated
-r.stdout, r.stderr    # captured text
-r.check()             # raises NativeCallError on a nonzero exit (opt-in "stop on error")
+r.exit_code  # always populated
+r.stdout, r.stderr  # captured text
+r.check()  # raises NativeCallError on a nonzero exit (opt-in "stop on error")
 ```
 
 CLI: `pwshpy exec -- git status` (put the program after `--` so its flags are not parsed by pwshpy).
@@ -43,11 +43,11 @@ No more UTF-16LE-with-a-BOM surprises from `Out-File`; the bytes are identical o
 Python version. And every write path streams, so a huge source never buffers:
 
 ```python
-ps.write_text("report.txt", text)                 # UTF-8, no BOM, LF - guaranteed
-ps.write_text_stream("out.txt", chunks)            # same guarantee, streamed chunk-by-chunk
+ps.write_text("report.txt", text)  # UTF-8, no BOM, LF - guaranteed
+ps.write_text_stream("out.txt", chunks)  # same guarantee, streamed chunk-by-chunk
 ps.write_records("procs.jsonl", ps.get_process())  # typed records -> UTF-8 JSONL, one at a time
 
-for line in ps.get_content_lines("huge.log"):      # reads one line at a time (vs whole-file get_content)
+for line in ps.get_content_lines("huge.log"):  # reads one line at a time (vs whole-file get_content)
     ...
 ps.download_file("https://host/big.iso", "big.iso")  # copies to disk in chunks; never buffers the body
 ```
@@ -62,9 +62,9 @@ unattended-safe alternative to a DPAPI file that will not decrypt under another 
 is a `SecretStr` - masked in repr / JSON / logs:
 
 ```python
-cred = ps.get_credential("svc")                       # non-echoing prompt
+cred = ps.get_credential("svc")  # non-echoing prompt
 ps.save_credential("prod-db", "svc", cred.secret.get_secret_value())
-later = ps.load_credential("prod-db")                 # None if absent; secret stays masked
+later = ps.load_credential("prod-db")  # None if absent; secret stays masked
 ```
 
 CLI: `pwshpy save_credential TARGET USER` (secret from a hidden prompt, never an argv flag),
@@ -78,9 +78,9 @@ itself into a per-user cache, installs `uv` if the machine has none, runs the sc
 the script's own exit code.
 
 ```python
-ps.pack_script("tool.py")                                  # -> tool.ps1, next to the entry
+ps.pack_script("tool.py")  # -> tool.ps1, next to the entry
 ps.pack_script("tool.py", "dist/tool.ps1", with_packages=["rich"])
-ps.unpack_script("dist/tool.ps1", "src/")                  # edit it and pack again
+ps.unpack_script("dist/tool.ps1", "src/")  # edit it and pack again
 ```
 
 ```bash
@@ -140,11 +140,11 @@ Details worth knowing:
 six streams, and `ps.get_command` tells you what parameters a cmdlet takes:
 
 ```python
-result = ps.cmdlet("Get-ChildItem", Path="C:/logs", Recurse=True)   # safe bound params
-result.output, result.warnings, result.errors                       # every stream, typed
+result = ps.cmdlet("Get-ChildItem", Path="C:/logs", Recurse=True)  # safe bound params
+result.output, result.warnings, result.errors  # every stream, typed
 
-info = ps.get_command("Get-Item")                                   # typed introspection
-[p.name for p in info.parameters if p.mandatory]                    # discover mandatory params
+info = ps.get_command("Get-Item")  # typed introspection
+[p.name for p in info.parameters if p.mandatory]  # discover mandatory params
 ```
 
 AD / Exchange / Azure and any other module cmdlet run this way too; a few common ones have typed

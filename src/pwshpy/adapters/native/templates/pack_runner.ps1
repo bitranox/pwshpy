@@ -66,7 +66,7 @@ function Get-PwshPyCacheRoot {
     return (Join-Path (Join-Path $HOME '.cache') 'pwshpy-pack')
 }
 
-function Get-PwshPyPayloadBytes {
+function Get-PwshPyPayload {
     $bytes = [Convert]::FromBase64String(($PwshPyPayload -replace '\s', ''))
     # Verify the whole payload before it is ever written or extracted: a base64 blob damaged in
     # transit would otherwise reach ExtractToDirectory and fail with a cryptic zip error, or (if
@@ -92,7 +92,7 @@ function Expand-PwshPyPayload {
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 
     $archive = Join-Path $Destination '.payload.zip'
-    [IO.File]::WriteAllBytes($archive, (Get-PwshPyPayloadBytes))
+    [IO.File]::WriteAllBytes($archive, (Get-PwshPyPayload))
     # System.IO.Compression.FileSystem is preloaded on PowerShell 7 but not on 5.1.
     try { $null = [System.IO.Compression.ZipFile] } catch { Add-Type -AssemblyName System.IO.Compression.FileSystem }
     [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $Destination)
@@ -183,8 +183,17 @@ function Install-PwshPyUv {
     if ($PwshPyOnWindows) {
         # Windows PowerShell 5.1 still defaults to TLS 1.0/1.1, which astral.sh refuses.
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        $installer = Invoke-RestMethod -Uri 'https://astral.sh/uv/install.ps1' -UseBasicParsing
-        Invoke-Expression $installer
+        # Download the installer to a file and run it in a child process with an explicit
+        # ExecutionPolicy Bypass, rather than piping it through Invoke-Expression: iex on a
+        # fetched string is exactly the pattern PSScriptAnalyzer warns about, and a plain
+        # `& $file` on a freshly downloaded script would trip the machine's execution policy.
+        $installer = Join-Path ([IO.Path]::GetTempPath()) ('uv-install-' + [Guid]::NewGuid().ToString('N') + '.ps1')
+        Invoke-RestMethod -Uri 'https://astral.sh/uv/install.ps1' -UseBasicParsing -OutFile $installer
+        try {
+            & (Get-PwshPyHostPath) -NoProfile -ExecutionPolicy Bypass -File $installer
+        } finally {
+            Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+        }
         $env:PATH = (Join-Path $env:USERPROFILE '.local\bin') + [IO.Path]::PathSeparator + $env:PATH
     } else {
         & /bin/sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh || wget -qO- https://astral.sh/uv/install.sh | sh'

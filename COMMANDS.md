@@ -270,8 +270,8 @@ through the universal escape hatch:
 ```python
 from pwshpy import ps
 
-ps.cmdlet("Set-ADUser", Identity="jdoe", Enabled=True)   # ANY cmdlet, any module - safe binding
-ps.run("Get-ADUser -Filter 'Department -eq \"IT\"' | Select Name")   # full-fidelity script
+ps.cmdlet("Set-ADUser", Identity="jdoe", Enabled=True)  # ANY cmdlet, any module - safe binding
+ps.run("Get-ADUser -Filter 'Department -eq \"IT\"' | Select Name")  # full-fidelity script
 ```
 
 The wrappers below are **illustrative, typed shortcuts** for a few of the most-reached-for cmdlets

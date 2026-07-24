@@ -120,14 +120,14 @@ script written once, in Python, runs on every box unchanged. No `if ($IsWindows)
 from pwshpy import ps
 
 # the same lines on Windows, macOS, and Linux
-ps.require_elevation()                                              # honest #Requires, any OS
+ps.require_elevation()  # honest #Requires, any OS
 ps.exec(["git", "clone", "https://github.com/acme/app", "/opt/app"]).check()
-ps.write_text("/opt/app/config.toml", "port = 8080\n")            # UTF-8, no BOM, identical bytes
-ps.download_file("https://host/tool.tgz", "/tmp/tool.tgz")         # streamed, memory-bounded
+ps.write_text("/opt/app/config.toml", "port = 8080\n")  # UTF-8, no BOM, identical bytes
+ps.download_file("https://host/tool.tgz", "/tmp/tool.tgz")  # streamed, memory-bounded
 sshd = ps.get_process().where(lambda p: p.name == "sshd").first()
-ps.get_service().where(lambda s: s.name.startswith("nginx")).first()   # win32service | systemd D-Bus
+ps.get_service().where(lambda s: s.name.startswith("nginx")).first()  # win32service | systemd D-Bus
 
-ps.pack_script("setup.py")      # -> setup.ps1: one file that installs uv, unpacks, runs, returns the exit code
+ps.pack_script("setup.py")  # -> setup.ps1: one file that installs uv, unpacks, runs, returns the exit code
 ```
 
 Services, the event log, scheduled tasks, local accounts, ACLs, the credential vault, and the
@@ -200,6 +200,7 @@ if svc is None:
 if svc.status is not ServiceState.RUNNING:
     ps.start_service("Spooler")
 
+
 # 4. ALL error events, memory-bound. A plain generator function: read one event, test it, yield the
 #    matches. It COLLECTS nothing; calling it reads nothing (a generator is lazy) - the log is
 #    pulled one event at a time in step 5.
@@ -207,6 +208,7 @@ def error_events():
     for event in ps.get_win_event("System"):
         if event.level is EventLevel.ERROR:
             yield event
+
 
 # 5. write_records STREAMS record-by-record straight to disk: read one, write one, discard. O(1)
 #    memory whether the log holds twenty entries or twenty million. UTF-8, no BOM, LF.

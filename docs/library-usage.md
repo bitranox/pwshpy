@@ -19,6 +19,7 @@ Read commands yield Pydantic records, not strings you have to re-parse:
 def is_python(proc):
     return proc.name == "python"
 
+
 for proc in ps.get_process().where(is_python).take(5):
     print(proc.pid, proc.name, proc.status.value)
 

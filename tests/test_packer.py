@@ -285,7 +285,7 @@ def test_sh_pack_emits_a_shell_runner_without_the_shim(tmp_path: Path) -> None:
 def test_sh_pack_embeds_a_tar_not_a_zip(tmp_path: Path) -> None:
     """POSIX ``sh`` has ``tar`` everywhere but not ``unzip``, so the .sh payload is a tar."""
     entry = tmp_path / "app.py"
-    entry.write_text("print('hi')\n")
+    entry.write_bytes(b"print('hi')\n")  # bytes: write_text would translate \n to \r\n on Windows
     manifest = pack_script(entry, tmp_path / "app.sh", options=_SH)
     members = _tar_of(Path(manifest.output_path))
     assert members["app.py"] == b"print('hi')\n"
@@ -295,7 +295,7 @@ def test_sh_pack_embeds_a_tar_not_a_zip(tmp_path: Path) -> None:
 def test_sh_pep723_block_rides_on_the_entry_itself(tmp_path: Path) -> None:
     """No shim in the .sh, so uv reads the block straight off the packed entry - it must be intact."""
     entry = tmp_path / "app.py"
-    entry.write_text(_PEP723 + "import cowsay\nprint(cowsay)\n")
+    entry.write_text(_PEP723 + "import cowsay\nprint(cowsay)\n", newline="\n")  # keep LF on Windows too
     manifest = pack_script(entry, tmp_path / "app.sh", options=_SH)
     assert manifest.has_script_metadata
     assert _tar_of(Path(manifest.output_path))["app.py"].decode().startswith(_PEP723)

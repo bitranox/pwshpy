@@ -168,6 +168,30 @@ def test_second_run_reuses_the_extraction_cache(tmp_path: Path) -> None:
     assert witness.exists(), "the payload was extracted a second time"
 
 
+def test_concurrent_cold_starts_do_not_race(tmp_path: Path) -> None:
+    """Two cold-cache runs of the same pack must both succeed, not stomp each other's extraction.
+
+    Launches both processes against one empty cache so they contend for the first extraction;
+    the runner's lock must serialize it so neither yanks the directory the other runs from.
+    """
+    manifest = pack_script(_project(tmp_path))
+    environment = {
+        **os.environ,
+        "PATH": os.pathsep.join([str(Path(_UV or "uv").parent), os.environ.get("PATH", "")]),
+        **_isolated_cache(tmp_path),
+    }
+    assert _PWSH is not None
+    argv = [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(manifest.output_path), "concurrent"]
+    first = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
+    second = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
+    out_a, err_a = first.communicate(timeout=300)
+    out_b, err_b = second.communicate(timeout=300)
+    assert first.returncode == 0, err_a
+    assert second.returncode == 0, err_b
+    assert "greeting:hello from the submodule" in out_a
+    assert "greeting:hello from the submodule" in out_b
+
+
 def test_clean_switch_forces_a_fresh_extraction(tmp_path: Path) -> None:
     """-PwshPyClean is the escape hatch when a cached tree needs discarding."""
     manifest = pack_script(_project(tmp_path))
@@ -189,6 +213,22 @@ def test_tampered_cache_is_detected_and_replaced(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "TAMPERED" not in result.stdout
     assert "greeting:hello from the submodule" in result.stdout
+
+
+def test_corrupt_payload_is_rejected_before_extraction(tmp_path: Path) -> None:
+    """A payload damaged in transit must fail with a clear message, not a cryptic zip error."""
+    manifest = pack_script(_project(tmp_path))
+    runner = Path(manifest.output_path)
+    lines = runner.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == "$PwshPyPayload = @'")
+    # Flip the first character of the first payload line to a different valid base64 symbol, so
+    # the blob still decodes but its bytes - and therefore its sha256 - no longer match.
+    body = lines[start + 1]
+    lines[start + 1] = ("B" if body[0] != "B" else "C") + body[1:]
+    runner.write_text("\n".join(lines) + "\n")
+    result = _run(runner, env=_isolated_cache(tmp_path))
+    assert result.returncode != 0
+    assert "corrupt" in (result.stdout + result.stderr).lower()
 
 
 def test_info_switch_reports_the_manifest_without_running(tmp_path: Path) -> None:

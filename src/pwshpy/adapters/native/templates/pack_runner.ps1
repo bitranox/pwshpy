@@ -30,6 +30,8 @@
         -PwshPyNoInstallUv  fail with exit code 127 rather than installing uv
         -PwshPyElevate      relaunch elevated first (UAC on Windows, sudo on POSIX)
 
+    Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
+
     Home: https://github.com/bitranox/pwshpy
 #>
 
@@ -65,7 +67,22 @@ function Get-PwshPyCacheRoot {
 }
 
 function Get-PwshPyPayloadBytes {
-    return [Convert]::FromBase64String(($PwshPyPayload -replace '\s', ''))
+    $bytes = [Convert]::FromBase64String(($PwshPyPayload -replace '\s', ''))
+    # Verify the whole payload before it is ever written or extracted: a base64 blob damaged in
+    # transit would otherwise reach ExtractToDirectory and fail with a cryptic zip error, or (if
+    # it still unzips) be caught only by the slower per-file check afterwards.
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        # String comparison is case-insensitive, so the uppercase hex here matches the lowercase
+        # digest the packer embedded.
+        $actual = [BitConverter]::ToString($sha256.ComputeHash($bytes)).Replace('-', '')
+    } finally {
+        $sha256.Dispose()
+    }
+    if ($actual -ne $PwshPySha) {
+        throw "the embedded payload is corrupt: sha256 $actual does not match the expected $PwshPySha"
+    }
+    return $bytes
 }
 
 function Expand-PwshPyPayload {
@@ -80,6 +97,39 @@ function Expand-PwshPyPayload {
     try { $null = [System.IO.Compression.ZipFile] } catch { Add-Type -AssemblyName System.IO.Compression.FileSystem }
     [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $Destination)
     Remove-Item -LiteralPath $archive -Force
+}
+
+function Invoke-PwshPyUnpackLocked {
+    param([string] $CacheDir)
+
+    # Serialize extraction across processes with an exclusive lock file next to the cache dir, so
+    # two cold-start runs of the same pack cannot stomp each other's extraction: without it, one
+    # process's Remove-Item + re-extract can yank the directory another is already running from.
+    # The warm path (a verified tree) never reaches here, so a normal run pays no lock cost.
+    $parent = Split-Path -Parent $CacheDir
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    $lockPath = "$CacheDir.lock"
+    for ($attempt = 0; $attempt -lt 600; $attempt++) {
+        $lock = $null
+        try {
+            $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        } catch [IO.IOException] {
+            Start-Sleep -Milliseconds 100
+            continue
+        }
+        try {
+            # Double-checked: another process may have finished extracting while we waited.
+            if (Test-PwshPyTree -Root $CacheDir) { return }
+            Expand-PwshPyPayload -Destination $CacheDir
+            if (-not (Test-PwshPyTree -Root $CacheDir)) {
+                throw "the unpacked payload in $CacheDir does not match its recorded hashes"
+            }
+            return
+        } finally {
+            $lock.Close()
+        }
+    }
+    throw "timed out after 60s waiting to unpack $CacheDir (another process holds $lockPath)"
 }
 
 function Test-PwshPyTree {
@@ -117,6 +167,10 @@ function Get-PwshPyUvPath {
             (Join-Path $HOME '.cargo/bin/uv'),
             '/usr/local/bin/uv'
         )
+        # The installer honours XDG_BIN_HOME / CARGO_HOME, so a machine that sets either installs
+        # uv there rather than under ~/.local/bin - check them too before giving up.
+        if ($env:XDG_BIN_HOME) { $candidates += (Join-Path $env:XDG_BIN_HOME 'uv') }
+        if ($env:CARGO_HOME) { $candidates += (Join-Path $env:CARGO_HOME 'bin/uv') }
     }
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
@@ -254,10 +308,7 @@ if ($PwshPyClean -and (Test-Path -LiteralPath $PwshPyCacheDir)) {
     Remove-Item -LiteralPath $PwshPyCacheDir -Recurse -Force
 }
 if (-not (Test-PwshPyTree -Root $PwshPyCacheDir)) {
-    Expand-PwshPyPayload -Destination $PwshPyCacheDir
-    if (-not (Test-PwshPyTree -Root $PwshPyCacheDir)) {
-        throw "the unpacked payload in $PwshPyCacheDir does not match its recorded hashes"
-    }
+    Invoke-PwshPyUnpackLocked -CacheDir $PwshPyCacheDir
 }
 
 # --- uv ---------------------------------------------------------------------------------

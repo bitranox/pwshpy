@@ -154,6 +154,16 @@ def test_refuses_to_overwrite_without_force(tmp_path: Path) -> None:
 
 
 @pytest.mark.os_agnostic
+def test_refuses_a_file_named_like_the_generated_shim(tmp_path: Path) -> None:
+    """A source whose archive name collides with the shim would be silently overwritten."""
+    (tmp_path / SHIM_MODULE).write_text("SHADOW = 1\n")
+    entry = tmp_path / "app.py"
+    entry.write_text(f"import {SHIM_MODULE[:-3]}\nprint('hi')\n")
+    with pytest.raises(PackError, match="reserved for the generated entry"):
+        pack_script(entry)
+
+
+@pytest.mark.os_agnostic
 def test_refuses_a_destination_that_is_an_input(tmp_path: Path) -> None:
     """Writing the runner over its own source would destroy the input."""
     entry = tmp_path / "app.py"

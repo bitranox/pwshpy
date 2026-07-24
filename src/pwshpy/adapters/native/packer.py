@@ -112,8 +112,13 @@ def pack_script(
     _guard_destination(destination, sources, force=force)
 
     entry_arc = _archive_name(entry_path, root_path)
-    members = {_archive_name(path, root_path): _read_bytes(path) for path in sources}
-    metadata = extract_script_metadata(_read_bytes(entry_path).decode("utf-8", "replace"))
+    members = {_archive_name(path, root_path): body for path, body in sources.items()}
+    if SHIM_MODULE in members:
+        raise PackError(
+            f"a file to pack is named {SHIM_MODULE!r}, which is reserved for the generated entry "
+            "shim; rename it so the pack does not silently overwrite it"
+        )
+    metadata = extract_script_metadata(sources[entry_path].decode("utf-8", "replace"))
     members[SHIM_MODULE] = render_shim(entry=entry_arc, metadata=metadata).encode("utf-8")
 
     payload = _build_archive(members)
@@ -190,7 +195,7 @@ def unpack_script(source: str | Path, dest: str | Path, *, force: bool = False) 
     )
 
 
-def _collect_sources(entry: Path, root: Path, include: Iterable[str | Path]) -> tuple[list[Path], list[str]]:
+def _collect_sources(entry: Path, root: Path, include: Iterable[str | Path]) -> tuple[dict[Path, bytes], list[str]]:
     """Walk ``entry``'s local imports breadth-first; return the files and the external names.
 
     A dotted name counts as local when a file for it exists under ``root``.  Resolution is
@@ -198,31 +203,39 @@ def _collect_sources(entry: Path, root: Path, include: Iterable[str | Path]) -> 
     module of the same name at runtime and must therefore be packed rather than assumed.
     """
     stdlib = frozenset(sys.stdlib_module_names)
-    found: dict[Path, None] = {entry: None}
+    # Each file is read exactly once here and its bytes cached, so the caller reuses them for
+    # the archive and the metadata rather than re-reading from disk two more times.
+    found: dict[Path, bytes] = {}
     external: set[str] = set()
     pending = [entry]
     while pending:
         current = pending.pop()
-        source = _read_bytes(current).decode("utf-8", "replace")
+        if current in found:
+            continue
+        body = _read_bytes(current)
+        found[current] = body
         package = _package_parts(current, root)
-        for dotted in iter_import_candidates(source, module_package=package, filename=str(current)):
+        for dotted in iter_import_candidates(
+            body.decode("utf-8", "replace"), module_package=package, filename=str(current)
+        ):
             resolved = _resolve_local(dotted, root)
             local_names: frozenset[str] = frozenset({dotted}) if resolved is not None else frozenset()
             kind = classify_import(dotted, stdlib_names=stdlib, local_names=local_names)
             if kind is ImportKind.EXTERNAL:
                 external.add(dotted.split(".", 1)[0])
             elif kind is ImportKind.LOCAL and resolved is not None and resolved not in found:
-                found[resolved] = None
                 pending.append(resolved)
     for extra in include:
-        found[_existing_file(Path(extra), "included file")] = None
+        path = _existing_file(Path(extra), "included file")
+        if path not in found:
+            found[path] = _read_bytes(path)
     for path in found:
         _require_under_root(path, root)
     # ``from pkg import thing`` yields the candidate ``pkg.thing``, which resolves to no file
     # when ``thing`` is a function or a constant. Its root would then look external even though
     # ``pkg`` was just packed, so drop any name whose root does resolve locally.
     external = {name for name in external if _resolve_local(name, root) is None}
-    return sorted(found), sorted(external)
+    return found, sorted(external)
 
 
 def _resolve_local(dotted: str, root: Path) -> Path | None:

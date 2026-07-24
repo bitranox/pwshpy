@@ -32,13 +32,33 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Iterator, Sequence
+from typing import NamedTuple
 
 from .enums import ImportKind
 from .errors import PackError
 
+
+class FileDigest(NamedTuple):
+    """One packed file's SHA-256 hex digest paired with its archive-relative path.
+
+    A named pair, not a bare ``tuple[str, str]``: the runner verifies each file against its
+    digest before executing, and a transposed ``(path, digest)`` would embed a manifest that
+    silently never matches. Naming the fields makes the order impossible to get wrong at the
+    one place they are built.
+    """
+
+    digest: str
+    path: str
+
+
 #: Name of the generated shim module inside the payload.  Dunder-prefixed so it cannot
 #: collide with a user module, and so an ``import *`` never picks it up.
 SHIM_MODULE = "__pwshpy_pack_main__.py"
+
+#: PEP 723 inline-script block delimiters, matched by exact line.  Named so a typo in the
+#: parser is a NameError here rather than a block that silently fails to extract.
+_PEP723_OPEN = "# /// script"
+_PEP723_CLOSE = "# ///"
 
 #: Environment variable carrying the encoded argument vector from runner to shim.
 ARGV_ENV_VAR = "PWSHPY_PACK_ARGV"
@@ -222,15 +242,15 @@ def extract_script_metadata(source: str) -> str:
     """
     lines = source.splitlines()
     for index, line in enumerate(lines):
-        if line.rstrip() != "# /// script":
+        if line.rstrip() != _PEP723_OPEN:
             continue
         for end in range(index + 1, len(lines)):
             stripped = lines[end].rstrip()
-            if stripped == "# ///":
+            if stripped == _PEP723_CLOSE:
                 return "\n".join(lines[index : end + 1]) + "\n"
             if not (stripped == "#" or stripped.startswith("# ")):
                 break
-        raise PackError("the entry's PEP 723 script block is not closed by a '# ///' line")
+        raise PackError(f"the entry's PEP 723 script block is not closed by a {_PEP723_CLOSE!r} line")
     return ""
 
 
@@ -284,7 +304,7 @@ def render_runner(
     payload_sha256: str,
     entry: str,
     uv_args: Sequence[str],
-    file_hashes: Sequence[tuple[str, str]],
+    file_hashes: Sequence[FileDigest],
 ) -> str:
     """Substitute a payload into the runner template, returning the finished ``.ps1`` text.
 
@@ -294,7 +314,7 @@ def render_runner(
         payload_sha256: Hex digest of the payload zip; keys the extraction cache.
         entry: Archive-relative path of the entry script.
         uv_args: Extra arguments spliced into the ``uv run`` invocation (``--with`` pins).
-        file_hashes: ``(sha256, relative_path)`` pairs the runner verifies before running.
+        file_hashes: :class:`FileDigest` pairs the runner verifies before running.
 
     Raises:
         PackError: If the template is missing a placeholder, which would ship a runner with
@@ -304,7 +324,7 @@ def render_runner(
         >>> tpl = "P=@@PWSHPY_PAYLOAD_B64@@ S=@@PWSHPY_PAYLOAD_SHA256@@ E=@@PWSHPY_ENTRY@@ " \\
         ...       "U=@@PWSHPY_UV_ARGS@@ H=@@PWSHPY_FILE_HASHES@@ M=@@PWSHPY_SHIM@@ V=@@PWSHPY_ARGV_ENV@@"
         >>> render_runner(tpl, payload_b64="Ym9keQ==", payload_sha256="ab12", entry="t.py",
-        ...               uv_args=["--with", "rich"], file_hashes=[("ff", "t.py")])
+        ...               uv_args=["--with", "rich"], file_hashes=[FileDigest("ff", "t.py")])
         "P=Ym9keQ== S=ab12 E=t.py U='--with','rich' H=ff *t.py M=__pwshpy_pack_main__.py V=PWSHPY_PACK_ARGV"
     """
     missing = [token for token in _PLACEHOLDERS if token not in template]
@@ -315,7 +335,7 @@ def render_runner(
         "@@PWSHPY_PAYLOAD_SHA256@@": payload_sha256,
         "@@PWSHPY_ENTRY@@": entry,
         "@@PWSHPY_UV_ARGS@@": _powershell_string_array(uv_args),
-        "@@PWSHPY_FILE_HASHES@@": "\n".join(f"{digest} *{path}" for digest, path in file_hashes),
+        "@@PWSHPY_FILE_HASHES@@": "\n".join(f"{fh.digest} *{fh.path}" for fh in file_hashes),
         "@@PWSHPY_SHIM@@": SHIM_MODULE,
         "@@PWSHPY_ARGV_ENV@@": ARGV_ENV_VAR,
     }
@@ -343,6 +363,7 @@ def _powershell_string_array(values: Sequence[str]) -> str:
 __all__ = [
     "ARGV_ENCODING_TAG",
     "ARGV_ENV_VAR",
+    "FileDigest",
     "SHIM_MODULE",
     "SHIM_SOURCE",
     "candidate_relative_paths",

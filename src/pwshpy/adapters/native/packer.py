@@ -30,13 +30,14 @@ import hashlib
 import io
 import sys
 import zipfile
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from ...domain.enums import ImportKind
 from ...domain.errors import PackError
 from ...domain.packing import (
     SHIM_MODULE,
+    FileDigest,
     candidate_relative_paths,
     chunk_base64,
     classify_import,
@@ -124,7 +125,7 @@ def pack_script(
         payload_sha256=payload_sha,
         entry=entry_arc,
         uv_args=uv_args,
-        file_hashes=[(hashlib.sha256(body).hexdigest(), name) for name, body in sorted(members.items())],
+        file_hashes=[FileDigest(hashlib.sha256(body).hexdigest(), name) for name, body in sorted(members.items())],
     )
     _write_runner(destination, runner)
     return PackedScript(
@@ -305,7 +306,7 @@ def _guard_destination(destination: Path, sources: Iterable[Path], *, force: boo
         raise PackError(f"{destination} already exists; pass force to overwrite it")
 
 
-def _build_archive(members: dict[str, bytes]) -> bytes:
+def _build_archive(members: Mapping[str, bytes]) -> bytes:
     """Build a deterministic zip: sorted members, fixed timestamps and modes.
 
     Determinism is what makes the payload hash a usable cache key - two packs of identical

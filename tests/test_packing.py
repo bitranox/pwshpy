@@ -13,6 +13,7 @@ from pwshpy.domain.errors import PackError
 from pwshpy.domain.packing import (
     ARGV_ENCODING_TAG,
     SHIM_MODULE,
+    FileDigest,
     candidate_relative_paths,
     chunk_base64,
     classify_import,
@@ -155,7 +156,7 @@ def test_render_runner_substitutes_every_placeholder() -> None:
         payload_sha256="ab12",
         entry="tool.py",
         uv_args=["--with", "rich"],
-        file_hashes=[("ff", "tool.py")],
+        file_hashes=[FileDigest("ff", "tool.py")],
     )
     assert "@@PWSHPY" not in rendered
     assert rendered.split("|") == [

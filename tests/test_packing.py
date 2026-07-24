@@ -14,6 +14,7 @@ from pwshpy.domain.packing import (
     ARGV_ENCODING_TAG,
     SHIM_MODULE,
     FileDigest,
+    RunnerContent,
     candidate_relative_paths,
     chunk_base64,
     classify_import,
@@ -152,11 +153,13 @@ def test_render_runner_substitutes_every_placeholder() -> None:
     """No @@PWSHPY_...@@ may survive into a shipped runner."""
     rendered = render_runner(
         _FULL_TEMPLATE,
-        payload_b64="Ym9keQ==",
-        payload_sha256="ab12",
-        entry="tool.py",
-        uv_args=["--with", "rich"],
-        file_hashes=[FileDigest("ff", "tool.py")],
+        RunnerContent(
+            payload_b64="Ym9keQ==",
+            payload_sha256="ab12",
+            entry="tool.py",
+            uv_args=["--with", "rich"],
+            file_hashes=[FileDigest("ff", "tool.py")],
+        ),
     )
     assert "@@PWSHPY" not in rendered
     assert rendered.split("|") == [
@@ -176,11 +179,7 @@ def test_render_runner_rejects_a_template_missing_a_placeholder() -> None:
     with pytest.raises(PackError, match="@@PWSHPY_ENTRY@@"):
         render_runner(
             _FULL_TEMPLATE.replace("@@PWSHPY_ENTRY@@", ""),
-            payload_b64="x",
-            payload_sha256="y",
-            entry="e",
-            uv_args=[],
-            file_hashes=[],
+            RunnerContent(payload_b64="x", payload_sha256="y", entry="e"),
         )
 
 
@@ -189,10 +188,6 @@ def test_uv_args_are_single_quoted_for_powershell() -> None:
     """Values reach PowerShell as literal single-quoted strings, with quotes doubled."""
     rendered = render_runner(
         _FULL_TEMPLATE,
-        payload_b64="x",
-        payload_sha256="y",
-        entry="e",
-        uv_args=["it's"],
-        file_hashes=[],
+        RunnerContent(payload_b64="x", payload_sha256="y", entry="e", uv_args=["it's"]),
     )
     assert "'it''s'" in rendered

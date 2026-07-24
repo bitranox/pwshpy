@@ -122,6 +122,7 @@ from ..application.ports import (
 )
 from ..domain.enums import AceType, FileItemType, RegistryValueType, ServiceStartType
 from ..domain.errors import ElevationRequiredError
+from ..domain.packing import DEFAULT_PACK_OPTIONS, PackOptions
 from ..domain.pipeline import Pipeline
 from ..domain.records import (
     AclEntry,
@@ -883,27 +884,20 @@ class Ps:
         return self._process_runner(argv, cwd=cwd, timeout=timeout, env=env, input_text=input_text)
 
     def pack_script(
-        self,
-        entry: str | Path,
-        dest: str | Path | None = None,
-        *,
-        include: Sequence[str | Path] = (),
-        with_packages: Sequence[str] = (),
-        root: str | Path | None = None,
-        force: bool = False,
+        self, entry: str | Path, dest: str | Path | None = None, *, options: PackOptions = DEFAULT_PACK_OPTIONS
     ) -> PackedScript:
         """Pack a Python script and its local modules into a self-extracting ``.ps1`` (portable).
 
         The artefact is one file: it unpacks itself into a per-user cache, provisions ``uv``
         if the machine has none, runs the script, and exits with the script's own exit code.
-        Third-party dependencies come from the entry's PEP 723 block or ``with_packages`` -
+        Third-party dependencies come from the entry's PEP 723 block or ``options.with_packages`` -
         never guessed from an import name.  Runs on Windows PowerShell 5.1 and pwsh 7 alike.
 
         Example:
             >>> callable(build_ps().pack_script)
             True
         """
-        return self._script_packer(entry, dest, include=include, with_packages=with_packages, root=root, force=force)
+        return self._script_packer(entry, dest, options=options)
 
     def unpack_script(self, source: str | Path, dest: str | Path, *, force: bool = False) -> PackedScript:
         """Restore the sources a packed ``.ps1`` carries, ready to edit and pack again (portable).

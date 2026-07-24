@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
+from pwshpy.domain.packing import PackOptions
 
 pytestmark = [pytest.mark.os_agnostic]
 
@@ -86,6 +87,18 @@ def _isolated_cache(tmp_path: Path) -> dict[str, str]:
     return {"PWSHPY_PACK_CACHE": str(tmp_path / "cache")}
 
 
+def _has_passwordless_sudo() -> bool:
+    """Whether ``sudo`` runs without a password prompt (POSIX only, safe on any OS).
+
+    A ``skipif`` condition is evaluated at COLLECTION time on every platform, so it must not
+    raise where ``sudo`` is absent: on Windows ``shutil.which`` returns ``None`` and we stop
+    before a subprocess that would raise ``FileNotFoundError`` and abort the whole module.
+    """
+    if shutil.which("sudo") is None:
+        return False
+    return subprocess.run(["sudo", "-n", "true"], capture_output=True, check=False).returncode == 0  # noqa: S607
+
+
 def test_packed_script_runs_and_imports_its_submodule(tmp_path: Path) -> None:
     """The headline case: one file in, a working program out."""
     manifest = pack_script(_project(tmp_path))
@@ -140,7 +153,7 @@ def test_with_packages_dependency_is_resolved_by_uv(tmp_path: Path) -> None:
     """--with covers a script that declares nothing inline."""
     entry = tmp_path / "app.py"
     entry.write_text('import cowsay\n\nprint("dependency:" + cowsay.__name__)\n')
-    manifest = pack_script(entry, with_packages=["cowsay"])
+    manifest = pack_script(entry, options=PackOptions(with_packages=["cowsay"]))
     result = _run(Path(manifest.output_path), env=_isolated_cache(tmp_path))
     assert result.returncode == 0, result.stderr
     assert "dependency:cowsay" in result.stdout
@@ -287,10 +300,7 @@ def test_no_install_uv_fails_cleanly_when_uv_is_absent(tmp_path: Path) -> None:
 @pytest.mark.local_only
 @pytest.mark.mutating
 @pytest.mark.os_posix
-@pytest.mark.skipif(
-    subprocess.run(["sudo", "-n", "true"], capture_output=True, check=False).returncode != 0,  # noqa: S607
-    reason="needs passwordless sudo",
-)
+@pytest.mark.skipif(not _has_passwordless_sudo(), reason="needs passwordless sudo")
 def test_elevate_switch_runs_the_script_as_root(tmp_path: Path) -> None:
     """-PwshPyElevate must run the script elevated AND hand back its output and exit code.
 

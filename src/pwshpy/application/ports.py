@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ..domain.enums import AceType, DeployTarget, FileItemType, OutputFormat, RegistryValueType, ServiceStartType
+from ..domain.packing import PackOptions
 from ..domain.records import (
     AclEntry,
     CimInstance,
@@ -180,14 +181,7 @@ class ScriptPacker(Protocol):
     """Pack a Python entry script and its local modules into a self-extracting ``.ps1`` (native)."""
 
     def __call__(
-        self,
-        entry: str | Path,
-        dest: str | Path | None = ...,
-        *,
-        include: Sequence[str | Path] = ...,
-        with_packages: Sequence[str] = ...,
-        root: str | Path | None = ...,
-        force: bool = ...,
+        self, entry: str | Path, dest: str | Path | None = ..., *, options: PackOptions = ...
     ) -> PackedScript: ...
 
 

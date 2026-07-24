@@ -49,6 +49,7 @@ from .domain.errors import (
     PowerShellError,
     PwshPyError,
 )
+from .domain.packing import PackOptions
 from .domain.pipeline import Pipeline
 from .domain.records import (
     AclEntry,
@@ -92,6 +93,7 @@ __all__ = [
     "Pipeline",
     "PSRecord",
     "ProcessInfo",
+    "PackOptions",
     "PackedScript",
     "ProcessResult",
     "NetAdapter",

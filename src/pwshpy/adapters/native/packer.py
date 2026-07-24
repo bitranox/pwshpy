@@ -30,14 +30,17 @@ import hashlib
 import io
 import sys
 import zipfile
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from ...domain.enums import ImportKind
 from ...domain.errors import PackError
 from ...domain.packing import (
+    DEFAULT_PACK_OPTIONS,
     SHIM_MODULE,
     FileDigest,
+    PackOptions,
+    RunnerContent,
     candidate_relative_paths,
     chunk_base64,
     classify_import,
@@ -68,34 +71,23 @@ _ENTRY_PREFIX = "$PwshPyEntry = '"
 
 
 def pack_script(
-    entry: str | Path,
-    dest: str | Path | None = None,
-    *,
-    include: Sequence[str | Path] = (),
-    with_packages: Sequence[str] = (),
-    root: str | Path | None = None,
-    force: bool = False,
+    entry: str | Path, dest: str | Path | None = None, *, options: PackOptions = DEFAULT_PACK_OPTIONS
 ) -> PackedScript:
     """Pack ``entry`` and the local modules it imports into a self-extracting ``.ps1``.
 
     Args:
         entry: The Python script to pack.
         dest: Output path; defaults to the entry's name with a ``.ps1`` suffix.
-        include: Extra files to embed, for what import analysis cannot see - data files,
-            templates, or a module reached through ``importlib``.
-        with_packages: Distributions spliced into the runner's ``uv run`` invocation as
-            ``--with`` arguments, on top of the entry's PEP 723 block.
-        root: Directory local imports resolve against; defaults to the entry's parent.
-            Every embedded file must live under it, so the archive has no ``..`` members.
-        force: Overwrite ``dest`` if it already exists.
+        options: How to pack - includes, extra ``--with`` distributions, the import root, and
+            whether to overwrite the destination (see :class:`~pwshpy.domain.packing.PackOptions`).
 
     Returns:
         A :class:`~pwshpy.domain.records.PackedScript` manifest of what was embedded.
 
     Raises:
-        PackError: If the entry is missing or unreadable, a file to embed lies outside
-            ``root``, the destination exists without ``force``, or the destination would
-            clobber one of the inputs.
+        PackError: If the entry is missing or unreadable, a file to embed lies outside the
+            root, the destination exists without ``force``, or the destination would clobber
+            one of the inputs.
 
     Example:
         >>> import tempfile, pathlib
@@ -106,10 +98,10 @@ def pack_script(
         ('tool.py', 2, True)
     """
     entry_path = _existing_file(Path(entry), "entry script")
-    root_path = Path(root).expanduser().resolve() if root is not None else entry_path.parent
+    root_path = Path(options.root).expanduser().resolve() if options.root is not None else entry_path.parent
     destination = Path(dest).expanduser() if dest is not None else entry_path.with_suffix(".ps1")
-    sources, external = _collect_sources(entry_path, root_path, include)
-    _guard_destination(destination, sources, force=force)
+    sources, external = _collect_sources(entry_path, root_path, options.include)
+    _guard_destination(destination, sources, force=options.force)
 
     entry_arc = _archive_name(entry_path, root_path)
     members = {_archive_name(path, root_path): body for path, body in sources.items()}
@@ -123,14 +115,16 @@ def pack_script(
 
     payload = _build_archive(members)
     payload_sha = hashlib.sha256(payload).hexdigest()
-    uv_args = [item for package in with_packages for item in ("--with", package)]
+    uv_args = [item for package in options.with_packages for item in ("--with", package)]
     runner = render_runner(
         _read_template(),
-        payload_b64=chunk_base64(base64.b64encode(payload).decode("ascii")),
-        payload_sha256=payload_sha,
-        entry=entry_arc,
-        uv_args=uv_args,
-        file_hashes=[FileDigest(hashlib.sha256(body).hexdigest(), name) for name, body in sorted(members.items())],
+        RunnerContent(
+            payload_b64=chunk_base64(base64.b64encode(payload).decode("ascii")),
+            payload_sha256=payload_sha,
+            entry=entry_arc,
+            uv_args=uv_args,
+            file_hashes=[FileDigest(hashlib.sha256(body).hexdigest(), name) for name, body in sorted(members.items())],
+        ),
     )
     _write_runner(destination, runner)
     return PackedScript(

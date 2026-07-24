@@ -25,6 +25,7 @@ from pwshpy.domain.enums import (
     TransportProtocol,
 )
 from pwshpy.domain.errors import ElevationRequiredError, FeatureUnavailableError
+from pwshpy.domain.packing import DEFAULT_PACK_OPTIONS, PackOptions
 from pwshpy.domain.pipeline import Pipeline
 from pwshpy.domain.records import (
     AclEntry,
@@ -513,15 +514,9 @@ def test_build_ps_accepts_injected_adapters() -> None:  # noqa: PLR0915 - exerci
     pack_calls: list[tuple[object, ...]] = []
 
     def fake_pack_script(
-        entry: str | Path,
-        dest: str | Path | None = None,
-        *,
-        include: Sequence[str | Path] = (),
-        with_packages: Sequence[str] = (),
-        root: str | Path | None = None,
-        force: bool = False,
+        entry: str | Path, dest: str | Path | None = None, *, options: PackOptions = DEFAULT_PACK_OPTIONS
     ) -> PackedScript:
-        pack_calls.append((str(entry), str(dest), tuple(with_packages), force))
+        pack_calls.append((str(entry), str(dest), tuple(options.with_packages), options.force))
         return PackedScript(
             output_path=str(dest or "tool.ps1"),
             entry=str(entry),
@@ -746,7 +741,10 @@ def test_build_ps_accepts_injected_adapters() -> None:  # noqa: PLR0915 - exerci
         facade.require_elevation()
     assert facade.elevate(["a", "b"], cwd="C:/work", wait=False) == 7
     assert elevate_calls == [(["a", "b"], None, "C:/work", False)]
-    assert facade.pack_script("tool.py", "out.ps1", with_packages=["rich"], force=True).entry == "tool.py"
+    assert (
+        facade.pack_script("tool.py", "out.ps1", options=PackOptions(with_packages=["rich"], force=True)).entry
+        == "tool.py"
+    )
     assert facade.unpack_script("out.ps1", "restored").files == ["tool.py"]
     assert pack_calls == [
         ("tool.py", "out.ps1", ("rich",), True),

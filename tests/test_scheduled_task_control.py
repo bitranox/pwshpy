@@ -86,7 +86,7 @@ class _FakeFolder:
         self.deleted.append(name)
         self.tasks.pop(name, None)
 
-    def RegisterTaskDefinition(
+    def RegisterTaskDefinition(  # noqa: PLR0917 - mirrors the Task Scheduler COM method's positional signature
         self, name: str, definition: _FakeDefinition, flags: int, user: Any, pw: Any, logon: int
     ) -> _FakeTask:
         task = _FakeTask(name, definition)

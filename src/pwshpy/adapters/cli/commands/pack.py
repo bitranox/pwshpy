@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import rich_click as click
 
+from ....domain.packing import PackOptions
 from ....domain.records import PackedScript
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
@@ -33,6 +34,7 @@ from ._common import resolve_format
 @click.pass_context
 def cli_pack(
     ctx: click.Context,
+    *,
     entry: str,
     dest: str | None,
     include: tuple[str, ...],
@@ -49,14 +51,8 @@ def cli_pack(
         >>> CliRunner().invoke(cli_pack, ["--help"]).exit_code
         0
     """
-    manifest = get_cli_context(ctx).services.ps.pack_script(
-        entry,
-        dest,
-        include=list(include),
-        with_packages=list(with_packages),
-        root=root,
-        force=force,
-    )
+    options = PackOptions(include=list(include), with_packages=list(with_packages), root=root, force=force)
+    manifest = get_cli_context(ctx).services.ps.pack_script(entry, dest, options=options)
     _warn_on_undeclared(manifest)
     emit([manifest], resolve_format(as_json, as_jsonl))
 
@@ -68,7 +64,7 @@ def cli_pack(
 @option("--json", "as_json", is_flag=True, default=False, help="Emit the manifest as a JSON array.")
 @option("--jsonl", "as_jsonl", is_flag=True, default=False, help="Emit the manifest as one JSON line.")
 @click.pass_context
-def cli_unpack(ctx: click.Context, source: str, dest: str, force: bool, as_json: bool, as_jsonl: bool) -> None:
+def cli_unpack(ctx: click.Context, *, source: str, dest: str, force: bool, as_json: bool, as_jsonl: bool) -> None:
     """Restore the Python sources embedded in a packed .ps1 (the inverse of ``pack``).
 
     Example:

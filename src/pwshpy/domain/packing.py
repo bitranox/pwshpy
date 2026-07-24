@@ -32,10 +32,60 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import NamedTuple
 
 from .enums import ImportKind
 from .errors import PackError
+
+
+@dataclass(frozen=True, slots=True)
+class PackOptions:
+    """How to pack, bundled so :func:`pack_script` takes one options object, not four flags.
+
+    A frozen value object, not a long keyword list: it keeps the packer's signature small and
+    lets a caller build the choices once and pass them around.
+
+    Attributes:
+        include: Extra files to embed that import analysis cannot see (data files, dynamic
+            imports).
+        with_packages: Distributions spliced into the runner's ``uv run`` as ``--with`` args.
+        root: Directory local imports resolve against; defaults to the entry's parent.
+        force: Overwrite the destination if it already exists.
+    """
+
+    include: Sequence[str | Path] = ()
+    with_packages: Sequence[str] = ()
+    root: str | Path | None = None
+    force: bool = False
+
+
+#: The all-defaults options, shared as an immutable singleton so it can be a parameter default
+#: without a per-call construction (which the bugbear B008 rule flags).
+DEFAULT_PACK_OPTIONS = PackOptions()
+
+
+@dataclass(frozen=True, slots=True)
+class RunnerContent:
+    """The rendered inputs :func:`render_runner` substitutes into the runner template.
+
+    Bundled into one value object so the pure renderer takes ``(template, content)`` rather
+    than six positional strings that are easy to transpose.
+
+    Attributes:
+        payload_b64: Base64 of the payload zip, already line-wrapped.
+        payload_sha256: Hex digest of the payload zip; keys the extraction cache.
+        entry: Archive-relative path of the entry script.
+        uv_args: Extra arguments spliced into the ``uv run`` invocation.
+        file_hashes: ``(digest, path)`` pairs the runner verifies before running.
+    """
+
+    payload_b64: str
+    payload_sha256: str
+    entry: str
+    uv_args: Sequence[str] = ()
+    file_hashes: Sequence[FileDigest] = field(default_factory=tuple)
 
 
 class FileDigest(NamedTuple):
@@ -297,24 +347,12 @@ def chunk_base64(blob: str, width: int = 120) -> str:
     return "\n".join(blob[index : index + width] for index in range(0, len(blob), width))
 
 
-def render_runner(
-    template: str,
-    *,
-    payload_b64: str,
-    payload_sha256: str,
-    entry: str,
-    uv_args: Sequence[str],
-    file_hashes: Sequence[FileDigest],
-) -> str:
+def render_runner(template: str, content: RunnerContent) -> str:
     """Substitute a payload into the runner template, returning the finished ``.ps1`` text.
 
     Args:
         template: The runner template text, carrying every ``@@PWSHPY_*@@`` placeholder.
-        payload_b64: Base64 of the payload zip, already line-wrapped.
-        payload_sha256: Hex digest of the payload zip; keys the extraction cache.
-        entry: Archive-relative path of the entry script.
-        uv_args: Extra arguments spliced into the ``uv run`` invocation (``--with`` pins).
-        file_hashes: :class:`FileDigest` pairs the runner verifies before running.
+        content: The rendered payload inputs (see :class:`RunnerContent`).
 
     Raises:
         PackError: If the template is missing a placeholder, which would ship a runner with
@@ -323,19 +361,20 @@ def render_runner(
     Example:
         >>> tpl = "P=@@PWSHPY_PAYLOAD_B64@@ S=@@PWSHPY_PAYLOAD_SHA256@@ E=@@PWSHPY_ENTRY@@ " \\
         ...       "U=@@PWSHPY_UV_ARGS@@ H=@@PWSHPY_FILE_HASHES@@ M=@@PWSHPY_SHIM@@ V=@@PWSHPY_ARGV_ENV@@"
-        >>> render_runner(tpl, payload_b64="Ym9keQ==", payload_sha256="ab12", entry="t.py",
-        ...               uv_args=["--with", "rich"], file_hashes=[FileDigest("ff", "t.py")])
+        >>> content = RunnerContent(payload_b64="Ym9keQ==", payload_sha256="ab12", entry="t.py",
+        ...                         uv_args=["--with", "rich"], file_hashes=[FileDigest("ff", "t.py")])
+        >>> render_runner(tpl, content)
         "P=Ym9keQ== S=ab12 E=t.py U='--with','rich' H=ff *t.py M=__pwshpy_pack_main__.py V=PWSHPY_PACK_ARGV"
     """
     missing = [token for token in _PLACEHOLDERS if token not in template]
     if missing:
         raise PackError(f"runner template is missing placeholder(s): {', '.join(missing)}")
     replacements = {
-        "@@PWSHPY_PAYLOAD_B64@@": payload_b64,
-        "@@PWSHPY_PAYLOAD_SHA256@@": payload_sha256,
-        "@@PWSHPY_ENTRY@@": entry,
-        "@@PWSHPY_UV_ARGS@@": _powershell_string_array(uv_args),
-        "@@PWSHPY_FILE_HASHES@@": "\n".join(f"{fh.digest} *{fh.path}" for fh in file_hashes),
+        "@@PWSHPY_PAYLOAD_B64@@": content.payload_b64,
+        "@@PWSHPY_PAYLOAD_SHA256@@": content.payload_sha256,
+        "@@PWSHPY_ENTRY@@": content.entry,
+        "@@PWSHPY_UV_ARGS@@": _powershell_string_array(content.uv_args),
+        "@@PWSHPY_FILE_HASHES@@": "\n".join(f"{fh.digest} *{fh.path}" for fh in content.file_hashes),
         "@@PWSHPY_SHIM@@": SHIM_MODULE,
         "@@PWSHPY_ARGV_ENV@@": ARGV_ENV_VAR,
     }
@@ -363,7 +402,10 @@ def _powershell_string_array(values: Sequence[str]) -> str:
 __all__ = [
     "ARGV_ENCODING_TAG",
     "ARGV_ENV_VAR",
+    "DEFAULT_PACK_OPTIONS",
     "FileDigest",
+    "PackOptions",
+    "RunnerContent",
     "SHIM_MODULE",
     "SHIM_SOURCE",
     "candidate_relative_paths",

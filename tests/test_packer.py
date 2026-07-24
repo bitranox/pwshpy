@@ -13,7 +13,7 @@ import pytest
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.errors import PackError
-from pwshpy.domain.packing import SHIM_MODULE
+from pwshpy.domain.packing import SHIM_MODULE, PackOptions
 
 _PEP723 = '# /// script\n# requires-python = ">=3.10"\n# dependencies = ["cowsay"]\n# ///\n'
 
@@ -102,7 +102,7 @@ def test_include_embeds_files_import_analysis_cannot_see(tmp_path: Path) -> None
     entry = tmp_path / "app.py"
     entry.write_text("print('hi')\n")
     (tmp_path / "data.json").write_text("{}\n")
-    manifest = pack_script(entry, include=[tmp_path / "data.json"])
+    manifest = pack_script(entry, options=PackOptions(include=[tmp_path / "data.json"]))
     assert "data.json" in manifest.files
 
 
@@ -111,7 +111,7 @@ def test_with_packages_become_uv_arguments(tmp_path: Path) -> None:
     """--with values are spliced into the runner's uv invocation, in order."""
     entry = tmp_path / "app.py"
     entry.write_text("print('hi')\n")
-    manifest = pack_script(entry, with_packages=["rich", "httpx>=0.27"])
+    manifest = pack_script(entry, options=PackOptions(with_packages=["rich", "httpx>=0.27"]))
     assert manifest.uv_args == ["--with", "rich", "--with", "httpx>=0.27"]
     assert "'--with','rich','--with','httpx>=0.27'" in Path(manifest.output_path).read_text()
 
@@ -150,7 +150,7 @@ def test_refuses_to_overwrite_without_force(tmp_path: Path) -> None:
     pack_script(entry)
     with pytest.raises(PackError, match="already exists"):
         pack_script(entry)
-    assert pack_script(entry, force=True).entry == "app.py"
+    assert pack_script(entry, options=PackOptions(force=True)).entry == "app.py"
 
 
 @pytest.mark.os_agnostic
@@ -169,7 +169,7 @@ def test_refuses_a_destination_that_is_an_input(tmp_path: Path) -> None:
     entry = tmp_path / "app.py"
     entry.write_text("print('hi')\n")
     with pytest.raises(PackError, match="being packed"):
-        pack_script(entry, entry, force=True)
+        pack_script(entry, entry, options=PackOptions(force=True))
 
 
 @pytest.mark.os_agnostic
@@ -182,7 +182,7 @@ def test_include_outside_the_root_is_refused(tmp_path: Path) -> None:
     outsider = tmp_path / "outside.py"
     outsider.write_text("X = 1\n")
     with pytest.raises(PackError, match="outside the pack root"):
-        pack_script(entry, include=[outsider])
+        pack_script(entry, options=PackOptions(include=[outsider]))
 
 
 @pytest.mark.os_agnostic
@@ -192,7 +192,7 @@ def test_root_widens_the_pack(tmp_path: Path) -> None:
     (tmp_path / "shared.py").write_text("VALUE = 2\n")
     entry = tmp_path / "app" / "main.py"
     entry.write_text("import shared\nprint(shared.VALUE)\n")
-    manifest = pack_script(entry, tmp_path / "out.ps1", root=tmp_path)
+    manifest = pack_script(entry, tmp_path / "out.ps1", options=PackOptions(root=tmp_path))
     assert manifest.entry == "app/main.py"
     assert "shared.py" in manifest.files
 

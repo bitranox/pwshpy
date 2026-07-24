@@ -5,10 +5,13 @@ packer writes; this checks that what it writes actually works - the payload unpa
 resolves the PEP 723 dependencies, local submodules import, the arguments arrive exactly as
 typed, and the script's own exit code comes back through PowerShell.
 
-``local_only``: needs both ``pwsh`` and ``uv`` on the host, and the dependency case reaches
-PyPI.  It skips cleanly when either is missing, so CI (which excludes ``local_only``) and a
-bare machine are both fine.  Windows PowerShell 5.1 is covered by the same scenarios on the
-throwaway VM, where ``_powershell()`` picks up ``powershell.exe``.
+These run in CI on purpose: GitHub's ubuntu, windows and macos runners all ship PowerShell and
+the workflow installs ``uv``, so the windows-latest leg exercises the real Windows PowerShell
+5.1 path (``_powershell()`` picks up ``powershell.exe`` there) - the one branch this dev box
+cannot reach. They skip cleanly when ``pwsh``/``uv`` are absent, and the dependency cases reach
+PyPI. Two tests stay ``local_only`` and never touch a runner: the ``mutating`` elevate test
+(GitHub runners have passwordless sudo, so ``-m "not local_only"`` would really run it as root)
+and the uv-absent test (it blanks ``PATH``/``HOME``, which can break process creation on Windows).
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ import pytest
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 
-pytestmark = [pytest.mark.local_only, pytest.mark.os_agnostic]
+pytestmark = [pytest.mark.os_agnostic]
 
 _PWSH = shutil.which("pwsh") or shutil.which("powershell")
 _UV = shutil.which("uv")
@@ -209,8 +212,13 @@ def test_help_switch_explains_how_to_unpack_and_repack(tmp_path: Path) -> None:
     assert "greeting:" not in result.stdout
 
 
+@pytest.mark.local_only
 def test_no_install_uv_fails_cleanly_when_uv_is_absent(tmp_path: Path) -> None:
-    """The opt-out must fail loudly with exit 127, never reach for the network installer."""
+    """The opt-out must fail loudly with exit 127, never reach for the network installer.
+
+    Stays ``local_only``: it blanks PATH and HOME to hide every uv, which is safe on POSIX but
+    can break process creation on a Windows runner, so it never runs in CI.
+    """
     manifest = pack_script(_project(tmp_path))
     empty = tmp_path / "empty-path"
     empty.mkdir()
@@ -236,6 +244,7 @@ def test_no_install_uv_fails_cleanly_when_uv_is_absent(tmp_path: Path) -> None:
     assert "uv" in result.stderr
 
 
+@pytest.mark.local_only
 @pytest.mark.mutating
 @pytest.mark.os_posix
 @pytest.mark.skipif(

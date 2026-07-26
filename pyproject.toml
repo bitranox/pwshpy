@@ -6,9 +6,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "rich-click>=1.9.8",
-    "lib_cli_exit_tools>=2.3.2",
-    "lib_log_rich>=6.3.5",
-    "lib_layered_config>=5.6.0",
+    "lib_cli_exit_tools>=2.3.3",
+    "lib_log_rich>=6.3.6",
+    "lib_layered_config>=5.6.1",
     "pydantic>=2.13.4",
     "orjson>=3.11.9",
     "psutil>=7.2.2",
@@ -20,7 +20,7 @@ dependencies = [
     "wmi>=1.5.1; sys_platform == 'win32'",
     # Typed winreg wrapper backing the Registry Tier-A adapter (Windows-only at
     # runtime; the dev extra installs it cross-OS for the hermetic fake_winreg tests).
-    "lib_registry>=3.1.3; sys_platform == 'win32'",
+    "lib_registry>=3.1.4; sys_platform == 'win32'",
     # Linux-only native bindings. Pure-Python D-Bus (jeepney) backs the systemd services
     # adapter; a universal wheel, so it is safe as a base dep (mirrors pywin32 on Windows).
     # journald's systemd-python is the one exception - source-only, so it stays the [journald]
@@ -79,7 +79,7 @@ journald = [
 dev = [
   "pytest>=9.1.1",
   "pytest-cov>=7.1.0",
-  "hypothesis>=6.161.2",
+  "hypothesis>=6.161.5",
   "ruff>=0.16.0",
   "pyright[nodejs]>=1.1.411",
   "bandit>=1.9.4",
@@ -101,7 +101,7 @@ dev = [
   "httpx2>=2.9.1",
   # Registry subsystem: lib_registry (+ its fake_winreg backend) on every dev OS
   # so the hermetic registry tests run in CI on Linux/macOS/Windows alike.
-  "lib_registry>=3.1.3",
+  "lib_registry>=3.1.4",
   "fake_winreg>=1.9.2",
   "types-defusedxml>=0.7.0.20260504",
   # Transitive CVE pins

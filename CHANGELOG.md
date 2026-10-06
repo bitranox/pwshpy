@@ -12,6 +12,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   (truthy) string `"false"`; a quoted value stays text. `defaultconfig.toml`'s header now says so,
   and lists the real per-OS config locations (its macOS lines still named the template's
   directory) with ASCII arrows.
+- **`click` and `rich` are declared dependencies.** The package imports both directly (`main.py`,
+  `commands/config.py`, `output.py`, `config/display.py`) but installed them only because
+  rich-click pulls them in. A test scans the package's run-time imports (outside
+  `TYPE_CHECKING`) and fails on any third-party module whose distribution is neither a dependency
+  nor in a runtime extra.
 
 ### Fixed
 - **`build_testing()` can run a command.** The in-memory logging initializer was a no-op while every

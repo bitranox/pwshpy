@@ -18,6 +18,18 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   runners are 79 columns wide) renders the same plain text as a developer machine. The conftest
   service fixtures use the quiet runtime, so a stderr assertion through them no longer races
   production logging's queued INFO lines.
+- **Exit code change: commands that exit with a code now really do.** `main()` discarded the code
+  rich_click's `main()` returns for a `ctx.exit(N)` and always returned 0, so through the `pwshpy`
+  console script and `python -m pwshpy`, `test_path` of a missing path, `is-elevated` when not
+  elevated, `exec` of a failing program and `--elevate` of a failing child all exited 0 although
+  they document a non-zero code. They now exit 1, 1, the program's own code and the child's code.
+  Scripts that relied on the old, always-0 exit status will see the documented one.
+- **No more `SystemExit: N` on stderr.** The `config`, `config-deploy` and
+  `config-generate-examples` errors raised a bare `SystemExit`, which `main()`'s catch-all branch
+  printed as `SystemExit: 22` (or 13, 1) after the real error message. They now exit through
+  click's context. `config-deploy` re-raises a click `Exit` before its catch-all, so a deliberate
+  exit inside the deploy keeps its own code instead of becoming 1. `typed_click` gains a typed
+  `get_current_context` wrapper for the helpers that have no `ctx` parameter.
 
 ## [1.2.1] 2026-07-30 18:11:54
 

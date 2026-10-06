@@ -98,6 +98,18 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   included. It is now recorded like a load failure: logging starts with its defaults, `config`
   exits 78 with one `Error:` line per problem naming the key (never the value), and the other
   commands run. The root group types the services factory instead of ignoring the type.
+- **Exit code change: a refused `LOG_*` variable no longer disables every command.** After a
+  refused logging setting the CLI started logging again with an empty configuration, but
+  lib_log_rich reads every `LOG_*` variable from the environment on each start, so when the refused
+  setting was one of them (`LOG_CONSOLE_LEVEL=bogus` in the environment or in the `--env-file`) it
+  was refused a second time, uncaught, and every command - `info`, `config-deploy` and the native
+  commands included - exited 1 with `InvalidLoggingConfigError: lib_log_rich: Unknown log level:
+  'bogus'`. Logging now falls back to its defaults, first with the `LOG_*` variables and, only when
+  that start is refused too, with every `LOG_*` variable hidden for that start (and put back
+  afterwards). Only `config` exits 78; the other commands run and exit 0. The 78 carries
+  lib_log_rich's own message, `Error: lib_log_rich: Unknown log level: 'bogus'`, which may name
+  neither the variable nor where it was set. A refused `[lib_log_rich]` value still leaves every
+  valid `LOG_*` variable in force for the fallback: only a refused variable hides them.
 - **Documented list and table syntax that actually works in `.env` and the environment.**
   `.env.example` and `defaultconfig.d/90-logging.toml` showed comma-separated `LEVEL=style` and
   `field=regex` pairs for `console_styles` and `scrub_patterns` and `"host:port"` / `"100:60"`

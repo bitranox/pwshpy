@@ -98,6 +98,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   included. It is now recorded like a load failure: logging starts with its defaults, `config`
   exits 78 with one `Error:` line per problem naming the key (never the value), and the other
   commands run. The root group types the services factory instead of ignoring the type.
+- **Documented list and table syntax that actually works in `.env` and the environment.**
+  `.env.example` and `defaultconfig.d/90-logging.toml` showed comma-separated `LEVEL=style` and
+  `field=regex` pairs for `console_styles` and `scrub_patterns` and `"host:port"` / `"100:60"`
+  strings for `graylog_endpoint` and `rate_limit`. Each arrives as ONE string, which lib_log_rich
+  refuses, so following the documentation stopped logging. They now show a JSON object or array
+  (unquoted in a `.env`, shell-quoted in the environment) or one key per entry
+  (`LIB_LOG_RICH__SCRUB_PATTERNS__API_KEY=.+`), and say how an unquoted value converts.
 
 ## [1.2.1] 2026-07-30 18:11:54
 

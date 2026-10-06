@@ -45,9 +45,9 @@ Configuration is loaded and merged in the following order (lowest to highest pre
 
 | Placeholder  | Linux                        | macOS / Windows              |
 |--------------|------------------------------|------------------------------|
-| `{slug}`     | `pwshpy`   | —                            |
-| `{vendor}`   | —                            | `bitranox`                   |
-| `{app}`      | —                            | `Bitranox Template Py Cli`   |
+| `{slug}`     | `pwshpy`                     | -                            |
+| `{vendor}`   | -                            | `bitranox`                   |
+| `{app}`      | -                            | `pwshpy`                     |
 | `{hostname}` | System hostname              | System hostname              |
 
 ### Concrete Examples
@@ -58,10 +58,10 @@ Configuration is loaded and merged in the following order (lowest to highest pre
 - Host config: `/etc/xdg/pwshpy/hosts/myserver.toml`
 
 **macOS:**
-- User config: `~/Library/Application Support/bitranox/Bitranox Template Py Cli/config.toml`
+- User config: `~/Library/Application Support/bitranox/pwshpy/config.toml`
 
 **Windows:**
-- User config: `%APPDATA%\bitranox\Bitranox Template Py Cli\config.toml`
+- User config: `%APPDATA%\bitranox\pwshpy\config.toml`
 
 ---
 
@@ -470,8 +470,8 @@ PWSHPY___LIB_LOG_RICH__CONSOLE_STREAM=stderr pwshpy info
 ```
 
 **Separator reference:**
-- `___` (triple underscore) — separates prefix from section
-- `__` (double underscore) — separates section from key
+- `___` (triple underscore) - separates prefix from section
+- `__` (double underscore) - separates section from key
 
 ---
 
@@ -508,26 +508,28 @@ The `defaultconfig.toml` and files in `defaultconfig.d/` (bundled with the packa
 
 ## Customization Best Practices
 
-**Do NOT modify deployed configuration files directly.** These files may be overwritten during package updates.
+**Do NOT modify deployed configuration files directly.** `config-deploy --force` replaces them
+(keeping the old file as `<name>.bak`).
 
-Instead, create your own override files in the appropriate layer directory using a high-numbered prefix:
+Instead, create your own override file in the layer's `config.d/` directory using a high-numbered
+prefix (a file beside `config.toml` is never read):
 
 ```bash
 # User-level customization (Linux)
-~/.config/pwshpy/999-myconfig.toml
+~/.config/pwshpy/config.d/999-myconfig.toml
 
 # User-level customization (macOS)
-~/Library/Application Support/bitranox/Bitranox Template Py Cli/999-myconfig.toml
+~/Library/Application Support/bitranox/pwshpy/config.d/999-myconfig.toml
 
 # User-level customization (Windows)
-%APPDATA%\bitranox\Bitranox Template Py Cli\999-myconfig.toml
+%APPDATA%\bitranox\pwshpy\config.d\999-myconfig.toml
 
 # System-wide customization (Linux)
-/etc/xdg/pwshpy/999-myconfig.toml
+/etc/xdg/pwshpy/config.d/999-myconfig.toml
 ```
 
 **Why this works:**
-- Files in each layer directory are loaded in alphabetical order
+- Each layer reads `config.toml`, then the files in its `config.d/` directory in alphabetical order
 - Higher-numbered files (e.g., `999-`) load last and override earlier values
 - Your custom file won't be touched by updates that regenerate `config.toml`
 

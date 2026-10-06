@@ -8,7 +8,7 @@ no lib_layered_config.
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from lib_layered_config import Config
@@ -36,9 +36,10 @@ def deploy_configuration_in_memory(
     targets: Sequence[DeployTarget],
     force: bool = False,
     profile: str | None = None,
-    set_permissions: bool = True,
+    set_permissions: bool | None = None,
     dir_mode: int | None = None,
     file_mode: int | None = None,
+    permission_overrides: Mapping[str, object] | None = None,
 ) -> list[Path]:
     """Simulate deployment -- no filesystem changes, returns empty list."""
     return []

@@ -12,6 +12,7 @@ from lib_layered_config import Config
 
 from pwshpy.adapters import cli as cli_mod
 from pwshpy.adapters.config import loader as config_mod
+from pwshpy.composition import build_testing
 
 
 @pytest.mark.os_agnostic
@@ -248,6 +249,36 @@ def test_when_config_deploy_finds_no_files_to_create_it_informs_user(
     assert result.exit_code == 0
     assert "No files were created" in result.output
     assert "--force" in result.output
+
+
+@pytest.mark.os_agnostic
+def test_when_a_forced_config_deploy_writes_nothing_it_does_not_suggest_force(
+    cli_runner: CliRunner,
+    inject_deploy_configuration: Callable[[Callable[..., list[Path]]], Callable[[], Any]],
+) -> None:
+    """With --force, lib_layered_config writes nothing only when every file is already identical."""
+
+    def deploy_nothing(**_kwargs: Any) -> list[Path]:
+        return []
+
+    factory = inject_deploy_configuration(deploy_nothing)
+
+    result: Result = cli_runner.invoke(cli_mod.cli, ["config-deploy", "--target", "user", "--force"], obj=factory)
+
+    assert result.exit_code == 0
+    assert "every target file is already identical to the bundled one" in result.output
+    assert "Use --force" not in result.output
+
+
+@pytest.mark.os_agnostic
+def test_config_deploy_help_prints_no_formatting_escapes(cli_runner: CliRunner) -> None:
+    """rich-click renders a click ``\\b`` marker literally, so the help showed a stray ``\\b``."""
+    result: Result = cli_runner.invoke(cli_mod.cli, ["config-deploy", "--help"], obj=build_testing)
+
+    assert result.exit_code == 0
+    assert "Permission options" in result.output  # control: the docstring body is rendered
+    assert "\\b" not in result.output
+    assert "<name>.bak" in result.output
 
 
 @pytest.mark.os_agnostic

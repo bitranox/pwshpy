@@ -105,6 +105,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   refuses, so following the documentation stopped logging. They now show a JSON object or array
   (unquoted in a `.env`, shell-quoted in the environment) or one key per entry
   (`LIB_LOG_RICH__SCRUB_PATTERNS__API_KEY=.+`), and say how an unquoted value converts.
+- **`config-deploy --force` says what lib_layered_config 7 does.** With nothing to write (every
+  target file already identical) a forced deploy told the user to "Use --force"; it now says that
+  every file is already identical. The `--force` help, the command help and CONFIG.md say that a
+  differing file is replaced and kept as `<name>.bak`, and the command help no longer prints the
+  literal `\b` markers rich-click does not interpret.
 
 ## [1.2.1] 2026-07-30 18:11:54
 

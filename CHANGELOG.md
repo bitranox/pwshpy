@@ -6,6 +6,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Changed
+- **Requires lib_layered_config 7.0.1.** An unquoted `.env` value now converts like the
+  environment layer, so `SECTION__FLAG=false` arrives as the boolean `false` instead of the
+  (truthy) string `"false"`; a quoted value stays text. `defaultconfig.toml`'s header now says so,
+  and lists the real per-OS config locations (its macOS lines still named the template's
+  directory) with ASCII arrows.
+
 ### Fixed
 - **`build_testing()` can run a command.** The in-memory logging initializer was a no-op while every
   command that logs binds job context onto the lib_log_rich runtime, so `info`, `config`,

@@ -172,3 +172,29 @@ def test_env_file_values_appear_in_config(
 
     assert result.exit_code == 0
     assert "from-env-file" in result.stdout
+
+
+@pytest.mark.os_agnostic
+def test_env_file_unquoted_false_arrives_as_a_boolean(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    clear_config_cache: None,
+    production_factory: Callable[[], AppServices],
+) -> None:
+    """lib_layered_config 7.0 converts an unquoted ``.env`` value like the environment layer does.
+
+    Before 7.0 every ``.env`` value stayed text, so ``FLAG=false`` reached the configuration as
+    the string ``"false"`` - truthy to any ``if`` that reads it. A quoted value stays text.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text('PROBE__FLAG=false\nPROBE__TEXT="false"\n', encoding="utf-8")
+
+    result: Result = cli_runner.invoke(
+        cli_mod.cli,
+        ["--env-file", str(env_file), "config", "--format", "json", "--section", "probe"],
+        obj=production_factory,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert '"flag": false' in result.stdout
+    assert '"text": "false"' in result.stdout

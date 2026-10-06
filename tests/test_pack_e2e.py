@@ -31,6 +31,10 @@ pytestmark = [pytest.mark.os_agnostic]
 
 _PWSH = shutil.which("pwsh") or shutil.which("powershell")
 _UV = shutil.which("uv")
+#: The POSIX path the runner probes whatever the environment says (pack_runner.ps1).
+_SYSTEM_WIDE_UV = "/usr/local/bin/uv"
+#: Variables that point the runner's uv lookup at an install directory.
+_UV_LOCATION_VARIABLES = ("XDG_BIN_HOME", "CARGO_HOME")
 
 if _PWSH is None or _UV is None:  # pragma: no cover - environment gate, not logic
     pytest.skip("the packer end-to-end test needs both pwsh and uv", allow_module_level=True)
@@ -276,8 +280,12 @@ def test_no_install_uv_fails_cleanly_when_uv_is_absent(tmp_path: Path) -> None:
     """The opt-out must fail loudly with exit 127, never reach for the network installer.
 
     Stays ``local_only``: it blanks PATH and HOME to hide every uv, which is safe on POSIX but
-    can break process creation on a Windows runner, so it never runs in CI.
+    can break process creation on a Windows runner, so it never runs in CI. A system-wide uv at
+    the fixed path the runner also probes cannot be hidden by the environment, so on such a
+    machine the premise cannot be set up and the test skips rather than report the runner wrong.
     """
+    if os.name != "nt" and Path(_SYSTEM_WIDE_UV).exists():
+        pytest.skip(f"a system-wide uv at {_SYSTEM_WIDE_UV} cannot be hidden from the runner")
     manifest = pack_script(_project(tmp_path))
     empty = tmp_path / "empty-path"
     empty.mkdir()
@@ -290,12 +298,14 @@ def test_no_install_uv_fails_cleanly_when_uv_is_absent(tmp_path: Path) -> None:
         timeout=120,
         check=False,
         # An empty PATH is not enough: the runner also probes the well-known per-user install
-        # dirs, so the home directory has to be barren too or it finds the real uv there.
+        # dirs (and XDG_BIN_HOME / CARGO_HOME when set), so the home directory has to be barren
+        # too and those variables gone, or it finds the real uv there.
         env={
-            **os.environ,
+            **{k: v for k, v in os.environ.items() if k not in _UV_LOCATION_VARIABLES},
             "PATH": str(empty),
             "HOME": str(barren),
             "USERPROFILE": str(barren),
+            "LOCALAPPDATA": str(barren),
             **_isolated_cache(tmp_path),
         },
     )

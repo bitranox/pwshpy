@@ -62,21 +62,24 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   file cannot hide them, and exit 2 naming the problem. The same key given twice still takes the
   last value. `overrides.nest_overrides` is the new function that parses and checks the `--set`
   values together.
-- **`config-deploy` leaves every permission decision to lib_layered_config.** The command read
-  `[lib_layered_config.default_permissions]` itself from the application's own configuration, so a
-  `.env` in the working directory (or one found above it) decided the deployed modes: a
-  `..._DEFAULT_PERMISSIONS__ENABLED=false` line there turned permission setting off, and a bare
-  integer mode such as `444` from the environment was deployed as the decimal number it is
-  (`0o674`, group-writable). The deploy now hands its command line - `--permissions`/
-  `--no-permissions` as True/False/None, `--dir-mode`/`--file-mode` and any `--set` of that section -
-  to ONE `deploy_config` call; the library reads the section from the bundled defaults, the files
-  the deploy does not overwrite and the environment, never from `.env`, so a `.env` can neither
-  change nor block a deploy and `--force` replaces a destination carrying a bad value. A refused
-  setting exits 78 with one `Error:` line per problem naming the key and its source, plus a hint in
-  the CLI's spelling when both mode options would get past it; `--set ...default_permissions=5`
-  (not a table) is refused before the call. The deploy port, the adapter and the in-memory double
-  take `set_permissions: bool | None` (default None) and `permission_overrides`;
-  `adapters/config/permissions.py` is removed.
+- **Exit code change: `config-deploy` leaves every permission decision to lib_layered_config.**
+  The command read `[lib_layered_config.default_permissions]` itself from the application's own
+  configuration, so a `.env` in the working directory (or one found above it) decided the deployed
+  modes: a `..._DEFAULT_PERMISSIONS__ENABLED=false` line there turned permission setting off, and
+  a bare integer mode such as `444` from the environment was deployed as the decimal number it is
+  (`0o674`, group-writable). The deploy now hands its command line
+  (`--permissions`/`--no-permissions` as True/False/None, `--dir-mode`/`--file-mode` and any
+  `--set` of that section) to ONE `deploy_config` call; the library reads the section from the
+  bundled defaults, the files the deploy does not overwrite and the environment, never from
+  `.env`, so a `.env` can neither change nor block a deploy and `--force` replaces a destination
+  carrying a bad value. A refused setting exits 78 with one `Error:` line per problem naming the
+  key and its source, plus a hint in the CLI's spelling when both mode options would get past it;
+  `--set ...default_permissions=5` (not a table) is refused before the call. Before, such a
+  setting never stopped the deploy: it exited 0 having deployed the value as read
+  (`PWSHPY___LIB_LAYERED_CONFIG__DEFAULT_PERMISSIONS__USER_FILE=444` gave the file mode `0o674`)
+  or a default in its place; it now exits 78 and writes nothing. The deploy port, the adapter and
+  the in-memory double take `set_permissions: bool | None` (default None) and
+  `permission_overrides`; `adapters/config/permissions.py` is removed.
 - **Exit code change: an unsafe or malformed `--dir-mode`/`--file-mode` is a usage error (exit 2).**
   The options were parsed with a bare `int(value, 8)`, which accepts `-1`, `7_5_0` or fullwidth
   digits, and an unsafe mode such as `777` was only refused inside the deploy as "Failed to deploy

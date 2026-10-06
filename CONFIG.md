@@ -448,6 +448,11 @@ LOG_CONSOLE_LEVEL=DEBUG pwshpy processes
 LOG_ENABLE_GRAYLOG=true LOG_GRAYLOG_ENDPOINT="logs.example.com:12201" pwshpy processes
 ```
 
+A `LOG_*` line in a `.env` file counts too: the `--env-file` when one is given, otherwise the
+nearest `.env` from the working directory up to the project root. Logging copies only the `LOG_*`
+lines of that file into the environment, and never over a variable that is already set, so no
+other line of a `.env` can pass itself off as an environment variable.
+
 ### Method 2: Application-Prefixed Variables
 
 For any configuration section, use the format: `<PREFIX>___<SECTION>__<KEY>=value`

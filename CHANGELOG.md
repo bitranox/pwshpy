@@ -79,6 +79,20 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   parsed, the same rule it applies to configured modes: a plain octal literal within
   0..0o7777, no setuid/setgid/sticky bit, no group or world write, no execute bit on a file, owner
   `rwx`/`rw` kept. `--no-permissions` together with a mode option is a usage error too.
+- **Logging takes only `LOG_*` lines from a `.env`.** `init_logging` called lib_log_rich's
+  `enable_dotenv()`, which copied every line of the nearest `.env` into the process environment,
+  so a later configuration load (`config --profile`, the deploy's permission read) took an
+  app-prefixed `.env` line (`PWSHPY___...`) for the environment layer, even under `--env-file`.
+  Logging now copies only `LOG_*` lines, never over a variable already set, from the `--env-file`
+  when given, otherwise from the nearest `.env` up to the project root, without `chdir` and passing
+  over unreadable directories; a `.env` that is not UTF-8 no longer stops logging. `python-dotenv`
+  is declared, and the `InitLogging` port takes `dotenv_path`.
+- **Exit code change: an invalid `[lib_log_rich]` value no longer stops every command.** A value
+  lib_log_rich refuses (a wrong type such as `rate_limit = "100:60"`, or its own range checks such
+  as `queue_maxsize = 0`) exited 22 with pydantic's report from every command, `config-deploy`
+  included. It is now recorded like a load failure: logging starts with its defaults, `config`
+  exits 78 with one `Error:` line per problem naming the key (never the value), and the other
+  commands run. The root group types the services factory instead of ignoring the type.
 
 ## [1.2.1] 2026-07-30 18:11:54
 

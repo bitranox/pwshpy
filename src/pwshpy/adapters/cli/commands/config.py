@@ -72,6 +72,7 @@ def cli_config(ctx: click.Context, output_format: str, section: str | None, prof
 
     Precedence: defaults -> app -> host -> user -> dotenv -> env
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> from unittest.mock import MagicMock
@@ -268,6 +269,7 @@ def cli_config_deploy(
     configuration files this deploy does not overwrite and the environment,
     with any --set of that section laid over them; never from .env.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> runner = CliRunner()
@@ -472,6 +474,7 @@ def cli_config_generate_examples(ctx: click.Context, destination: str, force: bo
 
     By default, existing files are not overwritten. Use --force to overwrite.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> runner = CliRunner()

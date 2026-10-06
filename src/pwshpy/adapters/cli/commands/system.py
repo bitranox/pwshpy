@@ -27,6 +27,7 @@ from ._common import resolve_format
 def cli_get_hotfix(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
     """List installed Windows updates as typed records (native, Windows; like Get-Hotfix).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_get_hotfix, ["--help"]).exit_code

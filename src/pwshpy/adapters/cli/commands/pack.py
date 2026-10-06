@@ -61,6 +61,7 @@ def cli_pack(
 ) -> None:
     """Pack ENTRY and its local modules into a self-extracting PowerShell (.ps1) or shell (.sh) script.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_pack, ["--help"]).exit_code
@@ -88,6 +89,7 @@ def cli_pack(
 def cli_unpack(ctx: click.Context, *, source: str, dest: str, force: bool, as_json: bool, as_jsonl: bool) -> None:
     """Restore the Python sources embedded in a packed .ps1 (the inverse of ``pack``).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_unpack, ["--help"]).exit_code

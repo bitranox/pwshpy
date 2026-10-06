@@ -88,6 +88,7 @@ def cli(
     the traceback flag into ``lib_cli_exit_tools.config`` so downstream helpers
     observe the preference.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> runner = CliRunner()

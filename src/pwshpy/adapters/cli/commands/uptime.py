@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 def cli_uptime(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
     """Show system boot time and elapsed uptime as a typed record (native, native).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_uptime, ["--help"]).exit_code

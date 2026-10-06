@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 def cli_resolve(ctx: click.Context, name: str, timeout: float | None, as_json: bool, as_jsonl: bool) -> None:
     """Resolve NAME to its addresses as typed records (native, native).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_resolve, ["--help"]).exit_code

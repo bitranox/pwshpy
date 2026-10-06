@@ -26,6 +26,7 @@ from ._common import resolve_format
 def cli_get_net_adapter(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
     """List network interfaces as typed records (native, portable; like Get-NetAdapter).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_get_net_adapter, ["--help"]).exit_code

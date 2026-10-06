@@ -125,6 +125,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   every file is already identical. The `--force` help, the command help and CONFIG.md say that a
   differing file is replaced and kept as `<name>.bak`, and the command help no longer prints the
   literal `\b` markers rich-click does not interpret.
+- **`--help` no longer prints Python code.** Every command's help text (the root group, `config`,
+  `config-deploy`, `config-generate-examples` and all native commands) ran on into the docstring's
+  developer `Example:` section, so `pwshpy config-deploy --help` ended with
+  `>>> from click.testing import CliRunner` and the lines after it. Each docstring now stops the
+  help text before that section, and a test checks the help of every registered command.
 
 ## [1.2.1] 2026-07-30 18:11:54
 

@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 def cli_info() -> None:
     """Print resolved metadata so users can inspect installation details.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> runner = CliRunner()
@@ -61,6 +62,7 @@ def cli_fail() -> None:
     Not listed in ``--help``; exists only as the CLI-level failure vehicle for
     error-handling tests.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> runner = CliRunner()

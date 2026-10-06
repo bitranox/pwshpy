@@ -43,6 +43,7 @@ def cli_invoke_web_request(
 ) -> None:
     """Perform an HTTP request; print the body, or the full record with --json (like Invoke-WebRequest).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_invoke_web_request, ["--help"]).exit_code

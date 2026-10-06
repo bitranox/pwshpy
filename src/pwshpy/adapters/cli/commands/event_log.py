@@ -37,6 +37,7 @@ def cli_event_log(ctx: click.Context, log_name: str, as_json: bool, as_jsonl: bo
     LOG_NAME is a channel, e.g. ``System``, ``Application``, ``Security``.  Reads
     newest-first and streams lazily, so ``eventlog System --jsonl | head`` is cheap.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_event_log, ["--help"]).exit_code

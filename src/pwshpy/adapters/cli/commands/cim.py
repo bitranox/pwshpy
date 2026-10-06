@@ -41,6 +41,7 @@ def cli_cim(
     Streams lazily, so even an unbounded class (``CIM_DataFile``) stays cheap with
     ``--jsonl | head``.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_cim, ["--help"]).exit_code

@@ -43,6 +43,7 @@ def _ps(ctx: click.Context) -> Ps:
 def cli_start_service(ctx: click.Context, name: str) -> None:
     """Start a service - win32service on Windows, systemd on Linux (mutating).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_start_service, ["--help"]).exit_code

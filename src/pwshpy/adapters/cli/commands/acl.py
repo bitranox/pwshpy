@@ -36,6 +36,7 @@ def cli_acl(ctx: click.Context, path: str, as_json: bool, as_jsonl: bool) -> Non
     One record per access-control entry, identified by trustee SID.  Filter in
     Python via the pipeline, e.g. keep the Deny entries.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_acl, ["--help"]).exit_code

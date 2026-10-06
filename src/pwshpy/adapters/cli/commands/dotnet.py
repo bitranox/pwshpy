@@ -34,6 +34,7 @@ from ._common import parse_pairs, resolve_format
 def cli_run(ctx: click.Context, script: str, timeout: float | None) -> None:
     """Run a PowerShell script in-process and print the marshaled output as JSON (.NET).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_run, ["--help"]).exit_code

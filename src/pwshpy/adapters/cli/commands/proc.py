@@ -29,6 +29,7 @@ from ._common import resolve_format
 def cli_exec(ctx: click.Context, argv: tuple[str, ...], cwd: str | None, timeout: float | None, as_json: bool) -> None:
     """Run an external program (put it after --) and exit with its code (like & / Start-Process).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_exec, ["--help"]).exit_code

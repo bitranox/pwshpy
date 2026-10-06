@@ -26,6 +26,7 @@ from ._common import resolve_format
 def cli_save_credential(ctx: click.Context, target: str, username: str) -> None:
     """Store a credential in the OS vault; the secret is read from a hidden prompt (mutating).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_save_credential, ["--help"]).exit_code

@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 def cli_env(ctx: click.Context, as_json: bool, as_jsonl: bool, limit: int | None) -> None:
     """List environment variables as typed records (native, native).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_env, ["--help"]).exit_code

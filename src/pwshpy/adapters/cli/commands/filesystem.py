@@ -30,6 +30,7 @@ from ._common import resolve_format
 def cli_get_child_item(ctx: click.Context, path: str, recurse: bool, as_json: bool, as_jsonl: bool) -> None:
     """List a directory's entries as typed records (native; like Get-ChildItem).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_get_child_item, ["--help"]).exit_code

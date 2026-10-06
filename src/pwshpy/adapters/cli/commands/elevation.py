@@ -26,6 +26,7 @@ from ..typed_click import option
 def cli_is_elevated(ctx: click.Context, quiet: bool) -> None:
     """Report whether pwshpy is elevated; exit 0 if elevated, 1 if not (native, portable).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_is_elevated, ["--help"]).exit_code

@@ -36,6 +36,7 @@ def cli_get_item_property(ctx: click.Context, key: str, as_json: bool, as_jsonl:
 
     KEY is a hive-prefixed path, e.g. ``HKLM/SOFTWARE/Microsoft/Windows NT/CurrentVersion``.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_get_item_property, ["--help"]).exit_code
@@ -56,6 +57,7 @@ def cli_get_item_property(ctx: click.Context, key: str, as_json: bool, as_jsonl:
 def cli_registry_keys(ctx: click.Context, key: str, as_json: bool, as_jsonl: bool) -> None:
     """List the immediate subkeys of registry KEY as typed records (like Get-ChildItem).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_registry_keys, ["--help"]).exit_code

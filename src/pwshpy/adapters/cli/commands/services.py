@@ -36,6 +36,7 @@ def cli_services(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
     Filter and sort in Python via the pipeline, not switches, e.g.
     ``ps.get_service().where(lambda s: s.status == ServiceState.RUNNING)``.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_services, ["--help"]).exit_code

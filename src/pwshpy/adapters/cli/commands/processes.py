@@ -36,6 +36,7 @@ def cli_processes(ctx: click.Context, as_json: bool, as_jsonl: bool, limit: int 
     The ``ps`` facade is injected via the CLI context (wired at the composition
     root), so this adapter never imports the composition layer.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_processes, ["--help"]).exit_code

@@ -36,6 +36,7 @@ def cli_local_users(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
     Records are identified by SID (locale-independent).  Filter in Python via the
     pipeline, e.g. keep the disabled accounts.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_local_users, ["--help"]).exit_code
@@ -57,6 +58,7 @@ def cli_local_groups(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
 
     Records are identified by SID (locale-independent).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_local_groups, ["--help"]).exit_code

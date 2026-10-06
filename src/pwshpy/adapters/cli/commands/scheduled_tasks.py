@@ -36,6 +36,7 @@ def cli_scheduled_tasks(ctx: click.Context, folder_path: str, as_json: bool, as_
     Recurses the Task Scheduler folder tree from ``--folder`` (default root).
     Filter and sort in Python via the pipeline, not switches.
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_scheduled_tasks, ["--help"]).exit_code

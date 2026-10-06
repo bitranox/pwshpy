@@ -31,6 +31,7 @@ _STDIN_BLOCK = 65536
 def cli_write_text(ctx: click.Context, path: str, encoding: str, bom: bool, crlf: bool) -> None:
     """Read stdin and write it to PATH with a predictable encoding (UTF-8, no BOM by default).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_write_text, ["--help"]).exit_code

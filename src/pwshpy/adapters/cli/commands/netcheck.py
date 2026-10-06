@@ -41,6 +41,7 @@ def cli_test_connection(
 ) -> None:
     """Probe TCP reachability of HOST:PORT as a typed record (native, native).
 
+    \f
     Example:
         >>> from click.testing import CliRunner
         >>> CliRunner().invoke(cli_test_connection, ["--help"]).exit_code

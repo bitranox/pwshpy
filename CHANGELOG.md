@@ -6,6 +6,19 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Fixed
+- **`build_testing()` can run a command.** The in-memory logging initializer was a no-op while every
+  command that logs binds job context onto the lib_log_rich runtime, so `info`, `config`,
+  `get_uptime` and the other binding commands under the testing composition raised
+  `RuntimeError('lib_log_rich.init() must be called before using the logging API')`. It now starts
+  a quiet runtime (no journald, event log, Graylog or queue; console at ERROR; no `.env` loading).
+- **Tests no longer pass or fail by order.** An autouse fixture shuts the lib_log_rich runtime down
+  and restores the root logger's handlers, level and propagate flag after every test, and another
+  pins rich-click's colour and width globals, so CI (GITHUB_ACTIONS colours the output, Windows
+  runners are 79 columns wide) renders the same plain text as a developer machine. The conftest
+  service fixtures use the quiet runtime, so a stderr assertion through them no longer races
+  production logging's queued INFO lines.
+
 ## [1.2.1] 2026-07-30 18:11:54
 
 ### Changed

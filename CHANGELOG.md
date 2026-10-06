@@ -37,6 +37,26 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   click's context. `config-deploy` re-raises a click `Exit` before its catch-all, so a deliberate
   exit inside the deploy keeps its own code instead of becoming 1. `typed_click` gains a typed
   `get_current_context` wrapper for the helpers that have no `ctx` parameter.
+- **Exit code change: a configuration that does not load no longer stops every command.** The root
+  group loaded the layered configuration before any subcommand ran and let a load error escape, so
+  one malformed `config.toml`, an unreadable file or a non-UTF-8 `--env-file` made every command
+  fail (exit 1 with only a `LayerLoadError` line for a malformed file) - `info`, `--help`,
+  `get_process`, `test_path` and the
+  other native commands, and `config-deploy`, the command that replaces the broken file. The
+  failure is now recorded: `config` (the one command that reads the configuration, also with its
+  own `--profile`) exits 78 with one `Error:` line naming the file, `--traceback` adds the loader's
+  traceback, `config-deploy` warns which failure it skipped and deploys, and every other command
+  runs as before. `config --profile X` now keeps the root's `--env-file` instead of falling back
+  to the upward `.env` search. A loader exception that is not a configuration failure still
+  propagates as the bug it is.
+- **Exit code change: command-line mistakes are usage errors (exit 2) for every command.** An
+  invalid `--profile` name exited 22 with `ValueError: profile contains invalid characters`,
+  conflicting overrides such as `--set a.b=1 --set a.b.c=2` exited 22 with a `TypeError` (the other
+  order silently dropped the earlier one), and `config-deploy --profile ../x` exited 1 as "Failed
+  to deploy configuration". All three are now checked before the configuration loads, so a broken
+  file cannot hide them, and exit 2 naming the problem. The same key given twice still takes the
+  last value. `overrides.nest_overrides` is the new function that parses and checks the `--set`
+  values together.
 
 ## [1.2.1] 2026-07-30 18:11:54
 

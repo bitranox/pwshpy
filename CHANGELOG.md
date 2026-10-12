@@ -6,6 +6,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.3.1] 2026-10-12 19:21:08
+
 ### Fixed
 - **A digit-only `.env` value no longer stops logging setup with `Input should be a valid string`.**
   lib_layered_config 7.1 reads an unquoted `.env` or environment value that spells a number

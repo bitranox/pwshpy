@@ -6,6 +6,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Fixed
+- **A digit-only `.env` value no longer stops logging setup with `Input should be a valid string`.**
+  lib_layered_config 7.1 reads an unquoted `.env` or environment value that spells a number
+  losslessly as an int, so `LIB_LOG_RICH__SERVICE=4711` reached a text setting as a number and was
+  refused. The `[lib_log_rich]` section now turns such a number back into the text that was
+  written; numeric settings still read as numbers and a value that is not text is still refused.
+
 ## [1.3.0] 2026-10-08 10:36:51
 
 ### Changed

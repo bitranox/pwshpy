@@ -6,6 +6,26 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+- Python 3.15 is a supported version: declared in the classifiers, so CI and `make test-all` run it.
+- `uv.lock` is committed, and `[tool.uv] exclude-newer` sets a cooldown that keeps releases younger
+  than it out of the lock. CI installs exactly the locked tree on push and pull request; the nightly
+  scheduled run still resolves afresh to catch upstream breakage early.
+
+### Changed
+- The install section explains why installing with uv protects against supply-chain attacks and why
+  a plain `pip install` from PyPI does not.
+
+### Fixed
+- **Two cold starts of a packed `.sh` runner no longer extract at the same time.** The extraction
+  lock was `mkdir "$lock"`, and the uutils coreutils `mkdir` that Ubuntu 26.04 ships lets two
+  racing calls on one path both succeed (measured: 660 of 2000 races; GNU mkdir: 0), so one start
+  died with "the embedded payload is corrupt" or a tar "File exists". The lock is now a file the
+  shell itself creates under noclobber (O_EXCL). Runners packed by earlier versions keep the old
+  lock until they are packed again.
+- A packed `.sh` runner that fails while holding the extraction lock (a corrupt payload, a failing
+  `tar`) now releases it; before, every later start waited ten minutes for it.
+
 ## [1.3.1] 2026-10-12 19:21:08
 
 ### Fixed

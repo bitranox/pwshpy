@@ -244,7 +244,7 @@ runs the real cmdlet (`Get-Service`, `Get-WinEvent`, `Get-CimInstance`, ...) on 
 pwshpy's typed records against it on locale-invariant fields. The gotchas above are not "gone because
 we say so" - there are tests whose entire job is to keep them gone. Principals are identified by SID,
 not by a name Microsoft translates. The whole thing runs strict-typed (pyright), memory-bounded, and
-green across Linux / macOS / Windows and CPython 3.10 through 3.14.
+green across Linux / macOS / Windows and CPython 3.10 through 3.15.
 
 ## Documentation
 

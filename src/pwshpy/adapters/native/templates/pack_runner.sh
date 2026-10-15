@@ -150,24 +150,40 @@ pwshpy_extract() {
     rm -f "$_archive"
 }
 
-# Serialize extraction across processes with a mkdir lock (atomic on POSIX). The warm path (a
-# verified tree) never locks, so a normal run pays no lock cost.
+# Serialize extraction across processes with a lock file created under noclobber, which the shell
+# itself opens with O_EXCL. Not `mkdir "$_lock"`: the mkdir utility is not always exclusive - the
+# uutils coreutils mkdir that Ubuntu 26.04 ships exits 0 for BOTH of two racing calls on one path
+# about a third of the time, letting two cold starts extract into the same directory at once.
+# The warm path (a verified tree) never locks, so a normal run pays no lock cost.
+pwshpy_take_lock() {
+    (set -C && : >"$_lock") 2>/dev/null
+}
+
+# Release the lock, and drop the EXIT trap that releases it if this process dies holding it.
+pwshpy_release_lock() {
+    rm -f "$_lock"
+    trap - EXIT
+}
+
 pwshpy_unpack_locked() {
     mkdir -p "$(dirname "$PWSHPY_CACHE")"
     _lock="$PWSHPY_CACHE.lock"
     _attempt=0
     while [ "$_attempt" -lt 600 ]; do
-        if mkdir "$_lock" 2>/dev/null; then
+        if pwshpy_take_lock; then
+            # A corrupt payload or a failing tar exits through pwshpy_die or set -e; without this
+            # trap the lock would outlive the process and every later start would wait it out.
+            trap 'rm -f "$_lock"' EXIT
             if pwshpy_verify_tree; then
-                rmdir "$_lock" 2>/dev/null || true
+                pwshpy_release_lock
                 return 0
             fi
             pwshpy_extract
             if ! pwshpy_verify_tree; then
-                rmdir "$_lock" 2>/dev/null || true
+                pwshpy_release_lock
                 pwshpy_die "the unpacked payload in $PWSHPY_CACHE does not match its recorded hashes"
             fi
-            rmdir "$_lock" 2>/dev/null || true
+            pwshpy_release_lock
             return 0
         fi
         # Another process holds the lock; it may already have finished.

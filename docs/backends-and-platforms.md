@@ -43,7 +43,7 @@ clear `FeatureUnavailableError` and loads no .NET.
   `lib_layered_config`, `pydantic`, `orjson` (plus `pywin32` / `wmi` on Windows only). The `[full]`
   extra adds `pythonnet` + `clr-loader` for .NET and requires the .NET 10 runtime.
 - CI exercises GitHub's rolling runner images (`ubuntu-latest`, `macos-latest`, `windows-latest`)
-  across CPython 3.10 through 3.14.
+  across CPython 3.10 through 3.15.
 
 ## Status
 

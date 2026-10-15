@@ -155,7 +155,7 @@ def test_second_run_reuses_the_cache(tmp_path: Path) -> None:
 
 
 def test_concurrent_cold_starts_do_not_race(tmp_path: Path) -> None:
-    """Two cold-cache runs of the same pack must both succeed (mkdir-lock serializes extraction)."""
+    """Two cold-cache runs of the same pack must both succeed (the lock serializes extraction)."""
     runner = _pack_sh(_project(tmp_path), tmp_path / "app.sh")
     environment = _env(tmp_path)
     argv = ["sh", str(runner), "concurrent"]
@@ -167,6 +167,45 @@ def test_concurrent_cold_starts_do_not_race(tmp_path: Path) -> None:
     assert second.returncode == 0, err_b
     assert "greeting:hello from the submodule" in out_a
     assert "greeting:hello from the submodule" in out_b
+
+
+def _shadow_tools(tmp_path: Path, counter: Path) -> Path:
+    """A PATH directory whose ``mkdir`` never refuses an existing directory and whose ``tar`` counts.
+
+    The ``mkdir`` copies uutils coreutils 0.8.0 (Ubuntu 26.04's ``/usr/bin/mkdir``), which lets two
+    racing calls on one path both exit 0. The ``tar`` records every extraction and holds the
+    window open for a second, so two cold starts that both pass the lock always overlap.
+    """
+    real_mkdir = shutil.which("mkdir")
+    real_tar = shutil.which("tar")
+    assert real_mkdir is not None
+    assert real_tar is not None
+    shadow = tmp_path / "shadow-bin"
+    shadow.mkdir()
+    mkdir = shadow / "mkdir"
+    mkdir.write_text(f'#!/bin/sh\nexec "{real_mkdir}" -p "$@"\n', newline="\n")
+    tar = shadow / "tar"
+    tar.write_text(f'#!/bin/sh\necho x >> "{counter}"\nsleep 1\nexec "{real_tar}" "$@"\n', newline="\n")
+    for tool in (mkdir, tar):
+        tool.chmod(0o755)
+    return shadow
+
+
+def test_concurrent_cold_starts_extract_once_when_mkdir_is_not_exclusive(tmp_path: Path) -> None:
+    """The extraction lock must not rest on ``mkdir`` refusing an existing directory."""
+    runner = _pack_sh(_project(tmp_path), tmp_path / "app.sh")
+    counter = tmp_path / "extractions.txt"
+    environment = _env(tmp_path)
+    environment["PATH"] = os.pathsep.join([str(_shadow_tools(tmp_path, counter)), environment["PATH"]])
+    argv = ["sh", str(runner)]
+    first = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
+    second = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
+    _, err_a = first.communicate(timeout=300)
+    _, err_b = second.communicate(timeout=300)
+
+    assert first.returncode == 0, err_a
+    assert second.returncode == 0, err_b
+    assert counter.read_text().count("x") == 1, "both cold starts extracted the payload"
 
 
 def test_tampered_cache_is_detected_and_replaced(tmp_path: Path) -> None:
@@ -184,13 +223,17 @@ def test_tampered_cache_is_detected_and_replaced(tmp_path: Path) -> None:
 def test_corrupt_payload_is_rejected(tmp_path: Path) -> None:
     runner = _pack_sh(_project(tmp_path), tmp_path / "app.sh")
     lines = runner.read_text().splitlines()
-    start = next(i for i, line in enumerate(lines) if line.strip() == "__PWSHPY_PAYLOAD_B64__")
+    # The heredoc OPENER, not its terminator: the line after the terminator is shell code, and
+    # damaging it fails the runner with a syntax error rather than a corrupt payload.
+    start = next(i for i, line in enumerate(lines) if line.rstrip().endswith("<<'__PWSHPY_PAYLOAD_B64__'"))
     body = lines[start + 1]
     lines[start + 1] = ("B" if body[:1] != "B" else "C") + body[1:]
     runner.write_text("\n".join(lines) + "\n")
     result = _run(["sh"], runner, env=_env(tmp_path))
     assert result.returncode != 0
-    assert "corrupt" in (result.stdout + result.stderr).lower()
+    # The exact sentence: a bare "corrupt" also matches this test's own name in any tmp path printed.
+    assert "pwshpy pack: the embedded payload is corrupt" in result.stderr
+    assert not list((tmp_path / "cache").glob("*.lock")), "the failed run left its lock behind"
 
 
 def test_info_switch_reports_manifest_without_running(tmp_path: Path) -> None:

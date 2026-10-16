@@ -87,7 +87,7 @@ dev = [
   "pytest>=9.1.1",
   "pytest-cov>=7.1.0",
   "hypothesis>=6.168.5",
-  "ruff>=0.17.0",
+  "ruff>=0.17.1",
   "pyright[nodejs]>=1.1.414",
   "bandit>=1.9.4",
   "build>=1.6.1",
@@ -108,7 +108,7 @@ dev = [
   # Registry subsystem: lib_registry (+ its fake_winreg backend) on every dev OS
   # so the hermetic registry tests run in CI on Linux/macOS/Windows alike.
   "lib_registry>=3.1.6",
-  "fake_winreg>=1.10.2",
+  "fake_winreg>=1.10.3",
   "types-defusedxml>=0.7.0.20260504",
   # Transitive CVE pins
   "click>=8.5.0",                # CVE-2026-7246

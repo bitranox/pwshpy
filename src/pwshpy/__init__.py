@@ -42,6 +42,7 @@ from .domain.enums import (
 )
 from .domain.errors import (
     ConfigurationError,
+    ElevationDeclinedError,
     ElevationRequiredError,
     FeatureUnavailableError,
     NativeCallError,
@@ -140,6 +141,7 @@ __all__ = [
     # Errors
     "PwshPyError",
     "NativeCallError",
+    "ElevationDeclinedError",
     "PowerShellError",
     "FeatureUnavailableError",
     "PlatformUnsupportedError",

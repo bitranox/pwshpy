@@ -8,6 +8,7 @@ HRESULT, .NET ``ErrorRecord``) into this tree.
 Contents:
     * :class:`PwshPyError` — root of the hierarchy.
     * :class:`NativeCallError` — a native native binding call failed.
+    * :class:`ElevationDeclinedError` — the person refused the Administrator prompt.
     * :class:`PowerShellError` — a .NET hosted-PowerShell call failed.
     * :class:`FeatureUnavailableError` — .NET invoked without the ``[full]`` extra.
     * :class:`PlatformUnsupportedError` — a Windows-only adapter used off Windows.
@@ -39,6 +40,20 @@ class NativeCallError(PwshPyError):
         Traceback (most recent call last):
         ...
         pwshpy.domain.errors.NativeCallError: OpenSCManager failed
+    """
+
+
+class ElevationDeclinedError(NativeCallError):
+    """The person refused the Administrator prompt an elevated relaunch raised.
+
+    A subclass of :class:`NativeCallError`, so code that already catches that
+    keeps working, and its own type, because a refusal is a decision rather than
+    a fault: a caller typically carries on unelevated and says so, where a
+    failure is reported as one. Windows reports it as ``ERROR_CANCELLED`` (1223).
+
+    Example:
+        >>> issubclass(ElevationDeclinedError, NativeCallError)
+        True
     """
 
 
@@ -120,6 +135,7 @@ class PackError(PwshPyError):
 __all__ = [
     "ConfigurationError",
     "PackError",
+    "ElevationDeclinedError",
     "ElevationRequiredError",
     "FeatureUnavailableError",
     "NativeCallError",

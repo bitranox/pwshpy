@@ -6,6 +6,22 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `ElevationDeclinedError`, a `NativeCallError` subclass, raised by `ps.elevate()` when the person
+  refuses the Administrator prompt (Windows error 1223). A caller can now carry on unelevated after a
+  refusal and still report a real failure as one; code catching `NativeCallError` is unaffected.
+
+### Fixed
+
+- `ps.elevate()` relaunches a console script installed by uv on Windows. Its launcher reports
+  `sys.argv[0]` without `.exe`, so the relaunch fell through to `python <argv0>`, which cannot open
+  that path; the `.exe` beside it is now what runs.
+- `ps.elevate()` passes `SEE_MASK_FLAG_NO_UI` to `ShellExecuteEx`. Without it a request Windows could
+  not satisfy waited on an error box, and where no desktop shows one the call never returned; it now
+  fails at once with the Windows error. The real `ShellExecuteEx` call now runs in the Windows test
+  lane, where before every test replaced it.
+
 ## [1.3.3] 2026-10-15 17:16:31
 
 ### Fixed

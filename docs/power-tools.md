@@ -17,6 +17,18 @@ ps.require_elevation()  # raises ElevationRequiredError if not admin (an honest 
 ps.elevate()  # relaunch THIS process elevated (UAC), preserving cwd + argv
 ```
 
+A refused prompt raises `ElevationDeclinedError`, a `NativeCallError` subclass, so a caller can carry on
+unelevated after a refusal and still treat any other failure as one:
+
+```python
+from pwshpy import ElevationDeclinedError, ps
+
+try:
+    code = ps.elevate()  # the elevated copy's exit code once it ends
+except ElevationDeclinedError:
+    code = None  # the person said no: run unelevated and say so
+```
+
 ```bash
 pwshpy is-elevated              # prints "elevated"/"not elevated"; exit 0 if admin, 1 if not
 pwshpy is-elevated -q && pwshpy clear_event_log Application   # gate a privileged step

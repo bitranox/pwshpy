@@ -26,11 +26,11 @@ import importlib
 import os
 import subprocess  # nosec B404 - argv quoting (list2cmdline) + the sudo re-exec on POSIX; always a fixed argv, no shell
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import ElevationDeclinedError, NativeCallError, PlatformUnsupportedError
 
 
 def is_elevated() -> bool:
@@ -139,32 +139,70 @@ def _relaunch_target(executable: str | None, argv: Sequence[str] | None) -> tupl
         return sys.executable, tail
     if argv0.lower().endswith(".exe"):
         return argv0, tail
+    # A uv-built console-script launcher reports argv0 WITHOUT ".exe" (measured on
+    # Windows): only the .exe sibling exists, and `python <argv0>` cannot open it.
+    if argv0 and Path(argv0 + ".exe").is_file():
+        return argv0 + ".exe", tail
     if Path(argv0).name == "__main__.py":
         package = Path(argv0).parent.name
         return sys.executable, ["-m", package, *tail]
     return sys.executable, list(sys.argv)
 
 
+#: ShellExecuteEx's error when the person refuses the UAC prompt (winerror.h).
+ERROR_CANCELLED = 1223
+
+
+class _Launch(NamedTuple):
+    """The program, its arguments and the directory it starts in, as one request."""
+
+    executable: str
+    argv: Sequence[str]
+    cwd: str
+
+
 def _shell_execute_runas(executable: str, argv: Sequence[str], cwd: str, *, wait: bool) -> int | None:
     """Launch ``executable`` elevated via ``ShellExecuteEx`` ``"runas"`` (UAC prompt)."""
-    shell = _load("win32com.shell.shell")
-    shellcon = _load("win32com.shell.shellcon")
-    win32con = _load("win32con")
-    win32event = _load("win32event")
-    win32process = _load("win32process")
-    win32api = _load("win32api")
-    parameters = subprocess.list2cmdline(list(argv))
+    return _shell_execute(_Launch(executable, argv, cwd), wait=wait)
+
+
+def _shell_execute(
+    launch: _Launch, *, wait: bool, verb: str = "runas", load: Callable[[str], Any] | None = None
+) -> int | None:
+    """Start ``launch`` through ``ShellExecuteEx`` and optionally wait for its exit code.
+
+    ``verb`` is ``"runas"`` for every caller; a test passes ``"open"`` so the real
+    call runs on Windows without a UAC prompt. ``SEE_MASK_FLAG_NO_UI`` is
+    load-bearing: measured on Windows, a request it could not satisfy otherwise
+    waited on an error box, which never returns where no desktop shows it; with
+    the flag the same request failed at once with error 2.
+
+    Raises:
+        ElevationDeclinedError: The person refused the prompt (``ERROR_CANCELLED``).
+        NativeCallError: Any other reason ShellExecuteEx could not start it.
+    """
+    # Resolved per call, not as a default: a default is bound when the def runs.
+    loader = load if load is not None else _load
+    shell = loader("win32com.shell.shell")
+    shellcon = loader("win32com.shell.shellcon")
+    win32con = loader("win32con")
+    win32event = loader("win32event")
+    win32process = loader("win32process")
+    win32api = loader("win32api")
+    parameters = subprocess.list2cmdline(list(launch.argv))
     try:
         result = shell.ShellExecuteEx(
             nShow=win32con.SW_SHOWNORMAL,
-            fMask=shellcon.SEE_MASK_NOCLOSEPROCESS,
-            lpVerb="runas",
-            lpFile=executable,
+            fMask=shellcon.SEE_MASK_NOCLOSEPROCESS | shellcon.SEE_MASK_FLAG_NO_UI,
+            lpVerb=verb,
+            lpFile=launch.executable,
             lpParameters=parameters,
-            lpDirectory=cwd,
+            lpDirectory=launch.cwd,
         )
-    except Exception as exc:  # pywintypes.error (e.g. the user declined the UAC prompt)
-        raise NativeCallError(f"Elevated relaunch (ShellExecuteEx runas) failed: {exc}") from exc
+    except Exception as exc:  # pywintypes.error, its Windows code on .winerror
+        if getattr(exc, "winerror", None) == ERROR_CANCELLED:
+            raise ElevationDeclinedError("The Administrator prompt was declined.") from exc
+        raise NativeCallError(f"Elevated relaunch (ShellExecuteEx {verb}) failed: {exc}") from exc
     handle = result["hProcess"]
     if not wait:
         return None

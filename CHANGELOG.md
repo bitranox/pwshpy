@@ -6,6 +6,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.0] 2026-10-16 23:24:25
+
 ### Added
 
 - `ElevationDeclinedError`, a `NativeCallError` subclass, raised by `ps.elevate()` when the person

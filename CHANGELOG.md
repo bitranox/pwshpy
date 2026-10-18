@@ -6,6 +6,16 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.5.1] 2026-10-18 22:49:59
+
+### Documentation
+
+- The `using-pwsh` skill lists six `.ps1` traps for when a script is still the deliverable, each with
+  the shell it occurs in (Windows PowerShell 5.1, pwsh 7) and what to do instead: an advanced script
+  binding a forwarded `-v`, a function returning its narration with its value, the `curl` alias, native
+  stderr as error records under `Stop`, `pwsh -File` splitting `--out=C:\data` at the colon, and an
+  unguarded read probe before a lock.
+
 ## [1.5.0] 2026-10-18 11:40:29
 
 ### Fixed

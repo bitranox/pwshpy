@@ -6,6 +6,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.5.0] 2026-10-18 11:40:29
+
 ### Fixed
 
 - `ps.elevate()` on Linux and macOS tells a refused sudo password from the command's own exit code. It

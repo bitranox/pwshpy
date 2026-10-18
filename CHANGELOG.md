@@ -6,6 +6,15 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Fixed
+
+- `ps.elevate()` on Linux and macOS tells a refused sudo password from the command's own exit code. It
+  ran `sudo <command>` and returned sudo's exit code, but sudo exits 1 when authentication fails, so a
+  wrong password read as the command having exited 1, and a Ctrl+C at the prompt escaped as
+  `KeyboardInterrupt`. It now asks with `sudo -v` first and raises `ElevationDeclinedError` when sudo
+  does not grant root or the prompt is interrupted, as a declined UAC prompt does on Windows, and only
+  then runs the command. A Ctrl+C once the command runs interrupts as before.
+
 ## [1.4.0] 2026-10-16 23:24:25
 
 ### Added

@@ -14,11 +14,17 @@ one call, and the elevated child keeps your cwd and argv:
 ```python
 ps.is_elevated()  # bool - cross-platform (Windows token / POSIX euid 0)
 ps.require_elevation()  # raises ElevationRequiredError if not admin (an honest #Requires)
-ps.elevate()  # relaunch THIS process elevated (UAC), preserving cwd + argv
+ps.elevate()  # relaunch THIS process elevated (UAC / sudo), preserving cwd + argv
 ```
 
+On Linux and macOS the password is asked by `sudo -v` first, and only then is the command run under
+`sudo`. sudo exits 1 when it refuses, which is also an ordinary exit code, so asking separately is what
+lets a refusal be told apart from the command's own result.
+
 A refused prompt raises `ElevationDeclinedError`, a `NativeCallError` subclass, so a caller can carry on
-unelevated after a refusal and still treat any other failure as one:
+unelevated after a refusal and still treat any other failure as one. On Windows that is a declined UAC
+prompt; on Linux and macOS it is any `sudo -v` that does not grant root - a wrong password, an
+interrupted prompt, or a user sudo does not allow:
 
 ```python
 from pwshpy import ElevationDeclinedError, ps

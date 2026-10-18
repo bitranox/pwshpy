@@ -44,12 +44,14 @@ class NativeCallError(PwshPyError):
 
 
 class ElevationDeclinedError(NativeCallError):
-    """The person refused the Administrator prompt an elevated relaunch raised.
+    """The elevated relaunch was refused: the UAC prompt, or sudo's password.
 
     A subclass of :class:`NativeCallError`, so code that already catches that
     keeps working, and its own type, because a refusal is a decision rather than
     a fault: a caller typically carries on unelevated and says so, where a
-    failure is reported as one. Windows reports it as ``ERROR_CANCELLED`` (1223).
+    failure is reported as one. Windows reports it as ``ERROR_CANCELLED`` (1223);
+    on POSIX it is a non-zero ``sudo -v``, which a wrong password, an interrupted
+    prompt and a user sudo does not allow all give alike.
 
     Example:
         >>> issubclass(ElevationDeclinedError, NativeCallError)

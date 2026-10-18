@@ -1234,8 +1234,13 @@ class Ps:
 
         A no-op returning ``0`` when already elevated. Windows uses UAC (and, unlike
         PowerShell's ``Start-Process -Verb RunAs``, the elevated child keeps the current
-        working directory - no ``System32`` surprise); POSIX (Linux/macOS) re-execs the
-        command under ``sudo``. ``argv`` is forwarded in both cases.
+        working directory - no ``System32`` surprise); POSIX (Linux/macOS) asks for the
+        password with ``sudo -v`` and then re-execs the command under ``sudo``. ``argv``
+        is forwarded in both cases.
+
+        Raises:
+            ElevationDeclinedError: The UAC prompt was refused, or sudo did not grant root.
+            NativeCallError: The relaunch could not be started.
 
         Example:
             >>> callable(build_ps().elevate)

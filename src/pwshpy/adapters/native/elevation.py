@@ -77,9 +77,9 @@ def elevate(
 
     A no-op returning ``0`` when already elevated.  Windows triggers a UAC prompt via
     ``ShellExecuteEx`` ``"runas"`` (the elevated child inherits the given/current working
-    directory - fixing PowerShell's ``System32`` gotcha).  POSIX (Linux/macOS) re-execs the
-    command under ``sudo`` (password prompt on the TTY).  ``argv`` defaults to the current
-    process's.
+    directory - fixing PowerShell's ``System32`` gotcha).  POSIX (Linux/macOS) asks for the
+    password with ``sudo -v`` on the TTY, then re-execs the command under ``sudo``.  ``argv``
+    defaults to the current process's.
 
     Args:
         argv: Argument vector for the relaunched process; defaults to ``sys.argv``.
@@ -94,6 +94,7 @@ def elevate(
         ``None`` when ``wait`` is ``False``.
 
     Raises:
+        ElevationDeclinedError: The UAC prompt was refused, or sudo did not grant root.
         NativeCallError: If the elevated relaunch (``ShellExecuteEx`` / ``sudo``) fails.
 
     Example:
@@ -110,9 +111,21 @@ def elevate(
 
 
 def _sudo_relaunch(executable: str, argv: Sequence[str], cwd: str, *, wait: bool) -> int | None:
-    """Re-exec ``executable`` elevated via ``sudo`` (POSIX), forwarding argv and cwd."""
+    """Re-exec ``executable`` elevated via ``sudo`` (POSIX), forwarding argv and cwd.
+
+    The password is asked by ``sudo -v`` on its own, before the command: sudo exits
+    1 when authentication fails (``man sudo``), which is a code the command itself
+    may return, so only a separate step can tell a refusal from a result. The
+    command then runs on the credential ``-v`` cached.
+
+    Raises:
+        ElevationDeclinedError: sudo did not grant root - a wrong or refused
+            password, a Ctrl+C at the prompt, or a user sudo does not allow.
+        NativeCallError: sudo could not be started at all.
+    """
     command = ["sudo", executable, *argv]
     try:
+        _ask_sudo_for_root(cwd)
         if wait:
             completed = subprocess.run(command, cwd=cwd, check=False)  # noqa: S603  # nosec B603 - fixed argv, no shell
             return completed.returncode
@@ -120,6 +133,22 @@ def _sudo_relaunch(executable: str, argv: Sequence[str], cwd: str, *, wait: bool
     except OSError as exc:
         raise NativeCallError(f"elevated relaunch via sudo failed: {exc}") from exc
     return None
+
+
+def _ask_sudo_for_root(cwd: str) -> None:
+    """Ask for the password with ``sudo -v``, and raise unless sudo granted root.
+
+    A Ctrl+C at the prompt is a refusal too: a password prompt has no "No", so
+    that is how a person declines, and the terminal delivers the SIGINT to this
+    process as well as to sudo (measured with sudo 1.9.15p5 in a pty). Only this
+    step converts it; a Ctrl+C once the command runs interrupts as usual.
+    """
+    try:
+        granted = subprocess.run(["sudo", "-v"], cwd=cwd, check=False).returncode == 0  # noqa: S607  # nosec B603 B607 - fixed argv, no shell; sudo resolved from PATH like the relaunch
+    except KeyboardInterrupt as exc:
+        raise ElevationDeclinedError("The sudo password prompt was interrupted.") from exc
+    if not granted:
+        raise ElevationDeclinedError("sudo did not grant root (refused, a wrong password, or not allowed).")
 
 
 def _relaunch_target(executable: str | None, argv: Sequence[str] | None) -> tuple[str, list[str]]:

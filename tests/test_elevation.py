@@ -9,6 +9,7 @@ Windows-only oracle test pins ``is_elevated()`` against the independent Win32
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -56,9 +57,129 @@ def test_elevate_is_noop_when_already_elevated(monkeypatch: pytest.MonkeyPatch) 
     assert calls == []
 
 
+#: A stand-in for sudo: it logs every call, answers ``-v`` with ``$FAKE_SUDO_VALIDATE``
+#: (0 when unset) and otherwise runs the command it was given, as sudo does once
+#: the credential is cached. Written as a real executable so the real
+#: ``_sudo_relaunch`` runs it through the real subprocess call.
+#: ``FAKE_SUDO_VALIDATE=interrupt`` plays a Ctrl+C at the prompt: a terminal sends
+#: SIGINT to the whole foreground group, so the caller receives it as well as sudo
+#: (measured with real sudo 1.9.15p5 in a pty on Ubuntu 24.04).
+_FAKE_SUDO = """#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_SUDO_LOG"
+if [ "$1" = "-v" ]; then
+    if [ "$FAKE_SUDO_VALIDATE" = "interrupt" ]; then
+        kill -INT "$PPID"
+        sleep 2
+        exit 1
+    fi
+    exit "${FAKE_SUDO_VALIDATE:-0}"
+fi
+exec "$@"
+"""
+
+
+def _sudo_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, validate: int | str = 0) -> Path:
+    """Put the stand-in sudo first on PATH and return the log it writes."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    sudo = bin_dir / "sudo"
+    sudo.write_text(_FAKE_SUDO, encoding="utf-8")
+    sudo.chmod(0o755)
+    log = tmp_path / "sudo.log"
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("FAKE_SUDO_LOG", str(log))
+    monkeypatch.setenv("FAKE_SUDO_VALIDATE", str(validate))
+    return log
+
+
+def _exits_with(code: int) -> list[str]:
+    return ["-c", f"import sys; sys.exit({code})"]
+
+
+def _sudo_relaunch() -> Any:
+    return elevation._sudo_relaunch  # pyright: ignore[reportPrivateUsage] - white-box test
+
+
+@pytest.mark.os_posix
+def test_sudo_asks_for_the_password_before_it_runs_the_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``sudo -v`` first, then the command in the given directory, whose exit code comes back."""
+    log = _sudo_on_path(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+
+    code = _sudo_relaunch()(sys.executable, _exits_with(7), str(work), wait=True)
+
+    assert code == 7
+    assert log.read_text(encoding="utf-8").splitlines() == ["-v", f"{sys.executable} {' '.join(_exits_with(7))}"]
+
+
+@pytest.mark.os_posix
+def test_a_refused_sudo_password_is_declined_and_never_runs_the_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sudo exits 1 on a failed authentication, the same as any command's 1, so ``-v`` tells them apart."""
+    from pwshpy import ElevationDeclinedError
+
+    log = _sudo_on_path(tmp_path, monkeypatch, validate=1)
+
+    with pytest.raises(ElevationDeclinedError, match="sudo"):
+        _sudo_relaunch()(sys.executable, _exits_with(0), str(tmp_path), wait=True)
+    assert log.read_text(encoding="utf-8").splitlines() == ["-v"], "the command ran although sudo refused"
+
+
+@pytest.mark.os_posix
+def test_ctrl_c_at_the_sudo_prompt_is_declined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A password prompt has no 'No' button, so Ctrl+C there is how a person says no."""
+    from pwshpy import ElevationDeclinedError
+
+    log = _sudo_on_path(tmp_path, monkeypatch, validate="interrupt")
+
+    with pytest.raises(ElevationDeclinedError, match="interrupted"):
+        _sudo_relaunch()(sys.executable, _exits_with(0), str(tmp_path), wait=True)
+    assert log.read_text(encoding="utf-8").splitlines() == ["-v"], "the command ran after the prompt was interrupted"
+
+
+@pytest.mark.os_posix
+def test_ctrl_c_inside_the_elevated_command_still_interrupts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control: once root was granted, Ctrl+C is the program's own business again.
+
+    This stand-in shares the caller's process group, as a sudo without ``use_pty``
+    does, so the caller sees the interrupt. Real sudo 1.9.15p5 (Ubuntu 24.04)
+    runs the command in its own pty instead: the command dies of SIGINT and the
+    caller gets ``-2`` back. Either way nothing here turns it into a refusal.
+    """
+    _sudo_on_path(tmp_path, monkeypatch)
+
+    with pytest.raises(KeyboardInterrupt):
+        _sudo_relaunch()("/bin/sh", ["-c", 'kill -INT "$PPID"; sleep 2'], str(tmp_path), wait=True)
+
+
+@pytest.mark.os_posix
+def test_a_command_exiting_1_after_sudo_granted_root_is_its_own_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: a 1 from the command itself is a result, not a refusal."""
+    _sudo_on_path(tmp_path, monkeypatch)
+
+    assert _sudo_relaunch()(sys.executable, _exits_with(1), str(tmp_path), wait=True) == 1
+
+
+@pytest.mark.os_posix
+def test_no_sudo_on_path_is_a_failure_that_names_sudo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pwshpy import ElevationDeclinedError, NativeCallError
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+    with pytest.raises(NativeCallError, match="sudo") as raised:
+        _sudo_relaunch()(sys.executable, _exits_with(0), str(tmp_path), wait=True)
+    assert not isinstance(raised.value, ElevationDeclinedError)
+
+
 @pytest.mark.os_agnostic
-def test_elevate_posix_reexecs_via_sudo(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Not elevated + POSIX -> re-exec under sudo, forwarding executable/argv/cwd and exit code."""
+def test_elevate_posix_hands_the_target_to_sudo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not elevated + POSIX -> the sudo relaunch gets the resolved target, cwd and wait."""
     monkeypatch.setattr(elevation, "is_elevated", lambda: False)
     monkeypatch.setattr(elevation.sys, "platform", "linux")
 
@@ -68,16 +189,13 @@ def test_elevate_posix_reexecs_via_sudo(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(elevation, "_relaunch_target", _target)
     captured: dict[str, Any] = {}
 
-    class _Result:
-        returncode = 7
+    def _fake_sudo(executable: str, argv: Any, cwd: str, *, wait: bool) -> int:
+        captured.update(executable=executable, argv=argv, cwd=cwd, wait=wait)
+        return 7
 
-    def _fake_run(command: list[str], **kwargs: Any) -> _Result:
-        captured.update(command=command, cwd=kwargs.get("cwd"))
-        return _Result()
-
-    monkeypatch.setattr(elevation.subprocess, "run", _fake_run)
+    monkeypatch.setattr(elevation, "_sudo_relaunch", _fake_sudo)
     assert elevation.elevate(cwd="/work") == 7
-    assert captured == {"command": ["sudo", "/opt/app", "--flag"], "cwd": "/work"}
+    assert captured == {"executable": "/opt/app", "argv": ["--flag"], "cwd": "/work", "wait": True}
 
 
 @pytest.mark.os_agnostic

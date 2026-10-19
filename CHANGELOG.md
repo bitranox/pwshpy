@@ -6,6 +6,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.5.2] 2026-10-19 14:48:04
+
 ### Fixed
 
 - `.gitignore`: four patterns (`*$py.class`, `*.egg-info/`, `*.manifest`, `*.spec`) carried an inline

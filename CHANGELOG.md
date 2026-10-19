@@ -6,6 +6,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Fixed
+
+- `.gitignore`: four patterns (`*$py.class`, `*.egg-info/`, `*.manifest`, `*.spec`) carried an inline
+  comment, which gitignore reads as part of the pattern, so they ignored nothing. Each comment now has
+  its own line and the patterns apply.
+
 ## [1.5.1] 2026-10-18 22:49:59
 
 ### Documentation

@@ -16,7 +16,7 @@ from __future__ import annotations
 import contextlib
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -332,7 +332,7 @@ def _no_com(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.os_agnostic
 def test_register_default_principal_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No principal keeps the interactive-token registration of every release before 1.6."""
+    """No principal registers for the interactive caller with an interactive token."""
     svc = _FakeService()
     _use(monkeypatch, svc)
     NativeScheduledTaskController().register("\\T", program="cmd.exe")
@@ -407,7 +407,7 @@ def test_register_boot_without_delay_and_logon_for_any_user(monkeypatch: pytest.
 
 @pytest.mark.os_agnostic
 def test_register_without_triggers_creates_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No triggers keeps the run-on-demand task of every release before 1.6."""
+    """No triggers registers a run-on-demand task."""
     svc = _FakeService()
     _use(monkeypatch, svc)
     NativeScheduledTaskController().register("\\T", program="cmd.exe")
@@ -449,6 +449,81 @@ def test_register_refuses_a_logon_type_the_principal_cannot_use(
     principal = TaskPrincipal(user_id=user_id, logon_type=logon_type)
     with pytest.raises(ConfigurationError, match=logon_type.value):
         NativeScheduledTaskController().register("\\T", program="cmd.exe", principal=principal)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("user_id", "logon_type"),
+    [
+        pytest.param(WellKnownSid.EVERYONE.value, None, id="everyone-implied-logon"),
+        pytest.param(
+            WellKnownSid.AUTHENTICATED_USERS.value, TaskLogonType.INTERACTIVE_TOKEN, id="auth-users-interactive"
+        ),
+        pytest.param(WellKnownSid.ADMINISTRATORS.value, TaskLogonType.S4U, id="builtin-admins-s4u"),
+        pytest.param(WellKnownSid.REMOTE_DESKTOP_USERS.value, None, id="builtin-rdp-users-implied-logon"),
+        pytest.param(WellKnownSid.USERS.value, TaskLogonType.SERVICE_ACCOUNT, id="builtin-users-service-logon"),
+    ],
+)
+def test_register_refuses_a_group_principal_before_com(
+    monkeypatch: pytest.MonkeyPatch, user_id: str, logon_type: TaskLogonType | None
+) -> None:
+    """A well-known group SID fits no logon type: refused before COM instead of an opaque HRESULT."""
+    _no_com(monkeypatch)
+    principal = TaskPrincipal(user_id=user_id, logon_type=logon_type)
+    with pytest.raises(ConfigurationError, match="group"):
+        NativeScheduledTaskController().register("\\T", program="cmd.exe", principal=principal)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "user_id",
+    [
+        pytest.param(WellKnownSid.EVERYONE.value, id="everyone"),
+        pytest.param(WellKnownSid.AUTHENTICATED_USERS.value, id="auth-users"),
+        pytest.param(WellKnownSid.USERS.value, id="builtin-users"),
+    ],
+)
+def test_register_refuses_a_group_logon_trigger_before_com(monkeypatch: pytest.MonkeyPatch, user_id: str) -> None:
+    """A logon trigger names one user; a well-known group SID is refused like a group principal."""
+    _no_com(monkeypatch)
+    with pytest.raises(ConfigurationError, match="group"):
+        NativeScheduledTaskController().register("\\T", program="cmd.exe", triggers=[LogonTrigger(user_id=user_id)])
+
+
+@pytest.mark.os_agnostic
+def test_register_passes_a_domain_relative_sid_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A domain-relative SID (user or domain group alike) is not refused: only an LSA lookup tells them apart."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    domain_users = "S-1-5-21-1-2-3-513"
+    NativeScheduledTaskController().register(
+        "\\T",
+        program="cmd.exe",
+        principal=TaskPrincipal(user_id=domain_users),
+        triggers=[LogonTrigger(user_id=domain_users)],
+    )
+    assert svc.folder.last_user == domain_users
+
+
+@pytest.mark.os_agnostic
+def test_register_sub_second_boot_delay_writes_no_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A boot delay under one second rounds to zero whole seconds, so the COM default stays."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    NativeScheduledTaskController().register(
+        "\\T", program="cmd.exe", triggers=[BootTrigger(delay=timedelta(milliseconds=500))]
+    )
+    (boot,) = svc.folder.tasks["T"].Definition.Triggers.items
+    assert boot.Delay == ""
+
+
+@pytest.mark.os_agnostic
+def test_add_trigger_refuses_an_unknown_trigger_kind() -> None:
+    """A value outside the TaskTrigger union is a programming error, never silently a logon trigger."""
+    definition = _FakeDefinition()
+    with pytest.raises(TypeError, match="object"):
+        mod._add_trigger(definition, cast(Any, object()))  # pyright: ignore[reportPrivateUsage] - the guard has no public path
+    assert definition.Triggers.items == []
 
 
 @pytest.mark.os_agnostic

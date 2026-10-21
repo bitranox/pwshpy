@@ -80,7 +80,7 @@ def _identity(value: object) -> str | None:
 class TaskPrincipal(BaseModel):
     """Who a scheduled task runs as.
 
-    ``user_id`` None means the interactive caller (the pre-1.6 behaviour).  A service SID
+    ``user_id`` None means the interactive caller.  A service SID
     (SYSTEM, LOCAL SERVICE, NETWORK SERVICE) logs on as a service account; any other SID
     defaults to S4U (runs whether or not the user is logged on, no stored password).
 
@@ -130,6 +130,16 @@ class TaskPrincipal(BaseModel):
         """
         return self.user_id is not None and _is_uid(self.user_id)
 
+    @property
+    def is_service_account(self) -> bool:
+        """True when ``user_id`` is a service account SID (SYSTEM, LOCAL SERVICE, NETWORK SERVICE).
+
+        Example:
+            >>> TaskPrincipal(user_id="S-1-5-20").is_service_account, TaskPrincipal().is_service_account
+            (True, False)
+        """
+        return self.user_id in _SERVICE_SIDS
+
     def effective_logon_type(self) -> TaskLogonType:
         """The explicit logon type, else the one implied by ``user_id``.
 
@@ -141,7 +151,7 @@ class TaskPrincipal(BaseModel):
             return self.logon_type
         if self.user_id is None:
             return TaskLogonType.INTERACTIVE_TOKEN
-        if self.user_id in _SERVICE_SIDS:
+        if self.is_service_account:
             return TaskLogonType.SERVICE_ACCOUNT
         return TaskLogonType.S4U
 
@@ -211,6 +221,16 @@ class LogonTrigger(BaseModel):
     @classmethod
     def _check_user_id(cls, value: object) -> str | None:
         return _identity(value)
+
+    @property
+    def is_uid(self) -> bool:
+        """True when ``user_id`` is a decimal POSIX uid.
+
+        Example:
+            >>> LogonTrigger(user_id="1000").is_uid, LogonTrigger(user_id="S-1-5-18").is_uid
+            (True, False)
+        """
+        return self.user_id is not None and _is_uid(self.user_id)
 
 
 # PEP 604 '|' between classes is a runtime types.UnionType from 3.10 on, which is this

@@ -17,11 +17,12 @@ Contents:
 from __future__ import annotations
 
 import importlib
+import re
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any
+from typing import Any, NoReturn
 
-from ...domain.enums import TaskLogonType, TaskRunLevel, WellKnownSid
+from ...domain.enums import TaskLogonType, TaskRunLevel
 from ...domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
 from ...domain.scheduling import BootTrigger, DailyTrigger, LogonTrigger, OnceTrigger, TaskPrincipal, TaskTrigger
@@ -39,10 +40,9 @@ _LOGON_TYPE = {
 }
 _RUN_LEVEL = {TaskRunLevel.LIMITED: 0, TaskRunLevel.HIGHEST: 1}
 _TRIGGER_TIME, _TRIGGER_DAILY, _TRIGGER_BOOT, _TRIGGER_LOGON = 1, 2, 8, 9
-# The accounts Windows logs on as a service; TASK_LOGON_SERVICE_ACCOUNT accepts only these.
-_SERVICE_SIDS = frozenset(
-    {WellKnownSid.LOCAL_SYSTEM.value, WellKnownSid.LOCAL_SERVICE.value, WellKnownSid.NETWORK_SERVICE.value}
-)
+# Well-known GROUP SIDs: Everyone, Authenticated Users and every BUILTIN alias (S-1-5-32-*).
+# No TASK_LOGON_TYPE fits a group, so RegisterTaskDefinition fails on one with an opaque HRESULT.
+_GROUP_SID = re.compile(r"S-1-1-0|S-1-5-11|S-1-5-32-[0-9]+")
 _UID_ON_WINDOWS = "a numeric uid principal is POSIX-only; on Windows pass a SID."
 
 
@@ -97,17 +97,42 @@ def _iso_duration(delay: timedelta) -> str:
     return f"PT{int(delay.total_seconds())}S"
 
 
+def _is_group_sid(user_id: str | None) -> bool:
+    """True when ``user_id`` is a well-known group SID (Everyone, Authenticated Users, BUILTIN).
+
+    A domain-relative group (``S-1-5-21-...-513``, Domain Users) has the same shape as a user
+    SID; telling them apart needs an LSA lookup, so such a SID is passed through.
+
+    Example:
+        >>> _is_group_sid("S-1-5-32-544"), _is_group_sid("S-1-5-21-1-2-3-513"), _is_group_sid(None)
+        (True, False, False)
+    """
+    return user_id is not None and _GROUP_SID.fullmatch(user_id) is not None
+
+
+def _refuse_group(user_id: str | None, role: str) -> None:
+    """Raise :class:`ConfigurationError` when ``user_id`` is a well-known group SID."""
+    if _is_group_sid(user_id):
+        raise ConfigurationError(
+            f"{role} {user_id} is a group SID; a scheduled task runs as, and a logon trigger "
+            "watches, a single account - pass a user or service account SID."
+        )
+
+
 def _check_principal(principal: TaskPrincipal) -> None:
     """Refuse a principal Task Scheduler cannot register, before any COM call.
 
     The domain deliberately does not cross-check ``logon_type`` against ``user_id`` (the
-    POSIX backend reads neither the same way), so the Windows rules live here: a service
-    SID logs on only as a service account, and only a service SID can.  Refusing up front
-    gives a clear message instead of an opaque HRESULT from ``RegisterTaskDefinition``.
+    POSIX backend reads neither the same way), so the Windows rules live here: no logon
+    type fits a well-known group SID, a service SID logs on only as a service account, and
+    only a service SID can.  Refusing up front gives a clear message instead of an opaque
+    HRESULT from ``RegisterTaskDefinition``.  A domain-relative group SID
+    (``S-1-5-21-...-513``) cannot be told from a user without an LSA lookup and is passed on.
 
     Raises:
         PlatformUnsupportedError: ``user_id`` is a numeric POSIX uid.
-        ConfigurationError: the explicit ``logon_type`` cannot fit ``user_id``.
+        ConfigurationError: ``user_id`` is a well-known group SID, or the explicit
+            ``logon_type`` cannot fit ``user_id``.
 
     Example:
         >>> _check_principal(TaskPrincipal.system())
@@ -118,8 +143,9 @@ def _check_principal(principal: TaskPrincipal) -> None:
     """
     if principal.is_uid:
         raise PlatformUnsupportedError(_UID_ON_WINDOWS)
+    _refuse_group(principal.user_id, "principal")
     logon = principal.effective_logon_type()
-    is_service = principal.user_id in _SERVICE_SIDS
+    is_service = principal.is_service_account
     if is_service and logon is not TaskLogonType.SERVICE_ACCOUNT:
         raise ConfigurationError(
             f"logon type {logon.value} cannot run as {principal.user_id}: a service account SID "
@@ -134,18 +160,26 @@ def _check_principal(principal: TaskPrincipal) -> None:
 
 
 def _check_triggers(triggers: Sequence[TaskTrigger]) -> None:
-    """Refuse a logon trigger naming a POSIX uid, before any COM call.
+    """Refuse a logon trigger naming a POSIX uid or a well-known group SID, before any COM call.
 
     Raises:
         PlatformUnsupportedError: a :class:`LogonTrigger` names a numeric uid.
+        ConfigurationError: a :class:`LogonTrigger` names a well-known group SID.
 
     Example:
-        >>> _check_triggers([LogonTrigger(user_id="S-1-5-18"), BootTrigger()])
+        >>> _check_triggers([LogonTrigger(user_id="S-1-5-21-1-2-3-1001"), BootTrigger()])
     """
-    # LogonTrigger already validated user_id as a SID or a decimal uid, so "not a SID" is a uid.
     for trigger in triggers:
-        if isinstance(trigger, LogonTrigger) and trigger.user_id is not None and not trigger.user_id.startswith("S-"):
+        if not isinstance(trigger, LogonTrigger):
+            continue
+        if trigger.is_uid:
             raise PlatformUnsupportedError(_UID_ON_WINDOWS)
+        _refuse_group(trigger.user_id, "logon trigger user")
+
+
+def _unknown_trigger(trigger: NoReturn) -> NoReturn:
+    """Fail loudly on a value outside the TaskTrigger union (pyright proves it unreachable)."""
+    raise TypeError(f"not a TaskTrigger: {type(trigger).__name__}")
 
 
 def _add_trigger(definition: Any, trigger: TaskTrigger) -> None:
@@ -153,26 +187,44 @@ def _add_trigger(definition: Any, trigger: TaskTrigger) -> None:
 
     ``StartBoundary`` keeps the caller's UTC offset (``isoformat``), which Task Scheduler
     honours, so a trigger built in one zone fires at the same instant on a machine in another.
+
+    Raises:
+        TypeError: ``trigger`` is not one of the :data:`TaskTrigger` kinds.
+
+    Example:
+        >>> callable(_add_trigger)
+        True
     """
-    if isinstance(trigger, OnceTrigger):
-        com = definition.Triggers.Create(_TRIGGER_TIME)
-        com.StartBoundary = trigger.at.isoformat(timespec="seconds")
-    elif isinstance(trigger, DailyTrigger):
-        com = definition.Triggers.Create(_TRIGGER_DAILY)
-        com.StartBoundary = trigger.at.isoformat(timespec="seconds")
-        com.DaysInterval = trigger.every_days
-    elif isinstance(trigger, BootTrigger):
-        com = definition.Triggers.Create(_TRIGGER_BOOT)
-        if trigger.delay:  # a zero delay keeps the COM default (fire at boot)
-            com.Delay = _iso_duration(trigger.delay)
-    else:
-        com = definition.Triggers.Create(_TRIGGER_LOGON)
-        if trigger.user_id is not None:  # None keeps the COM default: any user logging on
-            com.UserId = trigger.user_id
+    # match, not an isinstance chain: a last isinstance(LogonTrigger) would be "unnecessary"
+    # under pyright strict, and a bare else would silently treat any stray value as a logon.
+    match trigger:
+        case OnceTrigger():
+            com = definition.Triggers.Create(_TRIGGER_TIME)
+            com.StartBoundary = trigger.at.isoformat(timespec="seconds")
+        case DailyTrigger():
+            com = definition.Triggers.Create(_TRIGGER_DAILY)
+            com.StartBoundary = trigger.at.isoformat(timespec="seconds")
+            com.DaysInterval = trigger.every_days
+        case BootTrigger():
+            com = definition.Triggers.Create(_TRIGGER_BOOT)
+            # Whole seconds only: a sub-second delay would render "PT0S", so it keeps the default.
+            if int(trigger.delay.total_seconds()):
+                com.Delay = _iso_duration(trigger.delay)
+        case LogonTrigger():
+            com = definition.Triggers.Create(_TRIGGER_LOGON)
+            if trigger.user_id is not None:  # None keeps the COM default: any user logging on
+                com.UserId = trigger.user_id
+        case _:
+            _unknown_trigger(trigger)
 
 
 def _apply_principal(definition: Any, principal: TaskPrincipal) -> int:
-    """Set the definition's principal; return the logon type ``RegisterTaskDefinition`` needs."""
+    """Set the definition's principal; return the logon type ``RegisterTaskDefinition`` needs.
+
+    Example:
+        >>> callable(_apply_principal)
+        True
+    """
     logon = _LOGON_TYPE[principal.effective_logon_type()]
     if principal.user_id is not None:
         definition.Principal.UserId = principal.user_id
@@ -249,7 +301,7 @@ class NativeScheduledTaskController:
         """Register an EXEC task (``program`` + ``arguments``) with an optional principal and triggers.
 
         With no ``principal`` the task runs as the interactive caller; with no ``triggers``
-        it runs only on demand (``start_scheduled_task``) - both the pre-1.6 behaviour.
+        it runs only on demand (``start_scheduled_task``).
 
         Args:
             task_path: Full task path (``\\Folder\\Name``; ``\\Name`` at the root).
@@ -265,7 +317,8 @@ class NativeScheduledTaskController:
         Raises:
             PlatformUnsupportedError: a principal or logon trigger names a POSIX uid, or
                 pywin32 is absent.
-            ConfigurationError: the principal's logon type cannot fit its user.
+            ConfigurationError: the principal or a logon trigger names a well-known group
+                SID, or the principal's logon type cannot fit its user.
             NativeCallError: a Task Scheduler COM call failed.
 
         Example:

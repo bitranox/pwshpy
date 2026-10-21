@@ -93,8 +93,9 @@ A timed-out search raises `OperationTimeoutError` (its `.timeout` holds the limi
 
 The child is started with the `spawn` method on every OS, which re-imports the calling script in
 the child. A script that calls `get_windows_update` at module level without an
-`if __name__ == "__main__":` guard therefore fails in the child at bootstrap; put the call under the
-guard (the `pwshpy` CLI already does).
+`if __name__ == "__main__":` guard therefore fails in the child at bootstrap, reported at once as
+`NativeCallError` ("worker exited without a result"); put the call under the guard (the `pwshpy`
+CLI already does).
 
 CLI: `pwshpy get_windows_update --timeout 600 --jsonl`; a timeout prints one `timed out` line on
 stderr and exits **110** (ETIMEDOUT).

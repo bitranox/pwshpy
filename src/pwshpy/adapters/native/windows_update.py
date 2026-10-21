@@ -93,11 +93,9 @@ def _callee_failure(excepinfo: object, *, code: int, text: str) -> tuple[int, st
 def _windows_update_search(criteria: str) -> _Outcome:
     """Child-side: run the COM search; return (error message, rows), never raise a COM error."""
     pythoncom: Any = importlib.import_module("pythoncom")
-    client: Any = importlib.import_module("win32com.client")
     pythoncom.CoInitialize()
     try:
-        updates = client.Dispatch("Microsoft.Update.Session").CreateUpdateSearcher().Search(criteria).Updates
-        return "", [_flatten(updates.Item(i)) for i in range(int(updates.Count))]
+        return _search_rows(criteria)
     except Exception as exc:
         # Matched by name: pywintypes is importable only on Windows, and cim.py does the same.
         if type(exc).__name__ != "com_error":
@@ -105,6 +103,18 @@ def _windows_update_search(criteria: str) -> _Outcome:
         return _com_failure_message(exc), []
     finally:
         pythoncom.CoUninitialize()
+
+
+def _search_rows(criteria: str) -> _Outcome:
+    """Search and flatten; every COM object is local to this frame.
+
+    So all of them are released when it returns, BEFORE the caller's ``CoUninitialize``: a COM
+    reference still alive at that point is released into a torn-down apartment, and pywin32
+    prints "Win32 exception occurred releasing IUnknown" to stderr for each one.
+    """
+    client: Any = importlib.import_module("win32com.client")
+    updates = client.Dispatch("Microsoft.Update.Session").CreateUpdateSearcher().Search(criteria).Updates
+    return "", [_flatten(updates.Item(i)) for i in range(int(updates.Count))]
 
 
 def _rows_or_raise(outcome: _Outcome) -> list[dict[str, Any]]:

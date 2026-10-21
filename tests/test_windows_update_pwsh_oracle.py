@@ -71,3 +71,23 @@ def test_installed_update_ids_match_the_com_search_from_pwsh() -> None:
     assert {update.update_id for update in ours} == theirs
     assert all(update.is_installed for update in ours)
     assert all(update.title and update.update_id for update in ours)
+
+
+def test_cli_search_leaves_stderr_empty() -> None:
+    """The CLI's search child releases its COM objects cleanly: exit 0 and nothing on stderr.
+
+    A COM reference released after CoUninitialize makes pywin32 print "Win32 exception occurred
+    releasing IUnknown" from the child, which shares the CLI's stderr.
+    """
+    completed = subprocess.run(  # noqa: S603 - this interpreter running pwshpy with fixed arguments
+        [sys.executable, "-m", "pwshpy", "get_windows_update", "--criteria", _CRITERIA, "--timeout", "900", "--jsonl"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=_SEARCH_TIMEOUT + 60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip()
+    assert completed.stderr == ""

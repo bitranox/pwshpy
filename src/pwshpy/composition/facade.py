@@ -1284,7 +1284,8 @@ class Ps:
 
         The child is started with the ``spawn`` method, which re-imports the calling script,
         so a script using this must guard its top level with ``if __name__ == "__main__":``;
-        without the guard the child fails at bootstrap.
+        without the guard the child fails at bootstrap (a ``NativeCallError``, "worker exited
+        without a result").
 
         Args:
             criteria: A WUA search criteria string (default: software updates not installed).

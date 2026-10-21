@@ -11,6 +11,7 @@ Contents:
     * :func:`call` - one Manager method call, mapping a D-Bus error to :class:`NativeCallError`.
     * :func:`unit_property` / :func:`active_state` - read a ``Unit`` (or, with ``interface``, a
       ``Timer`` / ``Service``) property of a loaded unit.
+    * :func:`has_pending_job` - whether a unit still has a job queued or running.
     * :func:`unit_path` / :func:`path_property` - resolve a unit's object path once, then read
       several properties from it (one ``GetUnit`` instead of one per property).
     * :func:`load_unit_path` - the same, but ``LoadUnit`` loads an unloaded unit from its file
@@ -188,6 +189,19 @@ def active_state(bus: Bus, name: str) -> str:
     return str(unit_property(bus, name, "ActiveState", "inactive"))
 
 
+def has_pending_job(bus: Bus, name: str) -> bool:
+    """Whether the unit has a job queued or running (``Unit.Job`` is ``(0, "/")`` when it has none).
+
+    The job, not the ActiveState, says whether a start/stop is still on its way: a Type=oneshot
+    unit's start job ends with the unit inactive, and right after RestartUnit an active unit still
+    reads active. An unloaded unit has no job.
+    """
+    job: Any = path_property(bus, unit_path(bus, name), "Job", (0, "/"))
+    if not isinstance(job, tuple) or not job:
+        return False
+    return int(cast("Any", job[0])) != 0
+
+
 def unit_file_state(bus: Bus, name: str) -> str | None:
     """GetUnitFileState for one unit; ``None`` for a transient unit that has no unit file."""
     try:
@@ -208,6 +222,7 @@ __all__ = [
     "UNLISTED_LOAD_STATES",
     "active_state",
     "call",
+    "has_pending_job",
     "is_error",
     "is_unlisted_unit",
     "load_unit_path",

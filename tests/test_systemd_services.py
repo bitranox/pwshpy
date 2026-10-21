@@ -364,13 +364,15 @@ def test_read_back_of_a_running_not_found_service_reports_its_state(monkeypatch:
     assert (info.name, info.status) == ("busy.service", ServiceState.STOP_PENDING)
 
 
-def _settling_conn(active_state: str, *, failing: frozenset[str] = frozenset()) -> FakeConn:
-    """A loaded service frozen in ``active_state`` - the fake never advances it, like a hung stop."""
+def _settling_conn(
+    active_state: str, *, failing: frozenset[str] = frozenset(), walks: dict[str, list[str]] | None = None
+) -> FakeConn:
+    """A loaded service in ``active_state``; frozen there (like a hung stop) unless ``walks`` moves it."""
     props: dict[tuple[str, str, str], Any] = {
         ("wuauserv.service", _UNIT, "ActiveState"): active_state,
         ("wuauserv.service", _UNIT, "Description"): "Update daemon",
     }
-    return FakeConn([], props, frozenset({"wuauserv.service"}), failing=failing)
+    return FakeConn([], props, frozenset({"wuauserv.service"}), failing=failing, walks=walks)
 
 
 @pytest.mark.os_agnostic
@@ -415,3 +417,46 @@ def test_a_refused_stop_unit_is_native_call_error_not_a_timeout(monkeypatch: pyt
     with pytest.raises(NativeCallError) as caught:
         SystemdServiceController().stop("wuauserv.service", wait=wait)
     assert not isinstance(caught.value, OperationTimeoutError)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("method", "verb", "walk"),
+    [
+        ("start", "StartUnit", ["activating", "activating", "inactive"]),
+        ("restart", "RestartUnit", ["deactivating", "activating", "inactive"]),
+    ],
+)
+def test_a_start_whose_job_ends_inactive_returns_promptly(
+    monkeypatch: pytest.MonkeyPatch, method: str, verb: str, walk: list[str]
+) -> None:
+    """A Type=oneshot unit without RemainAfterExit (or a simple one exiting 0) ends inactive.
+
+    Its job is done once the unit leaves activating, so the start is settled there and reports
+    the state it reached instead of waiting for an active that never comes.
+    """
+    conn = _settling_conn("inactive", walks={verb: walk})
+    use_bus(monkeypatch, conn)
+    started = time.monotonic()
+    info = getattr(SystemdServiceController(), method)("wuauserv.service", timeout=3.0)
+    assert time.monotonic() - started < 2
+    assert info.status is ServiceState.STOPPED
+    assert conn.verbs == [verb]
+
+
+@pytest.mark.os_agnostic
+def test_a_restart_waits_for_its_job_not_for_the_active_state_it_started_from(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Right after RestartUnit an active unit still reads active; the restart is settled only when its job is."""
+    conn = _settling_conn("active", walks={"RestartUnit": ["active", "deactivating", "activating", "active"]})
+    use_bus(monkeypatch, conn)
+    info = SystemdServiceController().restart("wuauserv.service", timeout=3.0)
+    assert info.status is ServiceState.RUNNING
+    # Every step of the walk was read: the wait did not stop at the leading 'active'.
+    assert conn.steps_ahead("wuauserv.service") == ["active"]
+
+
+@pytest.mark.os_agnostic
+def test_a_stop_settles_when_its_job_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A waiting stop of a deactivating unit returns Stopped once the stop job is done."""
+    use_bus(monkeypatch, _settling_conn("active", walks={"StopUnit": ["deactivating", "deactivating", "inactive"]}))
+    assert SystemdServiceController().stop("wuauserv.service", timeout=3.0).status is ServiceState.STOPPED

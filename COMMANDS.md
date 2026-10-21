@@ -87,7 +87,11 @@ The whole subsystem is **portable**: win32service on Windows, systemd over D-Bus
 in - the D-Bus lib jeepney is a base Linux dependency). On Linux `name` is the unit name
 (`"sshd.service"`) and `service_type` is `None`. `Start`/`Stop`/`Restart`/`Set-Service` map to
 `StartUnit`/`StopUnit`/`RestartUnit` and `EnableUnitFiles`/`DisableUnitFiles`; each waits for the
-unit to settle. Mutation needs admin (Windows) / polkit or root (Linux).
+unit to settle, which on Linux means its job is done: a `Type=oneshot` unit without
+`RemainAfterExit` returns `Stopped` once its start job finishes. On Windows a service already in
+`StopPending` (`StartPending`) is not sent a second stop (start), which the SCM would refuse; the
+verb waits for that pending transition, or with `wait=False` returns `StopPending`. Mutation needs
+admin (Windows) / polkit or root (Linux).
 
 A start, stop or restart that has not settled by `timeout` raises `OperationTimeoutError` (its
 `.timeout` holds the limit; CLI exit 110): the control was issued and the service is still on its

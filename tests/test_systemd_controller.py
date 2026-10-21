@@ -1,7 +1,8 @@
 """Live systemd mutating controller test - on a SCRATCH unit, root only.
 
-Creates a throwaway ``pwshpy-pytest.service`` (a ``sleep`` unit), drives start/stop/
-set_startup through SystemdServiceController, and removes it again. It never touches a
+Creates throwaway ``pwshpy-pytest*.service`` units (a ``sleep`` unit, a slow-stopping one, a
+oneshot one), drives start/stop/restart/set_startup through SystemdServiceController or the ``ps``
+facade, and removes them again. It never touches a
 real service. local_only + Linux + root, so it runs on the dev box, never in CI.
 """
 # subprocess drives systemctl for the unit-file lifecycle (create/reload/cleanup); fixed argv.
@@ -17,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from pwshpy.adapters.native.systemd_services import SystemdServiceController
+from pwshpy.composition.facade import build_ps
 from pwshpy.domain.enums import ServiceStartType, ServiceState
 from pwshpy.domain.errors import OperationTimeoutError
 
@@ -112,3 +114,33 @@ def test_stop_without_wait_returns_before_a_slow_stop_finishes(slow_stop_unit: s
     assert caught.value.timeout == 0.5
 
     assert controller.stop(slow_stop_unit, timeout=_SLOW_STOP_SECONDS * 4).status is ServiceState.STOPPED
+
+
+_ONESHOT_UNIT = "pwshpy-pytest-oneshot.service"
+_ONESHOT_UNIT_PATH = Path("/etc/systemd/system") / _ONESHOT_UNIT
+# Type=oneshot without RemainAfterExit: the start job ends with the unit back at inactive, so a
+# start that waited for "active" would sit out its whole timeout although the job succeeded.
+_ONESHOT_UNIT_BODY = "[Unit]\nDescription=pwshpy pytest oneshot scratch\n[Service]\nType=oneshot\nExecStart=/bin/true\n"
+
+
+@pytest.fixture
+def oneshot_unit() -> object:
+    """Install a throwaway oneshot unit; remove it on teardown."""
+    _ONESHOT_UNIT_PATH.write_text(_ONESHOT_UNIT_BODY)
+    subprocess.run(["systemctl", "daemon-reload"], check=True)  # noqa: S607 - fixed argv
+    try:
+        yield _ONESHOT_UNIT
+    finally:
+        subprocess.run(["systemctl", "stop", _ONESHOT_UNIT], check=False)  # noqa: S603, S607
+        _ONESHOT_UNIT_PATH.unlink(missing_ok=True)
+        subprocess.run(["systemctl", "daemon-reload"], check=False)  # noqa: S607
+
+
+def test_starting_a_oneshot_unit_returns_once_its_job_is_done(oneshot_unit: str) -> None:
+    """ps.start_service / restart_service of a oneshot unit return promptly, reporting Stopped."""
+    ps = build_ps()
+    for verb in (ps.start_service, ps.restart_service):
+        started = time.monotonic()
+        info = verb(oneshot_unit, timeout=20.0)
+        assert time.monotonic() - started < 5, verb.__name__
+        assert info.status is ServiceState.STOPPED, verb.__name__

@@ -71,9 +71,19 @@ class FakeConn:
     without a daemon-reload: ListUnits still reports the cached ``not-found``, but ``LoadUnit``
     loads them from the new file (systemd's unit-cache retry, ``manager_unit_cache_should_retry_load``,
     which applies to a not-found unit only, never to a masked one).
+
+    ``Unit.Job`` is ``(0, "/")`` (no job, as busctl and jeepney show it) unless the unit's
+    ActiveState is a transition (activating, deactivating, reloading), which holds a job path, as a
+    start or stop job does on systemd; a ``Job`` entry in ``props`` overrides that. ``walks`` maps a
+    verb (``StartUnit``, ...) to the ActiveStates the unit named in that verb passes through after
+    it: each ActiveState or Job read returns the current step and moves to the next, the last step
+    sticking. Like systemd, which installs the job before it answers the verb, the unit holds a job
+    until it reaches that last step - so a restart reads active WITH a job right after the verb,
+    and a Type=oneshot start walks activating -> inactive, its job ending there.
     """
 
-    _VERBS = frozenset({"Reload", "StartUnit", "StopUnit", "EnableUnitFiles", "DisableUnitFiles"})
+    _VERBS = frozenset({"Reload", "StartUnit", "StopUnit", "RestartUnit", "EnableUnitFiles", "DisableUnitFiles"})
+    _TRANSITIONS = frozenset({"activating", "deactivating", "reloading"})
 
     def __init__(
         self,
@@ -87,6 +97,7 @@ class FakeConn:
         load_states: dict[str, str] | None = None,
         file_dirs: dict[str, str] | None = None,
         appeared: frozenset[str] = frozenset(),
+        walks: dict[str, list[str]] | None = None,
     ) -> None:
         self._units = units  # (name, description, active_state)
         self._props = props
@@ -97,6 +108,8 @@ class FakeConn:
         self._load_states = dict(load_states or {})  # a copy: LoadUnit of an appeared unit updates it
         self._appeared = appeared
         self._file_dirs = file_dirs or {}
+        self._walks = walks or {}
+        self._walking: dict[str, list[str]] = {}  # unit -> ActiveStates still ahead of it
         self._known = {unit for unit, _iface, _prop in props} | set(unit_files) | set(unloaded)
         self._not_found: set[str] = set()  # names LoadUnit answered with a not-found object
         self.verbs: list[str] = []
@@ -140,7 +153,39 @@ class FakeConn:
 
     def _verb(self, msg: Message) -> Reply:
         self.verbs.append(msg.method)
-        return Reply(("failed",), error=True) if msg.method in self._failing else Reply(())
+        if msg.method in self._failing:
+            return Reply(("failed",), error=True)
+        if msg.method in self._walks:
+            self._walking[str(msg.body[0])] = list(self._walks[msg.method])
+        return Reply(())
+
+    def _step(self, name: str) -> tuple[str, bool] | None:
+        """The walking unit's current ActiveState and whether its job is still on, moving one step on."""
+        steps = self._walking.get(name)
+        if not steps:
+            return None
+        current, job_on = steps[0], len(steps) > 1
+        if job_on:
+            steps.pop(0)
+        return current, job_on
+
+    def steps_ahead(self, name: str) -> list[str]:
+        """The ActiveStates the walking unit has still to pass (its last, sticking step included)."""
+        return list(self._walking.get(name, []))
+
+    def _job(self, active_state: str) -> tuple[int, str]:
+        return (7, "/org/freedesktop/systemd1/job/7") if active_state in self._TRANSITIONS else (0, "/")
+
+    def _transient(self, name: str, iface: str, prop: str) -> Reply | None:
+        """ActiveState and the derived Job of a loaded unit; None for any other property."""
+        if prop not in {"ActiveState", "Job"} or (prop == "Job" and (name, iface, prop) in self._props):
+            return None
+        step = self._step(name)
+        state = step[0] if step else self._props.get((name, iface, "ActiveState"))
+        if state is None:
+            return None
+        job = self._job("activating" if step and step[1] else state)
+        return Reply((("t", state if prop == "ActiveState" else job),))
 
     #: What systemd 259 reports for a not-found unit object (busctl get-property, measured).
     _NOT_FOUND_DEFAULTS: ClassVar[dict[str, Any]] = {
@@ -150,6 +195,7 @@ class FakeConn:
         "ExecMainStartTimestamp": 0,
         "ExecMainCode": 0,
         "ExecMainStatus": 0,
+        "Job": (0, "/"),
     }
 
     def _get(self, msg: Message) -> Reply:
@@ -159,6 +205,9 @@ class FakeConn:
             return Reply(("no prop",), error=True) if value is None else Reply((("t", value),))
         if name in self._unloaded:  # an unloaded unit has no readable properties
             return Reply(("not loaded",), error=True)
+        transient = self._transient(name, _iface, prop)
+        if transient is not None:
+            return transient
         key = (name, _iface, prop)
         if key in self._props:
             return Reply((("t", self._props[key]),))

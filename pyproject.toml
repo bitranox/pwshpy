@@ -20,11 +20,11 @@ dependencies = [
     "psutil>=7.2.2",
     # Safe XML parsing for the event-log adapter's rendered event XML (pure Python, portable).
     "defusedxml>=0.7.1",
-    # Windows-only native bindings (Tier A). Platform-gated so base installs on
+    # Windows-only native bindings. Platform-gated so base installs on
     # Linux/macOS pull only the portable subset (psutil).
     "pywin32>=312; sys_platform == 'win32'",
     "wmi>=1.5.1; sys_platform == 'win32'",
-    # Typed winreg wrapper backing the Registry Tier-A adapter (Windows-only at
+    # Typed winreg wrapper backing the Registry native adapter (Windows-only at
     # runtime; the dev extra installs it cross-OS for the hermetic fake_winreg tests).
     "lib_registry>=3.1.6; sys_platform == 'win32'",
     # Linux-only native bindings. Pure-Python D-Bus (jeepney) backs the systemd services
@@ -66,8 +66,8 @@ Repository = "https://github.com/bitranox/pwshpy.git"
 Issues = "https://github.com/bitranox/pwshpy/issues"
 
 [project.optional-dependencies]
-# Tier B — hosted PowerShell 7.6 SDK (in-process via pythonnet/CoreCLR).
-# Requires the .NET 10 runtime present. A Tier-B call without this extra raises
+# .NET - hosted PowerShell 7.6 SDK (in-process via pythonnet/CoreCLR).
+# Requires the .NET 10 runtime present. A .NET call without this extra raises
 # FeatureUnavailableError naming this exact install.
 full = [
   "pythonnet>=3.1.0",
@@ -210,7 +210,7 @@ convention = "google"
 "src/pwshpy/application/*.py" = ["PLR0913"]
 "src/pwshpy/adapters/config/*.py" = ["PLR0913"]
 "src/pwshpy/adapters/memory/*.py" = ["PLR0913"]
-# Composition root: the ps facade wires one injected adapter per Tier-A subsystem
+# Composition root: the ps facade wires one injected adapter per native subsystem
 "src/pwshpy/composition/*.py" = ["PLR0913"]
 
 [tool.pyright]
@@ -231,7 +231,7 @@ markers = [
   "os_linux: test exercises Linux-only behavior",
   "local_only: tests that require the local dev environment (external resources, script composition); skipped in CI",
   "integration: tests requiring external resources (SMTP, databases, APIs); run via 'bmk ti' or 'mktesti.sh'",
-  "mutating: tests that CHANGE host state (mutating Tier-A verbs); run only on the disposable throwaway VM, never CI",
+  "mutating: tests that CHANGE host state (mutating native verbs); run only on the disposable throwaway VM, never CI",
 ]
 
 [tool.coverage.run]

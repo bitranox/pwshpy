@@ -8,6 +8,7 @@ and that a child exception crosses the pipe as a typed error.
 
 from __future__ import annotations
 
+import multiprocessing
 import time
 
 import pytest
@@ -29,6 +30,14 @@ def test_a_hang_is_killed_and_reported_as_a_timeout() -> None:
         run_bounded(hang, (0.0,), timeout=2)
     assert time.monotonic() - started < 20  # bounded: kill + join, not the child's 3600 s sleep
     assert caught.value.timeout == 2
+
+
+@pytest.mark.os_agnostic
+def test_a_timed_out_child_is_not_left_running() -> None:
+    """The timeout bound alone passes even if the child is only abandoned; this pins the kill."""
+    with pytest.raises(OperationTimeoutError):
+        run_bounded(hang, (0.0,), timeout=1)
+    assert multiprocessing.active_children() == []
 
 
 @pytest.mark.os_agnostic

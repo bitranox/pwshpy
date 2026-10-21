@@ -422,6 +422,9 @@ _TASK_NO_RESULT = frozenset({_TASK_HAS_NOT_RUN, _TASK_RUNNING})
 def com_date_to_datetime(value: datetime | None) -> datetime | None:
     """Map a Task Scheduler COM date (local wall time) to aware UTC; the "never" sentinels -> None.
 
+    The repeated hour at a DST fall-back resolves to the DST offset (fold=0): a VT_DATE cannot
+    carry which of the two instants it meant.
+
     Example:
         >>> com_date_to_datetime(datetime(1899, 12, 30)) is None, com_date_to_datetime(datetime(1999, 11, 30)) is None
         (True, True)

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -575,6 +576,8 @@ def test_scheduled_task_lifecycle() -> None:
 def _pwsh_json(script: str) -> Any:
     """Run ``script`` in pwsh and parse its JSON output (the oracle module skips itself off Windows)."""
     pwsh = r"C:\Program Files\PowerShell\7\pwsh.exe"
+    if not Path(pwsh).exists():
+        pytest.skip("PowerShell 7 (pwsh.exe) is not installed; the cross-check needs it")
     completed = subprocess.run(  # noqa: S603 - fixed pwsh argv with a constant script; test oracle only
         [pwsh, "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
@@ -657,7 +660,12 @@ def test_run_info_for_a_just_run_and_a_never_run_task() -> None:
         ps.start_scheduled_task("\\" + _RAN)
         deadline = time.monotonic() + 60
         ran = ps.get_scheduled_task().first(lambda t: t.task_name == _RAN)
-        while ran is not None and ran.state is TaskState.RUNNING and time.monotonic() < deadline:
+        # Wait for the result too: the state can flip to Ready before LastTaskResult is written.
+        while (
+            ran is not None
+            and (ran.state is TaskState.RUNNING or ran.last_task_result is None)
+            and time.monotonic() < deadline
+        ):
             time.sleep(1)
             ran = ps.get_scheduled_task().first(lambda t: t.task_name == _RAN)
         never = ps.get_scheduled_task().first(lambda t: t.task_name == _NEVER)

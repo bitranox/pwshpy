@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+import time
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -68,6 +71,33 @@ def test_com_date_is_local_wall_time_whatever_the_label() -> None:
     as_utc = com_date_to_datetime(datetime(2026, 10, 21, 18, 53, 12, tzinfo=timezone.utc))
     as_plus2 = com_date_to_datetime(datetime(2026, 10, 21, 18, 53, 12, tzinfo=timezone(timedelta(hours=2))))
     assert as_utc == as_plus2 == datetime(2026, 10, 21, 18, 53, 12).astimezone(timezone.utc)
+
+
+@pytest.fixture
+def vienna_tz(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the process zone to Europe/Vienna, restoring the previous zone afterwards."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is POSIX-only")
+    monkeypatch.setenv("TZ", "Europe/Vienna")
+    time.tzset()
+    yield
+    monkeypatch.undo()  # restore TZ before re-reading it, or tzset would keep Vienna
+    time.tzset()
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="time.tzset is POSIX-only")
+@pytest.mark.usefixtures("vienna_tz")
+@pytest.mark.parametrize(
+    ("wall", "expected"),
+    [
+        (datetime(2026, 10, 21, 18, 53, 12), datetime(2026, 10, 21, 16, 53, 12, tzinfo=timezone.utc)),  # CEST
+        (datetime(2026, 1, 15, 12, 0), datetime(2026, 1, 15, 11, 0, tzinfo=timezone.utc)),  # CET
+    ],
+)
+def test_com_date_reads_the_wall_time_in_the_host_zone(wall: datetime, expected: datetime) -> None:
+    """Fixed instants under a fixed zone, so a UTC CI host still catches a read-the-wall-time-as-UTC regression."""
+    assert com_date_to_datetime(wall.replace(tzinfo=timezone.utc)) == expected
 
 
 @pytest.mark.os_agnostic

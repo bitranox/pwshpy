@@ -78,11 +78,20 @@ def _render_message(win32evtlog: Any, handle: Any) -> str | None:
     return str(text) if text else None
 
 
-def iter_event_log(log_name: str) -> Iterator[EventLogEntry]:
+def iter_event_log(log_name: str, *, evtlog_api: Any | None = None) -> Iterator[EventLogEntry]:
     """Stream a Windows event log's entries newest-first (like ``Get-WinEvent -LogName``).
 
     Reads in batches and yields one record at a time, so the pipeline stays
     memory-bounded even on a log with millions of entries.
+
+    Args:
+        log_name: The channel to read (``System``, ``Setup``, ``Microsoft-Windows-.../Operational``).
+        evtlog_api: The ``win32evtlog`` module to call; ``None`` imports the real one.  Tests pass
+            a fake here so the streaming and message-rendering logic runs on every OS.
+
+    Raises:
+        PlatformUnsupportedError: pywin32 is not installed (a non-Windows host).
+        NativeCallError: the channel cannot be queried, read, or an event record rendered.
 
     Example:
         >>> import sys
@@ -90,7 +99,7 @@ def iter_event_log(log_name: str) -> Iterator[EventLogEntry]:
         >>> sys.platform != "win32" or isinstance(next(iter_event_log("System")), EventLogEntry)
         True
     """
-    win32evtlog: Any = _load_win32evtlog()
+    win32evtlog: Any = _load_win32evtlog() if evtlog_api is None else evtlog_api
     flags = win32evtlog.EvtQueryChannelPath | win32evtlog.EvtQueryReverseDirection
     try:
         query = win32evtlog.EvtQuery(log_name, flags)

@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 
-from pwshpy.adapters.native import event_log as event_log_mod
 from pwshpy.adapters.native.event_log import iter_event_log
 from pwshpy.domain.enums import EventLevel
 from pwshpy.domain.errors import NativeCallError
@@ -69,10 +68,9 @@ class _FakeWin32Evtlog:
 
 
 @pytest.mark.os_agnostic
-def test_iter_event_log_streams_and_marshals(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_iter_event_log_streams_and_marshals() -> None:
     """The adapter parses the event XML into EventLogEntry records and ends cleanly."""
-    monkeypatch.setattr(event_log_mod, "_load_win32evtlog", _FakeWin32Evtlog)
-    entries = list(iter_event_log("System"))
+    entries = list(iter_event_log("System", evtlog_api=_FakeWin32Evtlog()))
     assert len(entries) == 2
 
     first = entries[0]
@@ -95,11 +93,10 @@ def test_iter_event_log_streams_and_marshals(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.os_agnostic
-def test_iter_event_log_is_lazy_and_memory_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_iter_event_log_is_lazy_and_memory_bounded() -> None:
     """Consuming one entry renders exactly one event - the stream never slurps the log."""
     fake = _FakeWin32Evtlog()
-    monkeypatch.setattr(event_log_mod, "_load_win32evtlog", lambda: fake)
-    first = next(iter_event_log("System"))
+    first = next(iter_event_log("System", evtlog_api=fake))
     assert first.record_id == 42
     assert fake.render_count == 1  # the second event was NOT rendered until requested
 
@@ -111,66 +108,66 @@ class _ReadError(Exception):
 
 
 @pytest.mark.os_agnostic
-def test_iter_event_log_wraps_query_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_iter_event_log_wraps_query_failure() -> None:
     """A failed EvtQuery (missing channel / access denied) surfaces as NativeCallError."""
 
     class _BadQuery(_FakeWin32Evtlog):
         def EvtQuery(self, path: str, flags: int) -> str:  # noqa: N802 - win32 API name
             raise RuntimeError("no such channel")
 
-    monkeypatch.setattr(event_log_mod, "_load_win32evtlog", _BadQuery)
+    api = _BadQuery()
     with pytest.raises(NativeCallError):
-        list(iter_event_log("System"))
+        list(iter_event_log("System", evtlog_api=api))
 
 
 @pytest.mark.os_agnostic
-def test_iter_event_log_wraps_read_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_iter_event_log_wraps_read_failure() -> None:
     """An EvtNext failure other than ERROR_NO_MORE_ITEMS surfaces as NativeCallError."""
 
     class _BadNext(_FakeWin32Evtlog):
         def EvtNext(self, query: Any, count: int) -> list[str]:  # noqa: N802 - win32 API name
             raise _ReadError
 
-    monkeypatch.setattr(event_log_mod, "_load_win32evtlog", _BadNext)
+    api = _BadNext()
     with pytest.raises(NativeCallError):
-        list(iter_event_log("System"))
+        list(iter_event_log("System", evtlog_api=api))
 
 
 @pytest.mark.os_agnostic
-def test_iter_event_log_ends_on_empty_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_iter_event_log_ends_on_empty_batch() -> None:
     """An empty EvtNext batch ends the stream cleanly (distinct from the no-more-items exception)."""
 
     class _EmptyNext(_FakeWin32Evtlog):
         def EvtNext(self, query: Any, count: int) -> list[str]:  # noqa: N802 - win32 API name
             return []
 
-    monkeypatch.setattr(event_log_mod, "_load_win32evtlog", _EmptyNext)
-    assert list(iter_event_log("System")) == []
+    api = _EmptyNext()
+    assert list(iter_event_log("System", evtlog_api=api)) == []
 
 
 @pytest.mark.os_agnostic
-def test_iter_event_log_wraps_render_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_iter_event_log_wraps_render_failure() -> None:
     """An unreadable event record (EvtRender raises) surfaces as NativeCallError."""
 
     class _BadRender(_FakeWin32Evtlog):
         def EvtRender(self, handle: str, flag: int) -> str:  # noqa: N802 - win32 API name
             raise RuntimeError("corrupt record")
 
-    monkeypatch.setattr(event_log_mod, "_load_win32evtlog", _BadRender)
+    api = _BadRender()
     with pytest.raises(NativeCallError):
-        list(iter_event_log("System"))
+        list(iter_event_log("System", evtlog_api=api))
 
 
 @pytest.mark.os_agnostic
-def test_message_render_degrades_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_message_render_degrades_on_exception() -> None:
     """A provider with no resolvable message table yields message=None, not an error."""
 
     class _BadMessage(_FakeWin32Evtlog):
         def EvtFormatMessage(self, meta: Any, handle: str, flag: int) -> str:  # noqa: N802 - win32 API name
             raise RuntimeError("no message table")
 
-    monkeypatch.setattr(event_log_mod, "_load_win32evtlog", _BadMessage)
-    entries = list(iter_event_log("System"))
+    api = _BadMessage()
+    entries = list(iter_event_log("System", evtlog_api=api))
     assert entries
     assert all(entry.message is None for entry in entries)
 

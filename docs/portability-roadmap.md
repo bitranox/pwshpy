@@ -41,8 +41,9 @@ box (like the Windows mutating tests need throwaway VM 24000).
    read; `posix_account_control.py` mutation via useradd/usermod/groupadd/gpasswd, verified live as root).
 3. **Services -> systemd** (read + mutating) - **DONE** (`systemd_services.py`, D-Bus; read + start/stop/restart/enable/disable verified live on a root scratch unit).
 4. **Scheduled tasks -> systemd timers** (read + mutating) - **DONE** (`systemd_timers.py`, D-Bus;
-   read lists `.timer` units, register/run/unregister an on-demand oneshot service, enable/disable a
-   `.timer`; verified live on root scratch units).
+   read lists `.timer` units with principal and run info, register writes a oneshot service plus a
+   `.timer` for its triggers, run/unregister, enable/disable a `.timer`; verified live on root
+   scratch units).
 5. **`elevate()` relaunch -> sudo/pkexec** - **DONE** (sudo re-exec; verified on Linux).
 6. **Credential store -> Secret Service** - **DONE** (`secret_service.py`, D-Bus, plain algorithm;
    save/load/delete verified live against gnome-keyring; locked/absent keyring gives a clear error).
@@ -121,16 +122,36 @@ box (like the Windows mutating tests need throwaway VM 24000).
 - **Model:** a scheduled task = a `.timer` unit (the schedule) triggering a `.service` unit (the work).
 - **Read** (`iter_timers`): `ListUnits()` filter to `.timer`; state from ActiveState + enablement from
   `GetUnitFileState`; description from the unit. Marshals to the same `ScheduledTaskInfo`.
-- **Mutate:** `register` writes an on-demand oneshot `.service` under `/etc/systemd/system` (matching
-  the Windows on-demand `Register-ScheduledTask` pwshpy exposes) + `Reload`; `run`/`stop` =
-  `StartUnit`/`StopUnit` of the service; `enable`/`disable` = `EnableUnitFiles`/`DisableUnitFiles` of a
-  task's `.timer`; `unregister` stops + removes the files pwshpy wrote (never a vendor unit under /lib).
+  `user_id` is the triggered service's `User=` as a decimal uid (`"0"` for root, `""` when it cannot
+  be read or resolved); `last_run_time` is the timer's `LastTriggerUSec`, `next_run_time` its
+  `NextElapseUSecRealtime` (None for a boot-only timer, which has no wall-clock next elapse);
+  `last_task_result` is the service's exit status, `128 + signal` when killed, None while it runs or
+  if it never ran; `run_level` is always None.
+- **Mutate:** `register` writes a oneshot `.service` under `/etc/systemd/system` (the exec action,
+  `User=<uid>` for a uid principal) and, when triggers are given, a `.timer` that starts it, then
+  `Reload` + `EnableUnitFiles`; a task with no triggers runs only on demand. Registering over an
+  existing task replaces it. `run`/`stop` = `StartUnit`/`StopUnit` of the service;
+  `enable`/`disable` = `EnableUnitFiles`/`DisableUnitFiles` of a task's `.timer`; `unregister` stops +
+  removes the files pwshpy wrote (never a vendor unit under /lib).
+- **Principal map (lossy, documented):** no principal or SYSTEM -> root (no `User=`), where Windows
+  runs a principal-less task as the interactive caller; a decimal uid -> `User=<uid>`. Any other SID,
+  any `logon_type`, and `run_level=HIGHEST` for a non-root uid -> `PlatformUnsupportedError` (no
+  Linux meaning).
+- **Trigger map:** once -> `OnCalendar=YYYY-MM-DD HH:MM:SS UTC`; daily with `every_days=1` ->
+  `OnCalendar=*-*-* HH:MM:SS UTC` (a calendar spec has no start date, so it runs from today even
+  when `at` lies ahead); boot -> `OnBootSec=<seconds>s`; every timer gets `AccuracySec=1s`.
+  `every_days` above 1, a logon trigger (a user unit fires when the user manager starts, not at each
+  logon), and boot mixed with calendar triggers in one task -> `PlatformUnsupportedError`.
 - **The gotcha (recorded):** an on-demand oneshot **cannot be "disabled"** on systemd - a mask symlink
   cannot shadow the unit file we wrote in `/etc` (`/etc` outranks `/run`, and a persistent mask
   path-collides). So enable/disable are timer-only and raise a clear error for an on-demand task;
   "runnable/not" is not a systemd concept for a static unit.
-- **`TaskState` map:** armed timer -> READY, activating -> QUEUED, inactive/failed -> DISABLED; an
-  on-demand service is RUNNING while executing else READY.
+- **The boot-timer gotcha (recorded):** systemd fires an `OnBootSec=` whose offset is already past
+  the moment the timer starts, so `register` and `enable` only enable a timer with a boot-relative
+  part (it starts at the next boot via timers.target); starting it would run the job at once.
+- **`TaskState` map:** armed timer -> READY (an enabled but not yet started boot timer included),
+  activating -> QUEUED, inactive/failed -> DISABLED; an on-demand service is RUNNING while executing
+  else READY.
 - **Privilege:** system units need root (like the Windows verbs need admin); user timers are future work.
 
 ## 5. `elevate()` relaunch -> sudo / pkexec  [DONE]

@@ -115,20 +115,32 @@ newest-first (memory-bounded). `L` is a Windows channel (`"System"`) or, on Linu
 
 Portable: the Task Scheduler on Windows, systemd timers over D-Bus on Linux (built in, via the
 base Linux dep jeepney). On Linux `get_scheduled_task` lists the `.timer` units (`task_name` is
-the unit base name, `task_path` is `/`); `register` creates an on-demand oneshot `.service`
-(matching the Windows on-demand shape) that `run`/`stop` start/stop; `enable`/`disable` arm/disarm
-a task's `.timer` and raise a clear error for an on-demand task (systemd cannot disable a static
-oneshot). Mutation needs admin (Windows) / root (Linux, system units).
+the unit base name, `task_path` is `/`); `register` writes a oneshot `.service` (the action, with
+`User=` for a uid principal) and, when triggers are given, a `.timer` that starts it, so a task
+without triggers runs only on demand; `run`/`stop` start/stop the service; `enable`/`disable`
+arm/disarm a task's `.timer` and raise a clear error for an on-demand task (systemd cannot disable
+a static oneshot). A principal is a SID on Windows and a decimal uid on Linux, never an account
+name. Logon triggers, `every_days` above 1 and a logon type are Windows-only, and with no principal
+a task runs as the interactive caller on Windows but as root on Linux; the full mapping is in
+[Library & Pipeline](docs/library-usage.md#scheduled-tasks-principal-run-level-and-triggers).
+Mutation needs admin (Windows) / root (Linux, system units).
 
-| PowerShell                                                                                    | pwshpy - Python (API)                                                            | pwshpy - CLI                                                  |
-|-----------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|---------------------------------------------------------------|
-| `Get-ScheduledTask`                                                                           | `ps.get_scheduled_task(folder_path="\\")`                                        | `pwshpy get_scheduled_task`                                   |
-| `Register-ScheduledTask -TaskName T -Action (New-ScheduledTaskAction -Execute P -Argument A)` | `ps.register_scheduled_task("\\T", program="P", arguments="A", description="D")` | `pwshpy register_scheduled_task \T --program P --arguments A` |
-| `Unregister-ScheduledTask -TaskName T`                                                        | `ps.unregister_scheduled_task("\\T")`                                            | `pwshpy unregister_scheduled_task \T`                         |
-| `Enable-ScheduledTask -TaskName T`                                                            | `ps.enable_scheduled_task("\\T")`                                                | `pwshpy enable_scheduled_task \T`                             |
-| `Disable-ScheduledTask -TaskName T`                                                           | `ps.disable_scheduled_task("\\T")`                                               | `pwshpy disable_scheduled_task \T`                            |
-| `Start-ScheduledTask -TaskName T`                                                             | `ps.start_scheduled_task("\\T")`                                                 | `pwshpy start_scheduled_task \T`                              |
-| `Stop-ScheduledTask -TaskName T`                                                              | `ps.stop_scheduled_task("\\T")`                                                  | `pwshpy stop_scheduled_task \T`                               |
+| PowerShell                                                                                              | pwshpy - Python (API)                                                            | pwshpy - CLI                                                  |
+|---------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|---------------------------------------------------------------|
+| `Get-ScheduledTask`                                                                                     | `ps.get_scheduled_task(folder_path="\\")`                                        | `pwshpy get_scheduled_task`                                   |
+| `Register-ScheduledTask -TaskName T -Action (New-ScheduledTaskAction -Execute P -Argument A)`           | `ps.register_scheduled_task("\\T", program="P", arguments="A", description="D")` | `pwshpy register_scheduled_task \T --program P --arguments A` |
+| `Register-ScheduledTask ... -Principal (New-ScheduledTaskPrincipal -UserId S-1-5-18 -RunLevel Highest)` | `principal=TaskPrincipal.system()`                                               | `--run-as local_system --run-level highest`                   |
+| `New-ScheduledTaskPrincipal -UserId SID -LogonType S4U`                                                 | `principal=TaskPrincipal(user_id="SID", logon_type=TaskLogonType.S4U)`           | `--run-as SID --logon-type s4u`                               |
+| `Register-ScheduledTask ... -Trigger (New-ScheduledTaskTrigger -Once -At T)`                            | `triggers=[OnceTrigger(at=T)]`                                                   | `--at T`                                                      |
+| `New-ScheduledTaskTrigger -Daily -DaysInterval N -At T`                                                 | `triggers=[DailyTrigger(at=T, every_days=N)]`                                    | `--daily T --every-days N`                                    |
+| `New-ScheduledTaskTrigger -AtStartup`                                                                   | `triggers=[BootTrigger(delay=timedelta(seconds=S))]`                             | `--at-boot --boot-delay S`                                    |
+| `New-ScheduledTaskTrigger -AtLogOn -User U`                                                             | `triggers=[LogonTrigger(user_id="SID")]`  *(Windows)*                            | `--at-logon --logon-user SID`                                 |
+| `Get-ScheduledTaskInfo T` (`LastRunTime` / `LastTaskResult` / `NextRunTime`)                            | `task.last_run_time` / `task.last_task_result` / `task.next_run_time`            | `pwshpy get_scheduled_task --jsonl`                           |
+| `Unregister-ScheduledTask -TaskName T`                                                                  | `ps.unregister_scheduled_task("\\T")`                                            | `pwshpy unregister_scheduled_task \T`                         |
+| `Enable-ScheduledTask -TaskName T`                                                                      | `ps.enable_scheduled_task("\\T")`                                                | `pwshpy enable_scheduled_task \T`                             |
+| `Disable-ScheduledTask -TaskName T`                                                                     | `ps.disable_scheduled_task("\\T")`                                               | `pwshpy disable_scheduled_task \T`                            |
+| `Start-ScheduledTask -TaskName T`                                                                       | `ps.start_scheduled_task("\\T")`                                                 | `pwshpy start_scheduled_task \T`                              |
+| `Stop-ScheduledTask -TaskName T`                                                                        | `ps.stop_scheduled_task("\\T")`                                                  | `pwshpy stop_scheduled_task \T`                               |
 
 ## Local accounts  *(portable: read + mutation)*
 

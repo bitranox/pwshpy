@@ -15,6 +15,12 @@ common cmdlets.
 - The **portable native subsystems** dispatch by OS - win32 on Windows, an honest Linux backend
   on Linux: services (systemd D-Bus), event log (journald), scheduled tasks (systemd timers),
   local accounts (pwd / grp / shadow-utils), ACLs (POSIX ACL xattr) - read and mutating verbs.
+  Where the two OS models differ, the mapping is documented rather than faked, and an input with no
+  analog raises `PlatformUnsupportedError` before anything is changed. Scheduled tasks are the
+  widest gap: a principal is a SID on Windows and a decimal uid on Linux, a task with no principal
+  runs as the interactive caller on Windows and as root on Linux, and logon triggers, every-N-days
+  daily triggers and logon types are Windows-only (the full table is in
+  [Library & Pipeline](library-usage.md#scheduled-tasks-principal-run-level-and-triggers)).
 - Only three are **Windows-only**, having no honest Linux analog: the registry (Linux config is
   files), CIM/WMI, and hotfixes.
 

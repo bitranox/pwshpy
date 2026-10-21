@@ -555,7 +555,7 @@ class Ps:
             arguments: Program arguments.
             description: Task description.
             principal: Who the task runs as (a SID on Windows, a decimal uid on Linux);
-                None runs it as the interactive caller.
+                None runs it as the interactive caller on Windows and as root on Linux.
             triggers: When it runs; empty means on demand only.
 
         Raises:

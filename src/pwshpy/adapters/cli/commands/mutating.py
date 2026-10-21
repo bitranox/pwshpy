@@ -357,8 +357,7 @@ def _render(exc: ValueError) -> str:
 def _principal(run_as: str | None, run_level: str, logon_type: str | None) -> TaskPrincipal | None:
     """Build the principal, or None when no principal option moved off its default.
 
-    None keeps the adapter's own default (the interactive caller), exactly as before these
-    options existed.
+    None keeps the adapter's own default: the interactive caller on Windows, root on Linux.
 
     Example:
         >>> _principal(None, "Limited", None) is None
@@ -427,7 +426,7 @@ def _triggers(
     "--run-as",
     default=None,
     help="Principal: a SID, a decimal uid (Linux), or a WellKnownSid name such as local_system. "
-    "Default: the caller. Account names are refused.",
+    "Default: the caller on Windows, root on Linux. Account names are refused.",
 )
 @option(
     "--run-level",

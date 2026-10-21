@@ -70,6 +70,50 @@ account API), and a POSIX group has no description so `new_local_group`'s is ign
 `remove_item_property`, `new_registry_key`, `remove_registry_key`) and `clear_event_log`. See
 [COMMANDS.md](../COMMANDS.md) for the full cmdlet-by-cmdlet table.
 
+### `register_scheduled_task`: principal, run level and triggers
+
+`pwshpy register_scheduled_task TASK_PATH --program P [--arguments A] [--description D]` plus the
+options below. With no trigger option the task runs only on demand (`start_scheduled_task`); with
+several, it fires on any of them.
+
+| Option              | Meaning                                                                                                        |
+|---------------------|----------------------------------------------------------------------------------------------------------------|
+| `--run-as ID`       | a SID, a decimal uid (Linux), or a `WellKnownSid` name in any case (`local_system`); account names are refused |
+| `--run-level LEVEL` | `limited` (default) or `highest` (the elevated token; on Linux root only)                                      |
+| `--logon-type TYPE` | `interactivetoken`, `serviceaccount` or `s4u` (Windows only); by default it follows `--run-as`                 |
+| `--at TIME`         | run once at `TIME` (repeatable)                                                                                |
+| `--daily TIME`      | run daily at the time of day of `TIME`, starting then (repeatable)                                             |
+| `--every-days N`    | day interval for every `--daily` trigger (default 1; above 1 is Windows only)                                  |
+| `--at-boot`         | run at boot                                                                                                    |
+| `--boot-delay S`    | seconds after boot (with `--at-boot`)                                                                          |
+| `--at-logon`        | run at logon (Windows only)                                                                                    |
+| `--logon-user SID`  | whose logon triggers the task (with `--at-logon`; default any user)                                            |
+
+`TIME` is ISO 8601 with a UTC offset: `2026-11-01T03:00:00+01:00`, or a trailing `Z` for UTC. A
+time without an offset is refused, because the same text would fire at a different instant on a
+machine in another zone. Without `--run-as` the task runs as the interactive caller on Windows and
+as root on Linux.
+
+```bash
+# Windows: SYSTEM, elevated, nightly at 03:00 +01:00 and five minutes after each boot
+pwshpy register_scheduled_task '\Maintenance\NightlyBackup' --program 'C:\Tools\backup.exe' \
+    --arguments /full --run-as local_system --run-level highest \
+    --daily 2026-11-01T03:00:00+01:00 --at-boot --boot-delay 300
+
+# Linux: uid 1000, nightly at 02:00 UTC (a systemd .service plus an enabled, started .timer)
+pwshpy register_scheduled_task nightly-backup --program /usr/local/bin/backup \
+    --arguments=--full --run-as 1000 --daily 2026-11-01T02:00:00Z
+```
+
+Exit codes: a malformed option exits 2 with a usage error before anything is registered - an
+account name for `--run-as`, an unparseable or offset-less time, a negative `--boot-delay`, or a
+modifier without its trigger (`--every-days` without `--daily`, `--boot-delay` without `--at-boot`,
+`--logon-user` without `--at-logon`). A refusal from the OS backend exits 1 with one
+`ErrorName: message` line on stderr and no traceback: on Linux a logon trigger, `--every-days`
+above 1, or boot and calendar triggers in one task; on Windows a uid, or a logon type that does not
+fit `--run-as`. The full per-OS mapping and the fields the task reads back are in
+[Library & Pipeline](library-usage.md#scheduled-tasks-principal-run-level-and-triggers).
+
 ## Power-tool commands
 
 ```bash

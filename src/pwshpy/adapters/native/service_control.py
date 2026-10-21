@@ -4,9 +4,12 @@ Start / Stop / Restart a Windows service and change its startup type - the
 mutating counterpart of the read-only :mod:`~pwshpy.adapters.native.services`
 source.  Each verb issues the native control call, waits for the service to
 reach the target state, then returns a fresh :class:`ServiceInfo`
-(query-after-mutate) so the caller can confirm the outcome.  Verbs are
-idempotent: starting a running service (or stopping a stopped one) is a no-op,
-not an error.
+(query-after-mutate) so the caller can confirm the outcome.  A wait that hits
+its deadline raises :class:`OperationTimeoutError`, a control the service
+refuses raises a plain :class:`NativeCallError`, so the two stay apart.
+``stop(wait=False)`` issues the stop and returns the state right after it,
+typically ``StopPending``.  Verbs are idempotent: starting a running service
+(or stopping a stopped one) is a no-op, not an error.
 
 **MUTATING** - see CLAUDE.md "Development Safety": exercise only on a disposable
 Windows VM (the throwaway box), never a machine you care about.  ``pywin32`` is
@@ -23,7 +26,7 @@ import time
 from typing import Any
 
 from ...domain.enums import ServiceStartType
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
 from ...domain.records import ServiceInfo
 from .marshal import from_service_start_type, to_service_kind, to_service_start_type, to_service_state
 
@@ -63,11 +66,13 @@ def _current_state(win32service: Any, handle: Any) -> int:
 
 
 def _wait_for_state(win32service: Any, handle: Any, target: int, timeout: float) -> None:
-    """Poll until the service reaches ``target`` state or ``timeout`` elapses."""
+    """Poll until the service reaches ``target`` state; raise OperationTimeoutError at ``timeout``."""
     deadline = time.monotonic() + timeout
     while _current_state(win32service, handle) != target:
         if time.monotonic() >= deadline:
-            raise NativeCallError(f"service did not reach state {target} within {timeout}s")
+            # Its own type: the control was accepted and the service is still on its way (a
+            # wuauserv in StopPending), which a caller handles differently from a refused control.
+            raise OperationTimeoutError(f"service did not reach state {target} within {timeout}s", timeout=timeout)
         time.sleep(_POLL_INTERVAL)
 
 
@@ -125,8 +130,12 @@ class NativeServiceController:
         finally:
             win32service.CloseServiceHandle(scm)
 
-    def stop(self, name: str, *, timeout: float = _DEFAULT_TIMEOUT) -> ServiceInfo:
-        """Stop ``name`` (no-op if already stopped); return its post-stop state."""
+    def stop(self, name: str, *, timeout: float = _DEFAULT_TIMEOUT, wait: bool = True) -> ServiceInfo:
+        """Stop ``name`` (no-op if already stopped); return its post-stop state.
+
+        With ``wait=False`` the stop is issued and the state right after the control is
+        returned (typically ``StopPending``) without polling; ``timeout`` is then unused.
+        """
         win32service = _load_win32service()
         scm = _open_scm(win32service)
         try:
@@ -139,7 +148,8 @@ class NativeServiceController:
                         win32service.ControlService(handle, win32service.SERVICE_CONTROL_STOP)
                     except Exception as exc:
                         raise NativeCallError(str(exc) or f"cannot stop service {name!r}") from exc
-                    _wait_for_state(win32service, handle, win32service.SERVICE_STOPPED, timeout)
+                    if wait:
+                        _wait_for_state(win32service, handle, win32service.SERVICE_STOPPED, timeout)
             finally:
                 win32service.CloseServiceHandle(handle)
             return _query_one(win32service, scm, name)

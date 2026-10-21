@@ -71,6 +71,15 @@ def test_exec_exits_with_the_child_s_code_through_main() -> None:
 
 
 @pytest.mark.os_agnostic
+def test_a_timed_out_exec_exits_110_through_main(capsys: pytest.CaptureFixture[str]) -> None:
+    """An OperationTimeoutError leaves main() as ETIMEDOUT on every OS, not the generic 1."""
+    argv = ["exec", "--timeout", "1", "--", sys.executable, "-c", "import time; time.sleep(60)"]
+
+    assert main(argv, services_factory=_services({})) == 110
+    assert "OperationTimeoutError" in capsys.readouterr().err
+
+
+@pytest.mark.os_agnostic
 def test_a_config_display_error_exits_22_without_printing_systemexit(capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = main(["config"], services_factory=_services({}, display_config=_raising(ValueError("boom"))))
 

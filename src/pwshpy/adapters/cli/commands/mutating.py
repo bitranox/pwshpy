@@ -63,10 +63,22 @@ def cli_start_service(ctx: click.Context, name: str) -> None:
 
 @click.command("stop_service")
 @argument("name")
+@option(
+    "--wait/--no-wait",
+    default=True,
+    help="Wait until the service is Stopped (default; exit 110 on timeout), or issue the stop and return.",
+)
 @click.pass_context
-def cli_stop_service(ctx: click.Context, name: str) -> None:
-    """Stop a service - win32service on Windows, systemd on Linux (mutating)."""
-    result = _ps(ctx).stop_service(name)
+def cli_stop_service(ctx: click.Context, name: str, wait: bool) -> None:
+    """Stop a service - win32service on Windows, systemd on Linux (mutating).
+
+    \f
+    Example:
+        >>> from click.testing import CliRunner
+        >>> "--no-wait" in CliRunner().invoke(cli_stop_service, ["--help"]).output
+        True
+    """
+    result = _ps(ctx).stop_service(name, wait=wait)
     click.echo(f"{name}: {result.status.value}")
 
 

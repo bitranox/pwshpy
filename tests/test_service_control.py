@@ -14,6 +14,8 @@ throwaway VM (see CLAUDE.md Development Safety), never in CI.
 
 from __future__ import annotations
 
+import sys
+import time
 from typing import Any
 
 import pytest
@@ -21,7 +23,7 @@ import pytest
 from pwshpy.adapters.native import service_control as mod
 from pwshpy.adapters.native.service_control import NativeServiceController
 from pwshpy.domain.enums import ServiceStartType, ServiceState
-from pwshpy.domain.errors import NativeCallError
+from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
 
 
 class _FakeWin32Service:
@@ -38,12 +40,22 @@ class _FakeWin32Service:
     SERVICE_CONTROL_STOP = 0x0001
     SERVICE_RUNNING = 4
     SERVICE_STOPPED = 1
+    SERVICE_STOP_PENDING = 3
     SERVICE_NO_CHANGE = 0xFFFFFFFF
 
-    def __init__(self, *, state: int = 1, start_type: int = 3, start_effect: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        state: int = 1,
+        start_type: int = 3,
+        start_effect: int | None = None,
+        stop_effect: int | None = None,
+    ) -> None:
         self.state = state
         self.start_type = start_type
         self._start_effect = self.SERVICE_RUNNING if start_effect is None else start_effect
+        # A service that takes its time to stop (wuauserv) stays in STOP_PENDING after the control.
+        self._stop_effect = self.SERVICE_STOPPED if stop_effect is None else stop_effect
         self.actions: list[str] = []
         self.closed = 0
         self.raise_on: str | None = None
@@ -67,8 +79,10 @@ class _FakeWin32Service:
         self.state = self._start_effect
 
     def ControlService(self, handle: Any, control: int) -> None:
+        if self.raise_on == "stop":
+            raise OSError("the service cannot accept control messages at this time")
         self.actions.append("stop")
-        self.state = self.SERVICE_STOPPED
+        self.state = self._stop_effect
 
     def ChangeServiceConfig(self, handle: Any, service_type: int, start_type: int, *rest: Any) -> None:
         if self.raise_on == "config":
@@ -171,12 +185,70 @@ def test_native_failure_wrapped_in_native_call_error(
 
 @pytest.mark.os_agnostic
 def test_wait_for_state_times_out(monkeypatch: pytest.MonkeyPatch, controller: NativeServiceController) -> None:
-    """If the service never reaches the target state, the wait times out as NativeCallError."""
+    """A start that never reaches RUNNING times out as OperationTimeoutError carrying its timeout."""
     # StartService leaves the state STOPPED, so RUNNING is never reached.
     fake = _FakeWin32Service(state=_FakeWin32Service.SERVICE_STOPPED, start_effect=_FakeWin32Service.SERVICE_STOPPED)
     _use(monkeypatch, fake)
-    with pytest.raises(NativeCallError, match="did not reach state"):
+    with pytest.raises(OperationTimeoutError, match="did not reach state") as caught:
         controller.start("Svc", timeout=0.4)
+    assert caught.value.timeout == 0.4
+
+
+@pytest.mark.os_agnostic
+def test_stop_without_wait_returns_while_stop_pending(
+    monkeypatch: pytest.MonkeyPatch, controller: NativeServiceController
+) -> None:
+    """wait=False issues the stop and returns the post-control state at once, without polling."""
+    fake = _FakeWin32Service(
+        state=_FakeWin32Service.SERVICE_RUNNING, stop_effect=_FakeWin32Service.SERVICE_STOP_PENDING
+    )
+    _use(monkeypatch, fake)
+    started = time.monotonic()
+    result = controller.stop("Svc", wait=False)
+    # The default 30 s timeout would be spent polling a service that never leaves STOP_PENDING.
+    assert time.monotonic() - started < 5
+    assert result.status is ServiceState.STOP_PENDING
+    assert fake.actions == ["stop"]
+
+
+@pytest.mark.os_agnostic
+def test_stop_without_wait_is_a_no_op_when_stopped(
+    monkeypatch: pytest.MonkeyPatch, controller: NativeServiceController
+) -> None:
+    """wait=False keeps the idempotency: an already-stopped service gets no control."""
+    fake = _FakeWin32Service(state=_FakeWin32Service.SERVICE_STOPPED)
+    _use(monkeypatch, fake)
+    assert controller.stop("Svc", wait=False).status is ServiceState.STOPPED
+    assert fake.actions == []
+
+
+@pytest.mark.os_agnostic
+def test_a_waiting_stop_that_stays_pending_raises_operation_timeout_error(
+    monkeypatch: pytest.MonkeyPatch, controller: NativeServiceController
+) -> None:
+    """The waiting stop's deadline is its own type, so 'stop issued, still pending' is not 'refused'."""
+    fake = _FakeWin32Service(
+        state=_FakeWin32Service.SERVICE_RUNNING, stop_effect=_FakeWin32Service.SERVICE_STOP_PENDING
+    )
+    _use(monkeypatch, fake)
+    with pytest.raises(OperationTimeoutError) as caught:
+        controller.stop("Svc", timeout=0.4)
+    assert caught.value.timeout == 0.4
+    assert fake.actions == ["stop"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("wait", [True, False])
+def test_a_refused_stop_is_native_call_error_not_a_timeout(
+    monkeypatch: pytest.MonkeyPatch, controller: NativeServiceController, wait: bool
+) -> None:
+    """A control the service refuses stays a plain NativeCallError in both forms."""
+    fake = _FakeWin32Service(state=_FakeWin32Service.SERVICE_RUNNING)
+    fake.raise_on = "stop"
+    _use(monkeypatch, fake)
+    with pytest.raises(NativeCallError, match="cannot accept control") as caught:
+        controller.stop("Svc", wait=wait)
+    assert not isinstance(caught.value, OperationTimeoutError)
 
 
 # --- Real integration: run only on the disposable throwaway VM ---------------
@@ -208,6 +280,35 @@ def test_stop_start_restart_roundtrip_on_real_service() -> None:
         # idempotent second start
         assert ps.start_service(_SCRATCH_SERVICE).status is ServiceState.RUNNING
         assert ps.restart_service(_SCRATCH_SERVICE).status is ServiceState.RUNNING
+    finally:
+        if original is ServiceState.STOPPED:
+            ps.stop_service(_SCRATCH_SERVICE)
+        else:
+            ps.start_service(_SCRATCH_SERVICE)
+
+
+@pytest.mark.local_only
+@pytest.mark.mutating
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="stops a real Windows service")
+def test_stop_without_wait_on_real_service_then_waiting_stop_settles() -> None:
+    """wait=False returns once the stop is issued; a waiting stop afterwards reaches Stopped.
+
+    Spooler usually stops within the query that follows the control, so the no-wait result may
+    already read Stopped: the assertion accepts StopPending or Stopped, never Running, and the
+    waiting stop that follows must end Stopped either way.
+    """
+    from pwshpy.composition import build_ps
+
+    ps = build_ps()
+    original = _service_state(_SCRATCH_SERVICE)
+    if original is None:
+        pytest.skip(f"{_SCRATCH_SERVICE} service is not present")
+    try:
+        ps.start_service(_SCRATCH_SERVICE)
+        issued = ps.stop_service(_SCRATCH_SERVICE, wait=False)
+        assert issued.status in {ServiceState.STOP_PENDING, ServiceState.STOPPED}
+        assert ps.stop_service(_SCRATCH_SERVICE).status is ServiceState.STOPPED
     finally:
         if original is ServiceState.STOPPED:
             ps.stop_service(_SCRATCH_SERVICE)

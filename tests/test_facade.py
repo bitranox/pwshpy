@@ -411,6 +411,7 @@ class _FakeServiceController:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
         self.last_start_type: ServiceStartType | None = None
+        self.stop_waits: list[bool] = []
 
     def _svc(self, name: str) -> ServiceInfo:
         return ServiceInfo(
@@ -425,8 +426,9 @@ class _FakeServiceController:
         self.calls.append(("start", name))
         return self._svc(name)
 
-    def stop(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
+    def stop(self, name: str, *, timeout: float = 30.0, wait: bool = True) -> ServiceInfo:
         self.calls.append(("stop", name))
+        self.stop_waits.append(wait)
         return self._svc(name)
 
     def restart(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
@@ -765,6 +767,14 @@ def test_injected_service_adapters(injected: _InjectedPs) -> None:
         ("set_startup", "Svc"),
     ]
     assert fake_service_controller.last_start_type is ServiceStartType.DISABLED
+
+
+@pytest.mark.os_agnostic
+def test_stop_service_forwards_the_wait_choice(injected: _InjectedPs) -> None:
+    """stop_service waits unless told not to, and hands that choice to the controller."""
+    injected.facade.stop_service("Svc")
+    injected.facade.stop_service("Svc", wait=False)
+    assert injected.service_controller.stop_waits == [True, False]
 
 
 @pytest.mark.os_agnostic

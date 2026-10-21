@@ -75,6 +75,13 @@ polkit on Linux). The library methods (`ps.start_service(...)`) mirror these nam
 | Credentials     | `save_credential` `load_credential` `delete_credential`                                                                                                                   | Credential Manager | Secret Service keyring  |
 | Local accounts  | `new_local_user` `remove_local_user` `enable_local_user` `disable_local_user` `new_local_group` `remove_local_group` `add_local_group_member` `remove_local_group_member` | win32net           | shadow-utils            |
 
+`stop_service NAME` waits until the service is Stopped (up to 30 s). `--no-wait` issues the stop and
+returns at once with the state right after it, typically `StopPending`, for a service that takes
+long to stop (Windows Update's `wuauserv`). A wait that hits its deadline exits 110 (ETIMEDOUT) with
+an `OperationTimeoutError` line on stderr - the stop was issued and the service is still on its
+way - while a refused stop exits 1 with a `NativeCallError` line. `start_service` and
+`restart_service` time out the same way.
+
 On Linux, `add_acl_ace` takes a `user:NAME` / `group:NAME` trustee and the low 3 bits of `RIGHTS` as
 `rwx` (POSIX ACLs are allow-only, so `--deny` is rejected); `save_credential` needs an unlocked
 desktop keyring; the local-account verbs drive shadow-utils (`useradd` / `usermod` / `groupadd` /

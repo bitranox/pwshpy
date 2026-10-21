@@ -11,12 +11,14 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from pwshpy.adapters.native.systemd_services import SystemdServiceController
 from pwshpy.domain.enums import ServiceStartType, ServiceState
+from pwshpy.domain.errors import OperationTimeoutError
 
 _UNIT = "pwshpy-pytest.service"
 _UNIT_PATH = Path("/etc/systemd/system") / _UNIT
@@ -66,3 +68,47 @@ def test_controller_start_stop_and_enable_disable(scratch_unit: str) -> None:
 
     disabled = controller.set_startup(scratch_unit, ServiceStartType.DISABLED)
     assert disabled.start_type is ServiceStartType.DISABLED
+
+
+_SLOW_UNIT = "pwshpy-pytest-slowstop.service"
+_SLOW_UNIT_PATH = Path("/etc/systemd/system") / _SLOW_UNIT
+_SLOW_STOP_SECONDS = 8
+# ExecStop holds the unit in "deactivating" for _SLOW_STOP_SECONDS, the systemd twin of a Windows
+# service sitting in StopPending (wuauserv), so the no-wait and timeout paths are observable.
+_SLOW_UNIT_BODY = (
+    "[Unit]\nDescription=pwshpy pytest slow-stop scratch\n"
+    f"[Service]\nType=simple\nExecStart=/bin/sleep 600\nExecStop=/bin/sleep {_SLOW_STOP_SECONDS}\n"
+)
+
+
+@pytest.fixture
+def slow_stop_unit() -> object:
+    """Install a throwaway unit whose stop takes _SLOW_STOP_SECONDS; remove it on teardown."""
+    _SLOW_UNIT_PATH.write_text(_SLOW_UNIT_BODY)
+    subprocess.run(["systemctl", "daemon-reload"], check=True)  # noqa: S607 - fixed argv
+    try:
+        yield _SLOW_UNIT
+    finally:
+        subprocess.run(["systemctl", "kill", _SLOW_UNIT], check=False)  # noqa: S603, S607
+        subprocess.run(["systemctl", "stop", _SLOW_UNIT], check=False)  # noqa: S603, S607
+        _SLOW_UNIT_PATH.unlink(missing_ok=True)
+        subprocess.run(["systemctl", "daemon-reload"], check=False)  # noqa: S607
+
+
+def test_stop_without_wait_returns_before_a_slow_stop_finishes(slow_stop_unit: str) -> None:
+    """wait=False returns while the unit deactivates; a short wait times out; a long one settles."""
+    controller = SystemdServiceController()
+    assert controller.start(slow_stop_unit).status is ServiceState.RUNNING
+
+    started = time.monotonic()
+    issued = controller.stop(slow_stop_unit, wait=False)
+    # Well under the ExecStop duration: the call did not wait for inactive.
+    assert time.monotonic() - started < _SLOW_STOP_SECONDS / 2
+    # Right after StopUnit the job may not have begun yet, so active is possible; inactive is not.
+    assert issued.status in {ServiceState.STOP_PENDING, ServiceState.RUNNING}
+
+    with pytest.raises(OperationTimeoutError) as caught:
+        controller.stop(slow_stop_unit, timeout=0.5)
+    assert caught.value.timeout == 0.5
+
+    assert controller.stop(slow_stop_unit, timeout=_SLOW_STOP_SECONDS * 4).status is ServiceState.STOPPED

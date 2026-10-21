@@ -18,12 +18,14 @@ import lib_log_rich.runtime
 
 from pwshpy import __init__conf__
 
+from ...domain.errors import OperationTimeoutError
 from .constants import TRACEBACK_SUMMARY_LIMIT, TRACEBACK_VERBOSE_LIMIT
 from .context import (
     apply_traceback_preferences,
     restore_traceback_state,
     snapshot_traceback_state,
 )
+from .exit_codes import ExitCode
 
 if TYPE_CHECKING:
     from pwshpy.composition import AppServices
@@ -74,7 +76,30 @@ def _run_cli(argv: Sequence[str] | None, *, services_factory: Callable[[], AppSe
         apply_traceback_preferences(tracebacks_enabled)
         length_limit = TRACEBACK_VERBOSE_LIMIT if tracebacks_enabled else TRACEBACK_SUMMARY_LIMIT
         lib_cli_exit_tools.print_exception_message(trace_back=tracebacks_enabled, length_limit=length_limit)
-        return lib_cli_exit_tools.get_system_exit_code(exc)
+        return _exit_code_for(exc)
+
+
+def _exit_code_for(exc: BaseException) -> int:
+    """The process exit code for an exception that reached the CLI boundary.
+
+    An :class:`OperationTimeoutError` exits ETIMEDOUT (110) on every OS. lib_cli_exit_tools
+    cannot give that: the error is a ``NativeCallError``, not a ``TimeoutError``, so it falls
+    through to the generic 1, the same code a refused call gets - and its ``TimeoutError`` row
+    is 1460 on Windows anyway. Everything else keeps lib_cli_exit_tools' mapping.
+
+    Args:
+        exc: The exception the command raised.
+
+    Returns:
+        The exit code for ``exc``.
+
+    Example:
+        >>> _exit_code_for(OperationTimeoutError("slow", timeout=1.0))
+        110
+    """
+    if isinstance(exc, OperationTimeoutError):
+        return int(ExitCode.TIMEOUT)
+    return lib_cli_exit_tools.get_system_exit_code(exc)
 
 
 def main(

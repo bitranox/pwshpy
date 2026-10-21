@@ -65,6 +65,8 @@ limit), a subclass of the `NativeCallError` a missing or unstartable program rai
 `OperationTimeoutError` first to tell the two apart.
 
 CLI: `pwshpy exec -- git status` (put the program after `--` so its flags are not parsed by pwshpy).
+A run that hits `--timeout` exits 110 (ETIMEDOUT) with an `OperationTimeoutError` line on stderr; a
+program that cannot start exits 1.
 
 ## Predictable, memory-bounded file I/O
 

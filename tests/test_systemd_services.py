@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import sys
+import time
 from typing import Any
 
 import pytest
@@ -24,6 +25,7 @@ from pwshpy.adapters.native.systemd_services import (
     to_start_type,
 )
 from pwshpy.domain.enums import ServiceStartType, ServiceState
+from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
 from pwshpy.domain.records import ServiceInfo
 
 _HAS_JEEPNEY = importlib.util.find_spec("jeepney") is not None
@@ -357,6 +359,59 @@ def test_read_back_of_a_running_not_found_service_reports_its_state(monkeypatch:
     """
     conn = _orphan_service_conn("not-found", "deactivating")
     use_bus(monkeypatch, conn)
-    info = SystemdServiceController().stop("busy.service", timeout=0.0)
+    info = SystemdServiceController().stop("busy.service", wait=False)
     assert conn.verbs == ["StopUnit"]
     assert (info.name, info.status) == ("busy.service", ServiceState.STOP_PENDING)
+
+
+def _settling_conn(active_state: str, *, failing: frozenset[str] = frozenset()) -> FakeConn:
+    """A loaded service frozen in ``active_state`` - the fake never advances it, like a hung stop."""
+    props: dict[tuple[str, str, str], Any] = {
+        ("wuauserv.service", _UNIT, "ActiveState"): active_state,
+        ("wuauserv.service", _UNIT, "Description"): "Update daemon",
+    }
+    return FakeConn([], props, frozenset({"wuauserv.service"}), failing=failing)
+
+
+@pytest.mark.os_agnostic
+def test_stop_without_wait_returns_the_state_right_after_stop_unit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """wait=False sends StopUnit and reads the unit back once, never polling it to inactive."""
+    conn = _settling_conn("deactivating")
+    use_bus(monkeypatch, conn)
+    started = time.monotonic()
+    info = SystemdServiceController().stop("wuauserv.service", wait=False)
+    # The default 30 s timeout would be spent polling a unit that never leaves deactivating.
+    assert time.monotonic() - started < 5
+    assert conn.verbs == ["StopUnit"]
+    assert info.status is ServiceState.STOP_PENDING
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_a_waiting_stop_that_stays_deactivating_raises_operation_timeout_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deadline raises its own type, as on Windows, instead of returning the unsettled state."""
+    conn = _settling_conn("deactivating")
+    use_bus(monkeypatch, conn)
+    with pytest.raises(OperationTimeoutError) as caught:
+        SystemdServiceController().stop("wuauserv.service", timeout=0.3)
+    assert caught.value.timeout == 0.3
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_a_waiting_start_that_stays_activating_raises_operation_timeout_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """start and restart share the wait, so their deadline is the same distinct error."""
+    use_bus(monkeypatch, _settling_conn("activating"))
+    with pytest.raises(OperationTimeoutError) as caught:
+        SystemdServiceController().start("wuauserv.service", timeout=0.3)
+    assert caught.value.timeout == 0.3
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("wait", [True, False])
+def test_a_refused_stop_unit_is_native_call_error_not_a_timeout(monkeypatch: pytest.MonkeyPatch, *, wait: bool) -> None:
+    """A StopUnit systemd refuses stays a plain NativeCallError in both forms."""
+    use_bus(monkeypatch, _settling_conn("active", failing=frozenset({"StopUnit"})))
+    with pytest.raises(NativeCallError) as caught:
+        SystemdServiceController().stop("wuauserv.service", wait=wait)
+    assert not isinstance(caught.value, OperationTimeoutError)

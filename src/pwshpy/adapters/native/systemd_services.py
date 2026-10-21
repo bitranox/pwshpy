@@ -22,7 +22,7 @@ import time
 from collections.abc import Iterator
 
 from ...domain.enums import ServiceStartType, ServiceState
-from ...domain.errors import NativeCallError
+from ...domain.errors import NativeCallError, OperationTimeoutError
 from ...domain.records import ServiceInfo
 from . import systemd_dbus as _dbus
 
@@ -184,7 +184,10 @@ class SystemdServiceController:
     """Start/stop/restart systemd units and change their enablement (Linux, **mutating**).
 
     The counterpart to the win32 NativeServiceController; needs polkit/root, like the Windows
-    verbs need admin. Each verb waits for the unit to settle, then returns its :class:`ServiceInfo`.
+    verbs need admin. Each verb waits for the unit to settle, then returns its :class:`ServiceInfo`;
+    a unit that has not settled by the deadline raises :class:`OperationTimeoutError`, as on
+    Windows, while a job systemd refuses raises a plain :class:`NativeCallError`.
+    ``stop(wait=False)`` sends ``StopUnit`` and returns the unit's state right after it.
 
     Example:
         >>> callable(SystemdServiceController().start)
@@ -195,9 +198,14 @@ class SystemdServiceController:
         """Start a unit; wait until active/failed; return its state (like Start-Service)."""
         return self._transition(name, "StartUnit", {"active", "failed"}, timeout)
 
-    def stop(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
-        """Stop a unit; wait until inactive/failed; return its state (like Stop-Service)."""
-        return self._transition(name, "StopUnit", {"inactive", "failed"}, timeout)
+    def stop(self, name: str, *, timeout: float = 30.0, wait: bool = True) -> ServiceInfo:
+        """Stop a unit; wait until inactive/failed; return its state (like Stop-Service).
+
+        With ``wait=False`` the StopUnit job is queued and the unit is read back at once
+        (typically ``deactivating``, so ``StopPending``) without polling; ``timeout`` is unused.
+        """
+        settled = {"inactive", "failed"} if wait else None
+        return self._transition(name, "StopUnit", settled, timeout)
 
     def restart(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
         """Restart a unit; wait until active/failed; return its state (like Restart-Service)."""
@@ -220,18 +228,29 @@ class SystemdServiceController:
         finally:
             bus.conn.close()
 
-    def _transition(self, name: str, method: str, settled: set[str], timeout: float) -> ServiceInfo:
+    def _transition(self, name: str, method: str, settled: set[str] | None, timeout: float) -> ServiceInfo:
+        """Send ``method`` for ``name``; poll until a ``settled`` state (``None``: do not wait)."""
         bus = _dbus.open_bus()
         try:
             _dbus.call(bus, method, "ss", (name, "replace"))
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                if _dbus.active_state(bus, name) in settled:
-                    break
-                time.sleep(_POLL_INTERVAL)
+            if settled is not None:
+                _wait_until_settled(bus, name, settled, timeout)
             return _get_one(bus, name)
         finally:
             bus.conn.close()
+
+
+def _wait_until_settled(bus: _dbus.Bus, name: str, settled: set[str], timeout: float) -> None:
+    """Poll the unit's ActiveState until it is in ``settled``; raise OperationTimeoutError at ``timeout``.
+
+    The deadline raises rather than returning the unsettled state, so a caller tells a job that
+    is still running (a slow stop) from a job systemd refused, as the win32 controller does.
+    """
+    deadline = time.monotonic() + timeout
+    while _dbus.active_state(bus, name) not in settled:
+        if time.monotonic() >= deadline:
+            raise OperationTimeoutError(f"unit {name!r} did not settle within {timeout}s", timeout=timeout)
+        time.sleep(_POLL_INTERVAL)
 
 
 __all__ = ["SystemdServiceController", "iter_services", "to_service_state", "to_start_type"]

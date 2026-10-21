@@ -27,7 +27,7 @@ from pwshpy.domain.enums import (
     TaskRunLevel,
     TaskState,
 )
-from pwshpy.domain.errors import PlatformUnsupportedError
+from pwshpy.domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
 from pwshpy.domain.records import LocalGroup, LocalUser, RegistryKey, ScheduledTaskInfo, ServiceInfo
 from pwshpy.domain.scheduling import TaskPrincipal, TaskTrigger
 
@@ -43,9 +43,10 @@ def _svc(name: str) -> ServiceInfo:
 
 
 class _FakePs:
-    def __init__(self, register_error: Exception | None = None) -> None:
+    def __init__(self, register_error: Exception | None = None, stop_error: Exception | None = None) -> None:
         self.calls: list[tuple[Any, ...]] = []
         self._register_error = register_error
+        self._stop_error = stop_error
 
     def _rec(self, *args: Any) -> None:
         self.calls.append(args)
@@ -54,8 +55,10 @@ class _FakePs:
         self._rec("start_service", name)
         return _svc(name)
 
-    def stop_service(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
-        self._rec("stop_service", name)
+    def stop_service(self, name: str, *, timeout: float = 30.0, wait: bool = True) -> ServiceInfo:
+        self._rec("stop_service", name, wait)
+        if self._stop_error is not None:
+            raise self._stop_error
         return _svc(name)
 
     def restart_service(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
@@ -396,3 +399,37 @@ def test_register_scheduled_task_cli_reports_an_adapter_refusal_on_one_line(caps
     assert rc == 1
     assert captured.err.strip() == "PlatformUnsupportedError: logon triggers are Windows-only"
     assert "Traceback" not in captured.err + captured.out
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("flags", "wait"), [([], True), (["--no-wait"], False)])
+def test_stop_service_passes_the_wait_choice(flags: list[str], *, wait: bool) -> None:
+    """stop_service waits by default; --no-wait issues the stop and returns."""
+    fake = _FakePs()
+    result = CliRunner().invoke(cli, ["stop_service", *flags, "S"], obj=_factory(fake))
+    assert result.exit_code == 0, result.output
+    assert fake.calls == [("stop_service", "S", wait)]
+
+
+@pytest.mark.os_agnostic
+def test_a_timed_out_stop_exits_110_through_main(capsys: pytest.CaptureFixture[str]) -> None:
+    """A wait that hits its deadline exits ETIMEDOUT (110), apart from a refused stop's 1."""
+    services = dataclasses.replace(
+        build_testing(),
+        ps=_FakePs(stop_error=OperationTimeoutError("service did not reach state 1 within 30.0s", timeout=30.0)),  # type: ignore[arg-type]
+    )
+    rc = main(["stop_service", "S"], services_factory=lambda: services)
+    captured = capsys.readouterr()
+    assert rc == 110
+    assert "OperationTimeoutError" in captured.err
+    assert "Traceback" not in captured.err + captured.out
+
+
+@pytest.mark.os_agnostic
+def test_a_refused_stop_exits_1_through_main() -> None:
+    """Control: a plain NativeCallError (a refused control) keeps exit 1, so 110 above is the timeout's."""
+    services = dataclasses.replace(
+        build_testing(),
+        ps=_FakePs(stop_error=NativeCallError("cannot stop service 'S'")),  # type: ignore[arg-type]
+    )
+    assert main(["stop_service", "S"], services_factory=lambda: services) == 1

@@ -475,27 +475,49 @@ class Ps:
 
         Idempotent - starting an already-running service is a no-op.
 
+        Raises:
+            OperationTimeoutError: The service was still not Running after ``timeout`` seconds.
+            NativeCallError: The start was refused or the service could not be opened.
+
         Example:
             >>> callable(build_ps().start_service)
             True
         """
         return self._service_controller.start(name, timeout=timeout)
 
-    def stop_service(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
+    def stop_service(self, name: str, *, timeout: float = 30.0, wait: bool = True) -> ServiceInfo:
         """Stop a service; return its post-stop state (native, portable, **mutating**).
 
         win32service on Windows, systemd (D-Bus, needs root) on Linux.
 
         Idempotent - stopping an already-stopped service is a no-op.
 
+        Args:
+            name: The service name (on Linux the unit name, ``"sshd.service"``).
+            timeout: Seconds to wait for the service to reach Stopped (``wait=True`` only).
+            wait: ``True`` polls until Stopped; ``False`` issues the stop and returns the state
+                right after it, typically ``StopPending``, for a service that takes long to stop.
+
+        Returns:
+            The service's :class:`ServiceInfo` after the stop (or right after the control).
+
+        Raises:
+            OperationTimeoutError: ``wait=True`` and the service was still not Stopped after
+                ``timeout`` seconds - the stop WAS issued; ``.timeout`` holds the limit.
+            NativeCallError: The stop was refused or the service could not be opened.
+
         Example:
             >>> callable(build_ps().stop_service)
             True
         """
-        return self._service_controller.stop(name, timeout=timeout)
+        return self._service_controller.stop(name, timeout=timeout, wait=wait)
 
     def restart_service(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
         """Restart a service; return its post-restart state (native, portable, **mutating**; systemd on Linux).
+
+        Raises:
+            OperationTimeoutError: The service did not settle within ``timeout`` seconds.
+            NativeCallError: The restart was refused or the service could not be opened.
 
         Example:
             >>> callable(build_ps().restart_service)

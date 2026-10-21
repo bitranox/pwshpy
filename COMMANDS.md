@@ -89,13 +89,22 @@ in - the D-Bus lib jeepney is a base Linux dependency). On Linux `name` is the u
 `StartUnit`/`StopUnit`/`RestartUnit` and `EnableUnitFiles`/`DisableUnitFiles`; each waits for the
 unit to settle. Mutation needs admin (Windows) / polkit or root (Linux).
 
-| PowerShell                                   | pwshpy - Python (API)                             | pwshpy - CLI                     |
-|----------------------------------------------|---------------------------------------------------|----------------------------------|
-| `Get-Service`                                | `ps.get_service()`  *(portable)*                  | `pwshpy get_service`             |
-| `Start-Service -Name N`                      | `ps.start_service("N", timeout=30.0)`             | `pwshpy start_service N`         |
-| `Stop-Service -Name N`                       | `ps.stop_service("N", timeout=30.0)`              | `pwshpy stop_service N`          |
-| `Restart-Service -Name N`                    | `ps.restart_service("N", timeout=30.0)`           | `pwshpy restart_service N`       |
-| `Set-Service -Name N -StartupType Automatic` | `ps.set_service("N", ServiceStartType.AUTOMATIC)` | `pwshpy set_service N Automatic` |
+A start, stop or restart that has not settled by `timeout` raises `OperationTimeoutError` (its
+`.timeout` holds the limit; CLI exit 110): the control was issued and the service is still on its
+way. A control the service or systemd refuses raises the plain `NativeCallError` (CLI exit 1).
+`OperationTimeoutError` subclasses `NativeCallError`, so catch it first to tell the two apart.
+`stop_service(name, wait=False)` (CLI `--no-wait`) issues the stop and returns the state right
+after it, typically `StopPending`, without waiting - for a service that sits in Stop Pending
+(Windows Update's `wuauserv`) where `Stop-Service` would never return.
+
+| PowerShell                                   | pwshpy - Python (API)                             | pwshpy - CLI                      |
+|----------------------------------------------|---------------------------------------------------|-----------------------------------|
+| `Get-Service`                                | `ps.get_service()`  *(portable)*                  | `pwshpy get_service`              |
+| `Start-Service -Name N`                      | `ps.start_service("N", timeout=30.0)`             | `pwshpy start_service N`          |
+| `Stop-Service -Name N`                       | `ps.stop_service("N", timeout=30.0)`              | `pwshpy stop_service N`           |
+| `Stop-Service -Name N -NoWait`               | `ps.stop_service("N", wait=False)`                | `pwshpy stop_service --no-wait N` |
+| `Restart-Service -Name N`                    | `ps.restart_service("N", timeout=30.0)`           | `pwshpy restart_service N`        |
+| `Set-Service -Name N -StartupType Automatic` | `ps.set_service("N", ServiceStartType.AUTOMATIC)` | `pwshpy set_service N Automatic`  |
 
 ## Event log  *(read: portable; clear: Windows)*
 

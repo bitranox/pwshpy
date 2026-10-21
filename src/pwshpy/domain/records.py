@@ -27,6 +27,7 @@ from .enums import (
     AddressFamily,
     ConnectionState,
     EventLevel,
+    ImageArchitecture,
     ProcessStatus,
     RegistryHive,
     RegistryValueType,
@@ -722,6 +723,32 @@ class PackedScript(PSRecord):
         return len(self.files)
 
 
+class WindowsImage(PSRecord):
+    """One image inside a WIM/ESD file (the native ``Get-WindowsImage`` record; portable).
+
+    Read from the file's XML resource, so every field the XML may omit has an empty
+    default rather than a guess. ``version`` is ``MAJOR.MINOR.BUILD.SPBUILD`` like
+    ``Get-WindowsImage``'s ``Version``; ``languages`` keeps the XML order.
+
+    Example:
+        >>> WindowsImage(index=1, name="Pro", architecture=ImageArchitecture.X64, build=26200).build
+        26200
+    """
+
+    index: int
+    name: str
+    description: str = ""
+    edition_id: str = ""
+    installation_type: str = ""
+    architecture: ImageArchitecture = ImageArchitecture.UNKNOWN
+    version: str = ""
+    build: int = 0
+    sp_build: int = 0
+    languages: tuple[str, ...] = ()
+    default_language: str = ""
+    size_bytes: int = 0
+
+
 __all__ = [
     "AclEntry",
     "CimInstance",
@@ -753,4 +780,5 @@ __all__ = [
     "ServiceInfo",
     "SystemUptime",
     "WebResponse",
+    "WindowsImage",
 ]

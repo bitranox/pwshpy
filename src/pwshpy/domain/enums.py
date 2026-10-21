@@ -418,6 +418,26 @@ class ImportKind(str, Enum):
     EXTERNAL = "external"
 
 
+class ImageArchitecture(str, Enum):
+    """CPU architecture of a Windows image (the WIM XML ``<ARCH>`` number, PROCESSOR_ARCHITECTURE_*).
+
+    The XML stores a number (0 x86, 5 ARM, 6 ia64, 9 x64, 12 ARM64); the values are the
+    spellings ``Get-WindowsImage`` prints, so a record compares against it directly.
+    ``UNKNOWN`` stands for a missing or unrecognised number, never a guessed CPU.
+
+    Example:
+        >>> ImageArchitecture.X64.value
+        'x64'
+    """
+
+    X86 = "x86"
+    ARM = "ARM"
+    IA64 = "ia64"
+    X64 = "x64"
+    ARM64 = "ARM64"
+    UNKNOWN = "Unknown"
+
+
 __all__ = [
     "AceType",
     "AclEntryKind",
@@ -426,6 +446,7 @@ __all__ = [
     "DeployTarget",
     "EventLevel",
     "FileItemType",
+    "ImageArchitecture",
     "ImportKind",
     "OutputFormat",
     "ProcessStatus",

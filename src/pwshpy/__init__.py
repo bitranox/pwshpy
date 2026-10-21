@@ -29,6 +29,7 @@ from .domain.enums import (
     AddressFamily,
     ConnectionState,
     EventLevel,
+    ImageArchitecture,
     ProcessStatus,
     RegistryHive,
     RegistryValueType,
@@ -86,6 +87,7 @@ from .domain.records import (
     ServiceInfo,
     SystemUptime,
     WebResponse,
+    WindowsImage,
 )
 from .domain.scheduling import (
     BootTrigger,
@@ -115,6 +117,7 @@ __all__ = [
     "DiskUsage",
     "SystemUptime",
     "WebResponse",
+    "WindowsImage",
     "DnsRecord",
     "ComputerInfo",
     "ConnectionTest",
@@ -154,6 +157,7 @@ __all__ = [
     "TaskState",
     "TaskRunLevel",
     "TaskLogonType",
+    "ImageArchitecture",
     "WellKnownSid",
     "AceType",
     # Errors

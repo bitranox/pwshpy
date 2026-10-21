@@ -238,6 +238,38 @@ function Test-PwshPyUacDeclined {
     return [bool]($win32 -and $win32.NativeErrorCode -eq 1223)
 }
 
+function ConvertTo-PwshPyCommandLineArgument {
+    param([string] $Value)
+
+    # Quotes one argument so the child's parser (CommandLineToArgvW, the C runtime, .NET) reads
+    # it back unchanged: backslashes are literal except in front of a quote, where 2n+1 of them
+    # make n plus a literal quote, so the ones in front of an embedded quote or the closing quote
+    # are doubled. An empty argument needs its quotes, or it vanishes.
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
+    $quoted = New-Object System.Text.StringBuilder
+    [void]$quoted.Append('"')
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq [char]'\') { $backslashes++; continue }
+        if ($character -eq [char]'"') { $backslashes = 2 * $backslashes + 1 }
+        [void]$quoted.Append([char]'\', $backslashes)
+        [void]$quoted.Append($character)
+        $backslashes = 0
+    }
+    [void]$quoted.Append([char]'\', 2 * $backslashes)
+    [void]$quoted.Append('"')
+    return $quoted.ToString()
+}
+
+function Join-PwshPyCommandLine {
+    param([string[]] $Arguments)
+
+    # A flat command line, because ProcessStartInfo.ArgumentList (which quotes for us) does not
+    # exist on the .NET Framework that Windows PowerShell 5.1 runs on.
+    $quoted = foreach ($argument in $Arguments) { ConvertTo-PwshPyCommandLineArgument -Value $argument }
+    return (@($quoted) -join ' ')
+}
+
 function Invoke-PwshPyElevated {
     param([string[]] $ForwardArgs)
 
@@ -272,16 +304,19 @@ function Invoke-PwshPyElevated {
     # A UAC child cannot inherit this console and a shell-executed start cannot redirect its
     # streams, so the child writes them to files we replay here.
     $relay = Join-Path ([IO.Path]::GetTempPath()) ('pwshpy-pack-' + [Guid]::NewGuid().ToString('N'))
-    $childArgs = @('-NoProfile', '-File', $self, '-PwshPyRelay', $relay) + $ForwardArgs
+    $childArgs = @('-NoProfile', '-File', $self, '-PwshPyRelay', $relay)
+    # Only a missing list is skipped: an empty-string argument is real and must reach the child.
+    if ($null -ne $ForwardArgs) { $childArgs += $ForwardArgs }
     # Process.Start rather than Start-Process -Verb RunAs: Start-Process rethrows a refused prompt
     # as a message-only InvalidOperationException, which drops the Win32Exception 1223 that is
-    # the only locale-independent sign of a refusal. The arguments are joined with single spaces,
-    # exactly as Start-Process joins -ArgumentList. The working directory has to be set by hand:
-    # Start-Process fills in the current FileSystem location, while a bare ProcessStartInfo
-    # starts the child in the process's own directory, which Set-Location never moves.
+    # the only locale-independent sign of a refusal. Every argument is quoted (a temp or script
+    # path under C:\Users\John Doe would otherwise split in two). The working directory has to
+    # be set by hand: Start-Process fills in the current FileSystem location, while a bare
+    # ProcessStartInfo starts the child in the process's own directory, which Set-Location never
+    # moves.
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = Get-PwshPyHostPath
-    $startInfo.Arguments = $childArgs -join ' '
+    $startInfo.Arguments = Join-PwshPyCommandLine -Arguments $childArgs
     $startInfo.WorkingDirectory = (Get-Location -PSProvider FileSystem).ProviderPath
     $startInfo.UseShellExecute = $true
     $startInfo.Verb = 'runas'

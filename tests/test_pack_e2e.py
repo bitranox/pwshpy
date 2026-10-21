@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -534,6 +535,121 @@ def test_the_windows_elevated_relaunch_keeps_the_working_directory(tmp_path: Pat
     exit_code, report = _run_relaunch_stand_in(tmp_path, tmp_path / "harness", work, "plain")
     assert exit_code == 5, report
     assert report["cwd"] == str(work)
+
+
+def test_the_windows_elevated_relaunch_keeps_spaced_paths_and_arguments_whole(tmp_path: Path) -> None:
+    """A space in the script path, the temp dir or an argument reaches the child as one argument.
+
+    The relaunch builds a flat command line (5.1's .NET Framework has no ArgumentList), so each
+    argument must be quoted the way the child's parser splits it: `C:\\Users\\John Doe\\...` must
+    not become two arguments.
+    """
+    spaced_temp = tmp_path / "temp with space"
+    spaced_temp.mkdir()
+    work = tmp_path / "work dir"
+    work.mkdir()
+    arguments = ["has space", 'quote"inside', "ends with backslash\\", "plain"]
+    temp_variables = {"TMPDIR": str(spaced_temp), "TMP": str(spaced_temp), "TEMP": str(spaced_temp)}
+    exit_code, report = _run_relaunch_stand_in(
+        tmp_path, tmp_path / "dir with space", work, *arguments, env=temp_variables
+    )
+    assert exit_code == 5, report
+    assert isinstance(report["argv"], list)
+    argv = cast("list[object]", report["argv"])
+    assert argv[0] == "-PwshPyRelay"
+    assert str(argv[1]).startswith(str(spaced_temp))
+    assert argv[2:] == arguments
+    assert report["cwd"] == str(work)
+
+
+#: Quotes a list of arguments with the artefact's own command-line builder.
+_COMMAND_LINE_PROBE = r"""
+param([string] $Artefact, [string] $Source, [string] $Output)
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Artefact, [ref]$tokens, [ref]$errors)
+$definitions = $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+}, $false)
+foreach ($definition in $definitions) { . ([ScriptBlock]::Create($definition.Extent.Text)) }
+$values = [string[]](ConvertFrom-Json ([IO.File]::ReadAllText($Source)))
+[IO.File]::WriteAllText($Output, (Join-PwshPyCommandLine -Arguments $values))
+"""
+
+#: One Windows command-line token: a quote with the backslashes before it, a backslash run, a
+#: blank run, or a run of anything else.
+_COMMAND_LINE_TOKEN = re.compile(r'(?P<quote>\\*")|(?P<slashes>\\+)|(?P<blank>[ \t]+)|(?P<text>[^\\" \t]+)')
+
+
+def _command_line_to_argv(line: str) -> list[str]:
+    """Split a Windows command line (program name already removed) the way CommandLineToArgvW does.
+
+    2n backslashes before a quote give n backslashes and toggle quoting; 2n+1 give n backslashes and
+    a literal quote; backslashes anywhere else are literal; blanks split only outside quotes. Two
+    adjacent quotes INSIDE a quoted region are parsed differently by CommandLineToArgvW and the C
+    runtime, so the builder must never emit them, and this parser does not model them.
+
+    Example:
+        >>> _command_line_to_argv('a "b c" "d\\\\"e" f\\\\')
+        ['a', 'b c', 'd"e', 'f\\\\']
+    """
+    argv: list[str] = []
+    current: str | None = None
+    quoted = False
+    for match in _COMMAND_LINE_TOKEN.finditer(line):
+        token = match.group()
+        if match.lastgroup == "blank" and not quoted:
+            if current is not None:
+                argv.append(current)
+            current = None
+            continue
+        current = current or ""
+        if match.lastgroup != "quote":
+            current += token
+            continue
+        slashes = len(token) - 1
+        current += "\\" * (slashes // 2) + ('"' if slashes % 2 else "")
+        quoted = quoted if slashes % 2 else not quoted
+    if current is not None:
+        argv.append(current)
+    return argv
+
+
+def test_the_relaunch_command_line_round_trips_through_the_windows_argument_rules(tmp_path: Path) -> None:
+    """Every argument the relaunch quotes comes back unchanged under CommandLineToArgvW's rules."""
+    assert _PWSH is not None
+    values = [
+        "plain",
+        "has space",
+        "tab\there",
+        'quote"inside',
+        '"',
+        "ends with backslash\\",
+        "C:\\Users\\John Doe\\AppData\\Local\\Temp\\",
+        "\\\\server\\share with space\\",
+        'back\\\\"slash',
+        "",
+        "-PwshPyRelay",
+        "gr\u00fc\u00dfe",
+    ]
+    manifest = pack_script(_project(tmp_path))
+    probe = tmp_path / "probe.ps1"
+    probe.write_text(_COMMAND_LINE_PROBE, encoding="utf-8")
+    source = tmp_path / "values.json"
+    source.write_text(json.dumps(values), encoding="utf-8")
+    output = tmp_path / "line.txt"
+    result = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", *map(str, (probe, manifest.output_path, source, output))],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _command_line_to_argv(output.read_text(encoding="utf-8")) == values
 
 
 def test_unpack_edit_repack_produces_a_working_artefact(tmp_path: Path) -> None:

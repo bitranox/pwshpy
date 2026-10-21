@@ -17,10 +17,8 @@ from typing import Any
 
 import rich_click as click
 
-from ....domain.errors import OperationTimeoutError
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
-from ..exit_codes import ExitCode
 from ..output import emit
 from ..typed_click import argument, option
 from ._common import resolve_format
@@ -77,14 +75,11 @@ def cli_get_windows_update(
     # Only the options given are forwarded, so the facade stays the one owner of the defaults.
     overrides: dict[str, Any] = {"criteria": criteria, "timeout": timeout}
     ps = get_cli_context(ctx).services.ps
-    try:
-        emit(
-            ps.get_windows_update(**{key: value for key, value in overrides.items() if value is not None}),
-            resolve_format(as_json, as_jsonl),
-        )
-    except OperationTimeoutError as exc:
-        click.echo(f"pwshpy: Windows Update search timed out after {exc.timeout:g}s (raise --timeout)", err=True)
-        ctx.exit(ExitCode.TIMEOUT)
+    # An OperationTimeoutError propagates: main() maps it to exit 110 for every command.
+    emit(
+        ps.get_windows_update(**{key: value for key, value in overrides.items() if value is not None}),
+        resolve_format(as_json, as_jsonl),
+    )
 
 
 @click.command("get_windows_image", context_settings=CLICK_CONTEXT_SETTINGS)

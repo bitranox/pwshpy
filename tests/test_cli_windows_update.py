@@ -46,8 +46,9 @@ def _run(fake: Ps, args: list[str]) -> int:
 
 @pytest.mark.os_agnostic
 def test_timeout_exits_110_with_a_timed_out_message(capsys: pytest.CaptureFixture[str]) -> None:
-    """An OperationTimeoutError leaves as exit 110 (ETIMEDOUT) and one 'timed out' stderr line."""
-    rc = _run(_WindowsUpdatePs(error=OperationTimeoutError("t", timeout=3)), [])
+    """An OperationTimeoutError leaves through main() as exit 110 (ETIMEDOUT), its message on stderr."""
+    error = OperationTimeoutError("Windows Update search timed out after 3s", timeout=3)
+    rc = _run(_WindowsUpdatePs(error=error), [])
     captured = capsys.readouterr()
     assert rc == ExitCode.TIMEOUT == 110
     assert "timed out" in captured.err

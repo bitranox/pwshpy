@@ -19,7 +19,7 @@ import subprocess  # nosec B404 - this module's purpose is a controlled, shell-f
 import time
 from collections.abc import Mapping, Sequence
 
-from ...domain.errors import NativeCallError
+from ...domain.errors import NativeCallError, OperationTimeoutError
 from ...domain.records import ProcessResult
 
 
@@ -46,8 +46,9 @@ def run_process(
         captured stdout/stderr (UTF-8 text), and wall-clock ``duration_s``.
 
     Raises:
-        NativeCallError: If the executable is not found, or the timeout elapses
-            (the partial output is included in the message).
+        OperationTimeoutError: If ``timeout`` elapses (the child is killed; a
+            :class:`~pwshpy.domain.errors.NativeCallError` subclass).
+        NativeCallError: If the executable is not found or cannot be started.
 
     Example:
         >>> import sys
@@ -76,7 +77,10 @@ def run_process(
     except OSError as exc:
         raise NativeCallError(f"Failed to run {args[0]!r}: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
-        raise NativeCallError(f"Command {args!r} exceeded its {timeout}s timeout and was killed.") from exc
+        # exc.timeout is the value subprocess enforced, so the attribute cannot drift from the message.
+        raise OperationTimeoutError(
+            f"Command {args!r} exceeded its {timeout}s timeout and was killed.", timeout=float(exc.timeout)
+        ) from exc
     duration = time.perf_counter() - started
     return ProcessResult(
         argv=args,

@@ -14,7 +14,8 @@ import sys
 import pytest
 
 from pwshpy.adapters.native.process_exec import run_process
-from pwshpy.domain.errors import NativeCallError
+from pwshpy.composition import build_ps
+from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
 from pwshpy.domain.records import ProcessResult
 
 
@@ -82,17 +83,21 @@ def test_env_replaces_child_environment() -> None:
 
 
 @pytest.mark.os_agnostic
-def test_timeout_kills_and_raises() -> None:
-    """A run that outlives its timeout is killed and raises NativeCallError."""
-    with pytest.raises(NativeCallError):
-        run_process([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.5)
+def test_timeout_raises_operation_timeout_error() -> None:
+    """[130]: a run that outlives its timeout is killed and raises the typed timeout, still a NativeCallError."""
+    with pytest.raises(OperationTimeoutError) as caught:
+        build_ps().exec([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.5)
+    assert isinstance(caught.value, NativeCallError)  # existing `except NativeCallError` callers keep working
+    assert caught.value.timeout == 0.5
+    assert "exceeded its 0.5s timeout" in str(caught.value)  # message kept
 
 
 @pytest.mark.os_agnostic
 def test_missing_executable_raises() -> None:
-    """A nonexistent executable raises NativeCallError, not a bare FileNotFoundError."""
-    with pytest.raises(NativeCallError):
+    """A nonexistent executable raises NativeCallError, never the timeout type (the item's whole point)."""
+    with pytest.raises(NativeCallError) as caught:
         run_process(["pwshpy-definitely-not-a-real-binary-xyz"])
+    assert not isinstance(caught.value, OperationTimeoutError)
 
 
 @pytest.mark.os_agnostic

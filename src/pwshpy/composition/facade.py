@@ -941,6 +941,11 @@ class Ps:
         ``stderr`` is plain data, never mistaken for a terminating error.  Call
         ``.check()`` on the result to raise on a nonzero exit.
 
+        Raises:
+            OperationTimeoutError: ``timeout`` elapsed; the child was killed. A
+                ``NativeCallError`` subclass, so catch it first to tell it apart.
+            NativeCallError: The executable was not found or could not be started.
+
         Example:
             >>> import sys
             >>> build_ps().exec([sys.executable, "-c", "print(1)"]).stdout.strip()

@@ -60,6 +60,10 @@ r.stdout, r.stderr  # captured text
 r.check()  # raises NativeCallError on a nonzero exit (opt-in "stop on error")
 ```
 
+A run that outlives `timeout=` is killed and raises `OperationTimeoutError` (its `.timeout` holds the
+limit), a subclass of the `NativeCallError` a missing or unstartable program raises: catch
+`OperationTimeoutError` first to tell the two apart.
+
 CLI: `pwshpy exec -- git status` (put the program after `--` so its flags are not parsed by pwshpy).
 
 ## Predictable, memory-bounded file I/O

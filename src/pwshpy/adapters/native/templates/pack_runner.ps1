@@ -276,10 +276,13 @@ function Invoke-PwshPyElevated {
     # Process.Start rather than Start-Process -Verb RunAs: Start-Process rethrows a refused prompt
     # as a message-only InvalidOperationException, which drops the Win32Exception 1223 that is
     # the only locale-independent sign of a refusal. The arguments are joined with single spaces,
-    # exactly as Start-Process joins -ArgumentList, so the child sees the same command line.
+    # exactly as Start-Process joins -ArgumentList. The working directory has to be set by hand:
+    # Start-Process fills in the current FileSystem location, while a bare ProcessStartInfo
+    # starts the child in the process's own directory, which Set-Location never moves.
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = Get-PwshPyHostPath
     $startInfo.Arguments = $childArgs -join ' '
+    $startInfo.WorkingDirectory = (Get-Location -PSProvider FileSystem).ProviderPath
     $startInfo.UseShellExecute = $true
     $startInfo.Verb = 'runas'
     try {

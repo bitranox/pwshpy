@@ -16,12 +16,14 @@ and the uv-absent test (it blanks ``PATH``/``HOME``, which can break process cre
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
 from elevation_doubles import RUNNING_AS_ROOT, link_tools, write_fake_sudo
@@ -446,6 +448,92 @@ def test_a_refused_uac_prompt_is_recognised_by_its_win32_code(tmp_path: Path) ->
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.split() == ["wrapped_1223=True", "bare_1223=True", "wrapped_5=False", "message_only=False"]
+
+
+#: Builds a stand-in for the Windows elevated relaunch out of the artefact's own functions. The
+#: only change is the 'runas' verb, which becomes '' because no non-Windows host (and no test)
+#: can answer a UAC prompt; everything else - the start info, the command line, the relay files,
+#: the exit code - is the artefact's code, run for real.
+_RELAUNCH_BUILDER = r"""
+param([string] $Artefact, [string] $Body, [string] $Output)
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Artefact, [ref]$tokens, [ref]$errors)
+$definitions = $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+}, $false) | ForEach-Object { $_.Extent.Text }
+$functions = $definitions -join "`n`n"
+$verbs = ([regex]::Matches($functions, "'runas'")).Count
+if ($verbs -ne 1) { throw "expected exactly one 'runas' verb in the artefact, found $verbs" }
+$functions = $functions.Replace("'runas'", "''")
+[IO.File]::WriteAllText($Output, $functions + "`n`n" + (Get-Content -LiteralPath $Body -Raw))
+"""
+
+#: The stand-in's script body. Run normally it moves to PWSHPY_TEST_CWD and relaunches itself
+#: through the artefact's Invoke-PwshPyElevated; the relaunched child (recognised by the relay
+#: switch the relaunch adds) reports its working directory and argv through the relay file.
+_RELAUNCH_BODY = r"""
+$PwshPyOnWindows = $true
+$relayAt = [Array]::IndexOf([object[]]$args, '-PwshPyRelay')
+if ($relayAt -ge 0) {
+    $report = ConvertTo-Json -Compress -InputObject ([ordered]@{ cwd = (Get-Location).ProviderPath; argv = @($args) })
+    [IO.File]::WriteAllText($args[$relayAt + 1] + '.out', $report)
+    exit 5
+}
+Set-Location -LiteralPath $env:PWSHPY_TEST_CWD
+Invoke-PwshPyElevated -ForwardArgs ([string[]]$args)
+"""
+
+
+def _run_relaunch_stand_in(
+    tmp_path: Path, harness_dir: Path, cwd: Path, *arguments: str, env: dict[str, str] | None = None
+) -> tuple[int, dict[str, object]]:
+    """Run the artefact's Windows relaunch with a non-elevating verb; return its exit and the child's report."""
+    assert _PWSH is not None
+    manifest = pack_script(_project(tmp_path))
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    builder = tmp_path / "relaunch_builder.ps1"
+    builder.write_text(_RELAUNCH_BUILDER, encoding="utf-8")
+    body = tmp_path / "relaunch_body.ps1"
+    body.write_text(_RELAUNCH_BODY, encoding="utf-8")
+    harness = harness_dir / "relaunch.ps1"
+    built = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", *map(str, (builder, manifest.output_path, body, harness))],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert built.returncode == 0, built.stderr
+    result = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(harness), *arguments],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+        env={**os.environ, "PWSHPY_TEST_CWD": str(cwd), **(env or {})},
+    )
+    report: object = json.loads(result.stdout.strip() or "{}")
+    assert isinstance(report, dict), result.stdout
+    return result.returncode, cast("dict[str, object]", report)
+
+
+def test_the_windows_elevated_relaunch_keeps_the_working_directory(tmp_path: Path) -> None:
+    """The elevated child starts in the caller's PowerShell location, as Start-Process did.
+
+    A bare ProcessStartInfo starts in the PROCESS's current directory, which PowerShell does not
+    move on Set-Location, so `cd C:\\work; .\\runner.ps1 -PwshPyElevate` would run the script
+    elsewhere. The harness moves with Set-Location only, which is exactly that situation.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    exit_code, report = _run_relaunch_stand_in(tmp_path, tmp_path / "harness", work, "plain")
+    assert exit_code == 5, report
+    assert report["cwd"] == str(work)
 
 
 def test_unpack_edit_repack_produces_a_working_artefact(tmp_path: Path) -> None:

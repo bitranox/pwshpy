@@ -31,6 +31,39 @@ class PwshPyError(Exception):
         True
     """
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Rebuild without ``__init__`` so pickle and ``copy.deepcopy`` keep the error intact.
+
+        The inherited reduce calls ``type(self)(*self.args)``, which works only while a
+        subclass's ``__init__`` takes exactly its ``args``.  A keyword-only parameter
+        (``OperationTimeoutError(message, timeout=...)``) makes the load raise ``TypeError``,
+        e.g. when the error crosses a ``multiprocessing`` pipe; an ``__init__`` that joins its
+        input into the message (``InvalidLoggingConfigError(problems)``) is handed that message
+        back and joins it again, one character at a time.  Restoring ``args`` plus ``__dict__``
+        keeps every attribute a subclass adds, whatever its ``__init__`` signature.  It sits on
+        the root rather than on each such subclass because forgetting it fails silently.
+
+        Returns:
+            The reduce triple: rebuild callable, its arguments, and the instance state.
+
+        Example:
+            >>> import pickle
+            >>> rebuilt = pickle.loads(pickle.dumps(OperationTimeoutError("slow", timeout=5.0)))
+            >>> (str(rebuilt), rebuilt.timeout)
+            ('slow', 5.0)
+        """
+        return (_rebuild_without_init, (type(self), self.args), self.__dict__)
+
+
+def _rebuild_without_init(cls: type[BaseException], args: tuple[object, ...]) -> BaseException:
+    """Create ``cls`` with ``args`` but without running ``__init__`` (the pickle state follows).
+
+    Example:
+        >>> _rebuild_without_init(OperationTimeoutError, ("slow",)).args
+        ('slow',)
+    """
+    return cls.__new__(cls, *args)
+
 
 class NativeCallError(PwshPyError):
     """A native native binding call (win32 / wmi / psutil / winreg) failed.
@@ -77,35 +110,6 @@ class OperationTimeoutError(NativeCallError):
     def __init__(self, message: str, *, timeout: float) -> None:
         super().__init__(message)
         self.timeout = timeout
-
-    def __reduce__(self) -> tuple[Any, ...]:
-        """Rebuild without ``__init__`` so pickle and ``copy.deepcopy`` keep ``timeout``.
-
-        The inherited reduce calls ``type(self)(*self.args)``, which cannot supply the
-        keyword-only ``timeout`` (a ``TypeError`` on load, e.g. when the error crosses a
-        ``multiprocessing`` pipe).  Restoring ``args`` plus ``__dict__`` instead keeps every
-        attribute a subclass adds too, whatever its ``__init__`` signature.
-
-        Returns:
-            The reduce triple: rebuild callable, its arguments, and the instance state.
-
-        Example:
-            >>> import pickle
-            >>> rebuilt = pickle.loads(pickle.dumps(OperationTimeoutError("slow", timeout=5.0)))
-            >>> (str(rebuilt), rebuilt.timeout)
-            ('slow', 5.0)
-        """
-        return (_rebuild_without_init, (type(self), self.args), self.__dict__)
-
-
-def _rebuild_without_init(cls: type[BaseException], args: tuple[object, ...]) -> BaseException:
-    """Create ``cls`` with ``args`` but without running ``__init__`` (the pickle state follows).
-
-    Example:
-        >>> _rebuild_without_init(OperationTimeoutError, ("slow",)).args
-        ('slow',)
-    """
-    return cls.__new__(cls, *args)
 
 
 class PowerShellError(PwshPyError):

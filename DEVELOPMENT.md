@@ -105,8 +105,35 @@ right subset:
 - **`mutating`** - **changes** real host state (creates users/services/tasks, writes the registry,
   clears an event log). `make test` **skips** these: this project sets
   `[tool.scripts.test].exclude-markers = "mutating"`. They run only on a disposable throwaway host.
-- **`os_agnostic` / `os_windows` / `os_macos` / `os_posix` / `os_linux`** - label the target OS. The
-  marker itself does not skip; each such test also carries its own `skipif(sys.platform ...)`.
+- **`os_agnostic` / `os_windows` / `os_macos` / `os_posix` / `os_linux`** - label the target OS.
+  `tests/conftest.py` skips an `os_windows` / `os_macos` / `os_posix` / `os_linux` test on any other
+  platform; `os_agnostic` runs everywhere.
+
+### No test touches the desktop keyring (session bus guard)
+
+Any contact with `org.freedesktop.secrets` on the desktop session bus D-Bus-activates the user's
+keyring daemon, and a locked login keyring then pops a password dialog on the desktop. So
+`tests/conftest.py` points `DBUS_SESSION_BUS_ADDRESS` at an abstract socket nobody listens on for
+the whole run, and every child process a test spawns inherits it. The variable is replaced, not
+removed: with it unset, libdbus, sd-bus and GDBus clients fall back to `$XDG_RUNTIME_DIR/bus` or
+X11 autolaunch, which reach a live session bus just the same. The system bus is untouched, and
+`tests/test_session_bus_guard.py` pins the guard.
+
+The live Secret Service round-trip (`tests/test_secret_service.py::test_save_load_delete_roundtrip`)
+is opt-in with `PWSHPY_TEST_SECRET_SERVICE=1`, which also switches the guard off. Set it ONLY on a
+private bus with a throwaway keyring in a throwaway HOME and no display. A private bus alone is not
+enough: a `gnome-keyring-daemon` started there still reads and writes the real
+`~/.local/share/keyrings` (and `--unlock` creates a `login.keyring` there when none exists):
+
+```bash
+sandbox=$(mktemp -d) && mkdir -m 700 "$sandbox/run" "$sandbox/share"
+env -u DBUS_SESSION_BUS_ADDRESS -u GNOME_KEYRING_CONTROL -u DISPLAY -u WAYLAND_DISPLAY \
+    HOME="$sandbox" XDG_DATA_HOME="$sandbox/share" XDG_RUNTIME_DIR="$sandbox/run" \
+    dbus-run-session -- sh -c '
+        printf %s test | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+        PWSHPY_TEST_SECRET_SERVICE=1 .venv/bin/python -m pytest tests/test_secret_service.py'
+rm -rf "$sandbox"
+```
 
 ### Quick Reference
 

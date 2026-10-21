@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import tempfile
+import uuid
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import fields
 from pathlib import Path
@@ -51,8 +52,51 @@ def _purge_stale_coverage_files(cov_path: Path) -> None:
             Path(str(cov_path) + suffix).unlink()
 
 
+#: Opts a run in to whatever session bus the environment provides (see ``_keep_off_the_session_bus``).
+SECRET_SERVICE_OPT_IN = "PWSHPY_TEST_SECRET_SERVICE"
+_SESSION_BUS_VAR = "DBUS_SESSION_BUS_ADDRESS"
+#: A stash key for the session-bus address the run inherited, restored at unconfigure.
+_INHERITED_SESSION_BUS = pytest.StashKey[str | None]()
+
+
+def _keep_off_the_session_bus(config: pytest.Config) -> None:
+    """Point the session bus at an address nobody listens on, unless the run opted in.
+
+    Any contact with ``org.freedesktop.secrets`` on the desktop session bus D-Bus-activates the
+    user's keyring daemon, and a locked login keyring then pops a password dialog on the desktop -
+    once per test run. A test or a library it reaches must never be able to do that, so the whole
+    run (and every child it spawns, which inherits ``os.environ``) gets a dead address.
+
+    The variable is replaced rather than removed: with it unset, libdbus, sd-bus and GDBus clients
+    fall back to ``$XDG_RUNTIME_DIR/bus`` or X11 autolaunch, which reach a live session bus that
+    can activate the keyring just the same. A random abstract socket name needs no file and has no
+    listener, so every connect fails at once with ECONNREFUSED. The SYSTEM bus is a different
+    variable and stays untouched (the systemd adapters use it).
+
+    ``PWSHPY_TEST_SECRET_SERVICE=1`` leaves the environment alone; only set it inside a private bus
+    (``dbus-run-session``), as DEVELOPMENT.md describes.
+    """
+    if os.environ.get(SECRET_SERVICE_OPT_IN) == "1":
+        return
+    config.stash[_INHERITED_SESSION_BUS] = os.environ.get(_SESSION_BUS_VAR)
+    os.environ[_SESSION_BUS_VAR] = f"unix:abstract=pwshpy-tests-no-session-bus-{uuid.uuid4().hex}"
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Give the session-bus address back to the process that ran pytest in-process."""
+    if _INHERITED_SESSION_BUS not in config.stash:
+        return
+    inherited = config.stash[_INHERITED_SESSION_BUS]
+    if inherited is None:
+        os.environ.pop(_SESSION_BUS_VAR, None)
+    else:
+        os.environ[_SESSION_BUS_VAR] = inherited
+
+
 def pytest_configure(config: pytest.Config) -> None:
-    """Redirect the coverage database to a **local** temp directory.
+    """Keep the run off the desktop session bus, then redirect the coverage database.
+
+    The coverage database goes to a **local** temp directory.
 
     coverage.py stores trace data in a SQLite database.  SQLite requires
     POSIX file-locking semantics that network mounts (SMB / NFS) do not
@@ -64,6 +108,7 @@ def pytest_configure(config: pytest.Config) -> None:
     picked up regardless of how pytest is invoked (CI, ``make test``,
     bare ``pytest --cov``).
     """
+    _keep_off_the_session_bus(config)
     if "COVERAGE_FILE" not in os.environ:
         cov_path = Path(tempfile.gettempdir()) / _COVERAGE_BASENAME
         _purge_stale_coverage_files(cov_path)

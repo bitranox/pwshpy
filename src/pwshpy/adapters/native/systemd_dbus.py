@@ -13,7 +13,8 @@ Contents:
       ``Timer`` / ``Service``) property of a loaded unit.
     * :func:`unit_path` / :func:`path_property` - resolve a unit's object path once, then read
       several properties from it (one ``GetUnit`` instead of one per property).
-    * :func:`load_unit_path` - the same, but ``LoadUnit`` loads an unloaded unit from its file.
+    * :func:`load_unit_path` - the same, but ``LoadUnit`` loads an unloaded unit from its file
+      (None for a name with no unit file, which systemd answers as a ``not-found`` object).
 """
 
 from __future__ import annotations
@@ -86,12 +87,21 @@ def unit_path(bus: Bus, name: str) -> str | None:
 
 
 def load_unit_path(bus: Bus, name: str) -> str | None:
-    """The object path of a unit, loading it from its unit file if needed; None if it has none."""
+    """The object path of a unit, loading it from its unit file if needed; None when it has none.
+
+    systemd answers ``LoadUnit`` for a valid name with NO unit file too (measured on 259): the
+    object's ``LoadState`` is ``not-found`` and every property reads a default - ``User`` ``""``,
+    which would read as root. So one ``LoadState`` read turns that into None, letting callers apply
+    their "unknown" defaults; an invalid name is a D-Bus error, also None.
+    """
     try:
         (path,) = call(bus, "LoadUnit", "s", (name,))
     except NativeCallError:
-        return None  # no unit file and not loaded: nothing to read
-    return str(path)
+        return None  # an invalid unit name: nothing to read
+    resolved = str(path)
+    if path_property(bus, resolved, "LoadState", "not-found") == "not-found":
+        return None
+    return resolved
 
 
 def unit_property(bus: Bus, name: str, prop: str, default: Any, *, interface: str = UNIT_IFACE) -> Any:

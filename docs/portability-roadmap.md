@@ -120,19 +120,30 @@ box (like the Windows mutating tests need throwaway VM 24000).
   `build_ps`, verified live (read unprivileged; the mutating verbs on root scratch units in
   `tests/test_systemd_task_controller.py`).
 - **Model:** a scheduled task = a `.timer` unit (the schedule) triggering a `.service` unit (the work).
-- **Read** (`iter_timers`): `ListUnits()` filter to `.timer`; state from ActiveState + enablement from
-  `GetUnitFileState`; description from the unit. Marshals to the same `ScheduledTaskInfo`.
-  `user_id` is the triggered service's `User=` as a decimal uid (`"0"` for root, `""` when it cannot
-  be read or resolved); `last_run_time` is the timer's `LastTriggerUSec`, `next_run_time` its
-  `NextElapseUSecRealtime` (None for a boot-only timer, which has no wall-clock next elapse);
-  `last_task_result` is the service's exit status, `128 + signal` when killed, None while it runs or
-  if it never ran; `run_level` is always None.
-- **Mutate:** `register` writes a oneshot `.service` under `/etc/systemd/system` (the exec action,
-  `User=<uid>` for a uid principal) and, when triggers are given, a `.timer` that starts it, then
-  `Reload` + `EnableUnitFiles`; a task with no triggers runs only on demand. Registering over an
-  existing task replaces it. `run`/`stop` = `StartUnit`/`StopUnit` of the service;
-  `enable`/`disable` = `EnableUnitFiles`/`DisableUnitFiles` of a task's `.timer`; `unregister` stops +
-  removes the files pwshpy wrote (never a vendor unit under /lib).
+- **Read** (`iter_timers`): two passes. First the loaded timers from `ListUnits()` (filter to `.timer`,
+  skipping LoadState `not-found` / `masked`); then the timer unit files `ListUnits` did not report
+  (`ListUnitFilesByPatterns`, or `ListUnitFiles` on systemd < 230), because a disabled or
+  not-yet-started timer is unloaded and `ListUnits` omits it - Get-ScheduledTask lists a disabled task.
+  Masked files, aliases and templates are skipped; vendor timers under `/usr/lib` are listed. State from
+  ActiveState + enablement from the UnitFileState (`static` counts as enabled: it cannot be disabled
+  and it runs); description from the unit. Marshals to the same `ScheduledTaskInfo`.
+- **Unit lookup:** units are resolved with `LoadUnit`, never `GetUnit`, which answers only for loaded
+  units (a fresh boot timer, a disabled timer and a finished oneshot are unloaded, and `GetUnit` would
+  read every field as a default). `LoadUnit` also answers for a name with no unit file, with an object
+  whose LoadState is `not-found`; that reads as unknown, not as systemd's defaults (`User` `""` = root).
+- **Run info:** `last_run_time` is the later of the timer's `LastTriggerUSec` and the triggered service's
+  `ExecMainStartTimestamp`, so an on-demand `run` counts as a run (as Windows' LastRunTime does), while a
+  `Persistent=` trigger that survived a reboot still shows; `next_run_time` is `NextElapseUSecRealtime`.
+- **Mutate:** `register` writes an oneshot `.service` under `/etc/systemd/system` (on demand, matching
+  the Windows on-demand `Register-ScheduledTask`) and, with triggers, a `.timer`; then `Reload`,
+  `EnableUnitFiles`, `Reload` again (as `systemctl enable` does, so no unit is left "changed on disk"),
+  and `StartUnit` only for a calendar timer. `enable` follows the same order (`EnableUnitFiles`, `Reload`,
+  then `StartUnit` unless the timer is boot-relative); `run`/`stop` = `StartUnit`/`StopUnit` of the
+  service; `disable` = `StopUnit` + `DisableUnitFiles` of the `.timer`; `unregister` stops + removes the
+  files pwshpy wrote (never a vendor unit under /lib).
+- **Read-back fields:** `user_id` is the triggered service's `User=` as a decimal uid (`"0"` for root, `""`
+  when it cannot be read or resolved); `last_task_result` is the service's exit status, `128 + signal`
+  when killed, None while it runs or if it never ran; `run_level` is always None.
 - **Principal map (lossy, documented):** no principal or SYSTEM -> root (no `User=`), where Windows
   runs a principal-less task as the interactive caller; a decimal uid -> `User=<uid>`. Any other SID,
   any `logon_type`, and `run_level=HIGHEST` for a non-root uid -> `PlatformUnsupportedError` (no

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import logging
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -53,6 +54,8 @@ from ...domain.errors import ConfigurationError, NativeCallError, PlatformUnsupp
 from ...domain.records import ScheduledTaskInfo
 from ...domain.scheduling import BootTrigger, DailyTrigger, OnceTrigger, TaskPrincipal, TaskTrigger
 from . import systemd_dbus as _dbus
+
+logger = logging.getLogger(__name__)
 
 _ROOT = "/"  # systemd timers are a flat namespace; task_path is this neutral root (no folder tree)
 _UNIT_DIR = Path("/etc/systemd/system")  # where pwshpy writes its own units (system scope, needs root)
@@ -84,13 +87,17 @@ def timer_to_task_state(active_state: str) -> TaskState:
 
 
 def timer_enabled(unit_file_state: str) -> bool:
-    """Whether a unit's ``UnitFileState`` counts as enabled (armed at boot).
+    """Whether a timer's ``UnitFileState`` counts as enabled (armed, it runs on schedule).
+
+    ``static`` counts as enabled: a static timer has no ``[Install]`` section, so it cannot be
+    disabled, and another unit pulls it in, so it is armed and fires (``systemd-tmpfiles-clean``).
+    ``disabled`` and ``masked`` are not enabled.
 
     Example:
-        >>> timer_enabled("enabled"), timer_enabled("disabled")
-        (True, False)
+        >>> timer_enabled("enabled"), timer_enabled("static"), timer_enabled("disabled")
+        (True, True, False)
     """
-    return unit_file_state in ("enabled", "enabled-runtime")
+    return unit_file_state in ("enabled", "enabled-runtime", "static")
 
 
 def timer_task_state(active_state: str, *, enabled: bool) -> TaskState:
@@ -328,8 +335,13 @@ def _timer_task(
     )
 
 
-#: UnitFileStates of a timer file that is not a task: masked is "made unstartable on purpose".
-_NOT_A_TASK = frozenset({"masked", "masked-runtime"})
+#: UnitFileStates of a timer file that is not a task of its own: masked is "made unstartable on
+#: purpose"; alias is a second name for a timer listed under its real name.
+_NOT_A_TASK = frozenset({"masked", "masked-runtime", "alias"})
+
+#: ListUnits LoadStates that are no task: not-found is a name some unit references with no unit
+#: file behind it; masked is made unstartable on purpose.
+_NOT_A_LOADED_TASK = frozenset({"not-found", "masked"})
 
 
 def _timer_files(bus: _dbus.Bus) -> list[tuple[str, str]]:
@@ -344,7 +356,8 @@ def _timer_files(bus: _dbus.Bus) -> list[tuple[str, str]]:
     except NativeCallError:
         try:
             (files,) = _dbus.call(bus, "ListUnitFiles")
-        except NativeCallError:
+        except NativeCallError as exc:
+            logger.debug("cannot list the timer unit files, listing loaded timers only: %s", exc)
             return []
     named = ((str(path).rsplit("/", 1)[-1], str(state)) for path, state in files)
     # A template (name@.timer) is no task until instantiated: LoadUnit cannot load it.
@@ -358,9 +371,11 @@ def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
     timers are flat). The loaded timers come first, from ``ListUnits``: the timer's object path
     comes from the listing itself, so a loaded timer costs no lookup. Then the timer unit FILES
     not among them - a disabled or not-yet-started timer is unloaded and ``ListUnits`` omits it,
-    while Get-ScheduledTask lists a disabled task - each read through ``LoadUnit``; a masked timer
-    or a template is no task and is skipped. Lazy: the unit-file listing, ``GetUnitFileState`` and
-    the run-info reads run only for consumed timers.
+    while Get-ScheduledTask lists a disabled task - each read through ``LoadUnit``. Skipped as no
+    task: a ListUnits entry whose LoadState is not-found or masked, and a masked file, an alias or
+    a template. Lazy: the unit-file listing, ``GetUnitFileState`` and the run-info reads run only
+    for consumed timers. Reading an unloaded timer loads it transiently; systemd unloads it again
+    when nothing references it.
 
     Example:
         >>> callable(iter_timers)
@@ -375,6 +390,8 @@ def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
             if not name.endswith(".timer"):
                 continue
             seen.add(name)
+            if str(unit[2]) in _NOT_A_LOADED_TASK:  # ListUnits field 2 is the LoadState
+                continue
             state = _dbus.unit_file_state(bus, name) or ""
             # ListUnits fields: 1 Description, 3 ActiveState, 6 the unit object path.
             listed = _Listed(active_state=str(unit[3]), description=str(unit[1]))
@@ -691,9 +708,9 @@ class SystemdScheduledTaskController:
             self._require_timer(bus, base, "enable")
             bases = _monotonic_bases(bus, timer)
             _dbus.call(bus, "EnableUnitFiles", "asbb", ([timer], False, False))
+            _dbus.call(bus, "Reload")  # as register does: the new timers.target link is loaded before the start
             if bases is not None and starts_when_armed(bases):
                 _dbus.call(bus, "StartUnit", "ss", (timer, "replace"))
-            _dbus.call(bus, "Reload")
             return self._info(bus, base)
         finally:
             bus.conn.close()

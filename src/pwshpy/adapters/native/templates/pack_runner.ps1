@@ -227,6 +227,17 @@ function Get-PwshPyHostPath {
     return (Get-Process -Id $PID).Path
 }
 
+function Test-PwshPyUacDeclined {
+    param([Exception] $Failure)
+
+    # A refused UAC prompt is Win32Exception 1223 (ERROR_CANCELLED); from PowerShell it arrives
+    # wrapped in a MethodInvocationException, so walk the inner exceptions. Matched by the code
+    # because the message text is localised.
+    $win32 = $Failure
+    while ($win32 -and -not ($win32 -is [System.ComponentModel.Win32Exception])) { $win32 = $win32.InnerException }
+    return [bool]($win32 -and $win32.NativeErrorCode -eq 1223)
+}
+
 function Invoke-PwshPyElevated {
     param([string[]] $ForwardArgs)
 
@@ -239,6 +250,11 @@ function Invoke-PwshPyElevated {
     # exit codes; the fixed stderr line covers a script that itself exits 77.
     $self = $PSCommandPath
     if (-not $PwshPyOnWindows) {
+        # No sudo is a missing tool (127), not a refused elevation (77).
+        if (-not (Get-Command sudo -CommandType Application -ErrorAction SilentlyContinue)) {
+            [Console]::Error.WriteLine('pwshpy: sudo not found; cannot elevate')
+            exit 127
+        }
         # Ask for the password with `sudo -v` first: sudo exits 1 when it refuses, which is also
         # an ordinary exit code of the script, so only asking separately tells the two apart.
         & sudo -v
@@ -246,28 +262,37 @@ function Invoke-PwshPyElevated {
             [Console]::Error.WriteLine('pwshpy: elevation declined (sudo did not grant root)')
             exit 77
         }
-        # sudo keeps the console, so output and exit code flow back without a relay.
+        # sudo keeps the console, so output and exit code flow back without a relay. A sudo that
+        # grants -v but then refuses the command itself (timestamp_timeout=0, sudoers allowing
+        # only -v) exits with that sudo's own code, which no wrapper can tell from the script's.
         & sudo (Get-PwshPyHostPath) -NoProfile -File $self @ForwardArgs
         exit $LASTEXITCODE
     }
 
-    # A UAC child cannot inherit this console and Start-Process rejects -RedirectStandard*
-    # together with -Verb RunAs, so the child writes its streams to files we replay here.
+    # A UAC child cannot inherit this console and a shell-executed start cannot redirect its
+    # streams, so the child writes them to files we replay here.
     $relay = Join-Path ([IO.Path]::GetTempPath()) ('pwshpy-pack-' + [Guid]::NewGuid().ToString('N'))
     $childArgs = @('-NoProfile', '-File', $self, '-PwshPyRelay', $relay) + $ForwardArgs
+    # Process.Start rather than Start-Process -Verb RunAs: Start-Process rethrows a refused prompt
+    # as a message-only InvalidOperationException, which drops the Win32Exception 1223 that is
+    # the only locale-independent sign of a refusal. The arguments are joined with single spaces,
+    # exactly as Start-Process joins -ArgumentList, so the child sees the same command line.
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = Get-PwshPyHostPath
+    $startInfo.Arguments = $childArgs -join ' '
+    $startInfo.UseShellExecute = $true
+    $startInfo.Verb = 'runas'
     try {
-        $process = Start-Process -FilePath (Get-PwshPyHostPath) -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
+        $process = [System.Diagnostics.Process]::Start($startInfo)
     } catch {
-        # A refused UAC prompt surfaces as Win32Exception 1223 (ERROR_CANCELLED), possibly
-        # wrapped; matched by its code because the message text is localised.
-        $win32 = $_.Exception
-        while ($win32 -and -not ($win32 -is [System.ComponentModel.Win32Exception])) { $win32 = $win32.InnerException }
-        if ($win32 -and $win32.NativeErrorCode -eq 1223) {
+        if (Test-PwshPyUacDeclined -Failure $_.Exception) {
             [Console]::Error.WriteLine('pwshpy: elevation declined (the Administrator prompt was refused)')
             exit 77
         }
         throw
     }
+    if ($null -eq $process) { throw 'the elevated PowerShell did not start' }
+    $process.WaitForExit()
     foreach ($stream in @(@("$relay.out", $false), @("$relay.err", $true))) {
         if (Test-Path -LiteralPath $stream[0]) {
             $text = Get-Content -LiteralPath $stream[0] -Raw

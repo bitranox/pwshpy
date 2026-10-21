@@ -285,25 +285,33 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+PWSHPY_CACHE="$(pwshpy_cache_root)/$(printf '%s' "$PWSHPY_SHA" | cut -c1-16)"
+
+# Before the elevate block: the manifest needs no root, so --pwshpy-info never prompts for sudo.
+if [ "$PWSHPY_INFO" = "1" ]; then
+    pwshpy_write_manifest
+    exit 0
+fi
+
 # Ask for the password with `sudo -v` first: sudo exits 1 when it refuses, which is also an ordinary
 # exit code of the script, so only asking separately lets a refusal exit 77 (EX_NOPERM) instead.
+# No sudo at all is a missing tool (127), not a refusal.
 # Relaunch through /bin/sh rather than exec-ing "$0": a packed file is usually not executable.
 # The explicit -- keeps the script's own arguments from being parsed as wrapper switches again.
 if [ "$PWSHPY_WANT_ELEVATE" = "1" ] && [ "$(id -u)" != "0" ]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+        printf '%s\n' "pwshpy: sudo not found; cannot elevate" >&2
+        exit 127
+    fi
     if ! sudo -v; then
         printf '%s\n' "pwshpy: elevation declined (sudo did not grant root)" >&2
         exit 77
     fi
+    # A sudo that grants -v but then refuses the command itself (timestamp_timeout=0, sudoers
+    # allowing only -v) exits with that sudo's own code, which no wrapper can tell from the script's.
     # The switches carry no values, so splitting the unquoted list is exactly what is wanted.
     # shellcheck disable=SC2086
     exec sudo /bin/sh "$0" $PWSHPY_FWD -- "$@"
-fi
-
-PWSHPY_CACHE="$(pwshpy_cache_root)/$(printf '%s' "$PWSHPY_SHA" | cut -c1-16)"
-
-if [ "$PWSHPY_INFO" = "1" ]; then
-    pwshpy_write_manifest
-    exit 0
 fi
 
 # --- unpack -----------------------------------------------------------------------------

@@ -14,10 +14,10 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+from elevation_doubles import RUNNING_AS_ROOT, link_tools, write_fake_sudo
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.enums import RunnerFormat
@@ -289,12 +289,12 @@ def test_unpack_of_a_freshly_packed_sh_round_trips(tmp_path: Path) -> None:
 
 
 # --- --pwshpy-elevate ----------------------------------------------------------------------
-# A refused sudo password cannot be typed without a TTY, so a sudo double on PATH stands in for
-# it: `sudo -v` grants or refuses, anything else runs the command as the same user. The runner
-# only elevates for a non-root uid, so as root none of these reach the sudo branch at all.
+# A sudo double on PATH stands in for a real password prompt (see elevation_doubles).
 
-_RUNNING_AS_ROOT = sys.platform != "win32" and os.geteuid() == 0
-_needs_non_root = pytest.mark.skipif(_RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+_needs_non_root = pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+
+#: What a runner needs on PATH before it reaches the elevate block; sudo deliberately absent.
+_PRE_ELEVATE_TOOLS = ("base64", "sha256sum", "shasum", "cut", "id", "tr", "sed", "cat")
 
 _ELEVATE_ENTRY = """import os
 import sys
@@ -307,19 +307,11 @@ sys.exit(9)
 """
 
 
-def _fake_sudo(bin_dir: Path, *, grant: bool) -> None:
-    """sudo double: -v grants or refuses; anything else runs the command as the same user."""
-    script = bin_dir / "sudo"
-    script.write_text(
-        f'#!/bin/sh\nif [ "$1" = "-v" ]; then exit {0 if grant else 1}; fi\nexec "$@"\n',
-        encoding="utf-8",
-        newline="\n",
-    )
-    script.chmod(0o755)
-
-
 def _elevate_setup(tmp_path: Path, *, grant: bool) -> tuple[Path, Path, dict[str, str]]:
-    """A packed marker-writing script, a sudo double on PATH, and the marker the script writes."""
+    """A packed marker-writing script, a sudo double on PATH, and the marker the script writes.
+
+    The double logs every call to ``sudo-calls.txt`` in ``tmp_path``.
+    """
     entry = tmp_path / "who.py"
     entry.write_text(_ELEVATE_ENTRY)
     runner = _pack_sh(entry, tmp_path / "who.sh")
@@ -327,12 +319,35 @@ def _elevate_setup(tmp_path: Path, *, grant: bool) -> tuple[Path, Path, dict[str
     runner.chmod(0o755)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    _fake_sudo(bin_dir, grant=grant)
+    write_fake_sudo(bin_dir, grant=grant, calls=tmp_path / "sudo-calls.txt")
     marker = tmp_path / "ran.marker"
     environment = _env(tmp_path)
     environment["PATH"] = os.pathsep.join([str(bin_dir), environment["PATH"]])
     environment["PWSHPY_TEST_MARKER"] = str(marker)
     return runner, marker, environment
+
+
+@_needs_non_root
+def test_info_with_elevate_prints_the_manifest_and_never_elevates(tmp_path: Path) -> None:
+    """--pwshpy-info needs no root: with --pwshpy-elevate it still only prints the manifest."""
+    runner, marker, environment = _elevate_setup(tmp_path, grant=True)
+    result = _run(["sh"], runner, "--pwshpy-info", "--pwshpy-elevate", env=environment)
+    assert result.returncode == 0, result.stderr
+    assert "files      :" in result.stdout
+    assert not (tmp_path / "sudo-calls.txt").exists(), "sudo was called for --pwshpy-info"
+    assert not marker.exists(), "the packed script ran for --pwshpy-info"
+
+
+@_needs_non_root
+def test_elevate_without_sudo_exits_127_not_77(tmp_path: Path) -> None:
+    """A host with no sudo is a missing tool (127), not a refused elevation (77)."""
+    runner, marker, environment = _elevate_setup(tmp_path, grant=True)
+    environment["PATH"] = str(link_tools(tmp_path / "no-sudo-bin", _PRE_ELEVATE_TOOLS))
+    sh_bin = shutil.which("sh") or "/bin/sh"
+    result = _run([sh_bin], runner, "--pwshpy-elevate", env=environment)
+    assert result.returncode == 127, result.stderr
+    assert "pwshpy: sudo not found" in result.stderr
+    assert not marker.exists()
 
 
 @_needs_non_root

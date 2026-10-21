@@ -24,6 +24,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+from elevation_doubles import RUNNING_AS_ROOT, link_tools, write_fake_sudo
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.packing import PackOptions
@@ -336,27 +337,10 @@ def test_elevate_switch_runs_the_script_as_root(tmp_path: Path) -> None:
     assert "euid:0" in result.stdout
 
 
-def _fake_sudo(bin_dir: Path, *, grant: bool) -> None:
-    """sudo double: -v grants or refuses; anything else runs the command as the same user.
-
-    A refused sudo password cannot be typed without a TTY, so the double stands in for it.
-    """
-    script = bin_dir / "sudo"
-    script.write_text(
-        f'#!/bin/sh\nif [ "$1" = "-v" ]; then exit {0 if grant else 1}; fi\nexec "$@"\n',
-        encoding="utf-8",
-        newline="\n",
-    )
-    script.chmod(0o755)
-
-
-_RUNNING_AS_ROOT = sys.platform != "win32" and os.geteuid() == 0
-
-
 @pytest.mark.local_only
 @pytest.mark.os_posix
 @pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
-@pytest.mark.skipif(_RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+@pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
 def test_elevate_switch_exits_77_when_sudo_refuses(tmp_path: Path) -> None:
     """A refused sudo is exit 77 (EX_NOPERM), told apart from the script's own exit 1."""
     entry = tmp_path / "who.py"
@@ -365,7 +349,7 @@ def test_elevate_switch_exits_77_when_sudo_refuses(tmp_path: Path) -> None:
     manifest = pack_script(entry)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    _fake_sudo(bin_dir, grant=False)
+    write_fake_sudo(bin_dir, grant=False)
     environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
     result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment)
     assert result.returncode == 77, result.stderr
@@ -376,14 +360,14 @@ def test_elevate_switch_exits_77_when_sudo_refuses(tmp_path: Path) -> None:
 @pytest.mark.local_only
 @pytest.mark.os_posix
 @pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
-@pytest.mark.skipif(_RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+@pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
 def test_elevate_switch_forwards_the_clean_switch(tmp_path: Path) -> None:
     """-PwshPyClean survives the relaunch: a stray file in the cached tree is gone afterwards."""
     manifest = pack_script(_project(tmp_path, exit_code=4))
     runner = Path(manifest.output_path)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    _fake_sudo(bin_dir, grant=True)
+    write_fake_sudo(bin_dir, grant=True)
     environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
     assert _run(runner, env=environment).returncode == 4
     # The .ps1 leaves its lock file beside the extraction; only the directory is the cached tree.
@@ -396,6 +380,72 @@ def test_elevate_switch_forwards_the_clean_switch(tmp_path: Path) -> None:
     assert result.returncode == 4, result.stderr
     assert "greeting:hello from the submodule" in result.stdout
     assert not stray.exists(), "-PwshPyClean was dropped by the elevated relaunch"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="hiding sudo needs a POSIX host")
+@pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+def test_elevate_switch_without_sudo_exits_127_not_77(tmp_path: Path) -> None:
+    """A host with no sudo is a missing tool (127), not a refused elevation (77)."""
+    entry = tmp_path / "who.py"
+    marker = tmp_path / "ran.marker"
+    entry.write_text(f'open({str(marker)!r}, "w").close()\n')
+    manifest = pack_script(entry)
+    # Only `id` (the runner's root check): sudo lives in the same system dir, so the whole PATH
+    # has to be this one directory to hide it.
+    environment = {**_isolated_cache(tmp_path), "PATH": str(link_tools(tmp_path / "no-sudo-bin", ("id",)))}
+    result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment)
+    assert result.returncode == 127, result.stderr
+    assert "pwshpy: sudo not found" in result.stderr
+    assert not marker.exists()
+
+
+_UAC_MAPPING_PROBE = r"""
+param([string] $Artefact)
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Artefact, [ref]$tokens, [ref]$errors)
+$definition = $ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-PwshPyUacDeclined'
+}, $true)
+if (-not $definition) { throw 'Test-PwshPyUacDeclined not found in the artefact' }
+. ([ScriptBlock]::Create($definition.Extent.Text))
+$cancelled = New-Object System.ComponentModel.Win32Exception 1223
+$denied = New-Object System.ComponentModel.Win32Exception 5
+$cases = [ordered]@{
+    wrapped_1223 = (New-Object System.Management.Automation.MethodInvocationException 'start failed', $cancelled)
+    bare_1223 = $cancelled
+    wrapped_5 = (New-Object System.Management.Automation.MethodInvocationException 'start failed', $denied)
+    message_only = (New-Object System.InvalidOperationException 'The operation was canceled by the user.')
+}
+foreach ($name in $cases.Keys) { Write-Output ("{0}={1}" -f $name, (Test-PwshPyUacDeclined -Failure $cases[$name])) }
+"""
+
+
+def test_a_refused_uac_prompt_is_recognised_by_its_win32_code(tmp_path: Path) -> None:
+    """The .ps1's refusal test maps Win32Exception 1223 (also wrapped) to declined, nothing else.
+
+    The real UAC "No" click needs a person; this pins the mapping the Windows branch relies on by
+    running the artefact's own function against constructed exceptions. A message-only
+    exception (what Start-Process -Verb RunAs throws) must NOT read as declined.
+    """
+    assert _PWSH is not None
+    manifest = pack_script(_project(tmp_path))
+    probe = tmp_path / "probe.ps1"
+    probe.write_text(_UAC_MAPPING_PROBE, encoding="utf-8")
+    result = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(probe), str(manifest.output_path)],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["wrapped_1223=True", "bare_1223=True", "wrapped_5=False", "message_only=False"]
 
 
 def test_unpack_edit_repack_produces_a_working_artefact(tmp_path: Path) -> None:

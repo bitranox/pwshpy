@@ -44,8 +44,9 @@ pwshpy --elevate clear_event_log Application                  # relaunch elevate
 When the prompt is refused, `pwshpy --elevate` exits 77 (`EX_NOPERM` from `sysexits.h`) and writes a
 line starting `pwshpy: elevation declined` to stderr, so a caller can tell a refusal from the
 relaunched command's own failure. The packed runners below do the same for `--pwshpy-elevate` and
-`-PwshPyElevate`. A command that itself exits 77 still looks the same by exit code alone; the
-stderr line is what tells them apart.
+`-PwshPyElevate` (on a POSIX host without `sudo` they exit 127 instead, a missing tool rather than
+a refusal). A command that itself exits 77 still looks the same by exit code alone; the stderr line
+is what tells them apart.
 
 ## `ps.exec` - run a program without the quoting / `$LASTEXITCODE` traps
 

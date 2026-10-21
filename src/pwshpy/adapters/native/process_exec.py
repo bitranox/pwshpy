@@ -7,7 +7,8 @@ the native command runs in a pipeline.  :func:`run_process` sidesteps all of it:
 takes an **argv list** (no shell, no quoting), always captures a real ``exit_code``,
 and returns ``stderr`` as plain data in a :class:`~pwshpy.domain.records.ProcessResult`.
 
-Portable (stdlib ``subprocess``); works on every OS.
+Portable (stdlib ``subprocess``); works on every OS.  ``wait_tree=True`` waits for the
+whole process tree (:mod:`~pwshpy.adapters.native.process_tree`).
 
 Contents:
     * :func:`run_process` - run an external program and return a typed ProcessResult.
@@ -21,15 +22,17 @@ from collections.abc import Mapping, Sequence
 
 from ...domain.errors import NativeCallError, OperationTimeoutError
 from ...domain.records import ProcessResult
+from .process_tree import run_process_tree
 
 
-def run_process(
+def run_process(  # noqa: PLR0913 - mirrors the ProcessRunner port: independent, all-optional exec parameters
     argv: Sequence[str],
     *,
     cwd: str | None = None,
     timeout: float | None = None,
     env: Mapping[str, str] | None = None,
     input_text: str | None = None,
+    wait_tree: bool = False,
 ) -> ProcessResult:
     """Run an external program from an argv list and return a typed result.
 
@@ -40,13 +43,19 @@ def run_process(
         timeout: Optional seconds before the child is killed and the call raises.
         env: Optional full environment mapping for the child (replaces, not merges).
         input_text: Optional text piped to the child's stdin.
+        wait_tree: When ``True``, return only after the program AND every process it
+            started have exited (like ``Start-Process -Wait``), and let ``timeout``
+            cover that whole wait and kill the whole tree.  ``False`` (the default)
+            waits for the started program only.  Coverage per OS is in
+            :mod:`~pwshpy.adapters.native.process_tree`.
 
     Returns:
         A :class:`~pwshpy.domain.records.ProcessResult` with argv, exit_code,
         captured stdout/stderr (UTF-8 text), and wall-clock ``duration_s``.
 
     Raises:
-        OperationTimeoutError: If ``timeout`` elapses (the child is killed; a
+        OperationTimeoutError: If ``timeout`` elapses (the child - with ``wait_tree``
+            its whole process tree - is killed; a
             :class:`~pwshpy.domain.errors.NativeCallError` subclass).
         NativeCallError: If the executable is not found or cannot be started.
 
@@ -58,6 +67,8 @@ def run_process(
     args = list(argv)
     if not args:
         raise NativeCallError("run_process requires a non-empty argv list.")
+    if wait_tree:
+        return run_process_tree(args, cwd=cwd, timeout=timeout, env=env, input_text=input_text)
     started = time.perf_counter()
     try:
         completed = subprocess.run(  # noqa: S603  # nosec B603 - argv list, shell=False by construction

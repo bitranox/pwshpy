@@ -2,7 +2,8 @@
 
 ``exec`` runs a program with no shell (no quoting hell); it streams stdout, sends the
 child's stderr to stderr, and exits with the child's exit code (or emits the typed
-``ProcessResult`` as JSON with ``--json``).  Put the program after ``--`` so its own
+``ProcessResult`` as JSON with ``--json``).  ``--wait-tree`` also waits for every process
+the program started, like ``Start-Process -Wait``.  Put the program after ``--`` so its own
 flags are not parsed by pwshpy: ``pwshpy exec -- git status``.
 
 Contents:
@@ -23,10 +24,18 @@ from ._common import resolve_format
 @click.command("exec", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("argv", nargs=-1, required=True)
 @option("--cwd", default=None, help="Working directory to run in.")
-@option("--timeout", type=float, default=None, help="Seconds before the process is killed.")
+@option("--timeout", type=float, default=None, help="Seconds before the process (or its tree) is killed.")
+@option(
+    "--wait-tree",
+    is_flag=True,
+    default=False,
+    help="Wait until every process the program started has exited too (like Start-Process -Wait).",
+)
 @option("--json", "as_json", is_flag=True, default=False, help="Emit the ProcessResult record as JSON.")
 @click.pass_context
-def cli_exec(ctx: click.Context, argv: tuple[str, ...], cwd: str | None, timeout: float | None, as_json: bool) -> None:
+def cli_exec(
+    ctx: click.Context, argv: tuple[str, ...], cwd: str | None, timeout: float | None, wait_tree: bool, as_json: bool
+) -> None:
     """Run an external program (put it after --) and exit with its code (like & / Start-Process).
 
     \f
@@ -35,7 +44,7 @@ def cli_exec(ctx: click.Context, argv: tuple[str, ...], cwd: str | None, timeout
         >>> CliRunner().invoke(cli_exec, ["--help"]).exit_code
         0
     """
-    result = get_cli_context(ctx).services.ps.exec(list(argv), cwd=cwd, timeout=timeout)
+    result = get_cli_context(ctx).services.ps.exec(list(argv), cwd=cwd, timeout=timeout, wait_tree=wait_tree)
     if as_json:
         emit([result], resolve_format(as_json=True, as_jsonl=False))
     else:

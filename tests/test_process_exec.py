@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import os
 import sys
+import time
+from pathlib import Path
 
 import pytest
+from process_tree_programs import finished, is_stopped, parent_argv, wait_for_beats
 
 from pwshpy.adapters.native.process_exec import run_process
 from pwshpy.composition import build_ps
@@ -105,3 +108,134 @@ def test_empty_argv_raises() -> None:
     """An empty argv list is rejected up front."""
     with pytest.raises(NativeCallError):
         run_process([])
+
+
+# --- [52] wait_tree: wait for every process the started program spawned -------------------------
+
+_GRANDCHILD_SECONDS = 3.0
+_ON_MACOS = sys.platform == "darwin"
+_MACOS_GAP = "macOS has no subreaper: a setsid/daemonized grandchild leaves the process group (documented gap)"
+
+
+def _timed_exec(argv: list[str], *, wait_tree: bool = False) -> tuple[ProcessResult, float]:
+    started = time.monotonic()
+    result = run_process(argv, wait_tree=wait_tree, timeout=120)
+    return result, time.monotonic() - started
+
+
+@pytest.mark.os_agnostic
+def test_wait_tree_waits_for_a_background_grandchild(tmp_path: Path) -> None:
+    """wait_tree=True returns only after the grandchild the program started has finished."""
+    base = tmp_path / "bg"
+    result, elapsed = _timed_exec(parent_argv("background", base, _GRANDCHILD_SECONDS), wait_tree=True)
+    assert finished(base), f"returned after {elapsed:.2f}s while the grandchild still ran"
+    assert elapsed >= _GRANDCHILD_SECONDS
+    assert result.exit_code == 0
+    assert "parent done" in result.stdout
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.skipif(_ON_MACOS, reason=_MACOS_GAP)
+def test_wait_tree_waits_for_a_daemonized_grandchild(tmp_path: Path) -> None:
+    """A grandchild that double-forks + setsid (POSIX) or is DETACHED (Windows) is still waited for."""
+    base = tmp_path / "daemon"
+    result, elapsed = _timed_exec(parent_argv("daemon", base, _GRANDCHILD_SECONDS), wait_tree=True)
+    assert finished(base), f"returned after {elapsed:.2f}s while the daemonized grandchild still ran"
+    assert elapsed >= _GRANDCHILD_SECONDS
+    assert result.exit_code == 0
+
+
+@pytest.mark.os_macos
+@pytest.mark.skipif(not _ON_MACOS, reason="pins the macOS-only gap")
+def test_wait_tree_on_macos_does_not_cover_a_daemonized_grandchild(tmp_path: Path) -> None:
+    """The documented macOS gap: a setsid grandchild leaves the process group and is not waited for."""
+    base = tmp_path / "daemon"
+    result, elapsed = _timed_exec(parent_argv("daemon", base, _GRANDCHILD_SECONDS), wait_tree=True)
+    assert result.exit_code == 0
+    assert elapsed < _GRANDCHILD_SECONDS
+    assert not finished(base)
+
+
+@pytest.mark.os_agnostic
+def test_without_wait_tree_returns_before_the_grandchild(tmp_path: Path) -> None:
+    """The default (wait_tree=False) keeps today's behaviour: only the started program is waited for."""
+    base = tmp_path / "default"
+    result, elapsed = _timed_exec(parent_argv("background", base, _GRANDCHILD_SECONDS))
+    assert result.exit_code == 0
+    assert elapsed < _GRANDCHILD_SECONDS
+    assert not finished(base)
+
+
+def _assert_timeout_kills_the_tree(tmp_path: Path, mode: str) -> None:
+    base = tmp_path / mode
+    started = time.monotonic()
+    with pytest.raises(OperationTimeoutError) as caught:
+        run_process(parent_argv(mode, base, 60.0), wait_tree=True, timeout=3.0)
+    elapsed = time.monotonic() - started
+    assert caught.value.timeout == 3.0
+    assert elapsed < 20.0  # the 60 s grandchild was not waited out
+    wait_for_beats(base)  # it really ran, so a quiet heartbeat below means it was killed
+    assert is_stopped(base), "the grandchild kept running after the timeout"
+    assert not finished(base)
+
+
+@pytest.mark.os_agnostic
+def test_wait_tree_timeout_kills_the_whole_tree(tmp_path: Path) -> None:
+    """On timeout the tree is killed (nothing left running) and OperationTimeoutError is raised."""
+    _assert_timeout_kills_the_tree(tmp_path, "background")
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.skipif(_ON_MACOS, reason=_MACOS_GAP)
+def test_wait_tree_timeout_kills_a_daemonized_grandchild(tmp_path: Path) -> None:
+    """The kill on timeout reaches a grandchild that left the process group / console too."""
+    _assert_timeout_kills_the_tree(tmp_path, "daemon")
+
+
+@pytest.mark.os_agnostic
+def test_wait_tree_captures_output_of_a_grandchild_that_inherits_stdout(tmp_path: Path) -> None:
+    """A grandchild that keeps the inherited stdout contributes its output to the result."""
+    result = run_process(parent_argv("inherit", tmp_path / "inherit", 1.0), wait_tree=True, timeout=60)
+    assert "parent done" in result.stdout
+    assert "grandchild out" in result.stdout
+
+
+@pytest.mark.os_agnostic
+def test_wait_tree_reports_the_started_programs_exit_code_under_env(tmp_path: Path) -> None:
+    """The exit code is the started program's own; env reaches it like the default path."""
+    result = run_process(
+        parent_argv("background", tmp_path / "rc", 0.5),
+        wait_tree=True,
+        env={**os.environ, "PARENT_EXIT": "3"},
+    )
+    assert result.exit_code == 3
+    assert finished(tmp_path / "rc")
+
+
+@pytest.mark.os_agnostic
+def test_wait_tree_pipes_input_text_and_honours_cwd(tmp_path: Path) -> None:
+    """input_text reaches stdin and cwd is the child's working directory under wait_tree."""
+    result = run_process(
+        [sys.executable, "-c", "import os, sys; print(sys.stdin.read().upper(), os.getcwd())"],
+        wait_tree=True,
+        input_text="abc",
+        cwd=str(tmp_path),
+    )
+    assert result.stdout.split()[0] == "ABC"
+    assert Path(result.stdout.split(maxsplit=1)[1].strip()).samefile(tmp_path)
+
+
+@pytest.mark.os_agnostic
+def test_wait_tree_missing_executable_raises_native_call_error() -> None:
+    """A missing program is a NativeCallError naming it, never the timeout type."""
+    with pytest.raises(NativeCallError, match="Executable not found") as caught:
+        run_process(["pwshpy-definitely-not-a-real-binary-xyz"], wait_tree=True)
+    assert not isinstance(caught.value, OperationTimeoutError)
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal semantics")
+def test_wait_tree_reports_a_signal_death_like_the_default_path() -> None:
+    """A program killed by a signal reports -N, exactly as subprocess (and wait_tree=False) does."""
+    argv = [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"]
+    assert run_process(argv, wait_tree=True).exit_code == run_process(argv).exit_code == -9

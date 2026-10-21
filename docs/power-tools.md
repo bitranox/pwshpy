@@ -100,6 +100,44 @@ CLI already does).
 CLI: `pwshpy get_windows_update --timeout 600 --jsonl`; a timeout prints one `timed out` line on
 stderr and exits **110** (ETIMEDOUT).
 
+### Waiting for the whole process tree (`wait_tree=True`, like `Start-Process -Wait`)
+
+By default `ps.exec` waits for the program it started, like `subprocess.run`. An installer or
+launcher that hands its work to a child (`setup.exe` starting `SetupHost`, a script that starts a
+background job) then reads as finished while the work still runs. PowerShell's
+`Start-Process -Wait` waits for the whole tree; `wait_tree=True` does the same:
+
+```python
+r = ps.exec(["setup.exe", "/quiet"], wait_tree=True, timeout=3600)
+```
+
+`ps.exec` then returns only after the program AND every process it started have exited, and
+`timeout=` covers that whole wait: on expiry every process in the tree is killed and
+`OperationTimeoutError` is raised, so nothing is left running. `exit_code` is still the started
+program's own. The CLI flag is `pwshpy exec --wait-tree -- setup.exe /quiet`.
+
+What counts as "the tree" depends on what the OS can track:
+
+| OS      | Mechanism                                                                                                | Waited for                                                                                  | Not waited for                                                                               |
+|---------|----------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------|
+| Windows | A Win32 job object; the program is created suspended and joins the job before it can start anything      | Every descendant, `DETACHED_PROCESS` / `CREATE_NEW_PROCESS_GROUP` children included         | A child created with `CREATE_BREAKAWAY_FROM_JOB` (allowed, so such a program keeps working)  |
+| Linux   | A helper process that is a child subreaper (`PR_SET_CHILD_SUBREAPER`) and reaps until it has no children | Every descendant, double-forked `setsid` daemons included                                   | Nothing that descends from the program                                                       |
+| macOS   | A helper process that starts the program in a new session and waits until that process group is empty    | Descendants that stay in the program's process group (ordinary children, `&` jobs, `nohup`) | A descendant that calls `setsid` or daemonizes: it leaves the group (macOS has no subreaper) |
+
+On every OS, work handed to a service manager (systemd, launchd, the Windows service control
+manager, Task Scheduler, an out-of-process COM server) is not a descendant of the program and is
+not waited for.
+
+On POSIX the helper is a small stdlib-only script that pwshpy runs with the current interpreter
+(`sys.executable -I`); it exists because becoming a subreaper and reaping every child would change
+process-wide state of the program that imports pwshpy. With `wait_tree=True` on macOS the program
+runs in a new session, so it has no controlling terminal.
+
+Output: stdout and stderr are captured as on the default path, including whatever descendants
+write to the pipes they inherited, until the tree is gone. A process outside the tree (the
+"Not waited for" column) may still hold those pipes; the result is then returned about two
+seconds after the tree exited, with the output read up to that point.
+
 ## Predictable, memory-bounded file I/O
 
 No more UTF-16LE-with-a-BOM surprises from `Out-File`; the bytes are identical on every OS and

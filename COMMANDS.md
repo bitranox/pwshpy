@@ -239,12 +239,14 @@ Always UTF-8, no BOM, LF by default - the same bytes on every OS (no `Out-File` 
 
 ## Running an external program  *(portable)*
 
-| PowerShell                                 | pwshpy - Python (API)                                              | pwshpy - CLI               |
-|--------------------------------------------|--------------------------------------------------------------------|----------------------------|
-| `& prog arg1 arg2` / `Start-Process -Wait` | `ps.exec(argv, cwd=None, timeout=None, env=None, input_text=None)` | `pwshpy exec -- prog args` |
+| PowerShell                                       | pwshpy - Python (API)                                              | pwshpy - CLI                           |
+|--------------------------------------------------|--------------------------------------------------------------------|----------------------------------------|
+| `& prog arg1 arg2`                               | `ps.exec(argv, cwd=None, timeout=None, env=None, input_text=None)` | `pwshpy exec -- prog args`             |
+| `Start-Process -Wait` (waits for the whole tree) | `ps.exec(argv, wait_tree=True)`                                    | `pwshpy exec --wait-tree -- prog args` |
 
 `argv` is a LIST (no shell, no quoting hell); `.exit_code` is always set, `.stderr` is data,
-`.check()` raises on nonzero.
+`.check()` raises on nonzero. `wait_tree=True` also waits for every process the program started
+(see [Power tools](docs/power-tools.md#psexec---run-a-program-without-the-quoting--lastexitcode-traps)).
 
 ## Shipping a script to a machine without Python  *(portable)*
 

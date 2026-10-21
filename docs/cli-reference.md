@@ -149,6 +149,7 @@ any `--logon-type`, `--run-level highest` with a non-root uid, a logon trigger, 
 ```bash
 pwshpy is-elevated -q && pwshpy clear_event_log Application   # elevation gate
 pwshpy exec -- git status --short                             # typed external run
+pwshpy exec --wait-tree -- setup.exe /quiet                  # ...and wait for its whole process tree
 pwshpy download_file https://host/big.iso big.iso            # streamed download
 pwshpy get_content huge.log | head                           # streamed file read
 pwshpy save_credential prod-db svc                           # hidden prompt for the secret

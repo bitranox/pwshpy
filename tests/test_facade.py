@@ -193,8 +193,9 @@ def _fake_exec(
     timeout: float | None = None,
     env: Mapping[str, str] | None = None,
     input_text: str | None = None,
+    wait_tree: bool = False,
 ) -> ProcessResult:
-    return ProcessResult(argv=list(argv), exit_code=0, stdout=f"cwd={cwd}")
+    return ProcessResult(argv=list(argv), exit_code=0, stdout=f"cwd={cwd}", stderr=f"wait_tree={wait_tree}")
 
 
 class _FakeWriters:
@@ -913,6 +914,8 @@ def test_injected_exec_and_writer_adapters(injected: _InjectedPs) -> None:
     exec_result = facade.exec(["git", "status"], cwd="C:/repo")
     assert exec_result.argv == ["git", "status"]
     assert exec_result.stdout == "cwd=C:/repo"
+    assert exec_result.stderr == "wait_tree=False"  # the default is today's behaviour
+    assert facade.exec(["setup.exe"], wait_tree=True).stderr == "wait_tree=True"
     assert facade.write_text("out.txt", "hi", bom=True) == Path("out.txt")
     assert facade.write_records("recs.jsonl", [EnvVar(name="A", value="1")]) == Path("recs.jsonl")
     assert facade.write_text_stream("s.txt", ["a\n", "b\n"], newline="\r\n") == Path("s.txt")

@@ -969,6 +969,7 @@ class Ps:
         timeout: float | None = None,
         env: Mapping[str, str] | None = None,
         input_text: str | None = None,
+        wait_tree: bool = False,
     ) -> ProcessResult:
         """Run an external program from an argv list; return a typed result (native, portable).
 
@@ -977,8 +978,14 @@ class Ps:
         ``stderr`` is plain data, never mistaken for a terminating error.  Call
         ``.check()`` on the result to raise on a nonzero exit.
 
+        ``wait_tree=True`` waits like ``Start-Process -Wait``: until the program AND every
+        process it started have exited (a Win32 job object on Windows, a child subreaper on
+        Linux, the process group on macOS - where a ``setsid`` grandchild is not covered),
+        and ``timeout`` then covers the whole tree and kills it on expiry.
+
         Raises:
-            OperationTimeoutError: ``timeout`` elapsed; the child was killed. A
+            OperationTimeoutError: ``timeout`` elapsed; the child (with ``wait_tree`` its
+                whole process tree) was killed. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
             NativeCallError: The executable was not found or could not be started.
 
@@ -987,7 +994,7 @@ class Ps:
             >>> build_ps().exec([sys.executable, "-c", "print(1)"]).stdout.strip()
             '1'
         """
-        return self._process_runner(argv, cwd=cwd, timeout=timeout, env=env, input_text=input_text)
+        return self._process_runner(argv, cwd=cwd, timeout=timeout, env=env, input_text=input_text, wait_tree=wait_tree)
 
     def pack_script(
         self, entry: str | Path, dest: str | Path | None = None, *, options: PackOptions = DEFAULT_PACK_OPTIONS

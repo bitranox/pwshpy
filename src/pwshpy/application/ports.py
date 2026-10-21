@@ -127,6 +127,7 @@ class ProcessRunner(Protocol):
         timeout: float | None = ...,
         env: Mapping[str, str] | None = ...,
         input_text: str | None = ...,
+        wait_tree: bool = ...,
     ) -> ProcessResult: ...
 
 

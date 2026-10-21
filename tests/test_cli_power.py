@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from click.testing import CliRunner
+from process_tree_programs import finished, parent_argv
 
 from pwshpy.adapters.cli.root import cli
 
@@ -24,6 +25,19 @@ def test_exec_runs_and_exits_with_child_code(
     result = cli_runner.invoke(cli, ["exec", "--", sys.executable, "-c", "print(1)"], obj=production_factory)
     assert result.exit_code == 0, result.output
     assert "1" in result.output
+
+
+@pytest.mark.os_agnostic
+def test_exec_wait_tree_waits_for_the_grandchild(
+    cli_runner: CliRunner, production_factory: Callable[[], AppServices], tmp_path: Path
+) -> None:
+    """`exec --wait-tree` returns only after the grandchild the program started has finished."""
+    base = tmp_path / "cli"
+    argv = ["exec", "--wait-tree", "--timeout", "120", "--", *parent_argv("background", base, 1.0)]
+    result = cli_runner.invoke(cli, argv, obj=production_factory)
+    assert result.exit_code == 0, result.output
+    assert "parent done" in result.output
+    assert finished(base)
 
 
 @pytest.mark.os_agnostic

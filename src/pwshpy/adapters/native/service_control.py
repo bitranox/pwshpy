@@ -9,7 +9,10 @@ its deadline raises :class:`OperationTimeoutError`, a control the service
 refuses raises a plain :class:`NativeCallError`, so the two stay apart.
 ``stop(wait=False)`` issues the stop and returns the state right after it,
 typically ``StopPending``.  Verbs are idempotent: starting a running service
-(or stopping a stopped one) is a no-op, not an error.
+(or stopping a stopped one) is a no-op, not an error.  A service already in
+``StartPending`` (``StopPending``) has its start (stop) issued, so the control is
+not sent again - the SCM would refuse it - and the verb waits for that pending
+transition instead, as ``Start-Service`` / ``Stop-Service`` do.
 
 **MUTATING** - see CLAUDE.md "Development Safety": exercise only on a disposable
 Windows VM (the throwaway box), never a machine you care about.  ``pywin32`` is
@@ -110,7 +113,10 @@ class NativeServiceController:
     """Mutating service control over ``win32service`` (Start/Stop/Restart/Set startup type)."""
 
     def start(self, name: str, *, timeout: float = _DEFAULT_TIMEOUT) -> ServiceInfo:
-        """Start ``name`` (no-op if already running); return its post-start state."""
+        """Start ``name`` (no-op if already running); return its post-start state.
+
+        A service already in ``StartPending`` gets no second StartService; the call waits for it.
+        """
         win32service = _load_win32service()
         scm = _open_scm(win32service)
         try:
@@ -118,11 +124,15 @@ class NativeServiceController:
                 win32service, scm, name, win32service.SERVICE_START | win32service.SERVICE_QUERY_STATUS
             )
             try:
-                if _current_state(win32service, handle) != win32service.SERVICE_RUNNING:
-                    try:
-                        win32service.StartService(handle, [])
-                    except Exception as exc:
-                        raise NativeCallError(str(exc) or f"cannot start service {name!r}") from exc
+                state = _current_state(win32service, handle)
+                if state != win32service.SERVICE_RUNNING:
+                    # StartPending: the start is already issued and StartService would fail with
+                    # ERROR_SERVICE_ALREADY_RUNNING, so only wait for it.
+                    if state != win32service.SERVICE_START_PENDING:
+                        try:
+                            win32service.StartService(handle, [])
+                        except Exception as exc:
+                            raise NativeCallError(str(exc) or f"cannot start service {name!r}") from exc
                     _wait_for_state(win32service, handle, win32service.SERVICE_RUNNING, timeout)
             finally:
                 win32service.CloseServiceHandle(handle)
@@ -134,7 +144,9 @@ class NativeServiceController:
         """Stop ``name`` (no-op if already stopped); return its post-stop state.
 
         With ``wait=False`` the stop is issued and the state right after the control is
-        returned (typically ``StopPending``) without polling; ``timeout`` is then unused.
+        returned (typically ``StopPending``) without polling; ``timeout`` is then unused. A
+        service already in ``StopPending`` gets no second control: ``wait=True`` waits for the
+        pending stop, ``wait=False`` returns ``StopPending``.
         """
         win32service = _load_win32service()
         scm = _open_scm(win32service)
@@ -143,11 +155,15 @@ class NativeServiceController:
                 win32service, scm, name, win32service.SERVICE_STOP | win32service.SERVICE_QUERY_STATUS
             )
             try:
-                if _current_state(win32service, handle) != win32service.SERVICE_STOPPED:
-                    try:
-                        win32service.ControlService(handle, win32service.SERVICE_CONTROL_STOP)
-                    except Exception as exc:
-                        raise NativeCallError(str(exc) or f"cannot stop service {name!r}") from exc
+                state = _current_state(win32service, handle)
+                if state != win32service.SERVICE_STOPPED:
+                    # StopPending (a second stop on a slow wuauserv): the stop is already issued and
+                    # ControlService would fail with ERROR_SERVICE_CANNOT_ACCEPT_CTRL, read as refused.
+                    if state != win32service.SERVICE_STOP_PENDING:
+                        try:
+                            win32service.ControlService(handle, win32service.SERVICE_CONTROL_STOP)
+                        except Exception as exc:
+                            raise NativeCallError(str(exc) or f"cannot stop service {name!r}") from exc
                     if wait:
                         _wait_for_state(win32service, handle, win32service.SERVICE_STOPPED, timeout)
             finally:

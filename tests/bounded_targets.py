@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 
@@ -15,3 +16,8 @@ def hang(_seconds: float) -> None:
 
 def boom(message: str) -> None:
     raise RuntimeError(message)
+
+
+def die(code: int) -> None:
+    # os._exit skips every handler, so the child sends nothing: the parent sees only the pipe close.
+    os._exit(code)

@@ -17,6 +17,7 @@ from __future__ import annotations
 import multiprocessing
 from collections.abc import Callable
 from multiprocessing.connection import Connection
+from multiprocessing.context import SpawnContext, SpawnProcess
 from typing import Any
 
 from ...domain.errors import NativeCallError, OperationTimeoutError
@@ -51,7 +52,8 @@ def run_bounded(target: Callable[..., Any], args: tuple[Any, ...], *, timeout: f
     Raises:
         OperationTimeoutError: If no result arrives within ``timeout`` (the child is killed).
         NativeCallError: If ``target`` raised in the child (its type and message are kept
-            in the message), or the child exited without sending a result.
+            in the message), the child exited without sending a result (its exit code is
+            in the message), or the child could not be started.
 
     Example:
         >>> run_bounded(abs, (-3,), timeout=30)
@@ -60,24 +62,55 @@ def run_bounded(target: Callable[..., Any], args: tuple[Any, ...], *, timeout: f
     name = getattr(target, "__name__", "call")
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe(duplex=False)
-    process = context.Process(target=_child, args=(child, target, args), daemon=True)
-    process.start()
-    # The parent's copy of the write end must close, or recv() never sees EOF when the child dies.
-    child.close()
     try:
-        if not parent.poll(timeout):
-            raise OperationTimeoutError(f"{name} timed out after {timeout}s", timeout=timeout)
-        kind, payload = parent.recv()
-    except EOFError as exc:
-        raise NativeCallError(f"{name} worker exited without a result") from exc
+        process = _start(context, child, target, args)
+        kind, payload = _await_result(parent, process, name=name, timeout=timeout)
     finally:
-        if process.is_alive():
-            process.kill()
-        process.join(_KILL_GRACE_SECONDS)
         parent.close()
     if kind == "error":
         raise NativeCallError(str(payload))
     return payload
+
+
+def _start(context: SpawnContext, child: Connection, target: Callable[..., Any], args: tuple[Any, ...]) -> SpawnProcess:
+    """Start the child, or raise NativeCallError when the OS cannot spawn it."""
+    process = context.Process(target=_child, args=(child, target, args), daemon=True)
+    # Only OSError (the OS cannot spawn) is wrapped: a PicklingError from a lambda or nested
+    # target is a programming error and stays raw.
+    try:
+        process.start()
+    except OSError as exc:
+        name = getattr(target, "__name__", "call")
+        raise NativeCallError(f"{name} worker could not be started: {exc}") from exc
+    finally:
+        # The parent's copy of the write end must close, or recv() never sees EOF when the child
+        # dies; on a failed start it would otherwise stay open until garbage collection.
+        child.close()
+    return process
+
+
+def _await_result(parent: Connection, process: SpawnProcess, *, name: str, timeout: float) -> tuple[str, Any]:
+    """Return the child's ``(kind, payload)`` message; the child is reaped on every path."""
+    try:
+        if not parent.poll(timeout):
+            raise OperationTimeoutError(f"{name} timed out after {timeout}s", timeout=timeout)
+        message: tuple[str, Any] = parent.recv()
+    # A child that dies sends nothing; the parent sees its write end close.  recv() reports that
+    # as EOFError on every OS, but on Windows PipeConnection.poll calls PeekNamedPipe unwrapped,
+    # which raises BrokenPipeError instead when the child died before the parent reached poll.
+    except (EOFError, BrokenPipeError, ConnectionResetError) as exc:
+        _reap(process)
+        raise NativeCallError(f"{name} worker exited without a result (exit code {process.exitcode})") from exc
+    finally:
+        _reap(process)
+    return message
+
+
+def _reap(process: SpawnProcess) -> None:
+    """Kill the child if it still runs and wait for it, so no call leaves a zombie behind."""
+    if process.is_alive():
+        process.kill()
+    process.join(_KILL_GRACE_SECONDS)
 
 
 __all__ = ["run_bounded"]

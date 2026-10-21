@@ -1,4 +1,4 @@
-"""Application ports — callable Protocol definitions for adapter functions.
+"""Application ports - callable Protocol definitions for adapter functions.
 
 Each Protocol class defines a ``__call__`` method whose signature exactly
 matches the corresponding adapter function.  Existing module-level functions
@@ -48,6 +48,7 @@ from ..domain.records import (
     SystemUptime,
     WebResponse,
 )
+from ..domain.scheduling import TaskPrincipal, TaskTrigger
 
 if TYPE_CHECKING:
     from lib_layered_config import Config
@@ -330,7 +331,11 @@ class ScheduledTaskSource(Protocol):
 
 
 class ScheduledTaskController(Protocol):
-    """Register/unregister, enable/disable and run/stop scheduled tasks (native, **mutating**)."""
+    """Register/unregister, enable/disable and run/stop scheduled tasks (native, **mutating**).
+
+    ``register`` takes an optional principal (None: the interactive caller) and triggers
+    (empty: run on demand only); an adapter refuses a shape its OS cannot honour.
+    """
 
     def enable(self, task_path: str) -> ScheduledTaskInfo: ...
     def disable(self, task_path: str) -> ScheduledTaskInfo: ...
@@ -338,7 +343,14 @@ class ScheduledTaskController(Protocol):
     def stop(self, task_path: str) -> None: ...
     def unregister(self, task_path: str) -> None: ...
     def register(
-        self, task_path: str, *, program: str, arguments: str = ..., description: str = ...
+        self,
+        task_path: str,
+        *,
+        program: str,
+        arguments: str = ...,
+        description: str = ...,
+        principal: TaskPrincipal | None = ...,
+        triggers: Sequence[TaskTrigger] = ...,
     ) -> ScheduledTaskInfo: ...
 
 

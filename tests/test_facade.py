@@ -58,6 +58,7 @@ from pwshpy.domain.records import (
     SystemUptime,
     WebResponse,
 )
+from pwshpy.domain.scheduling import BootTrigger, TaskPrincipal, TaskTrigger
 
 
 @pytest.mark.os_agnostic
@@ -519,7 +520,7 @@ class _FakeAclController:
 
 class _FakeScheduledTaskController:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, ...]] = []
+        self.calls: list[tuple[object, ...]] = []
 
     def _task(self, task_path: str, *, enabled: bool = True) -> ScheduledTaskInfo:
         name = task_path.rstrip("\\").rpartition("\\")[2]
@@ -543,9 +544,16 @@ class _FakeScheduledTaskController:
         self.calls.append(("unregister", task_path))
 
     def register(
-        self, task_path: str, *, program: str, arguments: str = "", description: str = ""
+        self,
+        task_path: str,
+        *,
+        program: str,
+        arguments: str = "",
+        description: str = "",
+        principal: TaskPrincipal | None = None,
+        triggers: Sequence[TaskTrigger] = (),
     ) -> ScheduledTaskInfo:
-        self.calls.append(("register", task_path, program))
+        self.calls.append(("register", task_path, program, principal, tuple(triggers)))
         return self._task(task_path)
 
 
@@ -731,13 +739,27 @@ def test_injected_scheduled_task_adapters(injected: _InjectedPs) -> None:
     facade.start_scheduled_task("\\T")
     facade.stop_scheduled_task("\\T")
     assert fake_scheduled_task_controller.calls == [
-        ("register", "\\T", "cmd.exe"),
+        ("register", "\\T", "cmd.exe", None, ()),
         ("unregister", "\\T"),
         ("enable", "\\T"),
         ("disable", "\\T"),
         ("run", "\\T"),
         ("stop", "\\T"),
     ]
+
+
+@pytest.mark.os_agnostic
+def test_register_scheduled_task_forwards_principal_and_triggers(injected: _InjectedPs) -> None:
+    """The facade hands the principal and the triggers to the controller unchanged."""
+    trigger = BootTrigger()
+    injected.facade.register_scheduled_task("\\T", program="x", principal=TaskPrincipal.system(), triggers=[trigger])
+    assert injected.scheduled_task_controller.calls[-1] == (
+        "register",
+        "\\T",
+        "x",
+        TaskPrincipal.system(),
+        (trigger,),
+    )
 
 
 @pytest.mark.os_agnostic

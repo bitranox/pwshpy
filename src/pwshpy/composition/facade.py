@@ -1,13 +1,13 @@
-"""The ``ps`` facade — the public entry point wiring adapters to the pipeline.
+"""The ``ps`` facade - the public entry point wiring adapters to the pipeline.
 
 ``ps`` is where library and CLI meet: both call the same facade, so they never
 diverge.  native sources return a :class:`~pwshpy.domain.pipeline.Pipeline`;
 ``ps.run`` reaches .NET (hosts PowerShell in-process) behind the ``[full]`` extra.
 
 Contents:
-    * :class:`Ps` — the facade binding a process source + PowerShell runner.
-    * :data:`ps` — the default production facade (``from pwshpy import ps``).
-    * :func:`build_ps` — construct a facade from explicit adapters (for tests).
+    * :class:`Ps` - the facade binding a process source + PowerShell runner.
+    * :data:`ps` - the default production facade (``from pwshpy import ps``).
+    * :func:`build_ps` - construct a facade from explicit adapters (for tests).
 """
 
 from __future__ import annotations
@@ -154,6 +154,7 @@ from ..domain.records import (
     SystemUptime,
     WebResponse,
 )
+from ..domain.scheduling import TaskPrincipal, TaskTrigger
 
 #: Platform switch for the local-accounts backend. Stored as an opaque bool so the type
 #: checker does not statically prune the "other OS" branch (and flag its import unused).
@@ -534,16 +535,47 @@ class Ps:
         return Pipeline(self._scheduled_task_source(folder_path))
 
     def register_scheduled_task(
-        self, task_path: str, *, program: str, arguments: str = "", description: str = ""
+        self,
+        task_path: str,
+        *,
+        program: str,
+        arguments: str = "",
+        description: str = "",
+        principal: TaskPrincipal | None = None,
+        triggers: Sequence[TaskTrigger] = (),
     ) -> ScheduledTaskInfo:
-        """Register a run-on-demand task (program + args); return it (native, **mutating**).
+        """Register a task (program + args) with an optional principal and triggers; return it (native, **mutating**).
+
+        Task Scheduler on Windows, a systemd ``.service`` (plus a ``.timer`` when triggered) on
+        Linux. Registering over an existing task replaces it.
+
+        Args:
+            task_path: Task path (``\\Folder\\Name`` on Windows, the unit base name on Linux).
+            program: Executable to run.
+            arguments: Program arguments.
+            description: Task description.
+            principal: Who the task runs as (a SID on Windows, a decimal uid on Linux);
+                None runs it as the interactive caller.
+            triggers: When it runs; empty means on demand only.
+
+        Raises:
+            PlatformUnsupportedError: The OS cannot honour the principal or a trigger (a uid on
+                Windows, a SID or a logon trigger on Linux).
+            ConfigurationError: The principal or the task text is inconsistent (a logon type
+                that does not fit the principal, a group SID, a newline in ``program``).
+            NativeCallError: The scheduler refused the registration.
 
         Example:
             >>> callable(build_ps().register_scheduled_task)
             True
         """
         return self._scheduled_task_controller.register(
-            task_path, program=program, arguments=arguments, description=description
+            task_path,
+            program=program,
+            arguments=arguments,
+            description=description,
+            principal=principal,
+            triggers=triggers,
         )
 
     def unregister_scheduled_task(self, task_path: str) -> None:

@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from pwshpy.adapters.native.systemd_timers import SystemdScheduledTaskController
+from pwshpy.composition import build_ps
 from pwshpy.domain.enums import TaskState
 from pwshpy.domain.errors import NativeCallError
 from pwshpy.domain.scheduling import BootTrigger
@@ -108,14 +109,20 @@ def test_enable_disable_timer(timer_task: str) -> None:
 
 
 def test_register_with_boot_trigger_writes_and_arms_a_timer(ondemand_task: str) -> None:
-    """A boot trigger becomes an enabled .timer (armed for the next boot), and unregister removes it."""
-    controller = SystemdScheduledTaskController()
-    info = controller.register(ondemand_task, program="/bin/true", triggers=[BootTrigger(delay=timedelta(seconds=600))])
+    """A boot trigger becomes an enabled .timer (armed for the next boot), and unregister removes it.
+
+    Driven through the production facade, so it also proves build_ps() wires the Linux
+    controller and the facade forwards the triggers.
+    """
+    facade = build_ps()
+    info = facade.register_scheduled_task(
+        ondemand_task, program="/bin/true", triggers=[BootTrigger(delay=timedelta(seconds=600))]
+    )
     assert info.enabled is True
     assert info.state is TaskState.READY  # armed for the next boot
     assert info.last_run_time is None  # the elapsed OnBootSec= did not run the job at registration
     assert info.user_id == "0"  # no principal: a system unit with no User= runs as root
     assert (_UNIT_DIR / f"{ondemand_task}.timer").read_text(encoding="utf-8").count("OnBootSec=600s") == 1
-    controller.unregister(ondemand_task)
+    facade.unregister_scheduled_task(ondemand_task)
     assert not (_UNIT_DIR / f"{ondemand_task}.timer").exists()
     assert not (_UNIT_DIR / "timers.target.wants" / f"{ondemand_task}.timer").exists()

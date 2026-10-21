@@ -18,16 +18,24 @@ Contents:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import TYPE_CHECKING, TypeVar
 
 import rich_click as click
+from pydantic import ValidationError
 
-from ....domain.enums import AceType, RegistryValueType, ServiceStartType
+from ....domain.enums import AceType, RegistryValueType, ServiceStartType, TaskLogonType, TaskRunLevel, WellKnownSid
+from ....domain.scheduling import BootTrigger, DailyTrigger, LogonTrigger, OnceTrigger, TaskPrincipal, TaskTrigger
 from ..context import get_cli_context
 from ..typed_click import argument, option
 
 if TYPE_CHECKING:
     from pwshpy.composition import Ps
+
+
+_E = TypeVar("_E", bound=Enum)
 
 
 def _ps(ctx: click.Context) -> Ps:
@@ -280,18 +288,223 @@ def cli_set_owner(ctx: click.Context, path: str, owner: str) -> None:
 # --- scheduled tasks ---------------------------------------------------------
 
 
+def _parse_when(value: str) -> datetime:
+    """Parse an ISO 8601 time that carries a UTC offset.
+
+    A trailing ``Z`` is rewritten to ``+00:00`` because ``datetime.fromisoformat`` only accepts
+    it from Python 3.11 on.  A time WITHOUT an offset is refused rather than read as local time
+    or UTC: the same text would fire at a different instant on a machine in another zone.
+
+    Raises:
+        ValueError: ``value`` is not ISO 8601, or has no UTC offset.
+
+    Example:
+        >>> _parse_when("2026-10-21T03:00:00Z").isoformat()
+        '2026-10-21T03:00:00+00:00'
+    """
+    parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    if parsed.tzinfo is None:
+        raise ValueError(f"{value!r} has no UTC offset; add one, e.g. {value}+02:00 or {value}Z")
+    return parsed
+
+
+def _run_as(value: str | None) -> str | None:
+    """Map a WellKnownSid member name (any case) to its SID; pass a SID or uid through unchanged.
+
+    Example:
+        >>> _run_as("local_system"), _run_as("1000"), _run_as(None)
+        ('S-1-5-18', '1000', None)
+    """
+    if value is None:
+        return None
+    member = WellKnownSid.__members__.get(value.upper())
+    return member.value if member is not None else value
+
+
+def _by_value(enum_cls: type[_E], value: str) -> _E:
+    """Return the member of ``enum_cls`` whose value matches ``value`` case-insensitively.
+
+    ``click.Choice(case_sensitive=False)`` hands back the canonical spelling in current click,
+    but this does not depend on it.
+
+    Example:
+        >>> _by_value(TaskRunLevel, "highest") is TaskRunLevel.HIGHEST
+        True
+    """
+    folded = value.casefold()
+    match = next((member for member in enum_cls if str(member.value).casefold() == folded), None)
+    if match is None:  # unreachable behind click.Choice; a ValueError reaches the user as a usage error
+        raise ValueError(f"{value!r} is not one of {', '.join(str(member.value) for member in enum_cls)}")
+    return match
+
+
+def _render(exc: ValueError) -> str:
+    """One ``<field>: <reason>`` line per validation error, or the plain ValueError text.
+
+    ``str(ValidationError)`` would hand the caller Pydantic's internals (model names, input
+    echoes, documentation URLs), so only each error's location and message are kept.
+
+    Example:
+        >>> _render(ValueError("bad time"))
+        'bad time'
+    """
+    if not isinstance(exc, ValidationError):
+        return str(exc)
+    lines = [f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}" for err in exc.errors()]
+    return "\n".join(line.removeprefix(": ") for line in lines)
+
+
+def _principal(run_as: str | None, run_level: str, logon_type: str | None) -> TaskPrincipal | None:
+    """Build the principal, or None when no principal option moved off its default.
+
+    None keeps the adapter's own default (the interactive caller), exactly as before these
+    options existed.
+
+    Example:
+        >>> _principal(None, "Limited", None) is None
+        True
+    """
+    level = _by_value(TaskRunLevel, run_level)
+    if run_as is None and logon_type is None and level is TaskRunLevel.LIMITED:
+        return None
+    return TaskPrincipal(
+        user_id=_run_as(run_as),
+        run_level=level,
+        logon_type=None if logon_type is None else _by_value(TaskLogonType, logon_type),
+    )
+
+
+def _check_modifiers(
+    *, daily: bool, every_days: int, at_boot: bool, boot_delay: int, at_logon: bool, logon_user: str | None
+) -> None:
+    """Refuse a trigger modifier given without its trigger instead of silently dropping it.
+
+    Example:
+        >>> _check_modifiers(daily=False, every_days=1, at_boot=False, boot_delay=0, at_logon=False, logon_user=None)
+    """
+    orphans = [
+        ("--every-days", "--daily", every_days != 1 and not daily),
+        ("--boot-delay", "--at-boot", boot_delay != 0 and not at_boot),
+        ("--logon-user", "--at-logon", logon_user is not None and not at_logon),
+    ]
+    for modifier, trigger, orphaned in orphans:
+        if orphaned:
+            raise click.UsageError(f"{modifier} needs {trigger}")
+
+
+def _triggers(
+    *,
+    at_times: Sequence[str],
+    daily_times: Sequence[str],
+    every_days: int,
+    at_boot: bool,
+    boot_delay: int,
+    at_logon: bool,
+    logon_user: str | None,
+) -> list[TaskTrigger]:
+    """Build the triggers in a fixed order: once, daily, boot, logon.
+
+    Example:
+        >>> [t.kind for t in _triggers(at_times=(), daily_times=(), every_days=1, at_boot=True,
+        ...                             boot_delay=0, at_logon=False, logon_user=None)]
+        ['boot']
+    """
+    triggers: list[TaskTrigger] = [OnceTrigger(at=_parse_when(value)) for value in at_times]
+    triggers += [DailyTrigger(at=_parse_when(value), every_days=every_days) for value in daily_times]
+    if at_boot:
+        triggers.append(BootTrigger(delay=timedelta(seconds=boot_delay)))
+    if at_logon:
+        triggers.append(LogonTrigger(user_id=logon_user))
+    return triggers
+
+
 @click.command("register_scheduled_task")
 @argument("task_path")
 @option("--program", required=True, help="Executable to run.")
 @option("--arguments", default="", help="Program arguments.")
 @option("--description", default="", help="Task description.")
+@option(
+    "--run-as",
+    default=None,
+    help="Principal: a SID, a decimal uid (Linux), or a WellKnownSid name such as local_system. "
+    "Default: the caller. Account names are refused.",
+)
+@option(
+    "--run-level",
+    type=click.Choice([e.value for e in TaskRunLevel], case_sensitive=False),
+    default=TaskRunLevel.LIMITED.value,
+    show_default=True,
+    help="Token the task runs with (Highest = elevated).",
+)
+@option(
+    "--logon-type",
+    type=click.Choice([e.value for e in TaskLogonType], case_sensitive=False),
+    default=None,
+    help="Windows logon type; default follows --run-as (service account, S4U, or interactive).",
+)
+@option("--at", "at_times", multiple=True, help="Run once at this ISO 8601 time with a UTC offset (repeatable).")
+@option(
+    "--daily", "daily_times", multiple=True, help="Run daily from this ISO 8601 time with a UTC offset (repeatable)."
+)
+@option("--every-days", type=int, default=1, show_default=True, help="Day interval for every --daily trigger.")
+@option("--at-boot", is_flag=True, help="Run at boot.")
+@option("--boot-delay", type=int, default=0, show_default=True, help="Seconds after boot (with --at-boot).")
+@option("--at-logon", is_flag=True, help="Run at logon (Windows only).")
+@option("--logon-user", default=None, help="SID whose logon triggers the task (with --at-logon; default any user).")
 @click.pass_context
 def cli_register_scheduled_task(
-    ctx: click.Context, task_path: str, program: str, arguments: str, description: str
+    ctx: click.Context,
+    task_path: str,
+    program: str,
+    arguments: str,
+    description: str,
+    run_as: str | None,
+    run_level: str,
+    logon_type: str | None,
+    at_times: tuple[str, ...],
+    daily_times: tuple[str, ...],
+    every_days: int,
+    at_boot: bool,
+    boot_delay: int,
+    at_logon: bool,
+    logon_user: str | None,
 ) -> None:
-    """Register a run-on-demand task (mutating)."""
-    _ps(ctx).register_scheduled_task(task_path, program=program, arguments=arguments, description=description)
-    click.echo(f"registered {task_path}")
+    """Register a task with an optional principal and triggers; none means run on demand (mutating).
+
+    Times are ISO 8601 with a UTC offset (2026-10-21T03:00:00+02:00, or Z for UTC); a time
+    without one is refused. On Linux a task becomes a systemd .service plus, with triggers,
+    a .timer; logon triggers and --every-days above 1 are Windows-only.
+    """
+    _check_modifiers(
+        daily=bool(daily_times),
+        every_days=every_days,
+        at_boot=at_boot,
+        boot_delay=boot_delay,
+        at_logon=at_logon,
+        logon_user=logon_user,
+    )
+    try:
+        principal = _principal(run_as, run_level, logon_type)
+        triggers = _triggers(
+            at_times=at_times,
+            daily_times=daily_times,
+            every_days=every_days,
+            at_boot=at_boot,
+            boot_delay=boot_delay,
+            at_logon=at_logon,
+            logon_user=logon_user,
+        )
+    except ValueError as exc:  # ValidationError is a ValueError; fromisoformat raises a plain one
+        raise click.BadParameter(_render(exc)) from exc
+    info = _ps(ctx).register_scheduled_task(
+        task_path,
+        program=program,
+        arguments=arguments,
+        description=description,
+        principal=principal,
+        triggers=triggers,
+    )
+    click.echo(f"registered {task_path} as {info.user_id or 'the caller'}")
 
 
 @click.command("unregister_scheduled_task")

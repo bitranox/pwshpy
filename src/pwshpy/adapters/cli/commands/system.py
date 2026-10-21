@@ -40,7 +40,12 @@ def cli_get_hotfix(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
 
 @click.command("get_windows_image", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("path")
-@option("--index", type=int, default=None, help="Show only the image with this 1-based index.")
+@option(
+    "--index",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Show only the image with this 1-based index; an index the file lacks is an error.",
+)
 @option("--json", "as_json", is_flag=True, default=False, help="Emit records as a JSON array.")
 @option("--jsonl", "as_jsonl", is_flag=True, default=False, help="Stream one JSON record per line.")
 @click.pass_context

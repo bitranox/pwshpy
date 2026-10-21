@@ -11,6 +11,7 @@ import pytest
 from pydantic import SecretStr
 
 from pwshpy import ps
+from pwshpy.application.ports import WindowsImageSource
 from pwshpy.composition import Ps, build_ps
 from pwshpy.domain.enums import (
     AceType,
@@ -26,7 +27,7 @@ from pwshpy.domain.enums import (
     TaskState,
     TransportProtocol,
 )
-from pwshpy.domain.errors import ElevationRequiredError, FeatureUnavailableError
+from pwshpy.domain.errors import ElevationRequiredError, FeatureUnavailableError, NativeCallError
 from pwshpy.domain.packing import DEFAULT_PACK_OPTIONS, PackOptions
 from pwshpy.domain.pipeline import Pipeline
 from pwshpy.domain.records import (
@@ -606,6 +607,7 @@ class _InjectedPs:
     acl_controller: _FakeAclController = field(default_factory=_FakeAclController)
     scheduled_task_controller: _FakeScheduledTaskController = field(default_factory=_FakeScheduledTaskController)
     packer: _FakePacker = field(default_factory=_FakePacker)
+    windows_image_source: WindowsImageSource = field(default=_fake_windows_images)
     facade: Ps = field(init=False)
 
     def __post_init__(self) -> None:
@@ -651,7 +653,7 @@ class _InjectedPs:
             file_downloader=self.writers.download_file,
             process_control=self.process_control,
             hotfix_source=_fake_hotfixes,
-            windows_image_source=_fake_windows_images,
+            windows_image_source=self.windows_image_source,
             computer_info_source=_fake_computer_info,
             elevation_check=self.elevator.is_elevated,
             elevator=self.elevator.elevate,
@@ -692,7 +694,39 @@ def test_injected_windows_image_source_filters_by_index(injected: _InjectedPs) -
         (2, "x.wim:Home")
     ]
     assert facade.get_windows_image("x.wim").select(lambda i: i.index).to_list() == [1, 2]
-    assert facade.get_windows_image("x.wim", index=7).to_list() == []
+
+
+@pytest.mark.os_agnostic
+def test_a_missing_windows_image_index_raises_naming_path_and_index(injected: _InjectedPs) -> None:
+    """An index the file does not hold is an error, like ``Get-WindowsImage -Index``, not an empty list.
+
+    The facade stays lazy, so the error surfaces when the pipeline is consumed.
+    """
+    pipeline = injected.facade.get_windows_image("x.wim", index=7)
+    with pytest.raises(NativeCallError, match=r"x\.wim.*index 7"):
+        pipeline.to_list()
+
+
+def _image_two_then_damage(path: Path) -> Iterator[WindowsImage]:
+    yield WindowsImage(index=1, name="Pro")
+    yield WindowsImage(index=2, name="Home")
+    # Indices are unique, so a reader that stops after the match never gets here.
+    raise AssertionError(f"{path}: read past the requested image")
+
+
+@pytest.mark.os_agnostic
+def test_a_matching_windows_image_index_stops_reading_after_the_match() -> None:
+    """Once image N is yielded the source is not advanced, so damage after it is never read."""
+    facade = _InjectedPs(windows_image_source=_image_two_then_damage).facade
+    assert facade.get_windows_image("x.wim", index=2).select(lambda i: i.name).to_list() == ["Home"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("index", [0, -1])
+def test_a_windows_image_index_below_one_is_refused_at_the_call(injected: _InjectedPs, index: int) -> None:
+    """Indices are 1-based; a smaller one is a caller error raised before anything is read."""
+    with pytest.raises(ValueError, match=r"index must be >= 1"):
+        injected.facade.get_windows_image("x.wim", index=index)
 
 
 @pytest.mark.os_agnostic

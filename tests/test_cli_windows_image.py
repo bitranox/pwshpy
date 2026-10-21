@@ -76,3 +76,39 @@ def test_a_missing_file_exits_nonzero_with_the_path_named(tmp_path: Path, capsys
     assert exit_code != 0
     assert "absent.wim" in captured.err
     assert "Traceback" not in captured.err
+
+
+@pytest.mark.os_agnostic
+def test_an_index_the_file_does_not_hold_exits_nonzero_naming_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--index 99`` on a two-image file is an error on stderr, not an empty listing with exit 0."""
+    path = _wim(tmp_path, image(1), image(2, name="Home"))
+    exit_code = main(["get_windows_image", str(path), "--index", "99", "--jsonl"], services_factory=build_production)
+    captured = capsys.readouterr()
+    assert exit_code != 0
+    assert captured.out == ""
+    assert "index 99" in captured.err
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.os_agnostic
+def test_a_matched_index_is_not_failed_by_a_damaged_image_after_it(
+    tmp_path: Path, cli_runner: CliRunner, production_factory: Callable[[], AppServices]
+) -> None:
+    """The real reader stops at the match, so a bad image after the requested one is never parsed."""
+    path = _wim(tmp_path, image(1), '<IMAGE INDEX="two"><NAME>Bad</NAME></IMAGE>')
+    result = cli_runner.invoke(cli, ["get_windows_image", str(path), "--index", "1", "--jsonl"], obj=production_factory)
+    assert result.exit_code == 0, result.output
+    assert [json.loads(line)["index"] for line in result.stdout.splitlines()] == [1]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("index", ["0", "-3"])
+def test_an_index_below_one_is_a_usage_error(
+    tmp_path: Path, cli_runner: CliRunner, production_factory: Callable[[], AppServices], index: str
+) -> None:
+    """Image indices are 1-based, so click refuses a smaller one with exit 2 before reading the file."""
+    path = _wim(tmp_path, image(1))
+    result = cli_runner.invoke(cli, ["get_windows_image", str(path), "--index", index], obj=production_factory)
+    assert result.exit_code == 2, result.output

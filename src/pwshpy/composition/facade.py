@@ -13,7 +13,7 @@ Contents:
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -123,7 +123,7 @@ from ..application.ports import (
     WindowsImageSource,
 )
 from ..domain.enums import AceType, FileItemType, RegistryValueType, ServiceStartType
-from ..domain.errors import ElevationRequiredError
+from ..domain.errors import ElevationRequiredError, NativeCallError
 from ..domain.packing import DEFAULT_PACK_OPTIONS, PackOptions
 from ..domain.pipeline import Pipeline
 from ..domain.records import (
@@ -162,6 +162,34 @@ from ..domain.scheduling import TaskPrincipal, TaskTrigger
 #: Platform switch for the local-accounts backend. Stored as an opaque bool so the type
 #: checker does not statically prune the "other OS" branch (and flag its import unused).
 _ON_WINDOWS: bool = sys.platform == "win32"
+
+
+def _only_image(images: Iterable[WindowsImage], index: int, path: Path) -> Iterator[WindowsImage]:
+    """Yield the image numbered ``index``, then stop; raise when the file holds none.
+
+    WIM indices are unique, so reading past the match could only surface damage in
+    images the caller did not ask for; the source is therefore not advanced again.
+
+    Args:
+        images: The file's images, in file order.
+        index: The 1-based image index to keep.
+        path: The file, named in the error.
+
+    Yields:
+        The one matching image.
+
+    Raises:
+        NativeCallError: No image of the file carries ``index``.
+
+    Example:
+        >>> [i.name for i in _only_image([WindowsImage(index=1, name="Pro")], 1, Path("x.wim"))]
+        ['Pro']
+    """
+    for image in images:
+        if image.index == index:
+            yield image
+            return
+    raise NativeCallError(f"{path}: no image with index {index}")
 
 
 class Ps:
@@ -1180,20 +1208,29 @@ class Ps:
         """Return a lazy pipeline over the images of a WIM file (native, portable; like Get-WindowsImage).
 
         Reads the file's header and XML resource only, so it works on any OS with no DISM.
-        Nothing is opened until the pipeline is consumed.
+        Nothing is opened until the pipeline is consumed, so a file error, and a missing
+        ``index``, are raised then, not by this call.
 
         Args:
             path: The ``.wim`` (or split ``.swm`` part) to read.
-            index: Keep only the image with this 1-based index, like ``-Index``; ``None``
-                lists every image.
+            index: Return only the image with this 1-based index, like ``-Index``; reading
+                stops right after it. ``None`` lists every image.
+
+        Raises:
+            ValueError: ``index`` is below 1 (raised by this call).
+            NativeCallError: On consumption: the file holds no image ``index``, or it is
+                unreadable or not a valid WIM.
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().get_windows_image("any.wim", index=1), Pipeline)
             True
         """
-        images = Pipeline(self._windows_image_source(Path(path)))
-        return images if index is None else images.where(lambda image: image.index == index)
+        if index is not None and index < 1:
+            raise ValueError(f"index must be >= 1, got {index}")
+        source = Path(path)
+        images = self._windows_image_source(source)
+        return Pipeline(images if index is None else _only_image(images, index, source))
 
     def get_computer_info(self) -> ComputerInfo:
         """Return a summary of the local computer (native, portable; like Get-ComputerInfo).

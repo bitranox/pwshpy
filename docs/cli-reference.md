@@ -29,7 +29,9 @@ lazy end to end), and a default human table; most take `--limit N`.
 `get_windows_image PATH [--index N]` reads the WIM header and its XML resource directly, so it
 lists the images of a `.wim` (or a split `.swm` part) on any OS without DISM. An image file whose XML
 resource is compressed (resource flag 0x04) is refused with an error rather than guessed at; ESD
-support is unverified.
+support is unverified. `--index N` prints only image N and stops reading right after it; an index
+the file does not hold exits non-zero with a message on stderr naming it, and an index below 1 is a
+usage error (exit 2).
 
 **Windows + Linux** - one command, a native backend on each (never a subprocess, never text scraping):
 

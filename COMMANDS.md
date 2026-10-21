@@ -33,7 +33,7 @@ Filtering: in Python use `.where(predicate)` (or a plain `for`/`if`); on the CLI
 `Get-EventLog` (the classic API) is covered by `ps.get_win_event` (Get-WinEvent). `restart_computer` /
 `stop_computer` are library-only by design - too destructive for a casual CLI reboot.
 `get_windows_image` with an index the file does not hold raises `NativeCallError` (the CLI exits
-non-zero with a message on stderr), like `Get-WindowsImage -Index`; an index below 1 is refused at the
+non-zero with a message on stderr); an index below 1 is refused at the
 call (`ValueError`, CLI usage error).
 
 ## Networking  *(portable)*

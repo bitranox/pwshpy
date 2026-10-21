@@ -698,7 +698,7 @@ def test_injected_windows_image_source_filters_by_index(injected: _InjectedPs) -
 
 @pytest.mark.os_agnostic
 def test_a_missing_windows_image_index_raises_naming_path_and_index(injected: _InjectedPs) -> None:
-    """An index the file does not hold is an error, like ``Get-WindowsImage -Index``, not an empty list.
+    """An index the file does not hold is an error, not an empty list.
 
     The facade stays lazy, so the error surfaces when the pipeline is consumed.
     """

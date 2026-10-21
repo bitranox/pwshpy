@@ -8,9 +8,11 @@ and that a child exception crosses the pipe as a typed error.
 
 from __future__ import annotations
 
+import json
 import multiprocessing
 import multiprocessing.spawn
 import re
+import subprocess
 import sys
 import time
 from collections.abc import Iterator
@@ -101,3 +103,47 @@ def test_a_child_that_cannot_be_started_becomes_native_call_error() -> None:
     expected = _START_FAILED if sys.platform == "win32" else f"{_START_FAILED}|{_EXITED_WITH_CODE}"
     assert re.search(expected, str(caught.value)), str(caught.value)
     assert set(multiprocessing.active_children()) - before == set()
+
+
+# A script that calls run_bounded at module level with no __main__ guard: the spawn child
+# re-imports it, calls run_bounded again while still bootstrapping, and dies before it has
+# unpickled its arguments.  Only the top-level process reports the outcome.
+_UNGUARDED_SCRIPT = """
+import json, time
+from pwshpy.adapters.native.bounded import run_bounded
+started = time.monotonic()
+try:
+    run_bounded(abs, (-3,), timeout=60)
+    outcome = "returned"
+except Exception as exc:
+    if __name__ != "__main__":
+        raise
+    outcome = type(exc).__name__
+if __name__ == "__main__":
+    print(json.dumps({"outcome": outcome, "seconds": time.monotonic() - started}))
+"""
+
+
+@pytest.mark.os_agnostic
+def test_a_child_that_dies_while_bootstrapping_is_reported_at_once(tmp_path: Path) -> None:
+    """A child that dies before unpickling its arguments is a dead worker, not a 60 s timeout.
+
+    On Windows the parent itself holds a duplicate of the child's write end until the child
+    unpickles it, so the pipe never reports EOF: only the process sentinel shows the death.
+    """
+    script = tmp_path / "unguarded.py"
+    script.write_text(_UNGUARDED_SCRIPT, encoding="utf-8")
+    completed = subprocess.run(  # noqa: S603 - this interpreter on a script the test wrote
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    lines = completed.stdout.strip().splitlines()
+    assert lines, completed.stderr
+    report = json.loads(lines[-1])
+    assert report["outcome"] == "NativeCallError", completed.stderr
+    assert report["seconds"] < 30, report  # reported when the child dies, not after the 60 s timeout

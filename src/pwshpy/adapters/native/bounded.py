@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import multiprocessing
 from collections.abc import Callable
-from multiprocessing.connection import Connection
+from multiprocessing.connection import Connection, wait
 from multiprocessing.context import SpawnContext, SpawnProcess
 from typing import Any
 
@@ -92,8 +92,17 @@ def _start(context: SpawnContext, child: Connection, target: Callable[..., Any],
 def _await_result(parent: Connection, process: SpawnProcess, *, name: str, timeout: float) -> tuple[str, Any]:
     """Return the child's ``(kind, payload)`` message; the child is reaped on every path."""
     try:
-        if not parent.poll(timeout):
+        # Wait on the process sentinel too, not only the pipe: on Windows the parent holds a
+        # duplicate of the child's write end until the child unpickles it, so a child that dies
+        # earlier (a script without a __main__ guard dies while bootstrapping) never closes the
+        # pipe, and a pipe-only wait would run out the whole timeout instead.
+        if not wait([parent, process.sentinel], timeout):
             raise OperationTimeoutError(f"{name} timed out after {timeout}s", timeout=timeout)
+        # Only the sentinel fired: the child is gone.  A result it sent before exiting is still
+        # buffered (poll is True, recv returns it); with none, recv sees EOF on POSIX, while on
+        # Windows the duplicate keeps the pipe open, so report the dead child directly.
+        if not parent.poll():
+            raise EOFError
         message: tuple[str, Any] = parent.recv()
     # A child that dies sends nothing; the parent sees its write end close.  recv() reports that
     # as EOFError on every OS, but on Windows PipeConnection.poll calls PeekNamedPipe unwrapped,

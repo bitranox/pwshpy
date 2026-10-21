@@ -14,10 +14,12 @@ from typing import TYPE_CHECKING
 import rich_click as click
 
 from pwshpy import __init__conf__
+from pwshpy.domain.errors import ElevationDeclinedError
 
 from .config_load import load_config, start_logging
 from .constants import CLICK_CONTEXT_SETTINGS
 from .context import apply_traceback_preferences, store_cli_context
+from .exit_codes import ExitCode
 from .typed_click import option, version_option
 
 if TYPE_CHECKING:
@@ -68,7 +70,7 @@ if TYPE_CHECKING:
     "elevate",
     is_flag=True,
     default=False,
-    help="Relaunch this command elevated (Windows UAC) if not already elevated.",
+    help="Relaunch this command elevated (UAC on Windows, sudo on POSIX) if not already; exit 77 if refused.",
 )
 @click.pass_context
 def cli(
@@ -118,7 +120,14 @@ def cli(
     apply_traceback_preferences(traceback)
 
     if elevate and ctx.invoked_subcommand is not None and not services.ps.is_elevated():
-        exit_code = services.ps.elevate(wait=True)
+        try:
+            exit_code = services.ps.elevate(wait=True)
+        except ElevationDeclinedError as exc:
+            # 77 (EX_NOPERM), not the generic 1: a caller can then tell a refused prompt from the
+            # relaunched command's own failure. The fixed prefix is for a packed script that
+            # itself exits 77, which no exit code alone can tell apart.
+            click.echo(f"pwshpy: elevation declined: {exc}", err=True)
+            ctx.exit(ExitCode.ELEVATION_DECLINED)
         ctx.exit(exit_code if exit_code is not None else 0)
 
     if ctx.invoked_subcommand is None:

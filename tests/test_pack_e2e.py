@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -333,6 +334,68 @@ def test_elevate_switch_runs_the_script_as_root(tmp_path: Path) -> None:
     result = _run(Path(manifest.output_path), "-PwshPyElevate")
     assert result.returncode == 9, result.stderr
     assert "euid:0" in result.stdout
+
+
+def _fake_sudo(bin_dir: Path, *, grant: bool) -> None:
+    """sudo double: -v grants or refuses; anything else runs the command as the same user.
+
+    A refused sudo password cannot be typed without a TTY, so the double stands in for it.
+    """
+    script = bin_dir / "sudo"
+    script.write_text(
+        f'#!/bin/sh\nif [ "$1" = "-v" ]; then exit {0 if grant else 1}; fi\nexec "$@"\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    script.chmod(0o755)
+
+
+_RUNNING_AS_ROOT = sys.platform != "win32" and os.geteuid() == 0
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
+@pytest.mark.skipif(_RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+def test_elevate_switch_exits_77_when_sudo_refuses(tmp_path: Path) -> None:
+    """A refused sudo is exit 77 (EX_NOPERM), told apart from the script's own exit 1."""
+    entry = tmp_path / "who.py"
+    marker = tmp_path / "ran.marker"
+    entry.write_text(f'open({str(marker)!r}, "w").close()\n')
+    manifest = pack_script(entry)
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    _fake_sudo(bin_dir, grant=False)
+    environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
+    result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment)
+    assert result.returncode == 77, result.stderr
+    assert "pwshpy: elevation declined" in result.stderr
+    assert not marker.exists(), "the packed script ran although sudo refused"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
+@pytest.mark.skipif(_RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+def test_elevate_switch_forwards_the_clean_switch(tmp_path: Path) -> None:
+    """-PwshPyClean survives the relaunch: a stray file in the cached tree is gone afterwards."""
+    manifest = pack_script(_project(tmp_path, exit_code=4))
+    runner = Path(manifest.output_path)
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    _fake_sudo(bin_dir, grant=True)
+    environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
+    assert _run(runner, env=environment).returncode == 4
+    # The .ps1 leaves its lock file beside the extraction; only the directory is the cached tree.
+    caches = [path for path in (tmp_path / "cache").iterdir() if path.is_dir()]
+    assert len(caches) == 1
+    # Not a payload file, so the per-file hash check alone never removes it; only a clean does.
+    stray = caches[0] / "stray.txt"
+    stray.write_text("left over")
+    result = _run(runner, "-PwshPyElevate", "-PwshPyClean", env=environment)
+    assert result.returncode == 4, result.stderr
+    assert "greeting:hello from the submodule" in result.stdout
+    assert not stray.exists(), "-PwshPyClean was dropped by the elevated relaunch"
 
 
 def test_unpack_edit_repack_produces_a_working_artefact(tmp_path: Path) -> None:

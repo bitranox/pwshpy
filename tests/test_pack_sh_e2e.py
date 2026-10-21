@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -285,3 +286,130 @@ def test_unpack_of_a_freshly_packed_sh_round_trips(tmp_path: Path) -> None:
     restored = unpack_script(manifest.output_path, tmp_path / "out")
     assert restored.files == ["app.py", "pkg/__init__.py", "pkg/helper.py"]
     assert (tmp_path / "out" / "pkg" / "helper.py").read_bytes() == (tmp_path / "pkg" / "helper.py").read_bytes()
+
+
+# --- --pwshpy-elevate ----------------------------------------------------------------------
+# A refused sudo password cannot be typed without a TTY, so a sudo double on PATH stands in for
+# it: `sudo -v` grants or refuses, anything else runs the command as the same user. The runner
+# only elevates for a non-root uid, so as root none of these reach the sudo branch at all.
+
+_RUNNING_AS_ROOT = sys.platform != "win32" and os.geteuid() == 0
+_needs_non_root = pytest.mark.skipif(_RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+
+_ELEVATE_ENTRY = """import os
+import sys
+
+marker = os.environ.get("PWSHPY_TEST_MARKER")
+if marker:
+    open(marker, "w").close()
+print("argv:" + repr(sys.argv[1:]))
+sys.exit(9)
+"""
+
+
+def _fake_sudo(bin_dir: Path, *, grant: bool) -> None:
+    """sudo double: -v grants or refuses; anything else runs the command as the same user."""
+    script = bin_dir / "sudo"
+    script.write_text(
+        f'#!/bin/sh\nif [ "$1" = "-v" ]; then exit {0 if grant else 1}; fi\nexec "$@"\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    script.chmod(0o755)
+
+
+def _elevate_setup(tmp_path: Path, *, grant: bool) -> tuple[Path, Path, dict[str, str]]:
+    """A packed marker-writing script, a sudo double on PATH, and the marker the script writes."""
+    entry = tmp_path / "who.py"
+    entry.write_text(_ELEVATE_ENTRY)
+    runner = _pack_sh(entry, tmp_path / "who.sh")
+    # Executable, so each test isolates its own defect; the non-executable case clears the bit.
+    runner.chmod(0o755)
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    _fake_sudo(bin_dir, grant=grant)
+    marker = tmp_path / "ran.marker"
+    environment = _env(tmp_path)
+    environment["PATH"] = os.pathsep.join([str(bin_dir), environment["PATH"]])
+    environment["PWSHPY_TEST_MARKER"] = str(marker)
+    return runner, marker, environment
+
+
+@_needs_non_root
+def test_elevate_refused_exits_77_and_never_runs_the_script(tmp_path: Path) -> None:
+    """A refused sudo is exit 77 (EX_NOPERM), told apart from the script's own exit 1."""
+    runner, marker, environment = _elevate_setup(tmp_path, grant=False)
+    result = _run(["sh"], runner, "--pwshpy-elevate", env=environment)
+    assert result.returncode == 77, result.stderr
+    assert "pwshpy: elevation declined" in result.stderr
+    assert not marker.exists(), "the packed script ran although sudo refused"
+
+
+@_needs_non_root
+def test_elevate_relaunches_a_runner_that_is_not_executable(tmp_path: Path) -> None:
+    """The relaunch goes through sh, so a packed file without the exec bit still runs elevated."""
+    runner, marker, environment = _elevate_setup(tmp_path, grant=True)
+    runner.chmod(0o644)
+    result = _run(["sh"], runner, "--pwshpy-elevate", env=environment)
+    assert result.returncode == 9, result.stderr
+    assert marker.exists()
+
+
+@_needs_non_root
+def test_elevate_keeps_the_double_dash_boundary(tmp_path: Path) -> None:
+    """After -- a wrapper-looking argument is the script's own, also after the elevated relaunch."""
+    runner, _, environment = _elevate_setup(tmp_path, grant=True)
+    result = _run(["sh"], runner, "--pwshpy-elevate", "--", "--pwshpy-help", env=environment)
+    assert result.returncode == 9, result.stderr
+    assert "argv:['--pwshpy-help']" in result.stdout
+
+
+@_needs_non_root
+def test_elevate_forwards_the_clean_switch(tmp_path: Path) -> None:
+    """--pwshpy-clean survives the relaunch: a stray file in the cached tree is gone afterwards."""
+    runner, _, environment = _elevate_setup(tmp_path, grant=True)
+    assert _run(["sh"], runner, env=environment).returncode == 9
+    caches = list((tmp_path / "cache").iterdir())
+    assert len(caches) == 1
+    # Not a payload file, so the per-file hash check alone never removes it; only a clean does.
+    stray = caches[0] / "stray.txt"
+    stray.write_text("left over")
+    result = _run(["sh"], runner, "--pwshpy-elevate", "--pwshpy-clean", env=environment)
+    assert result.returncode == 9, result.stderr
+    assert not stray.exists(), "--pwshpy-clean was dropped by the elevated relaunch"
+
+
+@_needs_non_root
+def test_elevate_forwards_the_no_install_uv_switch(tmp_path: Path) -> None:
+    """--pwshpy-no-install-uv survives the relaunch: uv absent is exit 127, no installer fetched."""
+    runner, _, _ = _elevate_setup(tmp_path, grant=True)
+    barren = tmp_path / "home"
+    barren.mkdir()
+    # The runner probes a fixed system-wide uv whatever PATH says; point that probe into the barren
+    # home so the test also runs on a machine that has uv installed there.
+    text = runner.read_text(encoding="utf-8")
+    assert "/usr/local/bin/uv" in text
+    runner.write_text(text.replace("/usr/local/bin/uv", str(barren / "system-uv")), encoding="utf-8", newline="\n")
+    bin_dir = tmp_path / "fake-bin"
+    fetched = tmp_path / "fetched.marker"
+    for tool in ("curl", "wget"):
+        double = bin_dir / tool
+        double.write_text(f'#!/bin/sh\n: > "{fetched}"\nexit 1\n', encoding="utf-8", newline="\n")
+        double.chmod(0o755)
+    sh_bin = shutil.which("sh") or "/bin/sh"
+    result = subprocess.run(  # noqa: S603 - fixed argv, resolved sh path
+        [sh_bin, str(runner), "--pwshpy-elevate", "--pwshpy-no-install-uv"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env={
+            "PATH": os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"]),
+            "HOME": str(barren),
+            "XDG_BIN_HOME": str(barren / "xdgbin"),
+            "CARGO_HOME": str(barren / "cargo"),
+            "PWSHPY_PACK_CACHE": str(tmp_path / "cache"),
+        },
+    )
+    assert result.returncode == 127, result.stderr
+    assert not fetched.exists(), "--pwshpy-no-install-uv was dropped by the elevated relaunch"

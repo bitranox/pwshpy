@@ -153,6 +153,10 @@ packed sources (`-o DIR`, `--force`) so a pack can be edited and packed again. S
 `-PwshPyClean` / `--pwshpy-clean`, `-PwshPyNoInstallUv` / `--pwshpy-no-install-uv`,
 `-PwshPyElevate` / `--pwshpy-elevate`).
 
+Exit code 77 (`EX_NOPERM`) means an elevation was refused or declined: `pwshpy --elevate`, a `.sh`
+runner's `--pwshpy-elevate` and a `.ps1` runner's `-PwshPyElevate` all exit 77 and write a line
+starting `pwshpy: elevation declined` to stderr, without running the command or the packed script.
+
 The `.NET` commands need the `[full]` extra (else a clear `FeatureUnavailableError`). `run` executes
 an arbitrary script; `cmdlet NAME -p KEY=VALUE` runs one cmdlet with safely-bound params; and the
 module shortcuts `get_ad_user` / `get_ad_group` / `get_ad_computer` / `get_mailbox` / `get_az_vm` /

@@ -28,7 +28,8 @@
         -PwshPyInfo         show the payload manifest and exit
         -PwshPyClean        discard the cached extraction and unpack again
         -PwshPyNoInstallUv  fail with exit code 127 rather than installing uv
-        -PwshPyElevate      relaunch elevated first (UAC on Windows, sudo on POSIX)
+        -PwshPyElevate      relaunch elevated first (UAC on Windows, sudo on POSIX);
+                            exit code 77 if the elevation is refused
 
     Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -233,8 +234,18 @@ function Invoke-PwshPyElevated {
     # returns everything written to the output stream, so returning a code from a function
     # that also runs a child would swallow the child's stdout into the return value and
     # print nothing. Exiting here keeps the child's output flowing straight to the console.
+    #
+    # A refused elevation exits 77 (EX_NOPERM), so a caller can tell it from the script's own
+    # exit codes; the fixed stderr line covers a script that itself exits 77.
     $self = $PSCommandPath
     if (-not $PwshPyOnWindows) {
+        # Ask for the password with `sudo -v` first: sudo exits 1 when it refuses, which is also
+        # an ordinary exit code of the script, so only asking separately tells the two apart.
+        & sudo -v
+        if ($LASTEXITCODE -ne 0) {
+            [Console]::Error.WriteLine('pwshpy: elevation declined (sudo did not grant root)')
+            exit 77
+        }
         # sudo keeps the console, so output and exit code flow back without a relay.
         & sudo (Get-PwshPyHostPath) -NoProfile -File $self @ForwardArgs
         exit $LASTEXITCODE
@@ -244,7 +255,19 @@ function Invoke-PwshPyElevated {
     # together with -Verb RunAs, so the child writes its streams to files we replay here.
     $relay = Join-Path ([IO.Path]::GetTempPath()) ('pwshpy-pack-' + [Guid]::NewGuid().ToString('N'))
     $childArgs = @('-NoProfile', '-File', $self, '-PwshPyRelay', $relay) + $ForwardArgs
-    $process = Start-Process -FilePath (Get-PwshPyHostPath) -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
+    try {
+        $process = Start-Process -FilePath (Get-PwshPyHostPath) -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
+    } catch {
+        # A refused UAC prompt surfaces as Win32Exception 1223 (ERROR_CANCELLED), possibly
+        # wrapped; matched by its code because the message text is localised.
+        $win32 = $_.Exception
+        while ($win32 -and -not ($win32 -is [System.ComponentModel.Win32Exception])) { $win32 = $win32.InnerException }
+        if ($win32 -and $win32.NativeErrorCode -eq 1223) {
+            [Console]::Error.WriteLine('pwshpy: elevation declined (the Administrator prompt was refused)')
+            exit 77
+        }
+        throw
+    }
     foreach ($stream in @(@("$relay.out", $false), @("$relay.err", $true))) {
         if (Test-Path -LiteralPath $stream[0]) {
             $text = Get-Content -LiteralPath $stream[0] -Raw
@@ -294,14 +317,17 @@ $PwshPyInfo = $false
 $PwshPyHelp = $false
 $PwshPyRelay = ''
 $PwshPyRest = New-Object System.Collections.ArrayList
+# The consumed switches an elevated relaunch must pass on again; every other one is either
+# handled before the relaunch (-PwshPyHelp, -PwshPyInfo) or set by it (-PwshPyRelay).
+$PwshPyRelaunchSwitches = New-Object System.Collections.ArrayList
 $PwshPyExpectRelay = $false
 
 foreach ($argument in $args) {
     $text = [string]$argument
     if ($PwshPyExpectRelay) { $PwshPyRelay = $text; $PwshPyExpectRelay = $false; continue }
     switch -Exact ($text) {
-        '-PwshPyClean' { $PwshPyClean = $true; continue }
-        '-PwshPyNoInstallUv' { $PwshPyNoInstallUv = $true; continue }
+        '-PwshPyClean' { $PwshPyClean = $true; [void]$PwshPyRelaunchSwitches.Add($text); continue }
+        '-PwshPyNoInstallUv' { $PwshPyNoInstallUv = $true; [void]$PwshPyRelaunchSwitches.Add($text); continue }
         '-PwshPyElevate' { $PwshPyWantElevate = $true; continue }
         '-PwshPyInfo' { $PwshPyInfo = $true; continue }
         '-PwshPyHelp' { $PwshPyHelp = $true; continue }
@@ -318,7 +344,7 @@ $PwshPyCacheDir = Join-Path (Get-PwshPyCacheRoot) $PwshPySha.Substring(0, 16)
 if ($PwshPyInfo) { Write-PwshPyManifest -CacheDir $PwshPyCacheDir; exit 0 }
 
 if ($PwshPyWantElevate -and -not (Test-PwshPyElevated)) {
-    exit (Invoke-PwshPyElevated -ForwardArgs $PwshPyForward)
+    exit (Invoke-PwshPyElevated -ForwardArgs (@($PwshPyRelaunchSwitches.ToArray()) + $PwshPyForward))
 }
 
 # --- unpack -----------------------------------------------------------------------------

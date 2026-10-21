@@ -16,12 +16,20 @@ from click.testing import CliRunner
 
 from pwshpy.adapters.cli.root import cli
 from pwshpy.composition import build_testing
+from pwshpy.domain.errors import ElevationDeclinedError
 
 
 class _FakePs:
-    def __init__(self, *, elevated: bool, elevate_code: int | None = 0) -> None:
+    def __init__(
+        self,
+        *,
+        elevated: bool,
+        elevate_code: int | None = 0,
+        raise_on_elevate: Exception | None = None,
+    ) -> None:
         self._elevated = elevated
         self._elevate_code = elevate_code
+        self._raise_on_elevate = raise_on_elevate
         self.elevate_calls: list[tuple[Any, ...]] = []
 
     def is_elevated(self) -> bool:
@@ -36,6 +44,8 @@ class _FakePs:
         wait: bool = True,
     ) -> int | None:
         self.elevate_calls.append((argv, executable, cwd, wait))
+        if self._raise_on_elevate is not None:
+            raise self._raise_on_elevate
         return self._elevate_code
 
 
@@ -88,3 +98,14 @@ def test_elevate_flag_is_noop_when_already_elevated() -> None:
     assert result.exit_code == 0
     assert fake.elevate_calls == []
     assert "elevated" in result.output
+
+
+@pytest.mark.os_agnostic
+def test_elevate_flag_exits_77_when_the_prompt_is_declined() -> None:
+    """A declined prompt exits 77 (EX_NOPERM) with a fixed stderr line, never the generic 1."""
+    fake = _FakePs(elevated=False, raise_on_elevate=ElevationDeclinedError("The Administrator prompt was declined."))
+    result = CliRunner().invoke(cli, ["--elevate", "is-elevated"], obj=_factory(fake))
+    assert result.exit_code == 77
+    # CliRunner mixes stderr into output by default.
+    assert "pwshpy: elevation declined" in result.output
+    assert "The Administrator prompt was declined." in result.output

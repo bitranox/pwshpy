@@ -19,7 +19,7 @@
 #     --pwshpy-info          show the payload manifest and exit
 #     --pwshpy-clean         discard the cached extraction and unpack again
 #     --pwshpy-no-install-uv fail instead of installing uv when it is missing
-#     --pwshpy-elevate       relaunch under sudo first
+#     --pwshpy-elevate       relaunch under sudo first; exit 77 if sudo refuses
 #
 # Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -250,6 +250,9 @@ PWSHPY_CLEAN=0
 PWSHPY_NO_INSTALL_UV=0
 PWSHPY_WANT_ELEVATE=0
 PWSHPY_INFO=0
+# The consumed switches an elevated relaunch must pass on again. They take no values, so the list
+# needs no quoting.
+PWSHPY_FWD=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --pwshpy-help)
@@ -262,10 +265,12 @@ while [ "$#" -gt 0 ]; do
             ;;
         --pwshpy-clean)
             PWSHPY_CLEAN=1
+            PWSHPY_FWD="$PWSHPY_FWD --pwshpy-clean"
             shift
             ;;
         --pwshpy-no-install-uv)
             PWSHPY_NO_INSTALL_UV=1
+            PWSHPY_FWD="$PWSHPY_FWD --pwshpy-no-install-uv"
             shift
             ;;
         --pwshpy-elevate)
@@ -280,8 +285,18 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# Ask for the password with `sudo -v` first: sudo exits 1 when it refuses, which is also an ordinary
+# exit code of the script, so only asking separately lets a refusal exit 77 (EX_NOPERM) instead.
+# Relaunch through /bin/sh rather than exec-ing "$0": a packed file is usually not executable.
+# The explicit -- keeps the script's own arguments from being parsed as wrapper switches again.
 if [ "$PWSHPY_WANT_ELEVATE" = "1" ] && [ "$(id -u)" != "0" ]; then
-    exec sudo "$0" "$@"
+    if ! sudo -v; then
+        printf '%s\n' "pwshpy: elevation declined (sudo did not grant root)" >&2
+        exit 77
+    fi
+    # The switches carry no values, so splitting the unquoted list is exactly what is wanted.
+    # shellcheck disable=SC2086
+    exec sudo /bin/sh "$0" $PWSHPY_FWD -- "$@"
 fi
 
 PWSHPY_CACHE="$(pwshpy_cache_root)/$(printf '%s' "$PWSHPY_SHA" | cut -c1-16)"

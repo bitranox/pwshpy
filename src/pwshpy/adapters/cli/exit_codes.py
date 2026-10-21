@@ -27,6 +27,7 @@ class ExitCode(IntEnum):
     * 2-13: errno-derived codes (ENOENT, EACCES)
     * 22: EINVAL
     * 69: EX_UNAVAILABLE (sysexits.h)
+    * 77: EX_NOPERM (sysexits.h) - elevation refused or declined
     * 78: EX_CONFIG (sysexits.h)
     * 110: ETIMEDOUT
     * 128+N: signal N (informational only)
@@ -36,6 +37,8 @@ class ExitCode(IntEnum):
         <ExitCode.SUCCESS: 0>
         >>> int(ExitCode.SMTP_FAILURE)
         69
+        >>> int(ExitCode.ELEVATION_DECLINED)
+        77
     """
 
     SUCCESS = 0
@@ -44,6 +47,7 @@ class ExitCode(IntEnum):
     PERMISSION_DENIED = 13
     INVALID_ARGUMENT = 22
     SMTP_FAILURE = 69
+    ELEVATION_DECLINED = 77
     CONFIG_ERROR = 78
     TIMEOUT = 110
     SIGNAL_INT = 130

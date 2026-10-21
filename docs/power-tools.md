@@ -41,6 +41,12 @@ pwshpy is-elevated -q && pwshpy clear_event_log Application   # gate a privilege
 pwshpy --elevate clear_event_log Application                  # relaunch elevated if needed
 ```
 
+When the prompt is refused, `pwshpy --elevate` exits 77 (`EX_NOPERM` from `sysexits.h`) and writes a
+line starting `pwshpy: elevation declined` to stderr, so a caller can tell a refusal from the
+relaunched command's own failure. The packed runners below do the same for `--pwshpy-elevate` and
+`-PwshPyElevate`. A command that itself exits 77 still looks the same by exit code alone; the
+stderr line is what tells them apart.
+
 ## `ps.exec` - run a program without the quoting / `$LASTEXITCODE` traps
 
 An argv list (no shell, no quoting hell), an exit code that is **always** set, and stderr as plain
@@ -156,7 +162,7 @@ to your script untouched. The `.ps1` spells them `-PwshPy...`; the `.sh` spells 
 | `-PwshPyInfo`        | `--pwshpy-info`          | print the manifest (entry, hash, file list, cache dir) without running anything |
 | `-PwshPyClean`       | `--pwshpy-clean`         | discard the cached extraction and unpack again                                  |
 | `-PwshPyNoInstallUv` | `--pwshpy-no-install-uv` | fail with exit 127 instead of installing uv                                     |
-| `-PwshPyElevate`     | `--pwshpy-elevate`       | relaunch elevated first (UAC on Windows, `sudo` on POSIX)                       |
+| `-PwshPyElevate`     | `--pwshpy-elevate`       | relaunch elevated first (UAC on Windows, `sudo` on POSIX); exit 77 if refused   |
 | `-PwshPyHelp`        | `--pwshpy-help`          | show the artefact's own help                                                    |
 
 Details worth knowing:

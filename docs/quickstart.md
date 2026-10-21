@@ -27,7 +27,8 @@ pwshpy info                                      # resolved package metadata
 Every native record command shares three output modes:
 
 - `--jsonl` : one JSON record per line; **stays lazy end to end** (`... --jsonl | head` stops early).
-- `--json` : a single JSON array (also streamed).
+- `--json` : a single JSON array (also streamed; an error after records were streamed leaves the
+  array unterminated, so check the exit code).
 - *(default)* : a human-readable rich table (soft-capped at 1000 rows; use `--jsonl` past that).
 
 ## The library in 30 seconds

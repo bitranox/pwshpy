@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 
 import pytest
 
@@ -78,3 +79,46 @@ def test_human_table_no_hint_when_within_cap(
     records = [ProcessInfo(pid=n, name=f"p{n}") for n in range(3)]
     emit(records, RecordFormat.HUMAN)
     assert "showing the first" not in capsys.readouterr().out
+
+
+class _SourceFailedError(Exception):
+    """Test-local stand-in for a record source failing mid-stream."""
+
+
+def _raises_before_first_record() -> Iterator[ProcessInfo]:
+    raise _SourceFailedError("source refused before its first record")
+    yield ProcessInfo(pid=0, name="unreachable")  # pragma: no cover - makes this a generator
+
+
+def _raises_after_one_record() -> Iterator[ProcessInfo]:
+    yield ProcessInfo(pid=1, name="init")
+    raise _SourceFailedError("source failed after one record")
+
+
+@pytest.mark.os_agnostic
+def test_json_writes_nothing_when_the_source_fails_before_its_first_record(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A source failing before its first record leaves stdout empty, never a bare ``[``."""
+    with pytest.raises(_SourceFailedError):
+        emit(_raises_before_first_record(), RecordFormat.JSON)
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.os_agnostic
+def test_json_leaves_a_partial_array_when_the_source_fails_after_records_streamed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The documented streaming trade-off: records already written stay, the array stays open."""
+    with pytest.raises(_SourceFailedError):
+        emit(_raises_after_one_record(), RecordFormat.JSON)
+    out = capsys.readouterr().out
+    assert out.startswith('[{"pid":1,')
+    assert not out.rstrip().endswith("]")
+
+
+@pytest.mark.os_agnostic
+def test_json_of_an_empty_source_is_still_an_empty_array(capsys: pytest.CaptureFixture[str]) -> None:
+    """Pulling the first record ahead keeps an empty source rendering as ``[]``."""
+    emit(iter(()), RecordFormat.JSON)
+    assert capsys.readouterr().out == "[]\n"

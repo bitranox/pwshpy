@@ -1,13 +1,19 @@
-"""Record output for the CLI — streaming JSON/JSONL and human tables.
+"""Record output for the CLI - streaming JSON/JSONL and human tables.
 
 Keeps the lazy pipeline lazy end to end: ``--jsonl`` writes one record at a time,
 so ``pwshpy processes --jsonl | head`` stops early and cheaply.  Writes are
 wrapped so a downstream reader closing the pipe exits cleanly (exit 0, no
 ``BrokenPipeError`` traceback) on both POSIX and Windows.
 
+``--json`` streams one array and writes nothing until the source has produced its
+first record, so a source that fails up front leaves stdout empty.  An error raised
+AFTER records were streamed leaves a partial, unterminated array on stdout: the
+streaming trade-off, accepted because closing it would mean buffering the whole
+stream.  The exit code is non-zero either way.
+
 Contents:
-    * :class:`RecordFormat` — human / json / jsonl selector.
-    * :func:`emit` — render an iterable of records in the chosen format.
+    * :class:`RecordFormat` - human / json / jsonl selector.
+    * :func:`emit` - render an iterable of records in the chosen format.
 """
 
 from __future__ import annotations
@@ -106,18 +112,29 @@ def _write_jsonl(records: Iterable[PSRecord]) -> None:
 
 
 def _write_json_array(records: Iterable[PSRecord]) -> None:
+    # Pull the first record BEFORE writing "[": a source that fails before yielding
+    # anything (missing path, refused native call) must leave stdout empty, so a
+    # caller piping into a JSON parser sees only the stderr error and exit code. An
+    # error after records were written still leaves a partial array; buffering the
+    # whole stream to avoid that would end --json's lazy, memory-bounded streaming.
+    iterator = iter(records)
+    first = next(iterator, None)
     out = sys.stdout
+    if first is None:
+        out.write("[]\n")
+        out.flush()
+        return
     out.write("[")
-    for index, record in enumerate(records):
-        if index:
-            out.write(",")
+    out.write(_dumps(first))
+    for record in iterator:
+        out.write(",")
         out.write(_dumps(record))
     out.write("]\n")
     out.flush()
 
 
 def _cell(value: object) -> str:
-    """Render one record field as a table cell (``None`` → empty string)."""
+    """Render one record field as a table cell (``None`` -> empty string)."""
     return "" if value is None else str(value)
 
 

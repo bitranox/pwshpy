@@ -11,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from pwshpy.adapters.cli.root import cli
+from pwshpy.domain.errors import NativeCallError
 
 if TYPE_CHECKING:
     from pwshpy.composition import AppServices
@@ -53,3 +54,19 @@ def test_new_item_and_get_content(
     content = cli_runner.invoke(cli, ["get_content", str(target)], obj=production_factory)
     assert content.exit_code == 0
     assert "body" in content.output
+
+
+@pytest.mark.os_agnostic
+def test_get_child_item_json_on_a_missing_directory_writes_no_partial_array(
+    cli_runner: CliRunner, production_factory: Callable[[], AppServices], tmp_path: Path
+) -> None:
+    """A source that fails before its first record leaves --json stdout empty, not a bare ``[``.
+
+    A caller piping ``--json`` into a JSON parser then sees only the stderr message and the
+    exit code, never a parse error on top of it.
+    """
+    missing = tmp_path / "does-not-exist"
+    result = cli_runner.invoke(cli, ["get_child_item", str(missing), "--json"], obj=production_factory)
+    assert result.exit_code == 1
+    assert isinstance(result.exception, NativeCallError)
+    assert result.stdout == ""

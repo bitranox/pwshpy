@@ -11,6 +11,13 @@ translation table (grouped by theme, Python API and CLI in separate columns), se
 Every native record command shares `--json` (a streamed array), `--jsonl` (one record per line,
 lazy end to end), and a default human table; most take `--limit N`.
 
+On an error the exit code is non-zero and the message goes to stderr. `--json` writes nothing
+until the source has produced its first record, so a command that fails up front (a missing
+path, a refused native call) leaves stdout empty rather than a bare `[`. An error after records
+were already streamed leaves a partial, unterminated array: that is the price of streaming, so
+check the exit code before trusting the output, or use `--jsonl`, whose lines stay individually
+parseable.
+
 **Everywhere** - one binding on Windows, macOS and Linux:
 
 | Command                         | Shows                         | Binding                                |

@@ -2,6 +2,7 @@
 
 ``get_hotfix`` / ``get_computer_info`` / ``get_windows_image`` (read) mirror Get-Hotfix /
 Get-ComputerInfo / Get-WindowsImage;
+``get_windows_update`` searches Windows Update (read-only, bounded by ``--timeout``);
 ``stop_process`` / ``wait_process`` mirror Stop-Process / Wait-Process.  The destructive
 ``restart_computer`` / ``stop_computer`` are intentionally library-only (no CLI) to avoid
 an accidental reboot from a shell.
@@ -12,10 +13,14 @@ Contents:
 
 from __future__ import annotations
 
+from typing import Any
+
 import rich_click as click
 
+from ....domain.errors import OperationTimeoutError
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
+from ..exit_codes import ExitCode
 from ..output import emit
 from ..typed_click import argument, option
 from ._common import resolve_format
@@ -36,6 +41,50 @@ def cli_get_hotfix(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
     """
     ps = get_cli_context(ctx).services.ps
     emit(ps.get_hotfix(), resolve_format(as_json, as_jsonl))
+
+
+# Mirrors the facade's accepted range, so a bad value is a usage error (exit 2) before any
+# child starts; NaN slips past a range check, and the facade refuses it.
+_TIMEOUT_RANGE = click.FloatRange(min=0, min_open=True, max=2147483)
+
+
+@click.command("get_windows_update", context_settings=CLICK_CONTEXT_SETTINGS)
+@option(
+    "--criteria",
+    default=None,
+    help="WUA search criteria (default: software updates not installed, \"IsInstalled=0 and Type='Software'\").",
+)
+@option(
+    "--timeout",
+    type=_TIMEOUT_RANGE,
+    default=None,
+    help="Seconds before the search is abandoned and exits 110 (default 300).",
+)
+@option("--json", "as_json", is_flag=True, default=False, help="Emit records as a JSON array.")
+@option("--jsonl", "as_jsonl", is_flag=True, default=False, help="Stream one JSON record per line.")
+@click.pass_context
+def cli_get_windows_update(
+    ctx: click.Context, criteria: str | None, timeout: float | None, as_json: bool, as_jsonl: bool
+) -> None:
+    """Search Windows Update for updates (native, Windows, read-only; exit 110 on timeout).
+
+    \f
+    Example:
+        >>> from click.testing import CliRunner
+        >>> CliRunner().invoke(cli_get_windows_update, ["--help"]).exit_code
+        0
+    """
+    # Only the options given are forwarded, so the facade stays the one owner of the defaults.
+    overrides: dict[str, Any] = {"criteria": criteria, "timeout": timeout}
+    ps = get_cli_context(ctx).services.ps
+    try:
+        emit(
+            ps.get_windows_update(**{key: value for key, value in overrides.items() if value is not None}),
+            resolve_format(as_json, as_jsonl),
+        )
+    except OperationTimeoutError as exc:
+        click.echo(f"pwshpy: Windows Update search timed out after {exc.timeout:g}s (raise --timeout)", err=True)
+        ctx.exit(ExitCode.TIMEOUT)
 
 
 @click.command("get_windows_image", context_settings=CLICK_CONTEXT_SETTINGS)
@@ -118,6 +167,7 @@ def cli_stop_computer(ctx: click.Context, delay_seconds: int, yes: bool) -> None
 
 SYSTEM_COMMANDS = (
     cli_get_hotfix,
+    cli_get_windows_update,
     cli_get_computer_info,
     cli_get_windows_image,
     cli_stop_process,

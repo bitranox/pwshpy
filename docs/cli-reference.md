@@ -52,7 +52,14 @@ usage error (exit 2).
 | `pwshpy get_acl PATH`       | ACL entries                 | win32security  | POSIX ACL xattr |
 
 **Windows only** - no honest Linux analog: `pwshpy get_item_property KEY` / `pwshpy registry_keys KEY`,
-`pwshpy get_cim_instance CLASS`, `pwshpy get_hotfix`.
+`pwshpy get_cim_instance CLASS`, `pwshpy get_hotfix`, `pwshpy get_windows_update`.
+
+`pwshpy get_windows_update` searches Windows Update (read-only: never downloads or installs).
+`--criteria` takes a WUA search string (default `IsInstalled=0 and Type='Software'`, the software
+updates not yet installed); `--timeout SECONDS` (default 300, at most 2147483) bounds the search,
+which runs in a child process that is killed when the time is up. A search that times out prints
+one `timed out` line on stderr and exits **110** (ETIMEDOUT), so a script can tell it from a
+failure (exit 1). Off Windows it exits 1 with `PlatformUnsupportedError`.
 
 ```bash
 # streaming and piping stay lazy end to end

@@ -89,6 +89,7 @@ from .domain.records import (
     SystemUptime,
     WebResponse,
     WindowsImage,
+    WindowsUpdate,
 )
 from .domain.scheduling import (
     BootTrigger,
@@ -119,6 +120,7 @@ __all__ = [
     "SystemUptime",
     "WebResponse",
     "WindowsImage",
+    "WindowsUpdate",
     "DnsRecord",
     "ComputerInfo",
     "ConnectionTest",

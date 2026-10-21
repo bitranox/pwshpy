@@ -16,6 +16,7 @@ Contents:
     * :func:`iter_registry_values` — Windows registry values (lib_registry, win32-gated).
     * :func:`iter_registry_keys` — Windows registry subkeys (lib_registry, win32-gated).
     * :func:`iter_wim_images` - portable WIM image list (header + XML resource, no DISM).
+    * :func:`search_updates` - Windows Update search in a killable child (Windows-only).
 """
 
 from __future__ import annotations
@@ -62,6 +63,7 @@ from .systemd_timers import SystemdScheduledTaskController
 from .systemd_timers import iter_timers as systemd_iter_timers
 from .web import download_file, invoke_rest_method, invoke_web_request
 from .wim import iter_wim_images
+from .windows_update import search_updates
 
 __all__ = [
     "NativeAclController",
@@ -113,6 +115,7 @@ __all__ = [
     "pack_script",
     "resolve",
     "run_process",
+    "search_updates",
     "unpack_script",
     "test_connection",
     "write_records",

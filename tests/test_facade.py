@@ -60,6 +60,7 @@ from pwshpy.domain.records import (
     SystemUptime,
     WebResponse,
     WindowsImage,
+    WindowsUpdate,
 )
 from pwshpy.domain.scheduling import BootTrigger, TaskPrincipal, TaskTrigger
 
@@ -568,6 +569,17 @@ class _FakeScheduledTaskController:
         return self._task(task_path)
 
 
+class _FakeWindowsUpdates:
+    """Windows Update source: records the criteria and timeout it was asked for."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, float]] = []
+
+    def __call__(self, criteria: str, *, timeout: float) -> Iterator[WindowsUpdate]:
+        self.calls.append((criteria, timeout))
+        yield WindowsUpdate(update_id="u-1", title="Cumulative Update", kb_article_ids=("5031455",))
+
+
 class _FakePacker:
     """Script packer and unpacker, sharing one call log."""
 
@@ -610,6 +622,7 @@ class _InjectedPs:
     scheduled_task_controller: _FakeScheduledTaskController = field(default_factory=_FakeScheduledTaskController)
     packer: _FakePacker = field(default_factory=_FakePacker)
     windows_image_source: WindowsImageSource = field(default=_fake_windows_images)
+    windows_updates: _FakeWindowsUpdates = field(default_factory=_FakeWindowsUpdates)
     facade: Ps = field(init=False)
 
     def __post_init__(self) -> None:
@@ -656,6 +669,7 @@ class _InjectedPs:
             process_control=self.process_control,
             hotfix_source=_fake_hotfixes,
             windows_image_source=self.windows_image_source,
+            windows_update_source=self.windows_updates,
             computer_info_source=_fake_computer_info,
             elevation_check=self.elevator.is_elevated,
             elevator=self.elevator.elevate,
@@ -1007,3 +1021,26 @@ def test_injected_script_packer_adapters(injected: _InjectedPs) -> None:
         ("tool.py", "out.ps1", ("rich",), True),
         ("unpack", "out.ps1", "restored", False),
     ]
+
+
+@pytest.mark.os_agnostic
+def test_get_windows_update_forwards_criteria_and_timeout(injected: _InjectedPs) -> None:
+    """The facade hands its defaults, or the caller's values, to the source and wraps it in a Pipeline."""
+    facade = injected.facade
+    pipeline = facade.get_windows_update()
+    assert isinstance(pipeline, Pipeline)
+    assert pipeline.select(lambda u: u.kb_article_ids).to_list() == [("5031455",)]
+    facade.get_windows_update(criteria="IsInstalled=1", timeout=2147483).to_list()
+    assert injected.windows_updates.calls == [
+        ("IsInstalled=0 and Type='Software'", 300.0),
+        ("IsInstalled=1", 2147483),
+    ]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("bad", [0, -1.0, 2147483.5, float("nan"), float("inf")])
+def test_get_windows_update_refuses_a_timeout_outside_the_waitable_range(injected: _InjectedPs, bad: float) -> None:
+    """A timeout outside (0, 2147483] raises ValueError at the call, before the source is asked."""
+    with pytest.raises(ValueError, match="timeout"):
+        injected.facade.get_windows_update(timeout=bad)
+    assert injected.windows_updates.calls == []

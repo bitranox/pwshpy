@@ -48,6 +48,7 @@ from ..domain.records import (
     SystemUptime,
     WebResponse,
     WindowsImage,
+    WindowsUpdate,
 )
 from ..domain.scheduling import TaskPrincipal, TaskTrigger
 
@@ -246,6 +247,12 @@ class WindowsImageSource(Protocol):
     """Yield the images of a WIM/ESD file as typed :class:`WindowsImage` records (native, portable)."""
 
     def __call__(self, path: Path) -> Iterator[WindowsImage]: ...
+
+
+class WindowsUpdateSource(Protocol):
+    """Search Windows Update for :class:`WindowsUpdate` records, bounded by ``timeout`` (native)."""
+
+    def __call__(self, criteria: str, *, timeout: float) -> Iterator[WindowsUpdate]: ...
 
 
 class ComputerInfoSource(Protocol):
@@ -485,6 +492,7 @@ __all__ = [
     "CredentialStore",
     "FileDownloader",
     "HotfixSource",
+    "WindowsUpdateSource",
     "ProcessControl",
     "ScriptPacker",
     "ScriptUnpacker",

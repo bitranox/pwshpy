@@ -1,0 +1,187 @@
+"""Windows Update search adapter: marshaling, the COM-error message, and the off-Windows guard.
+
+``os_agnostic`` where the code under test is pure (row -> record, IUpdate -> row, com_error ->
+message); the COM objects are faked at that true external edge because pywin32 exists only on
+Windows.  The live search against the real Windows Update agent is the pwsh oracle in
+``test_windows_update_pwsh_oracle.py``.
+"""
+
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass, field
+from decimal import Decimal
+
+import pytest
+
+from pwshpy.adapters.native import windows_update
+from pwshpy.domain.errors import NativeCallError, PlatformUnsupportedError
+from pwshpy.domain.records import WindowsUpdate
+
+# White-box tests of the adapter's pure helpers (no public path reaches them off Windows).
+_to_update = windows_update._to_update  # pyright: ignore[reportPrivateUsage]
+_flatten = windows_update._flatten  # pyright: ignore[reportPrivateUsage]
+_com_failure_message = windows_update._com_failure_message  # pyright: ignore[reportPrivateUsage]
+_rows_or_raise = windows_update._rows_or_raise  # pyright: ignore[reportPrivateUsage]
+
+_ROW: dict[str, object] = {
+    "update_id": "u",
+    "revision_number": 2,
+    "title": "t",
+    "kb_article_ids": ["5031455"],
+    "is_installed": False,
+    "is_downloaded": True,
+    "is_hidden": False,
+    "is_mandatory": False,
+    "msrc_severity": "Critical",
+    "max_download_size": 1024,
+    "categories": ["Security Updates", "Windows 11"],
+}
+
+
+@pytest.mark.os_agnostic
+def test_to_update_turns_a_child_row_into_a_record_with_tuples() -> None:
+    """A plain row from the child becomes a WindowsUpdate whose list fields are tuples."""
+    update = _to_update(dict(_ROW))
+    assert isinstance(update, WindowsUpdate)
+    assert update.kb_article_ids == ("5031455",)
+    assert update.categories == ("Security Updates", "Windows 11")
+    assert (update.update_id, update.revision_number, update.title) == ("u", 2, "t")
+    assert (update.is_downloaded, update.msrc_severity, update.max_download_size) == (True, "Critical", 1024)
+
+
+@pytest.mark.os_agnostic
+def test_windows_update_record_defaults() -> None:
+    """Only the identity and title are required; the rest default to empty / False / 0."""
+    update = WindowsUpdate(update_id="u", title="t")
+    assert update.kb_article_ids == ()
+    assert update.categories == ()
+    assert update.revision_number == 0
+    assert update.max_download_size == 0
+    assert update.is_installed is False
+
+
+# --- fake IUpdate: the COM edge, shaped like the WUA automation objects ------------------------
+
+
+@dataclass
+class _Collection:
+    """An IStringCollection / ICategoryCollection: Count plus Item(i)."""
+
+    items: list[object] = field(default_factory=lambda: [])
+
+    @property
+    def Count(self) -> int:  # noqa: N802 - mirrors the COM property name
+        return len(self.items)
+
+    def Item(self, index: int) -> object:  # noqa: N802 - mirrors the COM method name
+        return self.items[index]
+
+
+@dataclass
+class _Identity:
+    UpdateID: str
+    RevisionNumber: int
+
+
+@dataclass
+class _Category:
+    Name: str
+
+
+@dataclass
+class _FakeUpdate:
+    Identity: _Identity
+    Title: str
+    KBArticleIDs: _Collection
+    Categories: _Collection
+    MsrcSeverity: str | None
+    MaxDownloadSize: Decimal
+    IsInstalled: bool = False
+    IsDownloaded: bool = False
+    IsHidden: bool = True
+    IsMandatory: bool = True
+
+
+@pytest.mark.os_agnostic
+def test_flatten_reads_every_iupdate_field_into_plain_picklable_data() -> None:
+    """IUpdate -> dict: COM collections become lists, DECIMAL size an int, a None severity ''."""
+    fake = _FakeUpdate(
+        Identity=_Identity(UpdateID="1a2b", RevisionNumber=201),
+        Title="2026-10 Cumulative Update",
+        KBArticleIDs=_Collection(["5031455", "5031456"]),
+        Categories=_Collection([_Category("Security Updates")]),
+        MsrcSeverity=None,
+        MaxDownloadSize=Decimal(123456789),
+    )
+    row = _flatten(fake)
+    assert row == {
+        "update_id": "1a2b",
+        "revision_number": 201,
+        "title": "2026-10 Cumulative Update",
+        "kb_article_ids": ["5031455", "5031456"],
+        "is_installed": False,
+        "is_downloaded": False,
+        "is_hidden": True,
+        "is_mandatory": True,
+        "msrc_severity": "",
+        "max_download_size": 123456789,
+        "categories": ["Security Updates"],
+    }
+    assert type(row["max_download_size"]) is int
+
+
+# --- COM failure: the child returns the message as data, the parent raises it ------------------
+
+
+class com_error(Exception):  # noqa: N801, N818 - named like pywintypes.com_error, which the adapter matches by name
+    """Shaped like pywintypes.com_error: (hresult, strerror, excepinfo, argerror)."""
+
+
+@pytest.mark.os_agnostic
+def test_com_failure_message_prefers_the_scode_inside_a_dispatch_exception() -> None:
+    """DISP_E_EXCEPTION wraps the real WU code in excepinfo; the message names that code."""
+    exc = com_error(-2147352567, "Exception occurred.", (0, None, "No network", None, 0, -2145107924), None)
+    message = _com_failure_message(exc)
+    assert "0x8024402C" in message
+    assert "No network" in message
+    assert message.startswith("Windows Update search failed")
+
+
+@pytest.mark.os_agnostic
+def test_com_failure_message_uses_the_hresult_when_there_is_no_excepinfo() -> None:
+    """A plain com_error (no excepinfo) reports its own HRESULT and text."""
+    exc = com_error(-2147024894, "The system cannot find the file specified.", None, None)
+    message = _com_failure_message(exc)
+    assert "0x80070002" in message
+    assert "cannot find the file" in message
+
+
+@pytest.mark.os_agnostic
+def test_rows_or_raise_raises_the_childs_error_as_nativecallerror() -> None:
+    """A child outcome carrying an error message becomes a NativeCallError with that exact text."""
+    with pytest.raises(NativeCallError) as info:
+        _rows_or_raise(("Windows Update search failed: HRESULT 0x80240032", []))
+    assert str(info.value) == "Windows Update search failed: HRESULT 0x80240032"
+
+
+@pytest.mark.os_agnostic
+def test_rows_or_raise_passes_rows_through_on_success() -> None:
+    """An outcome with an empty error message hands its rows back unchanged."""
+    rows: list[dict[str, object]] = [dict(_ROW)]
+    assert _rows_or_raise(("", rows)) == rows
+
+
+# --- off Windows ------------------------------------------------------------------------------
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the off-Windows guard; Windows runs the real search")
+def test_search_updates_off_windows_raises_platform_unsupported_before_spawning() -> None:
+    """Off Windows the guard fires first: a spawned child would fail importing pythoncom instead.
+
+    That child failure would surface as a plain NativeCallError, so getting the
+    PlatformUnsupportedError type proves no child was started.
+    """
+    with pytest.raises(PlatformUnsupportedError):
+        next(windows_update.search_updates("x", timeout=1))

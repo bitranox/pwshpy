@@ -750,6 +750,31 @@ class WindowsImage(PSRecord):
     size_bytes: int = 0
 
 
+class WindowsUpdate(PSRecord):
+    """One update from a Windows Update search (Microsoft.Update.Session; Windows-only).
+
+    ``update_id`` plus ``revision_number`` is the update's stable identity.  ``title`` and
+    ``categories`` are display text, localized by the Windows Update agent to the machine's
+    language, so match on ``update_id`` or ``kb_article_ids``, never on them.
+
+    Example:
+        >>> WindowsUpdate(update_id="u", title="t").kb_article_ids
+        ()
+    """
+
+    update_id: str
+    revision_number: int = 0
+    title: str
+    kb_article_ids: tuple[str, ...] = ()
+    is_installed: bool = False
+    is_downloaded: bool = False
+    is_hidden: bool = False
+    is_mandatory: bool = False
+    msrc_severity: str = ""
+    max_download_size: int = 0
+    categories: tuple[str, ...] = ()
+
+
 __all__ = [
     "AclEntry",
     "CimInstance",
@@ -782,4 +807,5 @@ __all__ = [
     "SystemUptime",
     "WebResponse",
     "WindowsImage",
+    "WindowsUpdate",
 ]

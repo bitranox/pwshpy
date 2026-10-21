@@ -64,6 +64,7 @@ from ..adapters.native import posix_iter_local_users as _posix_iter_local_users
 from ..adapters.native import prompt_credential as _prompt_credential
 from ..adapters.native import resolve as _resolve
 from ..adapters.native import run_process as _run_process
+from ..adapters.native import search_updates as _search_updates
 from ..adapters.native import systemd_iter_services as _systemd_iter_services
 from ..adapters.native import systemd_iter_timers as _systemd_iter_timers
 from ..adapters.native import test_connection as _test_connection
@@ -121,6 +122,7 @@ from ..application.ports import (
     UptimeSource,
     WebRequester,
     WindowsImageSource,
+    WindowsUpdateSource,
 )
 from ..domain.enums import AceType, FileItemType, RegistryValueType, ServiceStartType
 from ..domain.errors import ElevationRequiredError, NativeCallError
@@ -156,12 +158,22 @@ from ..domain.records import (
     SystemUptime,
     WebResponse,
     WindowsImage,
+    WindowsUpdate,
 )
 from ..domain.scheduling import TaskPrincipal, TaskTrigger
 
 #: Platform switch for the local-accounts backend. Stored as an opaque bool so the type
 #: checker does not statically prune the "other OS" branch (and flag its import unused).
 _ON_WINDOWS: bool = sys.platform == "win32"
+
+#: Windows Update's own default query: software updates that are not installed yet.
+_DEFAULT_WU_CRITERIA = "IsInstalled=0 and Type='Software'"
+
+#: The longest timeout accepted, 2**31-1 ms.  On Windows the child is awaited with a DWORD
+#: millisecond wait: 0xFFFFFFFF ms means INFINITE and more raises OverflowError mid-call, and
+#: Windows socket timeouts top out at 2**31-1 ms, so the signed ceiling is safe for any wait
+#: the timeout may reach.  Refused at the call instead of failing (or never firing) later.
+_MAX_WAIT_SECONDS = 2147483
 
 
 def _only_image(images: Iterable[WindowsImage], index: int, path: Path) -> Iterator[WindowsImage]:
@@ -245,6 +257,7 @@ class Ps:
         process_control: ProcessControl,
         hotfix_source: HotfixSource,
         windows_image_source: WindowsImageSource,
+        windows_update_source: WindowsUpdateSource,
         computer_info_source: ComputerInfoSource,
         elevation_check: ElevationCheck,
         elevator: Elevator,
@@ -294,6 +307,7 @@ class Ps:
         self._process_control = process_control
         self._hotfix_source = hotfix_source
         self._windows_image_source = windows_image_source
+        self._windows_update_source = windows_update_source
         self._computer_info_source = computer_info_source
         self._elevation_check = elevation_check
         self._elevator = elevator
@@ -1259,6 +1273,40 @@ class Ps:
         images = self._windows_image_source(source)
         return Pipeline(images if index is None else _only_image(images, index, source))
 
+    def get_windows_update(
+        self, *, criteria: str = _DEFAULT_WU_CRITERIA, timeout: float = 300.0
+    ) -> Pipeline[WindowsUpdate]:
+        """Return a lazy pipeline over a Windows Update search (native, Windows, read-only).
+
+        The search (``Microsoft.Update.Session``) runs in a child process that is killed once
+        ``timeout`` seconds pass, because the COM call cannot be interrupted and can sit for
+        25+ minutes.  Lazy: the search starts when the pipeline is first iterated.
+
+        The child is started with the ``spawn`` method, which re-imports the calling script,
+        so a script using this must guard its top level with ``if __name__ == "__main__":``;
+        without the guard the child fails at bootstrap.
+
+        Args:
+            criteria: A WUA search criteria string (default: software updates not installed).
+            timeout: Seconds before the search is abandoned, in ``(0, 2147483]``.
+
+        Raises:
+            ValueError: ``timeout`` is outside ``(0, 2147483]`` (raised at the call).
+            PlatformUnsupportedError: Off Windows (raised on iteration).
+            OperationTimeoutError: The search outlived ``timeout`` (raised on iteration). A
+                ``NativeCallError`` subclass, so catch it first to tell it apart.
+            NativeCallError: The Windows Update agent failed (its HRESULT is in the message).
+
+        Example:
+            >>> from pwshpy.domain.pipeline import Pipeline
+            >>> isinstance(build_ps().get_windows_update(), Pipeline)
+            True
+        """
+        # NaN fails both comparisons, so it is refused here too.
+        if not 0 < timeout <= _MAX_WAIT_SECONDS:
+            raise ValueError(f"timeout must be in (0, {_MAX_WAIT_SECONDS}] seconds, got {timeout!r}")
+        return Pipeline(self._windows_update_source(criteria, timeout=timeout))
+
     def get_computer_info(self) -> ComputerInfo:
         """Return a summary of the local computer (native, portable; like Get-ComputerInfo).
 
@@ -1427,6 +1475,7 @@ def build_ps() -> Ps:
         process_control=_NativeProcessControl(),
         hotfix_source=_iter_hotfixes,
         windows_image_source=_iter_wim_images,
+        windows_update_source=_search_updates,
         computer_info_source=_get_computer_info,
         elevation_check=_is_elevated,
         elevator=_elevate,

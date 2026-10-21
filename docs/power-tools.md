@@ -68,6 +68,37 @@ CLI: `pwshpy exec -- git status` (put the program after `--` so its flags are no
 A run that hits `--timeout` exits 110 (ETIMEDOUT) with an `OperationTimeoutError` line on stderr; a
 program that cannot start exits 1.
 
+## Windows Update search that cannot hang forever
+
+`IUpdateSearcher.Search` is a synchronous COM call that can sit for 25+ minutes (measured against
+an empty update datastore), and nothing inside the process can interrupt it. `ps.get_windows_update`
+runs the search in a child process and kills it once `timeout` seconds pass:
+
+```python
+from pwshpy import OperationTimeoutError, ps
+
+if __name__ == "__main__":  # required: the search child re-imports this script
+    try:
+        pending = ps.get_windows_update(timeout=600).to_list()  # IsInstalled=0 and Type='Software'
+    except OperationTimeoutError as exc:
+        print(f"gave up after {exc.timeout}s")
+```
+
+Read-only: only `Search` is called, never Download or Install. `criteria=` takes any WUA search
+string (`"IsInstalled=1"` lists what is installed). The timeout must be in `(0, 2147483]` seconds
+(`ValueError` otherwise, at the call); the search itself starts when the pipeline is first iterated.
+A timed-out search raises `OperationTimeoutError` (its `.timeout` holds the limit), a subclass of the
+`NativeCallError` a Windows Update agent failure raises (its HRESULT is in the message): catch
+`OperationTimeoutError` first to tell the two apart.
+
+The child is started with the `spawn` method on every OS, which re-imports the calling script in
+the child. A script that calls `get_windows_update` at module level without an
+`if __name__ == "__main__":` guard therefore fails in the child at bootstrap; put the call under the
+guard (the `pwshpy` CLI already does).
+
+CLI: `pwshpy get_windows_update --timeout 600 --jsonl`; a timeout prints one `timed out` line on
+stderr and exits **110** (ETIMEDOUT).
+
 ## Predictable, memory-bounded file I/O
 
 No more UTF-16LE-with-a-BOM surprises from `Out-File`; the bytes are identical on every OS and

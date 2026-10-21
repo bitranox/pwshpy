@@ -304,7 +304,11 @@ function Invoke-PwshPyElevated {
     # A UAC child cannot inherit this console and a shell-executed start cannot redirect its
     # streams, so the child writes them to files we replay here.
     $relay = Join-Path ([IO.Path]::GetTempPath()) ('pwshpy-pack-' + [Guid]::NewGuid().ToString('N'))
-    $childArgs = @('-NoProfile', '-File', $self, '-PwshPyRelay', $relay)
+    # The caller's own -ExecutionPolicy Bypass lives only in its PSExecutionPolicyPreference
+    # variable, and a UAC start builds the elevated environment fresh from the profile, so it
+    # never reaches the child: on a default client (5.1 policy Restricted) the child would
+    # refuse to load this file. The caller already chose to run it; Group Policy still wins.
+    $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $self, '-PwshPyRelay', $relay)
     # Only a missing list is skipped: an empty-string argument is real and must reach the child.
     if ($null -ne $ForwardArgs) { $childArgs += $ForwardArgs }
     # Process.Start rather than Start-Process -Verb RunAs: Start-Process rethrows a refused prompt
@@ -331,6 +335,14 @@ function Invoke-PwshPyElevated {
     }
     if ($null -eq $process) { throw 'the elevated PowerShell did not start' }
     $process.WaitForExit()
+    # The child opens the relay files only when it starts the script, so a failure with neither
+    # means it never got that far (refused by the execution policy, a window closed early, or a
+    # failure while preparing the cache or uv). Its own window is gone by now, so say so rather
+    # than exit with a bare code and nothing on screen. The exit code itself is left unchanged.
+    $relayWritten = (Test-Path -LiteralPath "$relay.out") -or (Test-Path -LiteralPath "$relay.err")
+    if ($process.ExitCode -ne 0 -and -not $relayWritten) {
+        [Console]::Error.WriteLine("pwshpy: the elevated child produced no output and exited $($process.ExitCode) (it stopped before running the script, e.g. refused by the execution policy or its window was closed)")
+    }
     foreach ($stream in @(@("$relay.out", $false), @("$relay.err", $true))) {
         if (Test-Path -LiteralPath $stream[0]) {
             $text = Get-Content -LiteralPath $stream[0] -Raw

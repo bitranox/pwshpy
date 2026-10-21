@@ -474,12 +474,17 @@ $functions = $functions.Replace("'runas'", "''")
 
 #: The stand-in's script body. Run normally it moves to PWSHPY_TEST_CWD and relaunches itself
 #: through the artefact's Invoke-PwshPyElevated; the relaunched child (recognised by the relay
-#: switch the relaunch adds) reports its working directory and argv through the relay file.
+#: switch the relaunch adds) reports its working directory, its script argv and its host's own
+#: argv through the relay file. With PWSHPY_TEST_SILENT set the child exits 3 and writes nothing,
+#: which is what an elevated child refused by the execution policy looks like to the parent.
 _RELAUNCH_BODY = r"""
 $PwshPyOnWindows = $true
 $relayAt = [Array]::IndexOf([object[]]$args, '-PwshPyRelay')
+if ($relayAt -ge 0 -and $env:PWSHPY_TEST_SILENT) { exit 3 }
 if ($relayAt -ge 0) {
-    $report = ConvertTo-Json -Compress -InputObject ([ordered]@{ cwd = (Get-Location).ProviderPath; argv = @($args) })
+    $report = ConvertTo-Json -Compress -InputObject ([ordered]@{
+        cwd = (Get-Location).ProviderPath; argv = @($args); host_argv = @([Environment]::GetCommandLineArgs())
+    })
     [IO.File]::WriteAllText($args[$relayAt + 1] + '.out', $report)
     exit 5
 }
@@ -490,8 +495,12 @@ Invoke-PwshPyElevated -ForwardArgs ([string[]]$args)
 
 def _run_relaunch_stand_in(
     tmp_path: Path, harness_dir: Path, cwd: Path, *arguments: str, env: dict[str, str] | None = None
-) -> tuple[int, dict[str, object]]:
-    """Run the artefact's Windows relaunch with a non-elevating verb; return its exit and the child's report."""
+) -> tuple[int, dict[str, object], str]:
+    """Run the artefact's Windows relaunch with a non-elevating verb.
+
+    Returns the parent's exit code, the child's JSON report (empty when the child wrote none) and
+    the parent's stderr.
+    """
     assert _PWSH is not None
     manifest = pack_script(_project(tmp_path))
     harness_dir.mkdir(parents=True, exist_ok=True)
@@ -518,9 +527,12 @@ def _run_relaunch_stand_in(
         check=False,
         env={**os.environ, "PWSHPY_TEST_CWD": str(cwd), **(env or {})},
     )
-    report: object = json.loads(result.stdout.strip() or "{}")
-    assert isinstance(report, dict), result.stdout
-    return result.returncode, cast("dict[str, object]", report)
+    try:
+        report: object = json.loads(result.stdout.strip() or "{}")
+    except json.JSONDecodeError as error:
+        pytest.fail(f"the child report is not JSON ({error}); stdout={result.stdout!r} stderr={result.stderr!r}")
+    assert isinstance(report, dict), f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    return result.returncode, cast("dict[str, object]", report), result.stderr
 
 
 def test_the_windows_elevated_relaunch_keeps_the_working_directory(tmp_path: Path) -> None:
@@ -532,9 +544,45 @@ def test_the_windows_elevated_relaunch_keeps_the_working_directory(tmp_path: Pat
     """
     work = tmp_path / "work"
     work.mkdir()
-    exit_code, report = _run_relaunch_stand_in(tmp_path, tmp_path / "harness", work, "plain")
+    exit_code, report, _ = _run_relaunch_stand_in(tmp_path, tmp_path / "harness", work, "plain")
     assert exit_code == 5, report
     assert report["cwd"] == str(work)
+
+
+def test_the_windows_elevated_relaunch_bypasses_the_execution_policy(tmp_path: Path) -> None:
+    """The elevated child's host gets -ExecutionPolicy Bypass ahead of -File.
+
+    A process-scope execution policy lives only in the PSExecutionPolicyPreference variable, and a
+    UAC launch builds the elevated environment fresh, so the caller's own Bypass never reaches the
+    child: on a default client (5.1 policy Restricted) it would refuse to load the runner.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    exit_code, report, stderr = _run_relaunch_stand_in(tmp_path, tmp_path / "harness", work, "plain")
+    assert exit_code == 5, stderr
+    host_argv = [str(item) for item in cast("list[object]", report["host_argv"])]
+    assert "-File" in host_argv, host_argv
+    file_at = host_argv.index("-File")
+    policy_at = [index for index, item in enumerate(host_argv) if item == "-ExecutionPolicy"]
+    assert policy_at, host_argv
+    assert policy_at[0] < file_at, host_argv
+    assert host_argv[policy_at[0] + 1] == "Bypass", host_argv
+
+
+def test_a_silent_elevated_child_is_reported_not_swallowed(tmp_path: Path) -> None:
+    """A child that exits non-zero without writing a relay file gets one stderr line; its code stands.
+
+    An elevated host refused by the execution policy (or a window closed early) leaves no output at
+    all, so without the line the caller sees a bare failure with nothing to go on.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    exit_code, report, stderr = _run_relaunch_stand_in(
+        tmp_path, tmp_path / "harness", work, "plain", env={"PWSHPY_TEST_SILENT": "1"}
+    )
+    assert exit_code == 3, stderr
+    assert report == {}
+    assert "pwshpy: the elevated child produced no output" in stderr
 
 
 def test_the_windows_elevated_relaunch_keeps_spaced_paths_and_arguments_whole(tmp_path: Path) -> None:
@@ -550,7 +598,7 @@ def test_the_windows_elevated_relaunch_keeps_spaced_paths_and_arguments_whole(tm
     work.mkdir()
     arguments = ["has space", 'quote"inside', "ends with backslash\\", "plain"]
     temp_variables = {"TMPDIR": str(spaced_temp), "TMP": str(spaced_temp), "TEMP": str(spaced_temp)}
-    exit_code, report = _run_relaunch_stand_in(
+    exit_code, report, _ = _run_relaunch_stand_in(
         tmp_path, tmp_path / "dir with space", work, *arguments, env=temp_variables
     )
     assert exit_code == 5, report

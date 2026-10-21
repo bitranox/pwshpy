@@ -178,6 +178,13 @@ Details worth knowing:
   outside pwshpy's reach: `pwsh -File tool.ps1 --path=C:\dir` is split by PowerShell's own
   `-Name:Value` parsing before the script sees it - use `--path C:\dir`, or call `.\tool.ps1` from a
   PowerShell prompt, where it arrives intact.
+- **The `.ps1`'s `-PwshPyElevate` child on Windows is a fresh process.** UAC builds its environment
+  from your profile, so variables set only in the calling shell (`PWSHPY_PACK_CACHE` among them) do
+  not reach it. It is started as `powershell.exe -ExecutionPolicy Bypass -File runner.ps1 ...`, so
+  the `-Name:Value` caveat above applies to the elevated run even when you called the runner from a
+  PowerShell prompt. If it stops before running the script (a Group Policy execution policy, a
+  closed window), the parent prints a `pwshpy: the elevated child produced no output` line and
+  exits with the child's code.
 - **Self-elevation keeps working.** A packed script calling `ps.elevate()` re-execs the extracted
   entry with the environment uv already built, so it elevates exactly as it would unpacked.
 - **The cache is verified before every run** against per-file hashes embedded in the artefact, and

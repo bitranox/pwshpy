@@ -6,15 +6,16 @@ layer is the single place that maps foreign errors (``pywintypes.error`` /
 HRESULT, .NET ``ErrorRecord``) into this tree.
 
 Contents:
-    * :class:`PwshPyError` — root of the hierarchy.
-    * :class:`NativeCallError` — a native native binding call failed.
-    * :class:`ElevationDeclinedError` — the person refused the Administrator prompt.
-    * :class:`PowerShellError` — a .NET hosted-PowerShell call failed.
-    * :class:`FeatureUnavailableError` — .NET invoked without the ``[full]`` extra.
-    * :class:`PlatformUnsupportedError` — a Windows-only adapter used off Windows.
-    * :class:`ElevationRequiredError` — an operation needs administrative rights it lacks.
-    * :class:`ConfigurationError` — missing, invalid, or incomplete configuration.
-    * :class:`PackError` — a script could not be packed into a self-extracting runner.
+    * :class:`PwshPyError` - root of the hierarchy.
+    * :class:`NativeCallError` - a native binding call failed.
+    * :class:`ElevationDeclinedError` - the person refused the Administrator prompt.
+    * :class:`OperationTimeoutError` - a native call outlived its timeout and its worker was killed.
+    * :class:`PowerShellError` - a .NET hosted-PowerShell call failed.
+    * :class:`FeatureUnavailableError` - .NET invoked without the ``[full]`` extra.
+    * :class:`PlatformUnsupportedError` - a Windows-only adapter used off Windows.
+    * :class:`ElevationRequiredError` - an operation needs administrative rights it lacks.
+    * :class:`ConfigurationError` - missing, invalid, or incomplete configuration.
+    * :class:`PackError` - a script could not be packed into a self-extracting runner.
 """
 
 from __future__ import annotations
@@ -57,6 +58,23 @@ class ElevationDeclinedError(NativeCallError):
         >>> issubclass(ElevationDeclinedError, NativeCallError)
         True
     """
+
+
+class OperationTimeoutError(NativeCallError):
+    """A native call did not finish within its timeout and was abandoned (its worker killed).
+
+    A subclass of :class:`NativeCallError`, so existing ``except NativeCallError``
+    callers keep working, and its own type, so a caller can tell a call that ran
+    out of time from one that could not start at all.
+
+    Example:
+        >>> OperationTimeoutError("slow", timeout=5.0).timeout
+        5.0
+    """
+
+    def __init__(self, message: str, *, timeout: float) -> None:
+        super().__init__(message)
+        self.timeout = timeout
 
 
 class PowerShellError(PwshPyError):
@@ -141,6 +159,7 @@ __all__ = [
     "ElevationRequiredError",
     "FeatureUnavailableError",
     "NativeCallError",
+    "OperationTimeoutError",
     "PlatformUnsupportedError",
     "PowerShellError",
     "PwshPyError",

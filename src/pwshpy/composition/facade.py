@@ -55,6 +55,7 @@ from ..adapters.native import iter_registry_keys as _iter_registry_keys
 from ..adapters.native import iter_registry_values as _iter_registry_values
 from ..adapters.native import iter_scheduled_tasks as _iter_scheduled_tasks
 from ..adapters.native import iter_services as _iter_services
+from ..adapters.native import iter_wim_images as _iter_wim_images
 from ..adapters.native import journald_iter_event_log as _journald_iter_event_log
 from ..adapters.native import pack_script as _pack_script
 from ..adapters.native import posix_iter_acl as _posix_iter_acl
@@ -119,6 +120,7 @@ from ..application.ports import (
     TextWriter,
     UptimeSource,
     WebRequester,
+    WindowsImageSource,
 )
 from ..domain.enums import AceType, FileItemType, RegistryValueType, ServiceStartType
 from ..domain.errors import ElevationRequiredError
@@ -153,6 +155,7 @@ from ..domain.records import (
     ServiceInfo,
     SystemUptime,
     WebResponse,
+    WindowsImage,
 )
 from ..domain.scheduling import TaskPrincipal, TaskTrigger
 
@@ -213,6 +216,7 @@ class Ps:
         file_downloader: FileDownloader,
         process_control: ProcessControl,
         hotfix_source: HotfixSource,
+        windows_image_source: WindowsImageSource,
         computer_info_source: ComputerInfoSource,
         elevation_check: ElevationCheck,
         elevator: Elevator,
@@ -261,6 +265,7 @@ class Ps:
         self._file_downloader = file_downloader
         self._process_control = process_control
         self._hotfix_source = hotfix_source
+        self._windows_image_source = windows_image_source
         self._computer_info_source = computer_info_source
         self._elevation_check = elevation_check
         self._elevator = elevator
@@ -1171,6 +1176,25 @@ class Ps:
         """
         return Pipeline(self._hotfix_source())
 
+    def get_windows_image(self, path: str | Path, *, index: int | None = None) -> Pipeline[WindowsImage]:
+        """Return a lazy pipeline over the images of a WIM file (native, portable; like Get-WindowsImage).
+
+        Reads the file's header and XML resource only, so it works on any OS with no DISM.
+        Nothing is opened until the pipeline is consumed.
+
+        Args:
+            path: The ``.wim`` (or split ``.swm`` part) to read.
+            index: Keep only the image with this 1-based index, like ``-Index``; ``None``
+                lists every image.
+
+        Example:
+            >>> from pwshpy.domain.pipeline import Pipeline
+            >>> isinstance(build_ps().get_windows_image("any.wim", index=1), Pipeline)
+            True
+        """
+        images = Pipeline(self._windows_image_source(Path(path)))
+        return images if index is None else images.where(lambda image: image.index == index)
+
     def get_computer_info(self) -> ComputerInfo:
         """Return a summary of the local computer (native, portable; like Get-ComputerInfo).
 
@@ -1338,6 +1362,7 @@ def build_ps() -> Ps:
         file_downloader=_download_file,
         process_control=_NativeProcessControl(),
         hotfix_source=_iter_hotfixes,
+        windows_image_source=_iter_wim_images,
         computer_info_source=_get_computer_info,
         elevation_check=_is_elevated,
         elevator=_elevate,

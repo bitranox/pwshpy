@@ -47,6 +47,7 @@ from ..domain.records import (
     ServiceInfo,
     SystemUptime,
     WebResponse,
+    WindowsImage,
 )
 from ..domain.scheduling import TaskPrincipal, TaskTrigger
 
@@ -239,6 +240,12 @@ class HotfixSource(Protocol):
     """Enumerate installed Windows updates as typed :class:`Hotfix` records (native)."""
 
     def __call__(self) -> Iterator[Hotfix]: ...
+
+
+class WindowsImageSource(Protocol):
+    """Yield the images of a WIM/ESD file as typed :class:`WindowsImage` records (native, portable)."""
+
+    def __call__(self, path: Path) -> Iterator[WindowsImage]: ...
 
 
 class ComputerInfoSource(Protocol):
@@ -519,4 +526,5 @@ __all__ = [
     "ServiceController",
     "ServiceSource",
     "UptimeSource",
+    "WindowsImageSource",
 ]

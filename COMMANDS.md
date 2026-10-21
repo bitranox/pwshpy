@@ -17,16 +17,17 @@ native read commands return typed records through the lazy pipeline (`.where` / 
 
 ## Processes & system  *(portable)*
 
-| PowerShell                           | pwshpy - Python (API)                                                    | pwshpy - CLI                                            |
-|--------------------------------------|--------------------------------------------------------------------------|---------------------------------------------------------|
-| `Get-Process`                        | `ps.get_process()`                                                       | `pwshpy get_process`                                    |
-| `Get-Uptime`                         | `ps.get_uptime()`                                                        | `pwshpy get_uptime`                                     |
-| `Get-ChildItem Env:` / `$env:X`      | `ps.environment()`                                                       | `pwshpy env`                                            |
-| `Get-ComputerInfo`                   | `ps.get_computer_info()`                                                 | `pwshpy get_computer_info`                              |
-| `Get-Hotfix`                         | `ps.get_hotfix()`  *(Windows)*                                           | `pwshpy get_hotfix`                                     |
-| `Stop-Process -Id N`                 | `ps.stop_process(N, force=False)`  *(mutating)*                          | `pwshpy stop_process N [-f]`                            |
-| `Wait-Process -Id N`                 | `ps.wait_process(N, timeout=None)`                                       | `pwshpy wait_process N`                                 |
-| `Restart-Computer` / `Stop-Computer` | `ps.restart_computer()` / `ps.stop_computer()`  *(Windows, destructive)* | `pwshpy restart_computer --yes` / `stop_computer --yes` |
+| PowerShell                                 | pwshpy - Python (API)                                                    | pwshpy - CLI                                            |
+|--------------------------------------------|--------------------------------------------------------------------------|---------------------------------------------------------|
+| `Get-Process`                              | `ps.get_process()`                                                       | `pwshpy get_process`                                    |
+| `Get-Uptime`                               | `ps.get_uptime()`                                                        | `pwshpy get_uptime`                                     |
+| `Get-ChildItem Env:` / `$env:X`            | `ps.environment()`                                                       | `pwshpy env`                                            |
+| `Get-ComputerInfo`                         | `ps.get_computer_info()`                                                 | `pwshpy get_computer_info`                              |
+| `Get-Hotfix`                               | `ps.get_hotfix()`  *(Windows)*                                           | `pwshpy get_hotfix`                                     |
+| `Get-WindowsImage -ImagePath P [-Index N]` | `ps.get_windows_image("P", index=None)`                                  | `pwshpy get_windows_image P [--index N]`                |
+| `Stop-Process -Id N`                       | `ps.stop_process(N, force=False)`  *(mutating)*                          | `pwshpy stop_process N [-f]`                            |
+| `Wait-Process -Id N`                       | `ps.wait_process(N, timeout=None)`                                       | `pwshpy wait_process N`                                 |
+| `Restart-Computer` / `Stop-Computer`       | `ps.restart_computer()` / `ps.stop_computer()`  *(Windows, destructive)* | `pwshpy restart_computer --yes` / `stop_computer --yes` |
 
 Filtering: in Python use `.where(predicate)` (or a plain `for`/`if`); on the CLI pipe `--jsonl` to `jq`.
 `Get-EventLog` (the classic API) is covered by `ps.get_win_event` (Get-WinEvent). `restart_computer` /

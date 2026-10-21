@@ -13,17 +13,23 @@ lazy end to end), and a default human table; most take `--limit N`.
 
 **Everywhere** - one binding on Windows, macOS and Linux:
 
-| Command                         | Shows                         | Binding       |
-|---------------------------------|-------------------------------|---------------|
-| `pwshpy get_process`            | running processes             | psutil        |
-| `pwshpy get_net_tcp_connection` | open network connections      | psutil        |
-| `pwshpy get_volume`             | mounted filesystems and usage | psutil        |
-| `pwshpy get_uptime`             | boot time and elapsed uptime  | psutil        |
-| `pwshpy resolve_dns_name NAME`  | resolved DNS addresses        | stdlib socket |
-| `pwshpy test_connection HOST`   | TCP reachability probe        | stdlib socket |
-| `pwshpy env`                    | environment variables         | os.environ    |
-| `pwshpy get_net_adapter`        | network interfaces            | psutil        |
-| `pwshpy get_computer_info`      | machine summary               | stdlib/psutil |
+| Command                         | Shows                         | Binding                                |
+|---------------------------------|-------------------------------|----------------------------------------|
+| `pwshpy get_process`            | running processes             | psutil                                 |
+| `pwshpy get_net_tcp_connection` | open network connections      | psutil                                 |
+| `pwshpy get_volume`             | mounted filesystems and usage | psutil                                 |
+| `pwshpy get_uptime`             | boot time and elapsed uptime  | psutil                                 |
+| `pwshpy resolve_dns_name NAME`  | resolved DNS addresses        | stdlib socket                          |
+| `pwshpy test_connection HOST`   | TCP reachability probe        | stdlib socket                          |
+| `pwshpy env`                    | environment variables         | os.environ                             |
+| `pwshpy get_net_adapter`        | network interfaces            | psutil                                 |
+| `pwshpy get_computer_info`      | machine summary               | stdlib/psutil                          |
+| `pwshpy get_windows_image PATH` | images inside a WIM file      | stdlib + defusedxml (WIM header + XML) |
+
+`get_windows_image PATH [--index N]` reads the WIM header and its XML resource directly, so it
+lists the images of a `.wim` (or a split `.swm` part) on any OS without DISM. An image file whose XML
+resource is compressed (resource flag 0x04) is refused with an error rather than guessed at; ESD
+support is unverified.
 
 **Windows + Linux** - one command, a native backend on each (never a subprocess, never text scraping):
 

@@ -17,6 +17,7 @@ from pwshpy.domain.enums import (
     AddressFamily,
     EventLevel,
     FileItemType,
+    ImageArchitecture,
     RegistryHive,
     RegistryValueType,
     ServiceKind,
@@ -57,6 +58,7 @@ from pwshpy.domain.records import (
     ServiceInfo,
     SystemUptime,
     WebResponse,
+    WindowsImage,
 )
 from pwshpy.domain.scheduling import BootTrigger, TaskPrincipal, TaskTrigger
 
@@ -272,6 +274,12 @@ class _FakeProcessControl:
 
 def _fake_hotfixes() -> Iterator[Hotfix]:
     yield Hotfix(hotfix_id="KB5001", description="Security Update")
+
+
+def _fake_windows_images(path: Path) -> Iterator[WindowsImage]:
+    # The name carries the path back, so a test can see the facade passed a Path through.
+    yield WindowsImage(index=1, name=f"{path.name}:Pro", architecture=ImageArchitecture.X64)
+    yield WindowsImage(index=2, name=f"{path.name}:Home", architecture=ImageArchitecture.ARM64)
 
 
 def _fake_computer_info() -> ComputerInfo:
@@ -643,6 +651,7 @@ class _InjectedPs:
             file_downloader=self.writers.download_file,
             process_control=self.process_control,
             hotfix_source=_fake_hotfixes,
+            windows_image_source=_fake_windows_images,
             computer_info_source=_fake_computer_info,
             elevation_check=self.elevator.is_elevated,
             elevator=self.elevator.elevate,
@@ -673,6 +682,17 @@ def test_injected_system_sources_feed_the_facade(injected: _InjectedPs) -> None:
     assert facade.get_net_adapter().select(lambda a: a.name).to_list() == ["eth0"]
     assert facade.get_net_ip_address().select(lambda a: a.address).to_list() == ["10.0.0.5"]
     assert facade.get_net_udp_endpoint().select(lambda c: c.local_port).to_list() == [53]
+
+
+@pytest.mark.os_agnostic
+def test_injected_windows_image_source_filters_by_index(injected: _InjectedPs) -> None:
+    """``index`` keeps only that image; without it every image of the file is listed."""
+    facade = injected.facade
+    assert facade.get_windows_image(Path("x.wim"), index=2).select(lambda i: (i.index, i.name)).to_list() == [
+        (2, "x.wim:Home")
+    ]
+    assert facade.get_windows_image("x.wim").select(lambda i: i.index).to_list() == [1, 2]
+    assert facade.get_windows_image("x.wim", index=7).to_list() == []
 
 
 @pytest.mark.os_agnostic

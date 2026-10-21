@@ -1,6 +1,7 @@
 """``pwshpy`` system commands - inventory reads and process control.
 
-``get_hotfix`` / ``get_computer_info`` (read) mirror Get-Hotfix / Get-ComputerInfo;
+``get_hotfix`` / ``get_computer_info`` / ``get_windows_image`` (read) mirror Get-Hotfix /
+Get-ComputerInfo / Get-WindowsImage;
 ``stop_process`` / ``wait_process`` mirror Stop-Process / Wait-Process.  The destructive
 ``restart_computer`` / ``stop_computer`` are intentionally library-only (no CLI) to avoid
 an accidental reboot from a shell.
@@ -35,6 +36,25 @@ def cli_get_hotfix(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
     """
     ps = get_cli_context(ctx).services.ps
     emit(ps.get_hotfix(), resolve_format(as_json, as_jsonl))
+
+
+@click.command("get_windows_image", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("path")
+@option("--index", type=int, default=None, help="Show only the image with this 1-based index.")
+@option("--json", "as_json", is_flag=True, default=False, help="Emit records as a JSON array.")
+@option("--jsonl", "as_jsonl", is_flag=True, default=False, help="Stream one JSON record per line.")
+@click.pass_context
+def cli_get_windows_image(ctx: click.Context, path: str, index: int | None, as_json: bool, as_jsonl: bool) -> None:
+    """List the images of a WIM file as typed records (native, portable; like Get-WindowsImage).
+
+    \f
+    Example:
+        >>> from click.testing import CliRunner
+        >>> CliRunner().invoke(cli_get_windows_image, ["--help"]).exit_code
+        0
+    """
+    ps = get_cli_context(ctx).services.ps
+    emit(ps.get_windows_image(path, index=index), resolve_format(as_json, as_jsonl))
 
 
 @click.command("get_computer_info", context_settings=CLICK_CONTEXT_SETTINGS)
@@ -94,6 +114,7 @@ def cli_stop_computer(ctx: click.Context, delay_seconds: int, yes: bool) -> None
 SYSTEM_COMMANDS = (
     cli_get_hotfix,
     cli_get_computer_info,
+    cli_get_windows_image,
     cli_stop_process,
     cli_wait_process,
     cli_restart_computer,

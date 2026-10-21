@@ -6,8 +6,10 @@ run on every OS. The live D-Bus read needs Linux + jeepney; it self-skips otherw
 
 from __future__ import annotations
 
+import fnmatch
 import importlib.util
 import sys
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -381,12 +383,17 @@ class _FakeCore:
 
 
 class _FakeConn:
-    """A system bus holding loaded units: (unit, interface, property) -> value; unknown -> D-Bus error.
+    """A system bus holding units: (unit, interface, property) -> value; unknown -> D-Bus error.
 
     ``unit_files`` are the units with a unit file (GetUnitFileState answers ``enabled`` for them
-    only, unless ``file_states`` names another state); the Manager verbs a controller sends
-    (Reload, StopUnit, ...) are recorded and succeed, except those listed in ``failing``.
-    ``LoadUnit`` answers for a loaded unit or one with a unit file, like systemd loading it.
+    only, unless ``file_states`` names another state; ListUnitFiles[ByPatterns] lists them); the
+    Manager verbs a controller sends (Reload, StopUnit, ...) are recorded and succeed, except
+    those listed in ``failing`` (which also fails the unit-file listings).
+
+    A unit holding properties is LOADED unless it is in ``unloaded``: like systemd, GetUnit and
+    property reads fail for an unloaded unit until ``LoadUnit`` loads it from its file. A
+    registered-but-not-started boot timer and a disabled, stopped timer are unloaded on a real
+    host, so modelling every unit as loaded hides read-backs that only GetUnit would miss.
     """
 
     _VERBS = frozenset({"Reload", "StartUnit", "StopUnit", "EnableUnitFiles", "DisableUnitFiles"})
@@ -399,37 +406,71 @@ class _FakeConn:
         *,
         file_states: dict[str, str] | None = None,
         failing: frozenset[str] = frozenset(),
+        unloaded: frozenset[str] = frozenset(),
     ) -> None:
         self._units = units  # (name, description, active_state)
         self._props = props
         self._unit_files = unit_files
         self._file_states = file_states or {}
         self._failing = failing
+        self._unloaded = set(unloaded)  # shrinks as LoadUnit loads them
         self.verbs: list[str] = []
         self.methods: list[str] = []  # every method sent, in order (to count round trips)
         self.closed = False
 
+    def _loaded(self) -> set[str]:
+        return {unit for unit, _iface, _prop in self._props} - self._unloaded
+
+    def _list_units(self, msg: _Message) -> _Reply:
+        return _Reply(([(n, d, "loaded", a, "", "", f"/u/{n}", 0, "", "/") for n, d, a in self._units],))
+
+    def _list_unit_files(self, msg: _Message) -> _Reply:
+        if msg.method in self._failing:  # e.g. a systemd before 230 has no ListUnitFilesByPatterns
+            return _Reply(("unknown method",), error=True)
+        patterns = list(msg.body[1]) if msg.body else []
+        files = [n for n in sorted(self._unit_files) if not patterns or any(fnmatch.fnmatch(n, p) for p in patterns)]
+        return _Reply(([(f"/etc/systemd/system/{n}", self._file_states.get(n, "enabled")) for n in files],))
+
+    def _get_unit(self, msg: _Message) -> _Reply:
+        (name,) = msg.body
+        return _Reply((f"/u/{name}",)) if name in self._loaded() else _Reply(("not loaded",), error=True)
+
+    def _load_unit(self, msg: _Message) -> _Reply:
+        (name,) = msg.body
+        if name in self._loaded() or name in self._unit_files or name in self._unloaded:
+            self._unloaded.discard(name)  # loaded from its unit file
+            return _Reply((f"/u/{name}",))
+        return _Reply(("no such unit file",), error=True)
+
+    def _get_unit_file_state(self, msg: _Message) -> _Reply:
+        (name,) = msg.body
+        state = self._file_states.get(name, "enabled")
+        return _Reply((state,)) if name in self._unit_files else _Reply(("no unit file",), error=True)
+
+    def _verb(self, msg: _Message) -> _Reply:
+        self.verbs.append(msg.method)
+        return _Reply(("failed",), error=True) if msg.method in self._failing else _Reply(())
+
+    def _get(self, msg: _Message) -> _Reply:
+        key = (msg.path[len("/u/") :], *msg.body)
+        if key[0] in self._unloaded or key not in self._props:  # an unloaded unit has no readable properties
+            return _Reply(("no prop",), error=True)
+        return _Reply((("t", self._props[key]),))
+
     def send_and_get_reply(self, msg: _Message) -> _Reply:
         self.methods.append(msg.method)
-        loaded = {unit for unit, _iface, _prop in self._props}
-        if msg.method == "ListUnits":
-            return _Reply(([(n, d, "loaded", a, "", "", f"/u/{n}", 0, "", "/") for n, d, a in self._units],))
-        if msg.method in ("GetUnit", "LoadUnit"):
-            (name,) = msg.body
-            # GetUnit answers only for a loaded unit; LoadUnit also loads one from its unit file.
-            known = name in loaded or (msg.method == "LoadUnit" and name in self._unit_files)
-            return _Reply((f"/u/{name}",)) if known else _Reply(("not loaded",), error=True)
-        if msg.method == "GetUnitFileState":
-            (name,) = msg.body
-            state = self._file_states.get(name, "enabled")
-            return _Reply((state,)) if name in self._unit_files else _Reply(("no unit file",), error=True)
-        if msg.method in self._VERBS:
-            self.verbs.append(msg.method)
-            return _Reply(("failed",), error=True) if msg.method in self._failing else _Reply(())
-        if msg.method == "Get":
-            key = (msg.path[len("/u/") :], *msg.body)
-            return _Reply((("t", self._props[key]),)) if key in self._props else _Reply(("no prop",), error=True)
-        return _Reply(("unexpected",), error=True)
+        handlers: dict[str, Callable[[_Message], _Reply]] = {
+            "ListUnits": self._list_units,
+            "ListUnitFilesByPatterns": self._list_unit_files,
+            "ListUnitFiles": self._list_unit_files,
+            "GetUnit": self._get_unit,
+            "LoadUnit": self._load_unit,
+            "GetUnitFileState": self._get_unit_file_state,
+            "Get": self._get,
+            **dict.fromkeys(self._VERBS, self._verb),
+        }
+        handler = handlers.get(msg.method)
+        return _Reply(("unexpected",), error=True) if handler is None else handler(msg)
 
     def close(self) -> None:
         self.closed = True
@@ -472,10 +513,11 @@ def test_iter_timers_reads_run_info_from_the_timer_and_its_unit(monkeypatch: pyt
     assert backup.last_task_result == 3
     assert (never.last_run_time, never.last_task_result, never.next_run_time) == (None, None, None)
     assert (backup.user_id, backup.run_level) == ("0", None)
-    assert never.user_id == ""  # its service is not loaded: unknown, and the timer is still listed
+    assert never.user_id == ""  # its service has no unit file: unknown, and the timer is still listed
     assert conn.closed is True
-    # The timer's own path comes from ListUnits; only the triggered service needs one GetUnit.
-    assert conn.methods.count("GetUnit") == 2
+    # The timer's own path comes from ListUnits; only the triggered service needs one LoadUnit.
+    assert conn.methods.count("LoadUnit") == 2
+    assert conn.methods.count("GetUnit") == 0
 
 
 @pytest.mark.os_agnostic
@@ -486,35 +528,40 @@ def test_controller_info_timer_task(monkeypatch: pytest.MonkeyPatch) -> None:
         ("job.timer", _TIMER, "LastTriggerUSec"): _T0,
         ("job.timer", _TIMER, "NextElapseUSecRealtime"): _T1,
         ("job.timer", _TIMER, "Unit"): "job.service",
+        ("job.timer", systemd_dbus.UNIT_IFACE, "Description"): "nightly job",
         **_service_props("job.service", code=2, status=9, started=_T0),
         ("job.service", _SERVICE, "User"): "1000",
     }
-    conn = _FakeConn([], props, frozenset({"job.timer"}))
+    # Stopped and disabled, both units are unloaded: only LoadUnit reaches them (GetUnit says "not loaded").
+    unloaded = frozenset({"job.timer", "job.service"})
+    conn = _FakeConn([], props, frozenset({"job.timer"}), unloaded=unloaded)
     _use_bus(monkeypatch, conn)
     info = SystemdScheduledTaskController().disable("job")
-    assert conn.verbs == ["StopUnit", "DisableUnitFiles", "Reload"]
-    assert conn.methods.count("GetUnit") == 2  # one for the timer, one for its service
+    assert (info.description, info.user_id, info.run_level) == ("nightly job", "1000", None)
     assert info.state is TaskState.READY
     assert info.last_run_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
     assert info.next_run_time == datetime(2023, 11, 14, 23, 13, 20, tzinfo=timezone.utc)
     assert info.last_task_result == 137  # killed by SIGKILL
-    assert (info.user_id, info.run_level) == ("1000", None)
+    assert conn.verbs == ["StopUnit", "DisableUnitFiles", "Reload"]
+    assert conn.methods.count("LoadUnit") == 2  # one for the timer, one for its service
+    assert conn.methods.count("GetUnit") == 0
 
 
 @pytest.mark.os_agnostic
 def test_controller_info_on_demand_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """An on-demand service: last run is its own last start, the result its exit, nothing scheduled."""
     props = {**_service_props("adhoc.service", code=1, status=0, started=_T0), ("adhoc.service", _SERVICE, "User"): ""}
-    conn = _FakeConn([], props)
+    conn = _FakeConn([], props, unloaded=frozenset({"adhoc.service"}))  # a finished oneshot is unloaded
     _use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)  # filesystem edge: never write /etc here
     info = SystemdScheduledTaskController().register("adhoc", program="/bin/true")
     assert (tmp_path / "adhoc.service").is_file()
-    assert conn.methods.count("GetUnit") == 1  # the service, once, for every field
+    assert info.user_id == "0"  # an empty User= is root
     assert info.last_run_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
     assert info.last_task_result == 0  # ran and succeeded, never folded into None
     assert info.next_run_time is None
-    assert info.user_id == "0"  # an empty User= is root
+    assert conn.methods.count("LoadUnit") == 1  # the service, once, for every field
+    assert conn.methods.count("GetUnit") == 0
 
 
 def _job_props(base: str, *, user: str) -> dict[tuple[str, str, str], Any]:
@@ -542,10 +589,12 @@ def test_register_with_a_calendar_trigger_writes_and_arms_a_timer(
     )
     assert "\nUser=1000\n" in (tmp_path / "job.service").read_text(encoding="utf-8")
     assert "OnCalendar=*-*-* 21:59:00 UTC\n" in (tmp_path / "job.timer").read_text(encoding="utf-8")
-    assert conn.verbs == ["Reload", "EnableUnitFiles", "StartUnit"]
+    # Reload after EnableUnitFiles too (like systemctl enable), so no unit is left "changed on disk".
+    assert conn.verbs == ["Reload", "EnableUnitFiles", "Reload", "StartUnit"]
     assert (info.user_id, info.enabled, info.state) == ("1000", True, TaskState.READY)
     assert info.next_run_time == datetime(2023, 11, 14, 23, 13, 20, tzinfo=timezone.utc)
-    assert conn.methods.count("GetUnit") == 2  # one for the timer, one for its service
+    assert conn.methods.count("LoadUnit") == 2  # one for the timer, one for its service
+    assert conn.methods.count("GetUnit") == 0
     assert conn.closed is True
 
 
@@ -554,8 +603,13 @@ def test_register_with_a_boot_trigger_enables_but_does_not_start(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A boot timer is only enabled: starting it now would fire an already-elapsed OnBootSec= at once."""
-    props = {**_job_props("boot", user=""), ("boot.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "inactive"}
-    conn = _FakeConn([], props, frozenset({"boot.timer"}))
+    props = {
+        **_job_props("boot", user=""),
+        ("boot.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "inactive",
+        ("boot.timer", systemd_dbus.UNIT_IFACE, "Description"): "pwshpy task",
+    }
+    # Enabled but never started, neither unit is loaded: GetUnit would read every field as a default.
+    conn = _FakeConn([], props, frozenset({"boot.timer"}), unloaded=frozenset({"boot.timer", "boot.service"}))
     _use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
     info = SystemdScheduledTaskController().register(
@@ -563,9 +617,9 @@ def test_register_with_a_boot_trigger_enables_but_does_not_start(
     )
     assert "OnBootSec=600s\n" in (tmp_path / "boot.timer").read_text(encoding="utf-8")
     assert "User=" not in (tmp_path / "boot.service").read_text(encoding="utf-8")
-    assert conn.verbs == ["Reload", "EnableUnitFiles"]
-    assert info.user_id == "0"
+    assert (info.user_id, info.description) == ("0", "pwshpy task")
     assert (info.state, info.enabled) == (TaskState.READY, True)  # armed for the next boot, not "Disabled"
+    assert conn.verbs == ["Reload", "EnableUnitFiles", "Reload"]
 
 
 @pytest.mark.os_agnostic
@@ -628,7 +682,7 @@ def test_register_with_triggers_stops_the_previous_timer_first(monkeypatch: pyte
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
     SystemdScheduledTaskController().register("job", program="/bin/true", triggers=[OnceTrigger(at=_AT)])
     assert "OnCalendar=2026-10-21 21:59:00 UTC\n" in (tmp_path / "job.timer").read_text(encoding="utf-8")
-    assert conn.verbs == ["StopUnit", "Reload", "EnableUnitFiles", "StartUnit"]
+    assert conn.verbs == ["StopUnit", "Reload", "EnableUnitFiles", "Reload", "StartUnit"]
 
 
 @pytest.mark.os_agnostic
@@ -754,3 +808,95 @@ def test_listing_reads_an_enabled_inactive_timer_as_ready(monkeypatch: pytest.Mo
     armed, off = list(iter_timers())
     assert (armed.state, armed.enabled) == (TaskState.READY, True)
     assert (off.state, off.enabled) == (TaskState.DISABLED, False)
+
+
+def _listing_conn(*, failing: frozenset[str] = frozenset()) -> _FakeConn:
+    """One loaded timer plus, as unit files only, a disabled timer, a masked one and a template."""
+    props: dict[tuple[str, str, str], Any] = {
+        ("loaded.timer", _TIMER, "Unit"): "loaded.service",
+        ("off.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "inactive",
+        ("off.timer", systemd_dbus.UNIT_IFACE, "Description"): "Off job",
+        ("off.timer", _TIMER, "Unit"): "off.service",
+        ("off.timer", _TIMER, "LastTriggerUSec"): _T0,
+        **_service_props("off.service", code=1, status=0, started=_T0),
+        ("off.service", _SERVICE, "User"): "1000",
+    }
+    unit_files = frozenset({"loaded.timer", "off.timer", "gone.timer", "tpl@.timer", "x.service"})
+    return _FakeConn(
+        [("loaded.timer", "Loaded", "active")],
+        props,
+        unit_files,
+        file_states={"off.timer": "disabled", "gone.timer": "masked"},
+        failing=failing,
+        unloaded=frozenset({"off.timer", "off.service"}),
+    )
+
+
+_NOTHING_FAILS: frozenset[str] = frozenset()
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("failing", [_NOTHING_FAILS, frozenset({"ListUnitFilesByPatterns"})])
+def test_iter_timers_lists_a_timer_that_is_not_loaded(monkeypatch: pytest.MonkeyPatch, failing: frozenset[str]) -> None:
+    """A disabled timer is unloaded, so ListUnits misses it; its unit file lists it, read via LoadUnit.
+
+    Like Get-ScheduledTask listing a disabled task. Each timer once (no duplicate for the loaded
+    one), never a masked timer or a template; the second case is a systemd without
+    ListUnitFilesByPatterns (before 230), where the full ListUnitFiles is filtered instead.
+    """
+    conn = _listing_conn(failing=failing)
+    _use_bus(monkeypatch, conn)
+    loaded, off = list(iter_timers())
+    assert (loaded.task_name, loaded.description) == ("loaded", "Loaded")
+    assert (off.task_name, off.description, off.user_id) == ("off", "Off job", "1000")
+    assert (off.state, off.enabled) == (TaskState.DISABLED, False)
+    assert off.last_run_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_iter_timers_still_lists_loaded_timers_when_no_unit_file_listing_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail-soft: with both unit-file listings refused, the loaded timers are still listed."""
+    conn = _listing_conn(failing=frozenset({"ListUnitFilesByPatterns", "ListUnitFiles"}))
+    _use_bus(monkeypatch, conn)
+    assert [t.task_name for t in iter_timers()] == ["loaded"]
+
+
+@pytest.mark.os_agnostic
+def test_iter_timers_lists_unit_files_only_when_the_loaded_timers_are_consumed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lazy: taking the first (loaded) timer costs no unit-file listing and no LoadUnit of another timer."""
+    conn = _listing_conn()
+    _use_bus(monkeypatch, conn)
+    first = next(iter_timers())
+    assert first.task_name == "loaded"
+    assert "ListUnitFilesByPatterns" not in conn.methods
+    assert "ListUnitFiles" not in conn.methods
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("last_trigger", "service_started", "expected"),
+    [
+        (0, _T0, _T0),  # an on-demand start (run / systemctl start) moves last_run_time, as on Windows
+        (_T1, _T0, _T1),  # the timer fired later than the last manual start
+        (_T1, 0, _T1),  # Persistent= trigger survived a reboot that cleared the service's start time
+        (0, 0, None),  # never ran
+    ],
+)
+def test_timer_last_run_time_is_the_later_of_trigger_and_service_start(
+    monkeypatch: pytest.MonkeyPatch, last_trigger: int, service_started: int, expected: int | None
+) -> None:
+    """last_run_time is the later of the timer's LastTriggerUSec and the service's ExecMainStartTimestamp."""
+    props: dict[tuple[str, str, str], Any] = {
+        ("job.timer", _TIMER, "Unit"): "job.service",
+        ("job.timer", _TIMER, "LastTriggerUSec"): last_trigger,
+        **_service_props("job.service", code=1 if service_started else 0, status=0, started=service_started),
+    }
+    conn = _FakeConn([("job.timer", "", "active")], props, frozenset({"job.timer"}))
+    _use_bus(monkeypatch, conn)
+    (job,) = list(iter_timers())
+    assert job.last_run_time == (None if expected is None else usec_to_datetime(expected))

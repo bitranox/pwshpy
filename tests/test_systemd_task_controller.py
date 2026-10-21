@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from pwshpy.adapters.native.systemd_timers import SystemdScheduledTaskController
+from pwshpy.adapters.native.systemd_timers import SystemdScheduledTaskController, iter_timers
 from pwshpy.composition import build_ps
 from pwshpy.domain.enums import TaskState
 from pwshpy.domain.errors import NativeCallError
@@ -106,6 +106,10 @@ def test_enable_disable_timer(timer_task: str) -> None:
 
     disabled = controller.disable(timer_task)
     assert disabled.enabled is False
+    # A stopped, disabled timer is unloaded: the read-back and the listing must still reach it.
+    assert (disabled.description, disabled.user_id) == ("pwshpy pytest timer", "0")
+    listed = [t for t in iter_timers() if t.task_name == timer_task]
+    assert [(t.enabled, t.description) for t in listed] == [(False, "pwshpy pytest timer")]
 
 
 def test_register_with_boot_trigger_writes_and_arms_a_timer(ondemand_task: str) -> None:
@@ -122,6 +126,8 @@ def test_register_with_boot_trigger_writes_and_arms_a_timer(ondemand_task: str) 
     assert info.state is TaskState.READY  # armed for the next boot
     assert info.last_run_time is None  # the elapsed OnBootSec= did not run the job at registration
     assert info.user_id == "0"  # no principal: a system unit with no User= runs as root
+    assert info.description == "pwshpy task"  # read from the unloaded timer through LoadUnit
+    assert [t.task_name for t in iter_timers() if t.task_name == ondemand_task] == [ondemand_task]
     assert (_UNIT_DIR / f"{ondemand_task}.timer").read_text(encoding="utf-8").count("OnBootSec=600s") == 1
     facade.unregister_scheduled_task(ondemand_task)
     assert not (_UNIT_DIR / f"{ondemand_task}.timer").exists()

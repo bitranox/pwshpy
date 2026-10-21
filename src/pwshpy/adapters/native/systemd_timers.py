@@ -3,8 +3,10 @@
 The portable counterpart to the Task Scheduler adapter. On systemd a scheduled task is a
 ``.timer`` unit (the schedule) that triggers a ``.service`` unit (the work), so:
 
-* **read** (:func:`iter_timers`) lists the ``.timer`` units - the box's real scheduled tasks -
-  and marshals each into the same :class:`ScheduledTaskInfo`.
+* **read** (:func:`iter_timers`) lists the ``.timer`` units - the box's real scheduled tasks,
+  loaded or not (a disabled timer is unloaded) - and marshals each into the same
+  :class:`ScheduledTaskInfo`. Units are read through ``LoadUnit``, which answers for an
+  unloaded unit too; ``GetUnit`` answers only for loaded ones.
 * **register** writes a ``.service`` (``Type=oneshot``, the exec action; ``User=`` for a uid
   principal) and, when triggers are given, a ``.timer`` that starts it (``OnCalendar=`` in UTC
   for once/daily, ``OnBootSec=`` for boot), enabled over D-Bus. A calendar timer is started at
@@ -26,7 +28,8 @@ vendor unit under ``/lib``.
 
 Contents:
     * :func:`timer_to_task_state` / :func:`timer_enabled` - pure systemd -> domain mappers.
-    * :func:`usec_to_datetime` / :func:`service_last_result` - pure run-info mappers.
+    * :func:`usec_to_datetime` / :func:`service_last_result` / :func:`latest_usec` - pure run-info
+      mappers.
     * :func:`service_user_id` - a service's ``User=`` as a decimal uid.
     * :func:`service_unit` / :func:`timer_unit` / :func:`linux_user` / :func:`arms_on_register` -
       pure unit-file rendering and register policy.
@@ -230,8 +233,8 @@ def _timer_property(bus: _dbus.Bus, timer_path: str | None, prop: str) -> int:
     return int(_dbus.path_property(bus, timer_path, prop, 0, interface=_dbus.TIMER_IFACE))
 
 
-def _service_run(bus: _dbus.Bus, service_path: str | None) -> tuple[int | None, datetime | None]:
-    """A service's last result and the start time of its last run (None, None if it never ran)."""
+def _service_run(bus: _dbus.Bus, service_path: str | None) -> tuple[int | None, int]:
+    """A service's last result (None if it never ran) and its last ``ExecMainStartTimestamp`` (0: none)."""
 
     def read(prop: str) -> int:
         return int(_dbus.path_property(bus, service_path, prop, 0, interface=_dbus.SERVICE_IFACE))
@@ -240,7 +243,17 @@ def _service_run(bus: _dbus.Bus, service_path: str | None) -> tuple[int | None, 
     result = service_last_result(
         exec_code=read("ExecMainCode"), exec_status=read("ExecMainStatus"), started_usec=started
     )
-    return result, usec_to_datetime(started)
+    return result, started
+
+
+def latest_usec(*values: int) -> int:
+    """The latest of several systemd USec timestamps, ignoring 0 (none) and infinity; 0 when none is set.
+
+    Example:
+        >>> latest_usec(0, 5, 3), latest_usec(0, 2**64 - 1)
+        (5, 0)
+    """
+    return max((v for v in values if v not in (0, _USEC_INFINITY)), default=0)
 
 
 class _RunInfo(NamedTuple):
@@ -253,30 +266,101 @@ class _RunInfo(NamedTuple):
 
 
 def _timer_run_info(bus: _dbus.Bus, timer_path: str | None, base: str) -> _RunInfo:
-    """A timer task's last trigger, next realtime elapse, and its triggered service's result and user.
+    """A timer task's last run, next realtime elapse, and its triggered service's result and user.
 
     The service is the one the timer's ``Unit`` property names (``<base>.service`` unless the
     timer sets ``Unit=``), so listing and controller report the same result for the same timer.
     Properties are read from the already-resolved ``timer_path``; only the service costs a
-    ``GetUnit``, and its result and ``User=`` share that one resolved path.
+    lookup - ``LoadUnit``, because a stopped service is usually unloaded and ``GetUnit`` would
+    read every field as a default - and its result and ``User=`` share that one resolved path.
+
+    ``last_run_time`` is the later of the timer's ``LastTriggerUSec`` and the service's
+    ``ExecMainStartTimestamp``: an on-demand start (``run``) never moves the trigger time but is
+    a run, as Windows' LastRunTime counts Start-ScheduledTask; the trigger stays in the max so a
+    ``Persistent=`` trigger that survived a reboot (which clears the service's start) still shows.
     """
     service = str(_dbus.path_property(bus, timer_path, "Unit", f"{base}.service", interface=_dbus.TIMER_IFACE))
-    service_path = _dbus.unit_path(bus, service)
-    result, _started = _service_run(bus, service_path)
+    service_path = _dbus.load_unit_path(bus, service)
+    result, started = _service_run(bus, service_path)
     return _RunInfo(
-        last_run_time=usec_to_datetime(_timer_property(bus, timer_path, "LastTriggerUSec")),
+        last_run_time=usec_to_datetime(latest_usec(_timer_property(bus, timer_path, "LastTriggerUSec"), started)),
         last_task_result=result,
         next_run_time=usec_to_datetime(_timer_property(bus, timer_path, "NextElapseUSecRealtime")),
         user_id=_service_user(bus, service_path),
     )
 
 
+class _Listed(NamedTuple):
+    """What ``ListUnits`` already reports for a loaded unit, so no property read repeats it."""
+
+    active_state: str
+    description: str
+
+
+def _timer_task(
+    bus: _dbus.Bus, name: str, path: str | None, *, file_state: str, listed: _Listed | None = None
+) -> ScheduledTaskInfo:
+    """The record for timer ``name`` at its resolved object ``path`` (None: unreadable, fields default).
+
+    ``listed`` carries ActiveState and Description from ``ListUnits``; without it (a unit read
+    through ``LoadUnit``) both are read from ``path``.
+    """
+    if listed is None:
+        listed = _Listed(
+            active_state=str(_dbus.path_property(bus, path, "ActiveState", "inactive")),
+            description=str(_dbus.path_property(bus, path, "Description", "")),
+        )
+    base = name[: -len(".timer")]
+    run = _timer_run_info(bus, path, base)
+    enabled = timer_enabled(file_state)
+    return ScheduledTaskInfo.model_construct(
+        task_name=base,
+        task_path=_ROOT,
+        state=timer_task_state(listed.active_state, enabled=enabled),
+        enabled=enabled,
+        author="",
+        description=listed.description,
+        user_id=run.user_id,
+        run_level=None,  # systemd has no split token, so no run level to report
+        last_run_time=run.last_run_time,
+        last_task_result=run.last_task_result,
+        next_run_time=run.next_run_time,
+    )
+
+
+#: UnitFileStates of a timer file that is not a task: masked is "made unstartable on purpose".
+_NOT_A_TASK = frozenset({"masked", "masked-runtime"})
+
+
+def _timer_files(bus: _dbus.Bus) -> list[tuple[str, str]]:
+    """Every ``.timer`` unit file as (unit name, UnitFileState); [] when systemd lists none.
+
+    ``ListUnitFilesByPatterns`` lets systemd filter (systemd >= 230); an older manager lacks it,
+    so the full ``ListUnitFiles`` is filtered here instead. Fail-soft: when neither answers the
+    listing keeps the loaded timers rather than failing.
+    """
+    try:
+        (files,) = _dbus.call(bus, "ListUnitFilesByPatterns", "asas", ([], ["*.timer"]))
+    except NativeCallError:
+        try:
+            (files,) = _dbus.call(bus, "ListUnitFiles")
+        except NativeCallError:
+            return []
+    named = ((str(path).rsplit("/", 1)[-1], str(state)) for path, state in files)
+    # A template (name@.timer) is no task until instantiated: LoadUnit cannot load it.
+    return [(name, state) for name, state in named if name.endswith(".timer") and not name.endswith("@.timer")]
+
+
 def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
     """Yield a :class:`ScheduledTaskInfo` per systemd ``.timer`` unit (like Get-ScheduledTask, Linux).
 
     ``folder_path`` is accepted for signature parity with the Windows source and ignored (systemd
-    timers are flat). Lazy: ``GetUnitFileState`` and the run-info reads run only for consumed timers;
-    the timer's object path comes from ``ListUnits`` itself, so a timer costs no ``GetUnit``.
+    timers are flat). The loaded timers come first, from ``ListUnits``: the timer's object path
+    comes from the listing itself, so a loaded timer costs no lookup. Then the timer unit FILES
+    not among them - a disabled or not-yet-started timer is unloaded and ``ListUnits`` omits it,
+    while Get-ScheduledTask lists a disabled task - each read through ``LoadUnit``; a masked timer
+    or a template is no task and is skipped. Lazy: the unit-file listing, ``GetUnitFileState`` and
+    the run-info reads run only for consumed timers.
 
     Example:
         >>> callable(iter_timers)
@@ -285,26 +369,21 @@ def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
     bus = _dbus.open_bus()
     try:
         (units,) = _dbus.call(bus, "ListUnits")
+        seen: set[str] = set()
         for unit in units:
             name = str(unit[0])
             if not name.endswith(".timer"):
                 continue
+            seen.add(name)
             state = _dbus.unit_file_state(bus, name) or ""
-            base = name[: -len(".timer")]
-            run = _timer_run_info(bus, str(unit[6]), base)  # ListUnits field 6 is the unit object path
-            yield ScheduledTaskInfo.model_construct(
-                task_name=base,
-                task_path=_ROOT,
-                state=timer_task_state(str(unit[3]), enabled=timer_enabled(state)),
-                enabled=timer_enabled(state),
-                author="",
-                description=str(unit[1]),  # ListUnits field 1 is the unit Description
-                user_id=run.user_id,
-                run_level=None,  # systemd has no split token, so no run level to report
-                last_run_time=run.last_run_time,
-                last_task_result=run.last_task_result,
-                next_run_time=run.next_run_time,
-            )
+            # ListUnits fields: 1 Description, 3 ActiveState, 6 the unit object path.
+            listed = _Listed(active_state=str(unit[3]), description=str(unit[1]))
+            yield _timer_task(bus, name, str(unit[6]), file_state=state, listed=listed)
+        for name, state in _timer_files(bus):
+            if name in seen or state in _NOT_A_TASK:
+                continue
+            seen.add(name)
+            yield _timer_task(bus, name, _dbus.load_unit_path(bus, name), file_state=state)
     finally:
         bus.conn.close()
 
@@ -535,9 +614,12 @@ class SystemdScheduledTaskController:
             self._write(_UNIT_DIR / f"{base}.service", service_text)
             if timer_text is not None:
                 self._write(timer_file, timer_text)
-            _dbus.call(bus, "Reload")
+            _dbus.call(bus, "Reload")  # load the new unit files before enabling them
             if timer_text is not None:
                 _dbus.call(bus, "EnableUnitFiles", "asbb", ([timer], False, False))
+                # Reload again, as systemctl enable does: else the new timers.target Wants= link is
+                # not picked up and every new unit reads NeedDaemonReload ("changed on disk").
+                _dbus.call(bus, "Reload")
                 if arm_now:
                     _dbus.call(bus, "StartUnit", "ss", (timer, "replace"))
             return self._info(bus, base)
@@ -645,28 +727,18 @@ class SystemdScheduledTaskController:
             bus.conn.close()
 
     def _info(self, bus: _dbus.Bus, base: str) -> ScheduledTaskInfo:
-        """Snapshot a task's state - timer-based if it has a ``.timer``, else the on-demand service."""
+        """Snapshot a task's state - timer-based if it has a ``.timer``, else the on-demand service.
+
+        Units are resolved with ``LoadUnit``, never ``GetUnit``: a just-registered boot timer
+        (enabled, not started), a disabled timer and a finished oneshot are all unloaded, and
+        ``GetUnit`` would read each of their fields as a default (description and user ``""``).
+        Each unit is resolved once for every property read from it.
+        """
         if _has_timer(bus, base):
             unit = f"{base}.timer"
             state = _dbus.unit_file_state(bus, unit) or ""
-            path = _dbus.unit_path(bus, unit)  # resolved once for every property below
-            run = _timer_run_info(bus, path, base)
-            return ScheduledTaskInfo.model_construct(
-                task_name=base,
-                task_path=_ROOT,
-                state=timer_task_state(
-                    str(_dbus.path_property(bus, path, "ActiveState", "inactive")), enabled=timer_enabled(state)
-                ),
-                enabled=timer_enabled(state),
-                author="",
-                description=str(_dbus.path_property(bus, path, "Description", "")),
-                user_id=run.user_id,
-                run_level=None,  # systemd has no split token, so no run level to report
-                last_run_time=run.last_run_time,
-                last_task_result=run.last_task_result,
-                next_run_time=run.next_run_time,
-            )
-        path = _dbus.unit_path(bus, f"{base}.service")  # resolved once for every property below
+            return _timer_task(bus, unit, _dbus.load_unit_path(bus, unit), file_state=state)
+        path = _dbus.load_unit_path(bus, f"{base}.service")
         result, started = _service_run(bus, path)
         return ScheduledTaskInfo.model_construct(
             task_name=base,
@@ -677,7 +749,7 @@ class SystemdScheduledTaskController:
             description=str(_dbus.path_property(bus, path, "Description", "")),
             user_id=_service_user(bus, path),
             run_level=None,  # systemd has no split token, so no run level to report
-            last_run_time=started,  # no timer: the last run is the service's own last start
+            last_run_time=usec_to_datetime(started),  # no timer: the last run is the service's own last start
             last_task_result=result,
             next_run_time=None,  # on demand: nothing is scheduled
         )
@@ -688,6 +760,7 @@ __all__ = [
     "arms_on_register",
     "base_name",
     "iter_timers",
+    "latest_usec",
     "linux_user",
     "service_last_result",
     "service_task_state",

@@ -153,6 +153,9 @@ pwshpy pack tool.py -o dist/tool.sh                          # ...or a POSIX .sh
 pwshpy unpack dist/tool.ps1 -o src/                          # get the sources back out (reads .ps1 or .sh)
 ```
 
+Exit code 110 (ETIMEDOUT) means an `OperationTimeoutError` on every OS: `exec --timeout N` exits 110,
+not 1, when the child outlives `N` seconds, as a service wait that hits its deadline does.
+
 `pack` embeds the entry plus every local module it imports into a self-extracting runner that
 unpacks itself, installs `uv` if the target machine has none, runs the script and returns its exit
 code. Options: `-o/--out`, `--format auto|ps1|sh` (default `auto`: pick from the `-o` suffix - `.sh`

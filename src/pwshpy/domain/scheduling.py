@@ -23,7 +23,10 @@ from .enums import TaskLogonType, TaskRunLevel, WellKnownSid
 
 # fullmatch + [0-9]: '$' would accept a trailing newline and '\d' accepts non-ASCII digits.
 _SID = re.compile(r"S-1-[0-9]+(?:-[0-9]+)+")
-_UID = re.compile(r"[0-9]{1,10}")
+# No leading zeros: "01" and "1" would be two spellings of one account.
+_UID = re.compile(r"0|[1-9][0-9]{0,9}")
+# uid_t is an unsigned 32-bit integer on every POSIX target pwshpy supports.
+_UID_MAX = 4294967295
 _SERVICE_SIDS = frozenset(
     {
         WellKnownSid.LOCAL_SYSTEM.value,
@@ -32,12 +35,33 @@ _SERVICE_SIDS = frozenset(
     }
 )
 
+# extra="forbid": these are user-supplied inputs, and a silently dropped misspelt key widens
+# the task (LogonTrigger "user" instead of "user_id" would mean "any user logs on").
+_INPUT_CONFIG = ConfigDict(frozen=True, extra="forbid")
+
+
+def _is_uid(text: str) -> bool:
+    """True when ``text`` is a canonical decimal uid within ``uid_t``.
+
+    The regex bounds the length to 10 ASCII digits first, so ``int()`` never sees a long input.
+
+    Example:
+        >>> _is_uid("4294967295"), _is_uid("4294967296"), _is_uid("01")
+        (True, False, False)
+    """
+    return _UID.fullmatch(text) is not None and int(text) <= _UID_MAX
+
 
 def _identity(value: object) -> str | None:
     """Accept a SID or decimal uid (or a :class:`WellKnownSid` member) and return it as plain text.
 
     A localized account name is refused rather than resolved: the same account reads
     ``Administrators`` on one machine and ``Administratoren`` on the next.
+
+    Raises:
+        ValueError: ``value`` is not None, a :class:`WellKnownSid`, a SID string or a canonical
+            decimal uid within ``uid_t`` (account names, zero-padded or out-of-range uids,
+            non-string values).  Pydantic reports it as a ``ValidationError``.
 
     Example:
         >>> _identity(WellKnownSid.LOCAL_SYSTEM)
@@ -48,7 +72,7 @@ def _identity(value: object) -> str | None:
     if value is None:
         return None
     text = value.value if isinstance(value, WellKnownSid) else value
-    if isinstance(text, str) and (_SID.fullmatch(text) or _UID.fullmatch(text)):
+    if isinstance(text, str) and (_SID.fullmatch(text) or _is_uid(text)):
         return text
     raise ValueError("must be a SID (S-1-...) or a decimal uid, never an account name")
 
@@ -65,7 +89,7 @@ class TaskPrincipal(BaseModel):
         'S-1-5-18'
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = _INPUT_CONFIG
 
     user_id: str | None = None
     logon_type: TaskLogonType | None = None
@@ -104,7 +128,7 @@ class TaskPrincipal(BaseModel):
             >>> TaskPrincipal(user_id="1000").is_uid
             True
         """
-        return self.user_id is not None and _UID.fullmatch(self.user_id) is not None
+        return self.user_id is not None and _is_uid(self.user_id)
 
     def effective_logon_type(self) -> TaskLogonType:
         """The explicit logon type, else the one implied by ``user_id``.
@@ -131,7 +155,7 @@ class OnceTrigger(BaseModel):
         'once'
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = _INPUT_CONFIG
     kind: Literal["once"] = "once"
     at: AwareDatetime
 
@@ -145,7 +169,7 @@ class DailyTrigger(BaseModel):
         1
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = _INPUT_CONFIG
     kind: Literal["daily"] = "daily"
     at: AwareDatetime
     every_days: int = Field(default=1, ge=1, le=365)
@@ -159,7 +183,7 @@ class BootTrigger(BaseModel):
         0.0
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = _INPUT_CONFIG
     kind: Literal["boot"] = "boot"
     delay: timedelta = timedelta(0)
 
@@ -179,7 +203,7 @@ class LogonTrigger(BaseModel):
         True
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = _INPUT_CONFIG
     kind: Literal["logon"] = "logon"
     user_id: str | None = None
 

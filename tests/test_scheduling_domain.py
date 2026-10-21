@@ -68,6 +68,43 @@ def test_a_decimal_uid_is_accepted() -> None:
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("uid", ["0", "1000", "4294967295"])
+def test_a_uid_within_uid_t_is_accepted(uid: str) -> None:
+    assert TaskPrincipal(user_id=uid).is_uid
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("uid", ["01", "007", "4294967296", "9999999999"])
+def test_a_zero_padded_or_out_of_range_uid_is_refused(uid: str) -> None:
+    # uid_t is 32-bit; "01" would name the same account as "1" under a second spelling.
+    with pytest.raises(ValidationError):
+        TaskPrincipal(user_id=uid)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"kind": "logon", "user": "S-1-5-21-1-2-3-1001"},
+        {"kind": "daily", "at": _AT, "every_day": 7},
+        {"kind": "once", "at": _AT, "repeat": True},
+        {"kind": "boot", "dealy": timedelta(seconds=30)},
+    ],
+)
+def test_the_union_refuses_an_unknown_key(payload: dict[str, object]) -> None:
+    # A misspelt key silently dropped would widen the task: "this user logs on" -> "any user".
+    adapter: TypeAdapter[TaskTrigger] = TypeAdapter(TaskTrigger)
+    with pytest.raises(ValidationError):
+        adapter.validate_python(payload)
+
+
+@pytest.mark.os_agnostic
+def test_a_principal_refuses_an_unknown_key() -> None:
+    with pytest.raises(ValidationError):
+        TaskPrincipal.model_validate({"user_id": "S-1-5-18", "runlevel": "Highest"})
+
+
+@pytest.mark.os_agnostic
 def test_the_interactive_caller_is_neither_sid_nor_uid() -> None:
     p = TaskPrincipal()
     assert not p.is_sid and not p.is_uid

@@ -22,6 +22,17 @@ pwshpy therefore never exposes a localized string as a stable value:
   `message`) are carried as-is for display, but are never a match key and are
   never asserted against a literal in a test.
 
+What `EventLogEntry.message` holds on Windows: the event's message text exactly as
+`Get-WinEvent` shows it in `Message`, in the provider's language resource for the
+host's UI language.  pwshpy renders it through the provider's publisher metadata
+(opened once per provider for each stream and closed when the stream ends), the
+same way the cmdlet does.  It is `None` - never an error text standing in for the
+message - when the provider has no publisher metadata on this machine (an
+uninstalled or manifest-less provider), when the provider's table has no message
+for that event, or when the message has no resource for the current locale; those
+are the cases in which `Get-WinEvent` reports no `Message` either.  On Linux it is
+the journal entry's `MESSAGE` field.
+
 The pwsh oracles compare on locale-invariant bases: a .NET enum's `.ToString()`
 returns the **English** member name regardless of UI culture (`Get-Service`
 `Status.ToString()` is `Running` on German Windows too), or the raw numeric value

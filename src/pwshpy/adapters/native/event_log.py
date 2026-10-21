@@ -11,12 +11,14 @@ with ``defusedxml``.
 
 Contents:
     * :func:`iter_event_log` - stream a named log's entries, newest first.
+    * :class:`PublisherMessages` - render event messages through per-provider publisher metadata.
 """
 
 from __future__ import annotations
 
+import contextlib
 import importlib
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from typing import Any
 
 from defusedxml.ElementTree import fromstring as _xml_fromstring
@@ -46,14 +48,22 @@ def _child_text(node: Any, tag: str) -> str:
     return "" if text is None else str(text)
 
 
-def _to_entry(xml_text: str, log_name: str, message: str | None) -> EventLogEntry:
-    """Marshal one rendered event XML into an :class:`EventLogEntry`."""
-    system: Any = _xml_fromstring(xml_text).find(_NS + "System")
+def _parse_system(xml_text: str) -> Any:
+    """Return the ``<System>`` element of one rendered event XML (``None`` if absent)."""
+    return _xml_fromstring(xml_text).find(_NS + "System")
+
+
+def _provider_name(system: Any) -> str:
+    provider: Any = None if system is None else system.find(_NS + "Provider")
+    return str(provider.get("Name", "")) if provider is not None else ""
+
+
+def _to_entry(system: Any, log_name: str, message: str | None) -> EventLogEntry:
+    """Marshal one event's ``<System>`` element into an :class:`EventLogEntry`."""
     if system is None:  # pragma: no cover - EvtRender always emits a <System> block
         return EventLogEntry.model_construct(
             log_name=log_name, record_id=0, event_id=0, level=to_event_level(0), provider_name="", message=message
         )
-    provider: Any = system.find(_NS + "Provider")
     time_created: Any = system.find(_NS + "TimeCreated")
     security: Any = system.find(_NS + "Security")
     return EventLogEntry.model_construct(
@@ -61,7 +71,7 @@ def _to_entry(xml_text: str, log_name: str, message: str | None) -> EventLogEntr
         record_id=int(_child_text(system, "EventRecordID") or "0"),
         event_id=int(_child_text(system, "EventID") or "0"),
         level=to_event_level(int(_child_text(system, "Level") or "0")),
-        provider_name=str(provider.get("Name", "")) if provider is not None else "",
+        provider_name=_provider_name(system),
         time_created=parse_event_time(time_created.get("SystemTime") if time_created is not None else None),
         machine_name=_child_text(system, "Computer"),
         user_id=security.get("UserID") if security is not None else None,
@@ -69,20 +79,92 @@ def _to_entry(xml_text: str, log_name: str, message: str | None) -> EventLogEntr
     )
 
 
-def _render_message(win32evtlog: Any, handle: Any) -> str | None:
-    """Render the provider-formatted event message, or ``None`` when unavailable."""
-    try:
-        text = win32evtlog.EvtFormatMessage(None, handle, win32evtlog.EvtFormatMessageEvent)
-    except Exception:
-        return None
-    return str(text) if text else None
+def _close_quietly(handle: Any) -> None:
+    """Release an EVT_HANDLE during cleanup.
+
+    Runs in a ``finally``: a failing close must neither mask the exception that ended
+    the stream nor stop the remaining handles from being released.
+    """
+    with contextlib.suppress(Exception):
+        handle.Close()
 
 
-def iter_event_log(log_name: str, *, evtlog_api: Any | None = None) -> Iterator[EventLogEntry]:
+class PublisherMessages:
+    """Render event messages through each provider's publisher metadata, cached for one stream.
+
+    ``EvtFormatMessage`` needs the provider's metadata handle to find the message table;
+    called with ``None`` it returns a Win32 error text ("The system cannot find the file
+    specified.") posing as the message.  So the metadata is opened once per provider and
+    reused for every later event of that provider - a log holds events of a few hundred
+    providers at most, which bounds the cache.  A provider whose metadata cannot be opened
+    (uninstalled, no manifest) is remembered as such and renders ``None``, as does an event
+    whose message is missing or has no resource for the current locale: the same cases in
+    which ``Get-WinEvent`` reports no ``Message``.  Call :meth:`close` to release the handles.
+
+    Example:
+        >>> class _NoMetadata:
+        ...     def EvtOpenPublisherMetadata(self, provider):
+        ...         raise OSError(2, "not found")
+        >>> messages = PublisherMessages(_NoMetadata())
+        >>> messages.render("event-handle", "Gone-Provider") is None
+        True
+        >>> messages.close()
+    """
+
+    def __init__(self, win32evtlog: Any) -> None:
+        self._api = win32evtlog
+        self._metadata: dict[str, Any] = {}
+
+    def render(self, event_handle: Any, provider: str) -> str | None:
+        """Return the formatted message of one event, or ``None`` when it has none.
+
+        Args:
+            event_handle: The EVT_HANDLE of the event (from ``EvtNext``).
+            provider: The event's ``<Provider Name=...>``.
+
+        Returns:
+            The provider's message text, or ``None`` when the provider has no metadata or
+            the message cannot be formatted.  Never a Win32 error text.
+        """
+        metadata = self._open(provider)
+        if metadata is None:
+            return None
+        try:
+            text = self._api.EvtFormatMessage(metadata, event_handle, self._api.EvtFormatMessageEvent)
+        except Exception:
+            # Fail-soft by design: a missing message id (15027) or locale resource (15033)
+            # is common and per-event; one unformattable event must not end the stream.
+            return None
+        return str(text) if text else None
+
+    def _open(self, provider: str) -> Any:
+        if provider in self._metadata:
+            return self._metadata[provider]
+        metadata: Any = None
+        if provider:
+            try:
+                metadata = self._api.EvtOpenPublisherMetadata(provider)
+            except Exception:
+                # Cached as None, so a provider without metadata is asked once per stream.
+                metadata = None
+        self._metadata[provider] = metadata
+        return metadata
+
+    def close(self) -> None:
+        """Release every publisher-metadata handle this renderer opened."""
+        for metadata in self._metadata.values():
+            if metadata is not None:
+                _close_quietly(metadata)
+        self._metadata.clear()
+
+
+def iter_event_log(log_name: str, *, evtlog_api: Any | None = None) -> Generator[EventLogEntry, None, None]:
     """Stream a Windows event log's entries newest-first (like ``Get-WinEvent -LogName``).
 
     Reads in batches and yields one record at a time, so the pipeline stays
-    memory-bounded even on a log with millions of entries.
+    memory-bounded even on a log with millions of entries.  Each entry's ``message`` is
+    rendered through its provider's publisher metadata (see :class:`PublisherMessages`);
+    the metadata and query handles are released when the stream ends or is abandoned.
 
     Args:
         log_name: The channel to read (``System``, ``Setup``, ``Microsoft-Windows-.../Operational``).
@@ -105,6 +187,16 @@ def iter_event_log(log_name: str, *, evtlog_api: Any | None = None) -> Iterator[
         query = win32evtlog.EvtQuery(log_name, flags)
     except Exception as exc:
         raise NativeCallError(str(exc) or f"cannot query event log {log_name!r}") from exc
+    messages = PublisherMessages(win32evtlog)
+    try:
+        yield from _stream(win32evtlog, query, log_name, messages)
+    finally:
+        messages.close()
+        _close_quietly(query)
+
+
+def _stream(win32evtlog: Any, query: Any, log_name: str, messages: PublisherMessages) -> Iterator[EventLogEntry]:
+    """Pull ``query`` in batches of ``_BATCH`` and yield one marshaled entry per event."""
     while True:
         try:
             handles = win32evtlog.EvtNext(query, _BATCH)
@@ -119,7 +211,8 @@ def iter_event_log(log_name: str, *, evtlog_api: Any | None = None) -> Iterator[
                 xml_text = str(win32evtlog.EvtRender(handle, win32evtlog.EvtRenderEventXml))
             except Exception as exc:
                 raise NativeCallError(str(exc) or "failed to render an event record") from exc
-            yield _to_entry(xml_text, log_name, _render_message(win32evtlog, handle))
+            system = _parse_system(xml_text)
+            yield _to_entry(system, log_name, messages.render(handle, _provider_name(system)))
 
 
-__all__ = ["iter_event_log"]
+__all__ = ["PublisherMessages", "iter_event_log"]

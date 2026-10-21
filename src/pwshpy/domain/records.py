@@ -441,7 +441,8 @@ class EventLogEntry(PSRecord):
 
     win32evtlog on Windows, journald on Linux. ``level`` is the canonical English
     severity (``Get-WinEvent``'s ``LevelDisplayName`` and journald priorities are both
-    normalized to it). ``message`` is the rendered text when available, else ``None``.
+    normalized to it). ``message`` is the rendered text (on Windows the provider's
+    message, identical to ``Get-WinEvent``'s ``Message``), else ``None`` - never an error text.
     On journald ``record_id`` / ``event_id`` are 0 (journald has no numeric event id;
     its identity is the string cursor) and ``user_id`` is the ``_UID``.
 

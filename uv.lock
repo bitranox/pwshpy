@@ -1253,16 +1253,16 @@ wheels = [
 
 [[package]]
 name = "lib-registry"
-version = "3.1.6"
+version = "3.1.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fake-winreg", marker = "sys_platform != 'win32'" },
     { name = "rich-click" },
     { name = "rtoml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f2/52/63dde892b1a86e7452253d09d807848a09f68d35c22fedc118ede3005d82/lib_registry-3.1.6.tar.gz", hash = "sha256:fd58d3d4813675491b12c9480cb38fe23f0d01439fe7fe49940a64501df1a960", size = 55962, upload-time = "2026-10-15T14:41:49.264Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/49/c6/6eb32074893233e9e2faca5dd93eaeeda2305d8d518299e01c4335353f6f/lib_registry-3.1.7.tar.gz", hash = "sha256:44945c6b047f0446743927cd26aec0c05194b273e2864643d4d5a88af3773824", size = 56282, upload-time = "2026-10-21T18:07:15.843Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f0/f0/a2044fba0bea8e8719da3acbab88cc955dc798e84ceb8dcadd9c085f6396/lib_registry-3.1.6-py3-none-any.whl", hash = "sha256:77484bd872498d15e2d1ecd92916cec5bae24dee512550a794974586ec7d68f7", size = 33896, upload-time = "2026-10-15T14:41:48.274Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/c8/371f8bb7ab8e32bda916e51789690b46bff4b905199b13126dc3e1d7a5a7/lib_registry-3.1.7-py3-none-any.whl", hash = "sha256:2e06a0a69bcad79c71024c5124200517d2a9364412d7a3b8b4fb4dd4a6eb690d", size = 33904, upload-time = "2026-10-21T18:07:14.723Z" },
 ]
 
 [[package]]
@@ -1794,8 +1794,8 @@ requires-dist = [
     { name = "lib-cli-exit-tools", specifier = ">=2.4.1" },
     { name = "lib-layered-config", specifier = ">=7.3.0" },
     { name = "lib-log-rich", specifier = ">=6.5.6" },
-    { name = "lib-registry", marker = "sys_platform == 'win32'", specifier = ">=3.1.6" },
-    { name = "lib-registry", marker = "extra == 'dev'", specifier = ">=3.1.6" },
+    { name = "lib-registry", marker = "sys_platform == 'win32'", specifier = ">=3.1.7" },
+    { name = "lib-registry", marker = "extra == 'dev'", specifier = ">=3.1.7" },
     { name = "orjson", specifier = ">=3.13.0" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.10.1" },
     { name = "psutil", specifier = ">=7.2.2" },

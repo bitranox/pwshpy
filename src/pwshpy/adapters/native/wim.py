@@ -25,6 +25,7 @@ Contents:
 from __future__ import annotations
 
 import io
+import os
 import re
 import struct
 from collections.abc import Iterable, Iterator
@@ -101,21 +102,31 @@ def _xml_location(header: bytes, path: Path) -> tuple[int, int]:
     return offset, size
 
 
+def _truncated(path: Path, offset: int, size: int, remaining: int) -> NativeCallError:
+    """Name a resource that runs past the end of the file."""
+    return NativeCallError(
+        f"{path}: truncated - the XML resource at offset {offset} needs {size} bytes, only {remaining} remain"
+    )
+
+
 def _read_xml_resource(path: Path) -> bytes:
     """Return the raw XML resource bytes; the handle is closed before any image is yielded."""
     try:
         with path.open("rb") as handle:
             offset, size = _xml_location(handle.read(_HEADER_SIZE), path)
+            file_size = os.fstat(handle.fileno()).st_size
+            # The offset is an unsigned u64 from untrusted bytes: seek() raises ValueError, not
+            # OSError, for one past the signed 64-bit range, so it must be refused before seeking.
+            if offset + size > file_size:
+                raise _truncated(path, offset, size, max(0, file_size - offset))
             handle.seek(offset)
             raw = handle.read(size)
     except OSError as exc:
         raise NativeCallError(f"cannot read {path}: {exc}") from exc
     if len(raw) != size:
-        # A short read is the one check for both a cut copy and an offset past the end: a
-        # seek beyond EOF succeeds and the read then returns nothing.
-        raise NativeCallError(
-            f"{path}: truncated - the XML resource at offset {offset} needs {size} bytes, only {len(raw)} remain"
-        )
+        # The size check saw the file as it was; one cut between that check and the read
+        # shows up only here.
+        raise _truncated(path, offset, size, len(raw))
     return raw
 
 

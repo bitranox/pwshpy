@@ -28,6 +28,10 @@ from click.testing import CliRunner
 from lib_layered_config import Config
 from lib_layered_config.domain.config import SourceInfo
 
+# Imported before ``_load_dotenv()`` below runs: the module captures the session-bus opt-in from
+# the process environment at import, so an opt-in line in ``.env`` can never switch the guard off.
+from session_bus_isolation import GUARD_MARKER, PROCESS_OPTED_IN, SESSION_BUS_VAR
+
 if TYPE_CHECKING:
     from pwshpy.composition import AppServices
 
@@ -52,9 +56,6 @@ def _purge_stale_coverage_files(cov_path: Path) -> None:
             Path(str(cov_path) + suffix).unlink()
 
 
-#: Opts a run in to whatever session bus the environment provides (see ``_keep_off_the_session_bus``).
-SECRET_SERVICE_OPT_IN = "PWSHPY_TEST_SECRET_SERVICE"
-_SESSION_BUS_VAR = "DBUS_SESSION_BUS_ADDRESS"
 #: A stash key for the session-bus address the run inherited, restored at unconfigure.
 _INHERITED_SESSION_BUS = pytest.StashKey[str | None]()
 
@@ -73,13 +74,15 @@ def _keep_off_the_session_bus(config: pytest.Config) -> None:
     listener, so every connect fails at once with ECONNREFUSED. The SYSTEM bus is a different
     variable and stays untouched (the systemd adapters use it).
 
-    ``PWSHPY_TEST_SECRET_SERVICE=1`` leaves the environment alone; only set it inside a private bus
-    (``dbus-run-session``), as DEVELOPMENT.md describes.
+    ``PWSHPY_TEST_SECRET_SERVICE=1`` in the PROCESS environment leaves the environment alone; only
+    set it inside a private bus (``dbus-run-session``), as DEVELOPMENT.md describes. The decision
+    is :data:`session_bus_isolation.PROCESS_OPTED_IN`, captured before ``.env`` is loaded, so a
+    ``.env`` line cannot opt in.
     """
-    if os.environ.get(SECRET_SERVICE_OPT_IN) == "1":
+    if PROCESS_OPTED_IN:
         return
-    config.stash[_INHERITED_SESSION_BUS] = os.environ.get(_SESSION_BUS_VAR)
-    os.environ[_SESSION_BUS_VAR] = f"unix:abstract=pwshpy-tests-no-session-bus-{uuid.uuid4().hex}"
+    config.stash[_INHERITED_SESSION_BUS] = os.environ.get(SESSION_BUS_VAR)
+    os.environ[SESSION_BUS_VAR] = f"unix:abstract={GUARD_MARKER}-{uuid.uuid4().hex}"
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
@@ -88,9 +91,9 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         return
     inherited = config.stash[_INHERITED_SESSION_BUS]
     if inherited is None:
-        os.environ.pop(_SESSION_BUS_VAR, None)
+        os.environ.pop(SESSION_BUS_VAR, None)
     else:
-        os.environ[_SESSION_BUS_VAR] = inherited
+        os.environ[SESSION_BUS_VAR] = inherited
 
 
 def pytest_configure(config: pytest.Config) -> None:

@@ -120,19 +120,48 @@ X11 autolaunch, which reach a live session bus just the same. The system bus is 
 `tests/test_session_bus_guard.py` pins the guard.
 
 The live Secret Service round-trip (`tests/test_secret_service.py::test_save_load_delete_roundtrip`)
-is opt-in with `PWSHPY_TEST_SECRET_SERVICE=1`, which also switches the guard off. Set it ONLY on a
-private bus with a throwaway keyring in a throwaway HOME and no display. A private bus alone is not
-enough: a `gnome-keyring-daemon` started there still reads and writes the real
-`~/.local/share/keyrings` (and `--unlock` creates a `login.keyring` there when none exists):
+is opt-in with `PWSHPY_TEST_SECRET_SERVICE=1`, which also switches the guard off. Only the process
+environment that starts pytest can opt in: the conftest reads the variable before it loads `.env`,
+so a `.env` line setting it is ignored. Under the opt-in, a keyring that refuses the save (no
+default collection, a locked one) FAILS the round-trip instead of skipping it.
+
+Set the opt-in ONLY on a private bus with a throwaway keyring in a throwaway HOME and no display. A
+private bus alone is not enough: a `gnome-keyring-daemon` started there still reads and writes the
+real `~/.local/share/keyrings` (and `--unlock` creates a `login.keyring` there when none exists).
+
+**UNVERIFIED: the recipe below has not been run yet.** Do not run it on a machine whose desktop
+keyring matters until it has been verified on a throwaway box. Run it from the repo root (it calls
+`.venv/bin/python` by relative path). It builds the environment from `env -i` with an explicit
+allowlist, so nothing from the desktop session (bus address, display, keyring control socket) leaks
+in; it fails unless the round-trip PASSED with nothing skipped, and it fails if the real keyring
+directory changed during the run:
 
 ```bash
-sandbox=$(mktemp -d) && mkdir -m 700 "$sandbox/run" "$sandbox/share"
-env -u DBUS_SESSION_BUS_ADDRESS -u GNOME_KEYRING_CONTROL -u DISPLAY -u WAYLAND_DISPLAY \
-    HOME="$sandbox" XDG_DATA_HOME="$sandbox/share" XDG_RUNTIME_DIR="$sandbox/run" \
-    dbus-run-session -- sh -c '
-        printf %s test | gnome-keyring-daemon --unlock --components=secrets >/dev/null
-        PWSHPY_TEST_SECRET_SERVICE=1 .venv/bin/python -m pytest tests/test_secret_service.py'
-rm -rf "$sandbox"
+(
+    real_keyrings="$HOME/.local/share/keyrings"  # captured BEFORE HOME is overridden below
+    snapshot() { stat -c '%n %Y %s' "$real_keyrings" "$real_keyrings"/* 2>/dev/null | sort; }
+    before=$(snapshot)
+    sandbox=$(mktemp -d) || exit 1
+    mkdir -m 700 "$sandbox/home" "$sandbox/share" "$sandbox/config" "$sandbox/cache" "$sandbox/run"
+    env -i PATH="$PATH" LANG="${LANG:-C.UTF-8}" \
+        HOME="$sandbox/home" XDG_DATA_HOME="$sandbox/share" XDG_CONFIG_HOME="$sandbox/config" \
+        XDG_CACHE_HOME="$sandbox/cache" XDG_RUNTIME_DIR="$sandbox/run" \
+        dbus-run-session -- sh -c '
+            printf %s test | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+            PWSHPY_TEST_SECRET_SERVICE=1 .venv/bin/python -m pytest -p no:cacheprovider --no-cov -rs \
+                tests/test_secret_service.py::test_save_load_delete_roundtrip' >"$sandbox/pytest.log" 2>&1
+    rc=$?
+    after=$(snapshot)
+    cat "$sandbox/pytest.log"
+    verdict=PASS
+    [ "$before" = "$after" ] || { echo "FAIL: $real_keyrings changed during the run"; verdict=FAIL; }
+    [ "$rc" -eq 0 ] || { echo "FAIL: pytest exited $rc"; verdict=FAIL; }
+    grep -q ' 1 passed' "$sandbox/pytest.log" || { echo "FAIL: the round-trip did not pass"; verdict=FAIL; }
+    if grep -qi 'skipped' "$sandbox/pytest.log"; then echo "FAIL: a test was skipped"; verdict=FAIL; fi
+    rm -rf "$sandbox"
+    echo "$verdict"
+    [ "$verdict" = PASS ]
+)
 ```
 
 ### Quick Reference

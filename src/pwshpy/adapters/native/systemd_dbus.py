@@ -19,6 +19,8 @@ Contents:
       ``ListUnits`` omits because nothing has loaded them (a stopped, disabled service or timer).
     * :data:`UNLISTED_LOAD_STATES` / :data:`UNLISTED_FILE_STATES` - the states that are no unit
       of their own, so a listing skips them.
+    * :func:`is_unlisted_unit` - the one skip rule for a ``ListUnits`` entry: not-found or masked,
+      and not running.
 """
 
 from __future__ import annotations
@@ -36,13 +38,37 @@ TIMER_IFACE = "org.freedesktop.systemd1.Timer"  # LastTriggerUSec, NextElapseUSe
 SERVICE_IFACE = "org.freedesktop.systemd1.Service"  # ExecMainCode, ExecMainStatus, ExecMainStartTimestamp
 _PROPERTIES_IFACE = "org.freedesktop.DBus.Properties"
 
-#: ListUnits LoadStates that are no unit to list: not-found is a name some unit references with no
-#: unit file behind it; masked is made unstartable on purpose.
+#: ListUnits LoadStates that are no unit to list while stopped: not-found is a name some unit
+#: references with no unit file behind it; masked is made unstartable on purpose. A running unit in
+#: either state is still listed (:func:`is_unlisted_unit`).
 UNLISTED_LOAD_STATES = frozenset({"not-found", "masked"})
+
+#: ActiveStates of a unit that runs or is changing state. A unit whose file was deleted under it, or
+#: that was masked without ``--now``, keeps running in one of these; Get-Service keeps listing such a
+#: service (marked for deletion, or Disabled/Running), so the listings keep it too.
+RUNNING_ACTIVE_STATES = frozenset({"active", "activating", "deactivating", "reloading"})
 
 #: UnitFileStates of a unit file that is no unit of its own: masked is made unstartable on purpose;
 #: alias is a second name for a unit listed under its real name.
 UNLISTED_FILE_STATES = frozenset({"masked", "masked-runtime", "alias"})
+
+
+def is_unlisted_unit(load_state: str, active_state: str) -> bool:
+    """Whether a ``ListUnits`` entry is no unit to list: not-found or masked, and not running.
+
+    Args:
+        load_state: The entry's ``LoadState`` (``ListUnits`` field 2).
+        active_state: The entry's ``ActiveState`` (``ListUnits`` field 3); systemd reports the two
+            independently, so a not-found or masked unit can still be ``active``.
+
+    Returns:
+        True for a stopped (inactive or failed) not-found or masked unit, else False.
+
+    Example:
+        >>> is_unlisted_unit("not-found", "inactive"), is_unlisted_unit("masked", "active")
+        (True, False)
+    """
+    return load_state in UNLISTED_LOAD_STATES and active_state not in RUNNING_ACTIVE_STATES
 
 
 class Bus(NamedTuple):
@@ -174,6 +200,7 @@ def unit_file_state(bus: Bus, name: str) -> str | None:
 __all__ = [
     "Bus",
     "MANAGER_BUS",
+    "RUNNING_ACTIVE_STATES",
     "SERVICE_IFACE",
     "TIMER_IFACE",
     "UNIT_IFACE",
@@ -182,6 +209,7 @@ __all__ = [
     "active_state",
     "call",
     "is_error",
+    "is_unlisted_unit",
     "load_unit_path",
     "open_bus",
     "path_property",

@@ -835,3 +835,108 @@ def test_load_unit_path_reads_a_not_found_unit_as_unreadable() -> None:
     assert systemd_dbus.load_unit_path(bus, "ghost.service") is None
     assert systemd_dbus.load_unit_path(bus, "real.service") == "/u/real.service"
     assert conn.methods == ["LoadUnit", "Get", "LoadUnit", "Get"]  # one LoadState read per lookup
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("verb", ["enable", "disable"])
+def test_enable_and_disable_refuse_a_static_timer(monkeypatch: pytest.MonkeyPatch, verb: str) -> None:
+    """A static timer has no [Install] section: systemd's enable/disable change nothing, so refuse.
+
+    Otherwise the call returns a task still reading enabled, as if it had worked - and disable
+    would also have stopped the timer on the way. Nothing may be sent before the refusal.
+    """
+    props = _enable_props("tmpfiles", [("OnBootUSec", 900_000_000, 0)])
+    conn = FakeConn([], props, frozenset({"tmpfiles.timer"}), file_states={"tmpfiles.timer": "static"})
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeCallError, match=r"static.*no \[Install\]"):
+        getattr(SystemdScheduledTaskController(), verb)("tmpfiles")
+    assert conn.verbs == []
+
+
+_RUNNING_STATES = ["active", "activating", "deactivating", "reloading"]
+
+
+def _orphan_timer_conn(load_state: str, active_state: str) -> FakeConn:
+    """A loaded ``orphan.timer`` whose ListUnits LoadState is ``load_state`` while it is ``active_state``.
+
+    not-found: its unit file was deleted under it (no file, GetUnitFileState refuses). masked: a
+    ``systemctl mask`` without ``--now`` left it running (its file state reads masked).
+    """
+    masked = load_state == "masked"
+    return FakeConn(
+        [("orphan.timer", "Orphan job", active_state)],
+        {("orphan.timer", _TIMER, "Unit"): "orphan.service"},
+        frozenset({"orphan.timer"}) if masked else frozenset(),
+        file_states={"orphan.timer": "masked"} if masked else None,
+        load_states={"orphan.timer": load_state},
+    )
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("load_state", ["not-found", "masked"])
+@pytest.mark.parametrize("active_state", _RUNNING_STATES)
+def test_iter_timers_lists_a_running_timer_whose_unit_is_gone_or_masked(
+    monkeypatch: pytest.MonkeyPatch, load_state: str, active_state: str
+) -> None:
+    """A not-found or masked timer that is still running is a live task: listed once, never enabled."""
+    conn = _orphan_timer_conn(load_state, active_state)
+    use_bus(monkeypatch, conn)
+    tasks = list(iter_timers())
+    assert [(t.task_name, t.description, t.enabled) for t in tasks] == [("orphan", "Orphan job", False)]
+    assert tasks[0].state is timer_to_task_state(active_state)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("load_state", ["not-found", "masked"])
+@pytest.mark.parametrize("active_state", ["inactive", "failed"])
+def test_iter_timers_skips_a_stopped_timer_whose_unit_is_gone_or_masked(
+    monkeypatch: pytest.MonkeyPatch, load_state: str, active_state: str
+) -> None:
+    """Stopped, a not-found or masked timer is no task: only a reference or an unstartable name is left."""
+    conn = _orphan_timer_conn(load_state, active_state)
+    use_bus(monkeypatch, conn)
+    assert list(iter_timers()) == []
+
+
+@pytest.mark.os_agnostic
+def test_iter_timers_lists_a_cached_not_found_timer_whose_file_appeared(monkeypatch: pytest.MonkeyPatch) -> None:
+    """systemd cached the name as not-found, then its file was written without a daemon-reload.
+
+    ListUnits still reports the cached not-found, so that pass skips it; the unit-file pass must
+    still list it, read through LoadUnit, which reloads it from the new file.
+    """
+    props: dict[tuple[str, str, str], Any] = {
+        ("late.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "inactive",
+        ("late.timer", systemd_dbus.UNIT_IFACE, "Description"): "Late job",
+        ("late.timer", _TIMER, "Unit"): "late.service",
+    }
+    conn = FakeConn(
+        [("late.timer", "late.timer", "inactive")],
+        props,
+        frozenset({"late.timer"}),
+        file_states={"late.timer": "disabled"},
+        load_states={"late.timer": "not-found"},
+        appeared=frozenset({"late.timer"}),
+    )
+    use_bus(monkeypatch, conn)
+    assert [(t.task_name, t.description, t.enabled) for t in iter_timers()] == [("late", "Late job", False)]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("cached", [False, True])
+def test_iter_timers_skips_a_stale_timer_file(monkeypatch: pytest.MonkeyPatch, cached: bool) -> None:
+    """A listed timer file whose LoadUnit still reads not-found (a broken or dangling file) is no task.
+
+    The services listing skips such a file too; listing it would show a task with every field a
+    default. ``cached``: ListUnits also carries the name as a stopped not-found entry, which no
+    longer marks it seen, so the file pass is what must skip it.
+    """
+    conn = FakeConn(
+        [("stale.timer", "stale.timer", "inactive")] if cached else [],
+        {},
+        frozenset({"stale.timer"}),
+        file_states={"stale.timer": "disabled"},
+        load_states={"stale.timer": "not-found"},
+    )
+    use_bus(monkeypatch, conn)
+    assert list(iter_timers()) == []

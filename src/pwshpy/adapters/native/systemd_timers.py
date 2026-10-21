@@ -17,7 +17,9 @@ The portable counterpart to the Task Scheduler adapter. On systemd a scheduled t
   only on demand: ``run`` starts it. ``enable``/``disable`` arm/disarm a task's ``.timer`` (via
   ``EnableUnitFiles``/``DisableUnitFiles``); an on-demand task has no schedule to toggle, so
   they raise a clear error pointing at ``run``/``unregister`` instead. (systemd cannot "disable"
-  a static oneshot: a mask symlink cannot shadow the unit file we wrote under ``/etc``.)
+  a static oneshot: a mask symlink cannot shadow the unit file we wrote under ``/etc``.) A static
+  timer (no ``[Install]`` section) is refused the same way: systemd accepts both calls and changes
+  nothing, so the task would still read enabled.
 * **principals** are a decimal uid (``User=``) or SYSTEM / none (root: a system unit's
   default); a Windows SID, a logon type or HIGHEST for a non-root uid has no Linux meaning and
   is refused. Read back, ``user_id`` is the triggered service's ``User=`` as a decimal uid.
@@ -356,10 +358,13 @@ def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
     comes from the listing itself, so a loaded timer costs no lookup. Then the timer unit FILES
     not among them - a disabled or not-yet-started timer is unloaded and ``ListUnits`` omits it,
     while Get-ScheduledTask lists a disabled task - each read through ``LoadUnit``. Skipped as no
-    task: a ListUnits entry whose LoadState is not-found or masked, and a masked file, an alias or
-    a template. Lazy: the unit-file listing, ``GetUnitFileState`` and the run-info reads run only
-    for consumed timers. Reading an unloaded timer loads it transiently; systemd unloads it again
-    when nothing references it.
+    task: a stopped ListUnits entry whose LoadState is not-found or masked
+    (:func:`~.systemd_dbus.is_unlisted_unit`; a running one is listed), and a masked file, an alias,
+    a template or a file ``LoadUnit`` reads as not-found. A skipped entry does not hide its file:
+    a name systemd cached as not-found before its file was written is listed from the file.
+    Lazy: the unit-file listing,
+    ``GetUnitFileState`` and the run-info reads run only for consumed timers. Reading an unloaded
+    timer loads it transiently; systemd unloads it again when nothing references it.
 
     Example:
         >>> callable(iter_timers)
@@ -373,18 +378,23 @@ def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
             name = str(unit[0])
             if not name.endswith(".timer"):
                 continue
-            seen.add(name)
-            if str(unit[2]) in _dbus.UNLISTED_LOAD_STATES:  # ListUnits field 2 is the LoadState
+            # ListUnits fields: 1 Description, 2 LoadState, 3 ActiveState, 6 the unit object path.
+            if _dbus.is_unlisted_unit(str(unit[2]), str(unit[3])):
+                # Not marked seen: a cached not-found name whose file appeared since (no
+                # daemon-reload) is still listed by the unit-file pass, which LoadUnit reloads.
                 continue
+            seen.add(name)
             state = _dbus.unit_file_state(bus, name) or ""
-            # ListUnits fields: 1 Description, 3 ActiveState, 6 the unit object path.
             listed = _Listed(active_state=str(unit[3]), description=str(unit[1]))
             yield _timer_task(bus, name, str(unit[6]), file_state=state, listed=listed)
         for name, state in _timer_files(bus):
             if name in seen or state in _dbus.UNLISTED_FILE_STATES:
                 continue
             seen.add(name)
-            yield _timer_task(bus, name, _dbus.load_unit_path(bus, name), file_state=state)
+            path = _dbus.load_unit_path(bus, name)
+            if path is None:  # a stale or broken file: systemd has no unit behind the name
+                continue
+            yield _timer_task(bus, name, path, file_state=state)
     finally:
         bus.conn.close()
 
@@ -684,6 +694,10 @@ class SystemdScheduledTaskController:
         started (:func:`starts_when_armed`): started now, its elapsed boot offset would run the
         job at once. It arms at the next boot. A timer whose monotonic timers cannot be read is
         treated the same way - never running the job unexpectedly is the safe side.
+
+        Raises:
+            NativeCallError: the task is on-demand (no ``.timer``) or its timer is static (no
+                ``[Install]`` section), or a D-Bus call failed.
         """
         base = base_name(task_path)
         timer = f"{base}.timer"
@@ -700,7 +714,12 @@ class SystemdScheduledTaskController:
             bus.conn.close()
 
     def disable(self, task_path: str) -> ScheduledTaskInfo:
-        """Disarm a task's ``.timer`` so it no longer runs on schedule (like Disable-ScheduledTask)."""
+        """Disarm a task's ``.timer`` so it no longer runs on schedule (like Disable-ScheduledTask).
+
+        Raises:
+            NativeCallError: the task is on-demand (no ``.timer``) or its timer is static (no
+                ``[Install]`` section) - refused before anything is stopped - or a D-Bus call failed.
+        """
         base = base_name(task_path)
         bus = _dbus.open_bus()
         try:
@@ -714,10 +733,21 @@ class SystemdScheduledTaskController:
 
     @staticmethod
     def _require_timer(bus: _dbus.Bus, base: str, verb: str) -> None:
-        """A task with no ``.timer`` is on-demand; enable/disable have nothing to toggle for it."""
+        """Refuse enable/disable for a task whose schedule systemd cannot toggle.
+
+        A task with no ``.timer`` is on-demand: there is nothing to toggle. A static timer has no
+        ``[Install]`` section, so ``EnableUnitFiles``/``DisableUnitFiles`` succeed and change nothing:
+        the task would read back enabled as if the call had worked (and disable would have stopped
+        the timer on the way, until whatever pulls it in starts it again).
+        """
         if not _has_timer(bus, base):
             raise NativeCallError(
                 f"task {base!r} is on-demand (no .timer); nothing to {verb} - run it directly, or unregister it."
+            )
+        if _dbus.unit_file_state(bus, f"{base}.timer") == "static":
+            raise NativeCallError(
+                f"task {base!r} is a static timer (no [Install] section; another unit pulls it in), so systemd "
+                f"has nothing to {verb} - change the unit that wants it, or mask the timer."
             )
 
     def _start_stop(self, base: str, method: str) -> None:

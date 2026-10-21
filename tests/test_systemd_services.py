@@ -267,3 +267,96 @@ def test_read_back_of_a_not_found_name_reports_defaults(monkeypatch: pytest.Monk
     use_bus(monkeypatch, conn)
     info = SystemdServiceController().stop("ghost.service", timeout=1.0)
     assert (info.display_name, info.status, info.start_type) == ("", ServiceState.STOPPED, None)
+
+
+def _orphan_service_conn(load_state: str, active_state: str) -> FakeConn:
+    """A loaded ``busy.service`` whose ListUnits LoadState is ``load_state`` while it is ``active_state``.
+
+    not-found: its unit file was deleted under it (no file, GetUnitFileState refuses). masked: a
+    ``systemctl mask`` without ``--now`` left it running (its file state reads masked).
+    """
+    masked = load_state == "masked"
+    return FakeConn(
+        [("busy.service", "Busy daemon", active_state)],
+        {("busy.service", _UNIT, "ActiveState"): active_state},
+        frozenset({"busy.service"}) if masked else frozenset(),
+        file_states={"busy.service": "masked"} if masked else None,
+        load_states={"busy.service": load_state},
+    )
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("load_state", "start_type"), [("not-found", None), ("masked", ServiceStartType.DISABLED)])
+@pytest.mark.parametrize(
+    ("active_state", "status"),
+    [
+        ("active", ServiceState.RUNNING),
+        ("activating", ServiceState.START_PENDING),
+        ("deactivating", ServiceState.STOP_PENDING),
+        ("reloading", ServiceState.CONTINUE_PENDING),
+    ],
+)
+def test_iter_services_lists_a_running_service_whose_unit_is_gone_or_masked(
+    monkeypatch: pytest.MonkeyPatch,
+    load_state: str,
+    start_type: ServiceStartType | None,
+    active_state: str,
+    status: ServiceState,
+) -> None:
+    """Get-Service keeps listing a running service marked for deletion, and a masked one as Disabled/Running."""
+    conn = _orphan_service_conn(load_state, active_state)
+    use_bus(monkeypatch, conn)
+    services = list(iter_services())
+    assert [(s.name, s.display_name, s.status, s.start_type) for s in services] == [
+        ("busy.service", "Busy daemon", status, start_type)
+    ]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("load_state", ["not-found", "masked"])
+@pytest.mark.parametrize("active_state", ["inactive", "failed"])
+def test_iter_services_skips_a_stopped_service_whose_unit_is_gone_or_masked(
+    monkeypatch: pytest.MonkeyPatch, load_state: str, active_state: str
+) -> None:
+    """Stopped, a not-found or masked service is no service: only a reference or an unstartable name is left."""
+    conn = _orphan_service_conn(load_state, active_state)
+    use_bus(monkeypatch, conn)
+    assert list(iter_services()) == []
+
+
+@pytest.mark.os_agnostic
+def test_iter_services_lists_a_cached_not_found_service_whose_file_appeared(monkeypatch: pytest.MonkeyPatch) -> None:
+    """systemd cached the name as not-found, then its file was written without a daemon-reload.
+
+    ListUnits still reports the cached not-found, so that pass skips it; the unit-file pass must
+    still list it, read through LoadUnit, which reloads it from the new file.
+    """
+    props: dict[tuple[str, str, str], Any] = {
+        ("late.service", _UNIT, "ActiveState"): "inactive",
+        ("late.service", _UNIT, "Description"): "Late daemon",
+    }
+    conn = FakeConn(
+        [("late.service", "late.service", "inactive")],
+        props,
+        frozenset({"late.service"}),
+        file_states={"late.service": "disabled"},
+        load_states={"late.service": "not-found"},
+        appeared=frozenset({"late.service"}),
+    )
+    use_bus(monkeypatch, conn)
+    assert [(s.name, s.display_name, s.start_type) for s in iter_services()] == [
+        ("late.service", "Late daemon", ServiceStartType.DISABLED)
+    ]
+
+
+@pytest.mark.os_agnostic
+def test_read_back_of_a_running_not_found_service_reports_its_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LoadUnit reads a service whose file was deleted under it as not-found, yet it still runs.
+
+    The read-back after a stop that has not settled yet must say so, not report Stopped.
+    """
+    conn = _orphan_service_conn("not-found", "deactivating")
+    use_bus(monkeypatch, conn)
+    info = SystemdServiceController().stop("busy.service", timeout=0.0)
+    assert conn.verbs == ["StopUnit"]
+    assert (info.name, info.status) == ("busy.service", ServiceState.STOP_PENDING)

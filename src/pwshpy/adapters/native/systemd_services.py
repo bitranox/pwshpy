@@ -82,11 +82,20 @@ def _start_type_of(bus: _dbus.Bus, name: str) -> ServiceStartType | None:
 
 
 def _service_at(bus: _dbus.Bus, name: str, path: str | None, *, start_type: ServiceStartType | None) -> ServiceInfo:
-    """The record for service ``name`` read from its object ``path`` (None: unreadable, fields default)."""
+    """The record for service ``name`` read from its object ``path`` (None: unreadable, fields default).
+
+    With no ``path`` the state is still read, through ``GetUnit``: ``LoadUnit`` reads a service whose
+    file was deleted under it as not-found, yet it can still run, and GetUnit answers for any loaded
+    unit whatever its LoadState (an absent one reads inactive).
+    """
+    if path is None:
+        active_state = _dbus.active_state(bus, name)
+    else:
+        active_state = str(_dbus.path_property(bus, path, "ActiveState", "inactive"))
     return ServiceInfo(
         name=name,
         display_name=str(_dbus.path_property(bus, path, "Description", "")),
-        status=to_service_state(str(_dbus.path_property(bus, path, "ActiveState", "inactive"))),
+        status=to_service_state(active_state),
         start_type=start_type,
         can_stop=True,
         can_pause_continue=False,
@@ -113,9 +122,12 @@ def iter_services() -> Iterator[ServiceInfo]:
     and state. Then the service unit FILES not among them - a stopped, disabled service is
     unloaded and ``ListUnits`` omits it, while Get-Service lists a stopped service - each read
     through ``LoadUnit``, with its start type taken from the file listing. Skipped as no service:
-    a ListUnits entry whose LoadState is not-found or masked, and a masked file, an alias, a
-    template or a file ``LoadUnit`` reads as not-found. Lazy: ``GetUnitFileState``, the unit-file
-    listing and each ``LoadUnit`` run only for consumed services, so
+    a stopped ListUnits entry whose LoadState is not-found or masked
+    (:func:`~.systemd_dbus.is_unlisted_unit`; a running one is listed, as Get-Service lists a
+    running service marked for deletion), and a masked file, an alias, a template or a file
+    ``LoadUnit`` reads as not-found. A skipped entry does not hide its file: a name systemd cached
+    as not-found before its file was written is listed from the file. Lazy: ``GetUnitFileState``,
+    the unit-file listing and each ``LoadUnit`` run only for consumed services, so
     ``get_service().where(...).take(5)`` over loaded services costs one ``ListUnits`` plus five
     state lookups. Reading an unloaded service loads it transiently; systemd unloads it again when
     nothing references it.
@@ -132,10 +144,12 @@ def iter_services() -> Iterator[ServiceInfo]:
             name = str(unit[0])
             if not name.endswith(".service"):
                 continue
-            seen.add(name)
-            if str(unit[2]) in _dbus.UNLISTED_LOAD_STATES:  # ListUnits field 2 is the LoadState
+            # ListUnits fields: 1 Description, 2 LoadState, 3 ActiveState.
+            if _dbus.is_unlisted_unit(str(unit[2]), str(unit[3])):
+                # Not marked seen: a cached not-found name whose file appeared since (no
+                # daemon-reload) is still listed by the unit-file pass, which LoadUnit reloads.
                 continue
-            # ListUnits fields: 1 Description, 3 ActiveState.
+            seen.add(name)
             yield ServiceInfo(
                 name=name,
                 display_name=str(unit[1]),

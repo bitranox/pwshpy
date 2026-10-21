@@ -63,6 +63,14 @@ class FakeConn:
     systemd's defaults (``User`` ``""``, ``ExecMainStartTimestamp`` 0, ...). ``load_states``
     overrides a known unit's ``LoadState`` (``loaded`` by default), in ListUnits field 2 too;
     ``file_dirs`` puts a unit file somewhere other than ``/etc/systemd/system`` (a vendor unit).
+    A ListUnits row carries LoadState and ActiveState independently, as on a real host: a unit whose
+    file was deleted under it, or masked without ``--now``, reads ``not-found``/``masked`` while
+    still ``active``.
+
+    ``appeared`` names units systemd cached as ``not-found`` whose unit file was written later,
+    without a daemon-reload: ListUnits still reports the cached ``not-found``, but ``LoadUnit``
+    loads them from the new file (systemd's unit-cache retry, ``manager_unit_cache_should_retry_load``,
+    which applies to a not-found unit only, never to a masked one).
     """
 
     _VERBS = frozenset({"Reload", "StartUnit", "StopUnit", "EnableUnitFiles", "DisableUnitFiles"})
@@ -78,6 +86,7 @@ class FakeConn:
         unloaded: frozenset[str] = frozenset(),
         load_states: dict[str, str] | None = None,
         file_dirs: dict[str, str] | None = None,
+        appeared: frozenset[str] = frozenset(),
     ) -> None:
         self._units = units  # (name, description, active_state)
         self._props = props
@@ -85,7 +94,8 @@ class FakeConn:
         self._file_states = file_states or {}
         self._failing = failing
         self._unloaded = set(unloaded)  # shrinks as LoadUnit loads them
-        self._load_states = load_states or {}
+        self._load_states = dict(load_states or {})  # a copy: LoadUnit of an appeared unit updates it
+        self._appeared = appeared
         self._file_dirs = file_dirs or {}
         self._known = {unit for unit, _iface, _prop in props} | set(unit_files) | set(unloaded)
         self._not_found: set[str] = set()  # names LoadUnit answered with a not-found object
@@ -117,6 +127,8 @@ class FakeConn:
     def _load_unit(self, msg: Message) -> Reply:
         (name,) = msg.body
         self._unloaded.discard(name)  # loaded from its unit file
+        if name in self._appeared and self._load_states.get(name) == "not-found":
+            self._load_states[name] = "loaded"  # the unit-cache retry finds the file written since
         if name not in self._known:
             self._not_found.add(name)  # systemd still answers: a "not-found" unit object
         return Reply((f"/u/{name}",))

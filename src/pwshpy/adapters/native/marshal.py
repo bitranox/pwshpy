@@ -1,12 +1,14 @@
-"""Shared marshaling seam for native native values → domain types.
+"""Shared marshaling seam for native values -> domain types.
 
 One place converts foreign native representations into the domain object model,
 so native adapters stay thin and the mapping is tested once.  .NET has its own
 PSObject marshaling; both feed the same records.
 
 Contents:
-    * :func:`epoch_to_datetime` — POSIX timestamp → aware UTC ``datetime``.
-    * :func:`to_process_status` — raw status string → :class:`ProcessStatus`.
+    * :func:`epoch_to_datetime` - POSIX timestamp -> aware UTC ``datetime``.
+    * :func:`to_process_status` - raw status string -> :class:`ProcessStatus`.
+    * :func:`to_task_run_level` / :func:`com_date_to_datetime` / :func:`to_task_result` -
+      Task Scheduler principal run level, COM dates and ``LastTaskResult``.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from ...domain.enums import (
     ServiceKind,
     ServiceStartType,
     ServiceState,
+    TaskRunLevel,
     TaskState,
     TransportProtocol,
 )
@@ -393,6 +396,50 @@ def to_task_state(state: int) -> TaskState:
     return _TASK_STATE_BY_INT.get(state, TaskState.UNKNOWN)
 
 
+def to_task_run_level(value: int) -> TaskRunLevel:
+    """Map ``TASK_RUNLEVEL`` (0 limited, 1 highest) to :class:`TaskRunLevel`.
+
+    Example:
+        >>> to_task_run_level(1) is TaskRunLevel.HIGHEST, to_task_run_level(0) is TaskRunLevel.LIMITED
+        (True, True)
+    """
+    return TaskRunLevel.HIGHEST if value == 1 else TaskRunLevel.LIMITED
+
+
+# Task Scheduler "no value" sentinels, kept together so the on-VM check (Task 6) corrects them
+# in one place. UNVERIFIED on a real Windows host: the VT_DATE zero (1899-12-30) for a task
+# that never ran / has no next run, and SCHED_S_TASK_HAS_NOT_RUN for its LastTaskResult.
+_COM_DATE_NEVER_BEFORE_YEAR = 1900  # any COM date before this is the VT_DATE zero (1899-12-30)
+_TASK_HAS_NOT_RUN = 0x41303  # SCHED_S_TASK_HAS_NOT_RUN: LastTaskResult of a task that never ran
+
+
+def com_date_to_datetime(value: datetime | None) -> datetime | None:
+    """Map a Task Scheduler COM date to aware UTC; the VT_DATE zero (1899-12-30, "never") -> None.
+
+    Example:
+        >>> com_date_to_datetime(datetime(1899, 12, 30)) is None
+        True
+        >>> com_date_to_datetime(datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc))
+        datetime.datetime(2026, 10, 21, 12, 0, tzinfo=datetime.timezone.utc)
+    """
+    if value is None or value.year < _COM_DATE_NEVER_BEFORE_YEAR:
+        return None
+    # astimezone treats a naive value as local wall time, which is what a COM DATE is;
+    # an aware value is converted as labelled (whether pywin32 labels it right is checked in Task 6).
+    return value.astimezone(timezone.utc)
+
+
+def to_task_result(value: int) -> int | None:
+    """Map ``LastTaskResult`` to an unsigned 32-bit code; has-not-run (0x41303) -> None.
+
+    Example:
+        >>> to_task_result(0), to_task_result(0x41303)
+        (0, None)
+    """
+    code = value & 0xFFFFFFFF  # pywin32 can hand an HRESULT back signed; Get-ScheduledTaskInfo prints it unsigned
+    return None if code == _TASK_HAS_NOT_RUN else code
+
+
 # Win32 ACCESS_DENIED_* ACE type ids (all other DACL ACE types grant access).
 _DENY_ACE_TYPES = frozenset({1, 6, 10, 12})
 
@@ -410,6 +457,7 @@ def to_ace_type(ace_type: int) -> AceType:
 
 
 __all__ = [
+    "com_date_to_datetime",
     "epoch_to_datetime",
     "from_registry_value_type",
     "from_service_start_type",
@@ -426,6 +474,8 @@ __all__ = [
     "to_service_kind",
     "to_service_start_type",
     "to_service_state",
+    "to_task_result",
+    "to_task_run_level",
     "to_task_state",
     "to_transport_protocol",
 ]

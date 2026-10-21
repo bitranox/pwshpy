@@ -1,4 +1,4 @@
-"""Typed domain records — the ``PSObject``-like object model.
+"""Typed domain records - the ``PSObject``-like object model.
 
 Both backends marshal into the **same** records so the :mod:`~pwshpy.domain.pipeline`
 composes over either source.  :class:`PSRecord` is the Pydantic base; concrete
@@ -10,8 +10,8 @@ full validation is reserved for genuine external boundaries (.NET PSObject
 marshaling and user-supplied data), per the strict-data rule.
 
 Contents:
-    * :class:`PSRecord` — frozen Pydantic base record with JSON helpers.
-    * :class:`ProcessInfo` — a single operating-system process.
+    * :class:`PSRecord` - frozen Pydantic base record with JSON helpers.
+    * :class:`ProcessInfo` - a single operating-system process.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from .enums import (
     ServiceKind,
     ServiceStartType,
     ServiceState,
+    TaskRunLevel,
     TaskState,
     TransportProtocol,
 )
@@ -43,7 +44,7 @@ class PSRecord(BaseModel):
     """Immutable base for every typed record flowing through the pipeline.
 
     Frozen so records behave as value objects.  ``to_dict`` yields a
-    JSON-serializable mapping (``datetime`` → ISO string, enum → its value),
+    JSON-serializable mapping (``datetime`` -> ISO string, enum -> its value),
     ready for ``orjson`` or a rich table.
 
     Example:
@@ -572,10 +573,18 @@ class ScheduledTaskInfo(PSRecord):
     task is a systemd ``.timer`` unit: ``task_name`` is the unit base name (no ``.timer``),
     ``task_path`` is the flat root ``"/"``, and ``description`` comes from the unit.
 
+    ``user_id`` is the principal's SID on Windows and its decimal uid on Linux (``""`` when
+    unknown); ``run_level`` is None where the backend has no run-level concept.
+    ``last_run_time`` / ``next_run_time`` are aware UTC (None = never ran / nothing scheduled);
+    ``last_task_result`` is the last exit code or HRESULT (unsigned on Windows), None until the
+    task has run - 0 means it ran and succeeded.
+
     Example:
         >>> t = ScheduledTaskInfo(task_name="Backup", task_path="Root", state=TaskState.READY, enabled=True)
         >>> t.task_name, t.state.value, t.enabled
         ('Backup', 'Ready', True)
+        >>> t.user_id, t.run_level, t.last_task_result
+        ('', None, None)
     """
 
     task_name: str
@@ -584,6 +593,11 @@ class ScheduledTaskInfo(PSRecord):
     enabled: bool = True
     author: str = ""
     description: str = ""
+    user_id: str = ""
+    run_level: TaskRunLevel | None = None
+    last_run_time: datetime | None = None
+    last_task_result: int | None = None
+    next_run_time: datetime | None = None
 
 
 class LocalUser(PSRecord):

@@ -19,7 +19,8 @@ from typing import Any
 
 from ...domain.errors import NativeCallError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
-from .marshal import to_task_state
+from .marshal import com_date_to_datetime, to_task_result, to_task_run_level, to_task_state
+from .sid import sid_string
 
 _TASK_ENUM_HIDDEN = 1  # include hidden tasks, like Get-ScheduledTask
 _ROOT = "\\"
@@ -48,6 +49,7 @@ def _folder_path(folder: Any) -> str:
 
 def _to_task_info(task: Any, folder_path: str) -> ScheduledTaskInfo:
     registration = task.Definition.RegistrationInfo
+    principal = task.Definition.Principal
     return ScheduledTaskInfo.model_construct(
         task_name=str(task.Name),
         task_path=folder_path,
@@ -55,6 +57,11 @@ def _to_task_info(task: Any, folder_path: str) -> ScheduledTaskInfo:
         enabled=bool(task.Enabled),
         author=str(registration.Author or ""),
         description=str(registration.Description or ""),
+        user_id=sid_string(str(principal.UserId or "")),
+        run_level=to_task_run_level(int(principal.RunLevel)),
+        last_run_time=com_date_to_datetime(task.LastRunTime),
+        last_task_result=to_task_result(int(task.LastTaskResult)),
+        next_run_time=com_date_to_datetime(task.NextRunTime),
     )
 
 

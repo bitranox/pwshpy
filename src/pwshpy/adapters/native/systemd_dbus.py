@@ -9,7 +9,8 @@ Contents:
     * :class:`Bus` - a live system-bus connection plus the jeepney handles.
     * :func:`open_bus` - open the system bus (the caller closes it).
     * :func:`call` - one Manager method call, mapping a D-Bus error to :class:`NativeCallError`.
-    * :func:`unit_property` / :func:`active_state` - read a ``Unit`` property of a loaded unit.
+    * :func:`unit_property` / :func:`active_state` - read a ``Unit`` (or, with ``interface``, a
+      ``Timer`` / ``Service``) property of a loaded unit.
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ MANAGER_PATH = "/org/freedesktop/systemd1"
 MANAGER_BUS = "org.freedesktop.systemd1"
 MANAGER_IFACE = "org.freedesktop.systemd1.Manager"
 UNIT_IFACE = "org.freedesktop.systemd1.Unit"
+TIMER_IFACE = "org.freedesktop.systemd1.Timer"  # LastTriggerUSec, NextElapseUSecRealtime, Unit
+SERVICE_IFACE = "org.freedesktop.systemd1.Service"  # ExecMainCode, ExecMainStatus, ExecMainStartTimestamp
 _PROPERTIES_IFACE = "org.freedesktop.DBus.Properties"
 
 
@@ -70,14 +73,19 @@ def call(bus: Bus, method: str, signature: str = "", body: tuple[Any, ...] = ())
     return reply.body
 
 
-def unit_property(bus: Bus, name: str, prop: str, default: Any) -> Any:
-    """Read one ``org.freedesktop.systemd1.Unit`` property; ``default`` if the unit is not loaded."""
+def unit_property(bus: Bus, name: str, prop: str, default: Any, *, interface: str = UNIT_IFACE) -> Any:
+    """Read one property of a loaded unit; ``default`` if the unit is not loaded or lacks it.
+
+    ``interface`` picks the property's D-Bus interface: the generic ``Unit`` one by default, or
+    the type-specific :data:`TIMER_IFACE` / :data:`SERVICE_IFACE` for a timer's or service's own
+    properties (systemd exposes those only under the type's interface).
+    """
     try:
         (path,) = call(bus, "GetUnit", "s", (name,))
     except NativeCallError:
         return default  # a stopped/absent unit unloads -> GetUnit reports "not loaded"
     props = bus.core.DBusAddress(path, bus_name=MANAGER_BUS, interface=_PROPERTIES_IFACE)
-    reply = bus.conn.send_and_get_reply(bus.core.new_method_call(props, "Get", "ss", (UNIT_IFACE, prop)))
+    reply = bus.conn.send_and_get_reply(bus.core.new_method_call(props, "Get", "ss", (interface, prop)))
     if is_error(reply):
         return default
     value: Any = reply.body[0]
@@ -103,6 +111,8 @@ def unit_file_state(bus: Bus, name: str) -> str | None:
 __all__ = [
     "Bus",
     "MANAGER_BUS",
+    "SERVICE_IFACE",
+    "TIMER_IFACE",
     "UNIT_IFACE",
     "active_state",
     "call",

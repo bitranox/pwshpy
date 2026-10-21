@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import contextlib
 import sys
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
 from pwshpy.adapters.native import scheduled_task_control as mod
 from pwshpy.adapters.native.scheduled_task_control import NativeScheduledTaskController
+from pwshpy.domain.enums import TaskRunLevel
 from pwshpy.domain.errors import NativeCallError, PwshPyError
 
 
@@ -46,6 +48,28 @@ class _FakeActions:
         return action
 
 
+class _FakePrincipal:
+    def __init__(self) -> None:
+        self.UserId = ""
+        self.LogonType = 3
+        self.RunLevel = 0
+
+
+class _FakeTrigger:
+    def __init__(self, trigger_type: int) -> None:
+        self.Type = trigger_type
+
+
+class _FakeTriggers:
+    def __init__(self) -> None:
+        self.items: list[_FakeTrigger] = []
+
+    def Create(self, trigger_type: int) -> _FakeTrigger:
+        trigger = _FakeTrigger(trigger_type)
+        self.items.append(trigger)
+        return trigger
+
+
 class _FakeSettings:
     def __init__(self) -> None:
         self.Enabled = True
@@ -57,6 +81,8 @@ class _FakeDefinition:
         self.RegistrationInfo = _FakeRegInfo()
         self.Actions = _FakeActions()
         self.Settings = _FakeSettings()
+        self.Principal = _FakePrincipal()
+        self.Triggers = _FakeTriggers()
 
 
 class _FakeTask:
@@ -66,6 +92,9 @@ class _FakeTask:
         self.State = 3
         self.Definition = definition or _FakeDefinition()
         self.actions: list[str] = []
+        self.LastRunTime = datetime(1899, 12, 30)  # VT_DATE zero: Task Scheduler's "never ran" (UNVERIFIED, Task 6)
+        self.LastTaskResult = 0x41303  # SCHED_S_TASK_HAS_NOT_RUN
+        self.NextRunTime = datetime(1899, 12, 30)  # no next run
 
     def Run(self, params: Any) -> None:
         self.actions.append("run")
@@ -109,6 +138,11 @@ class _FakeService:
 
 def _use(monkeypatch: pytest.MonkeyPatch, svc: _FakeService) -> None:
     monkeypatch.setattr(mod, "_connect_scheduler", lambda: svc)
+
+
+def _sid_as_given(value: str) -> str:
+    """Stand-in for sid_string (an external edge: LookupAccountName) that returns its input."""
+    return value
 
 
 @pytest.mark.os_agnostic
@@ -179,6 +213,63 @@ def test_missing_task_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
     _use(monkeypatch, svc)
     with pytest.raises(NativeCallError):
         NativeScheduledTaskController().enable("\\Missing")
+
+
+@pytest.mark.os_agnostic
+def test_task_info_reads_principal_sid_and_run_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A task's principal reads back as a SID and its run level as an enum (never a localized name)."""
+    svc = _FakeService()
+    task = _FakeTask("MyTask")
+    task.Definition.Principal.UserId = "S-1-5-18"
+    task.Definition.Principal.RunLevel = 1
+    svc.folder.tasks["MyTask"] = task
+    _use(monkeypatch, svc)
+    monkeypatch.setattr(mod, "sid_string", _sid_as_given)  # external edge: LookupAccountName
+    info = NativeScheduledTaskController().enable("\\MyTask")
+    assert info.user_id == "S-1-5-18"
+    assert info.run_level is TaskRunLevel.HIGHEST
+
+
+@pytest.mark.os_agnostic
+def test_task_info_resolves_an_account_name_through_sid_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A principal registered by account name is normalised through sid_string, not passed through."""
+    svc = _FakeService()
+    task = _FakeTask("MyTask")
+    task.Definition.Principal.UserId = "SYSTEM"
+    svc.folder.tasks["MyTask"] = task
+    _use(monkeypatch, svc)
+    monkeypatch.setattr(mod, "sid_string", {"SYSTEM": "S-1-5-18"}.__getitem__)  # external edge: LookupAccountName
+    info = NativeScheduledTaskController().enable("\\MyTask")
+    assert info.user_id == "S-1-5-18"
+    assert info.run_level is TaskRunLevel.LIMITED
+
+
+@pytest.mark.os_agnostic
+def test_task_info_reads_run_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[120]: last run, last result and next run read back from the IRegisteredTask as aware UTC / int."""
+    svc = _FakeService()
+    task = _FakeTask("MyTask")
+    task.LastRunTime = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
+    task.LastTaskResult = 0
+    task.NextRunTime = datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
+    svc.folder.tasks["MyTask"] = task
+    _use(monkeypatch, svc)
+    monkeypatch.setattr(mod, "sid_string", _sid_as_given)  # external edge: LookupAccountName
+    info = NativeScheduledTaskController().enable("\\MyTask")
+    assert info.last_run_time == datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
+    assert info.last_task_result == 0  # 0 is a real result ("ran, succeeded"), never folded into None
+    assert info.next_run_time == datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.os_agnostic
+def test_task_info_never_run_reads_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[120]: the never-run sentinels (1899-12-30, 0x41303) read back as None, not as a date or a code."""
+    svc = _FakeService()
+    svc.folder.tasks["MyTask"] = _FakeTask("MyTask")
+    _use(monkeypatch, svc)
+    monkeypatch.setattr(mod, "sid_string", _sid_as_given)
+    info = NativeScheduledTaskController().enable("\\MyTask")
+    assert (info.last_run_time, info.last_task_result, info.next_run_time) == (None, None, None)
 
 
 # --- Real integration: run only on the disposable throwaway VM ---------------

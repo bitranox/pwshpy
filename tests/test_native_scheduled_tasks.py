@@ -9,13 +9,14 @@ pinned against Get-ScheduledTask in ``test_scheduled_tasks_pwsh_oracle``.
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
 from pwshpy.adapters.native import scheduled_tasks as st_mod
 from pwshpy.adapters.native.scheduled_tasks import iter_scheduled_tasks
-from pwshpy.domain.enums import TaskState
+from pwshpy.domain.enums import TaskRunLevel, TaskState
 from pwshpy.domain.errors import NativeCallError
 from pwshpy.domain.records import ScheduledTaskInfo
 
@@ -26,9 +27,17 @@ class _FakeReg:
         self.Description = description
 
 
+class _FakePrincipal:
+    def __init__(self, user_id: str = "", run_level: int = 0) -> None:
+        self.UserId = user_id
+        self.LogonType = 3
+        self.RunLevel = run_level
+
+
 class _FakeDef:
-    def __init__(self, registration: _FakeReg) -> None:
+    def __init__(self, registration: _FakeReg, principal: _FakePrincipal | None = None) -> None:
         self.RegistrationInfo = registration
+        self.Principal = principal or _FakePrincipal()
 
 
 class _FakeTask:
@@ -37,6 +46,9 @@ class _FakeTask:
         self.State = state
         self.Enabled = enabled
         self.Definition = _FakeDef(_FakeReg(author, description))
+        self.LastRunTime = datetime(1899, 12, 30)  # VT_DATE zero: Task Scheduler's "never ran" (UNVERIFIED, Task 6)
+        self.LastTaskResult = 0x41303  # SCHED_S_TASK_HAS_NOT_RUN
+        self.NextRunTime = datetime(1899, 12, 30)  # no next run
 
 
 class _FakeCollection:
@@ -75,6 +87,11 @@ class _FakeService:
 
     def GetFolder(self, path: str) -> _FakeFolder:  # noqa: N802 - COM API name
         return self._root
+
+
+def _sid_as_given(value: str) -> str:
+    """Stand-in for sid_string (an external edge: LookupAccountName) that returns its input."""
+    return value
 
 
 @pytest.mark.os_agnostic
@@ -171,6 +188,27 @@ def test_task_none_author_and_description_coalesce(monkeypatch: pytest.MonkeyPat
     info = next(iter_scheduled_tasks())
     assert info.author == ""
     assert info.description == ""
+
+
+@pytest.mark.os_agnostic
+def test_listing_reads_principal_run_level_and_run_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The listing carries the principal SID, run level and [120] run info, like the controller."""
+    ran = _FakeTask("Ran", 3, True)
+    ran.Definition = _FakeDef(_FakeReg("", ""), _FakePrincipal("S-1-5-18", 1))
+    ran.LastRunTime = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
+    ran.LastTaskResult = -2147216609  # a negative HRESULT as pywin32 can return it
+    ran.NextRunTime = datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
+    never = _FakeTask("Never", 3, True)
+    root = _FakeFolder("\\", [ran, never], [])
+    monkeypatch.setattr(st_mod, "_connect_scheduler", lambda: _FakeService(root))
+    monkeypatch.setattr(st_mod, "sid_string", _sid_as_given)  # external edge: LookupAccountName
+    first, second = list(iter_scheduled_tasks())
+    assert (first.user_id, first.run_level) == ("S-1-5-18", TaskRunLevel.HIGHEST)
+    assert first.last_run_time == datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
+    assert first.last_task_result == 0x8004131F  # read unsigned, like Get-ScheduledTaskInfo
+    assert first.next_run_time == datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
+    assert (second.user_id, second.run_level) == ("", TaskRunLevel.LIMITED)
+    assert (second.last_run_time, second.last_task_result, second.next_run_time) == (None, None, None)
 
 
 @pytest.mark.os_windows

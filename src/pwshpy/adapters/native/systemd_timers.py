@@ -18,6 +18,7 @@ vendor unit under ``/lib``.
 
 Contents:
     * :func:`timer_to_task_state` / :func:`timer_enabled` - pure systemd -> domain mappers.
+    * :func:`usec_to_datetime` / :func:`service_last_result` - pure run-info mappers.
     * :func:`iter_timers` - stream the ``.timer`` units as records.
     * :class:`SystemdScheduledTaskController` - register/unregister, run/stop, enable/disable.
 """
@@ -26,7 +27,9 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from ...domain.enums import TaskState
 from ...domain.errors import NativeCallError
@@ -35,6 +38,11 @@ from . import systemd_dbus as _dbus
 
 _ROOT = "/"  # systemd timers are a flat namespace; task_path is this neutral root (no folder tree)
 _UNIT_DIR = Path("/etc/systemd/system")  # where pwshpy writes its own units (system scope, needs root)
+
+# Run-info sentinels, read on a container host with busctl; re-checked on a root Linux VM in Task 6.
+_USEC_INFINITY = 2**64 - 1  # systemd's USEC_INFINITY: "never elapses"
+_CLD_EXITED = 1  # ExecMainCode: the main process exited (status = exit code); 2/3 = killed/dumped (status = signal)
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 #: systemd timer ActiveState -> TaskState. An armed timer is READY (waiting to fire); a stopped
 #: or failed timer is DISABLED. RUNNING (the triggered job executing) is Windows-only granularity.
@@ -74,11 +82,88 @@ def service_task_state(active_state: str) -> TaskState:
     return TaskState.READY
 
 
+def usec_to_datetime(value: int) -> datetime | None:
+    """Map a systemd USec timestamp to aware UTC; 0 (never/none) and infinity -> None.
+
+    Example:
+        >>> usec_to_datetime(0) is None
+        True
+        >>> usec_to_datetime(1_000_000)
+        datetime.datetime(1970, 1, 1, 0, 0, 1, tzinfo=datetime.timezone.utc)
+    """
+    if value in (0, _USEC_INFINITY):
+        return None
+    return _EPOCH + timedelta(microseconds=value)  # exact: a float division drops the last microsecond
+
+
+def service_last_result(*, exec_code: int, exec_status: int, started_usec: int) -> int | None:
+    """The service's last result: its exit status, 128 + signal if killed, None if it never started.
+
+    Args:
+        exec_code: ``ExecMainCode`` - the CLD_* code (0 none yet, 1 exited, 2 killed, 3 dumped).
+        exec_status: ``ExecMainStatus`` - the exit status, or the signal number when killed.
+        started_usec: ``ExecMainStartTimestamp`` - 0 when the service never started.
+
+    Returns:
+        The exit status, ``128 + signal`` for a killed or dumped process (the shell's
+        convention, so a kill never reads like a clean exit with the same number), or None.
+
+    Example:
+        >>> service_last_result(exec_code=1, exec_status=0, started_usec=1), service_last_result(
+        ...     exec_code=0, exec_status=0, started_usec=0)
+        (0, None)
+    """
+    if started_usec == 0 or exec_code == 0:  # never started, or running now with no exit recorded yet
+        return None
+    return exec_status if exec_code == _CLD_EXITED else 128 + exec_status
+
+
+def _timer_property(bus: _dbus.Bus, timer: str, prop: str) -> int:
+    """One ``Timer`` USec property as an int (0 - "none" - when the timer is not loaded)."""
+    return int(_dbus.unit_property(bus, timer, prop, 0, interface=_dbus.TIMER_IFACE))
+
+
+def _service_run(bus: _dbus.Bus, service: str) -> tuple[int | None, datetime | None]:
+    """A service's last result and the start time of its last run (None, None if it never ran)."""
+
+    def read(prop: str) -> int:
+        return int(_dbus.unit_property(bus, service, prop, 0, interface=_dbus.SERVICE_IFACE))
+
+    started = read("ExecMainStartTimestamp")
+    result = service_last_result(
+        exec_code=read("ExecMainCode"), exec_status=read("ExecMainStatus"), started_usec=started
+    )
+    return result, usec_to_datetime(started)
+
+
+class _RunInfo(NamedTuple):
+    """The [120] run-info fields of a task, as they land on :class:`ScheduledTaskInfo`."""
+
+    last_run_time: datetime | None
+    last_task_result: int | None
+    next_run_time: datetime | None
+
+
+def _timer_run_info(bus: _dbus.Bus, timer: str, base: str) -> _RunInfo:
+    """The [120] fields of a timer task: last trigger, next realtime elapse, and the triggered service's result.
+
+    The service is the one the timer's ``Unit`` property names (``<base>.service`` unless the
+    timer sets ``Unit=``), so listing and controller report the same result for the same timer.
+    """
+    service = str(_dbus.unit_property(bus, timer, "Unit", f"{base}.service", interface=_dbus.TIMER_IFACE))
+    result, _started = _service_run(bus, service)
+    return _RunInfo(
+        last_run_time=usec_to_datetime(_timer_property(bus, timer, "LastTriggerUSec")),
+        last_task_result=result,
+        next_run_time=usec_to_datetime(_timer_property(bus, timer, "NextElapseUSecRealtime")),
+    )
+
+
 def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
     """Yield a :class:`ScheduledTaskInfo` per systemd ``.timer`` unit (like Get-ScheduledTask, Linux).
 
     ``folder_path`` is accepted for signature parity with the Windows source and ignored (systemd
-    timers are flat). Lazy: ``GetUnitFileState`` runs only for consumed timers.
+    timers are flat). Lazy: ``GetUnitFileState`` and the run-info reads run only for consumed timers.
 
     Example:
         >>> callable(iter_timers)
@@ -92,13 +177,18 @@ def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
             if not name.endswith(".timer"):
                 continue
             state = _dbus.unit_file_state(bus, name) or ""
+            base = name[: -len(".timer")]
+            run = _timer_run_info(bus, name, base)
             yield ScheduledTaskInfo.model_construct(
-                task_name=name[: -len(".timer")],
+                task_name=base,
                 task_path=_ROOT,
                 state=timer_to_task_state(str(unit[3])),
                 enabled=timer_enabled(state),
                 author="",
                 description=str(unit[1]),  # ListUnits field 1 is the unit Description
+                last_run_time=run.last_run_time,
+                last_task_result=run.last_task_result,
+                next_run_time=run.next_run_time,
             )
     finally:
         bus.conn.close()
@@ -219,6 +309,7 @@ class SystemdScheduledTaskController:
         if _has_timer(bus, base):
             unit = f"{base}.timer"
             state = _dbus.unit_file_state(bus, unit) or ""
+            run = _timer_run_info(bus, unit, base)
             return ScheduledTaskInfo.model_construct(
                 task_name=base,
                 task_path=_ROOT,
@@ -226,8 +317,12 @@ class SystemdScheduledTaskController:
                 enabled=timer_enabled(state),
                 author="",
                 description=str(_dbus.unit_property(bus, unit, "Description", "")),
+                last_run_time=run.last_run_time,
+                last_task_result=run.last_task_result,
+                next_run_time=run.next_run_time,
             )
         unit = f"{base}.service"
+        result, started = _service_run(bus, unit)
         return ScheduledTaskInfo.model_construct(
             task_name=base,
             task_path=_ROOT,
@@ -235,6 +330,9 @@ class SystemdScheduledTaskController:
             enabled=True,  # an on-demand oneshot has no schedule to disable; it can always be run
             author="",
             description=str(_dbus.unit_property(bus, unit, "Description", "")),
+            last_run_time=started,  # no timer: the last run is the service's own last start
+            last_task_result=result,
+            next_run_time=None,  # on demand: nothing is scheduled
         )
 
 
@@ -242,8 +340,10 @@ __all__ = [
     "SystemdScheduledTaskController",
     "base_name",
     "iter_timers",
+    "service_last_result",
     "service_task_state",
     "service_unit",
     "timer_enabled",
     "timer_to_task_state",
+    "usec_to_datetime",
 ]

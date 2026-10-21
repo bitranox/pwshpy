@@ -17,6 +17,7 @@ import pytest
 from process_tree_programs import finished, is_stopped, parent_argv, wait_for_beats
 
 from pwshpy.adapters.native.process_exec import run_process
+from pwshpy.adapters.native.process_tree import ProcessTree, _Reader  # pyright: ignore[reportPrivateUsage]
 from pwshpy.composition import build_ps
 from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
 from pwshpy.domain.records import ProcessResult
@@ -239,3 +240,40 @@ def test_wait_tree_reports_a_signal_death_like_the_default_path() -> None:
     """A program killed by a signal reports -N, exactly as subprocess (and wait_tree=False) does."""
     argv = [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"]
     assert run_process(argv, wait_tree=True).exit_code == run_process(argv).exit_code == -9
+
+
+def _platform_tree() -> ProcessTree:
+    if sys.platform == "win32":
+        from pwshpy.adapters.native.process_tree_windows import WindowsJobTree
+
+        return WindowsJobTree()
+    from pwshpy.adapters.native.process_tree_posix import PosixReaperTree
+
+    return PosixReaperTree()
+
+
+@pytest.mark.os_agnostic
+def test_an_aborted_tree_wait_kills_the_tree(tmp_path: Path) -> None:
+    """Closing the tree without a finished wait (an exception, Ctrl-C) kills it, as subprocess.run does."""
+    base = tmp_path / "abort"
+    tree = _platform_tree()
+    try:
+        tree.launch(parent_argv("background", base, 60.0), cwd=None, env=None, with_stdin=False)
+        wait_for_beats(base)
+    finally:
+        tree.close()
+    assert is_stopped(base), "the grandchild kept running after the aborted wait"
+
+
+@pytest.mark.os_agnostic
+def test_tree_output_reader_returns_what_it_has_when_the_pipe_stays_open() -> None:
+    """A pipe held open by a process outside the tree cannot block the result past the drain deadline."""
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, b"partial\r\n")
+        reader = _Reader(os.fdopen(read_fd, "rb"))
+        started = time.monotonic()
+        assert reader.text(time.monotonic() + 0.5) == "partial\n"
+        assert time.monotonic() - started < 5.0
+    finally:
+        os.close(write_fd)

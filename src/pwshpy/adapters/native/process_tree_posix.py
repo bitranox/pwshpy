@@ -139,7 +139,14 @@ class PosixReaperTree:
         return self._popen
 
     def close(self) -> None:
-        """Release the status pipe if it was not read (an aborted run)."""
+        """Kill a tree whose wait was aborted, and release the status pipe if it was not read.
+
+        A wait aborted by an exception (Ctrl-C included) must not leave the tree running:
+        ``subprocess.run`` kills its child on any exception, and the Windows job does the
+        same through ``KILL_ON_JOB_CLOSE``.
+        """
+        if self._popen is not None and self._popen.poll() is None:
+            self.kill()
         if self._status_fd >= 0:
             _close_quietly(self._status_fd)
             self._status_fd = -1

@@ -2,7 +2,7 @@
 
 A genuinely Pythonic PowerShell: typed records and a fluent, lazy pipeline over
 native Windows bindings (native), with an in-process PowerShell 7.6 SDK fallback
-(.NET) — never a ``pwsh.exe`` subprocess.
+(.NET) - never a ``pwsh.exe`` subprocess.
 
 Typical use::
 
@@ -36,6 +36,8 @@ from .domain.enums import (
     ServiceKind,
     ServiceStartType,
     ServiceState,
+    TaskLogonType,
+    TaskRunLevel,
     TaskState,
     TransportProtocol,
     WellKnownSid,
@@ -85,6 +87,14 @@ from .domain.records import (
     SystemUptime,
     WebResponse,
 )
+from .domain.scheduling import (
+    BootTrigger,
+    DailyTrigger,
+    LogonTrigger,
+    OnceTrigger,
+    TaskPrincipal,
+    TaskTrigger,
+)
 
 __all__ = [
     # Facade
@@ -120,6 +130,12 @@ __all__ = [
     "CommandInfo",
     "CommandParameter",
     "ScheduledTaskInfo",
+    "TaskPrincipal",
+    "TaskTrigger",
+    "OnceTrigger",
+    "DailyTrigger",
+    "BootTrigger",
+    "LogonTrigger",
     "LocalUser",
     "LocalGroup",
     "AclEntry",
@@ -136,6 +152,8 @@ __all__ = [
     "ServiceKind",
     "EventLevel",
     "TaskState",
+    "TaskRunLevel",
+    "TaskLogonType",
     "WellKnownSid",
     "AceType",
     # Errors

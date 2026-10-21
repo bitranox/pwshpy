@@ -72,7 +72,7 @@ class ProcessStatus(str, Enum):
     """Operating-system process states, as reported by the native binding.
 
     Values mirror ``psutil``'s ``STATUS_*`` constants (a fixed, well-known set),
-    so the strict-data rule is honored — process state is an enum, never a raw
+    so the strict-data rule is honored - process state is an enum, never a raw
     string.  Unrecognized states marshal to :attr:`UNKNOWN` rather than raising.
 
     Example:
@@ -293,6 +293,34 @@ class TaskState(str, Enum):
     RUNNING = "Running"
 
 
+class TaskRunLevel(str, Enum):
+    """Privilege a scheduled task runs with (Task Scheduler ``TASK_RUNLEVEL``).
+
+    ``HIGHEST`` is the elevated (unfiltered) token; ``LIMITED`` the filtered one.
+
+    Example:
+        >>> TaskRunLevel.HIGHEST.value
+        'Highest'
+    """
+
+    LIMITED = "Limited"
+    HIGHEST = "Highest"
+
+
+class TaskLogonType(str, Enum):
+    """How a scheduled task's principal logs on (Task Scheduler ``TASK_LOGON_TYPE``, Windows-only).
+
+    Example:
+        >>> TaskLogonType.SERVICE_ACCOUNT.value
+        'ServiceAccount'
+    """
+
+    # Named after TASK_LOGON_INTERACTIVE_TOKEN; the value is a logon-type label, not a credential.
+    INTERACTIVE_TOKEN = "InteractiveToken"  # noqa: S105  # nosec B105 - enum label, not a secret
+    SERVICE_ACCOUNT = "ServiceAccount"
+    S4U = "S4U"
+
+
 class WellKnownSid(str, Enum):
     """Stable, locale-independent SIDs for well-known Windows principals.
 
@@ -407,6 +435,8 @@ __all__ = [
     "ServiceKind",
     "ServiceStartType",
     "ServiceState",
+    "TaskLogonType",
+    "TaskRunLevel",
     "TaskState",
     "TransportProtocol",
     "WellKnownSid",

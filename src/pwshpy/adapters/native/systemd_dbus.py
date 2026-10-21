@@ -15,6 +15,10 @@ Contents:
       several properties from it (one ``GetUnit`` instead of one per property).
     * :func:`load_unit_path` - the same, but ``LoadUnit`` loads an unloaded unit from its file
       (None for a name with no unit file, which systemd answers as a ``not-found`` object).
+    * :func:`unit_files` - every unit file of one type with its UnitFileState: the units
+      ``ListUnits`` omits because nothing has loaded them (a stopped, disabled service or timer).
+    * :data:`UNLISTED_LOAD_STATES` / :data:`UNLISTED_FILE_STATES` - the states that are no unit
+      of their own, so a listing skips them.
 """
 
 from __future__ import annotations
@@ -31,6 +35,14 @@ UNIT_IFACE = "org.freedesktop.systemd1.Unit"
 TIMER_IFACE = "org.freedesktop.systemd1.Timer"  # LastTriggerUSec, NextElapseUSecRealtime, Unit
 SERVICE_IFACE = "org.freedesktop.systemd1.Service"  # ExecMainCode, ExecMainStatus, ExecMainStartTimestamp
 _PROPERTIES_IFACE = "org.freedesktop.DBus.Properties"
+
+#: ListUnits LoadStates that are no unit to list: not-found is a name some unit references with no
+#: unit file behind it; masked is made unstartable on purpose.
+UNLISTED_LOAD_STATES = frozenset({"not-found", "masked"})
+
+#: UnitFileStates of a unit file that is no unit of its own: masked is made unstartable on purpose;
+#: alias is a second name for a unit listed under its real name.
+UNLISTED_FILE_STATES = frozenset({"masked", "masked-runtime", "alias"})
 
 
 class Bus(NamedTuple):
@@ -104,6 +116,22 @@ def load_unit_path(bus: Bus, name: str) -> str | None:
     return resolved
 
 
+def unit_files(bus: Bus, suffix: str) -> list[tuple[str, str]]:
+    """Every unit file named ``*<suffix>`` as (unit name, UnitFileState), templates excluded.
+
+    ``ListUnitFilesByPatterns`` lets systemd filter (systemd >= 230); an older manager lacks it, so
+    the full ``ListUnitFiles`` is filtered here instead. A template (``name@.service``) is no unit
+    until instantiated: ``LoadUnit`` cannot load it. Raises :class:`NativeCallError` when neither
+    listing answers; a caller that lists loaded units first can fall back to those alone.
+    """
+    try:
+        (files,) = call(bus, "ListUnitFilesByPatterns", "asas", ([], [f"*{suffix}"]))
+    except NativeCallError:
+        (files,) = call(bus, "ListUnitFiles")
+    named = ((str(path).rsplit("/", 1)[-1], str(state)) for path, state in files)
+    return [(name, state) for name, state in named if name.endswith(suffix) and not name.endswith(f"@{suffix}")]
+
+
 def unit_property(bus: Bus, name: str, prop: str, default: Any, *, interface: str = UNIT_IFACE) -> Any:
     """Read one property of a loaded unit; ``default`` if the unit is not loaded or lacks it.
 
@@ -149,6 +177,8 @@ __all__ = [
     "SERVICE_IFACE",
     "TIMER_IFACE",
     "UNIT_IFACE",
+    "UNLISTED_FILE_STATES",
+    "UNLISTED_LOAD_STATES",
     "active_state",
     "call",
     "is_error",
@@ -156,6 +186,7 @@ __all__ = [
     "open_bus",
     "path_property",
     "unit_file_state",
+    "unit_files",
     "unit_path",
     "unit_property",
 ]

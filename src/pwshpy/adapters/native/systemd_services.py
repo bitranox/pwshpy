@@ -1,9 +1,9 @@
 """Native services on Linux via systemd over D-Bus (jeepney).
 
-The portable counterpart to the win32service adapter: reads the systemd unit list through
-``org.freedesktop.systemd1.Manager`` (``ListUnits`` + per-unit ``GetUnitFileState``) - the
-native interface ``systemctl`` itself uses, so no subprocess and no text scraping. Each
-``.service`` unit marshals into the same :class:`ServiceInfo`.
+The portable counterpart to the win32service adapter: reads the systemd units through
+``org.freedesktop.systemd1.Manager`` (``ListUnits``, the service unit files, ``LoadUnit`` for an
+unloaded one) - the native interface ``systemctl`` itself uses, so no subprocess and no text
+scraping. Each ``.service`` unit marshals into the same :class:`ServiceInfo`.
 
 The shared D-Bus plumbing (open the bus, call the Manager, read a Unit property) lives in
 :mod:`.systemd_dbus`; this module adds the service-specific mapping and the mutating controller.
@@ -17,6 +17,7 @@ Contents:
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Iterator
 
@@ -24,6 +25,8 @@ from ...domain.enums import ServiceStartType, ServiceState
 from ...domain.errors import NativeCallError
 from ...domain.records import ServiceInfo
 from . import systemd_dbus as _dbus
+
+logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 0.1  # seconds between ActiveState polls while a start/stop/restart settles
 
@@ -78,11 +81,44 @@ def _start_type_of(bus: _dbus.Bus, name: str) -> ServiceStartType | None:
     return None if state is None else to_start_type(state)
 
 
+def _service_at(bus: _dbus.Bus, name: str, path: str | None, *, start_type: ServiceStartType | None) -> ServiceInfo:
+    """The record for service ``name`` read from its object ``path`` (None: unreadable, fields default)."""
+    return ServiceInfo(
+        name=name,
+        display_name=str(_dbus.path_property(bus, path, "Description", "")),
+        status=to_service_state(str(_dbus.path_property(bus, path, "ActiveState", "inactive"))),
+        start_type=start_type,
+        can_stop=True,
+        can_pause_continue=False,
+    )
+
+
+def _service_files(bus: _dbus.Bus) -> list[tuple[str, str]]:
+    """Every ``.service`` unit file as (unit name, UnitFileState); [] when systemd lists none.
+
+    Fail-soft: when no unit-file listing answers, the listing keeps the loaded services rather
+    than failing.
+    """
+    try:
+        return _dbus.unit_files(bus, ".service")
+    except NativeCallError as exc:
+        logger.debug("cannot list the service unit files, listing loaded services only: %s", exc)
+        return []
+
+
 def iter_services() -> Iterator[ServiceInfo]:
     """Yield a :class:`ServiceInfo` per systemd ``.service`` unit (like Get-Service, Linux).
 
-    Lazy: ``GetUnitFileState`` is only called for the units actually consumed, so
-    ``get_service().where(...).take(5)`` costs one ``ListUnits`` plus five state lookups.
+    The loaded services come first, from ``ListUnits``, which already carries their description
+    and state. Then the service unit FILES not among them - a stopped, disabled service is
+    unloaded and ``ListUnits`` omits it, while Get-Service lists a stopped service - each read
+    through ``LoadUnit``, with its start type taken from the file listing. Skipped as no service:
+    a ListUnits entry whose LoadState is not-found or masked, and a masked file, an alias, a
+    template or a file ``LoadUnit`` reads as not-found. Lazy: ``GetUnitFileState``, the unit-file
+    listing and each ``LoadUnit`` run only for consumed services, so
+    ``get_service().where(...).take(5)`` over loaded services costs one ``ListUnits`` plus five
+    state lookups. Reading an unloaded service loads it transiently; systemd unloads it again when
+    nothing references it.
 
     Example:
         >>> callable(iter_services)
@@ -91,10 +127,15 @@ def iter_services() -> Iterator[ServiceInfo]:
     bus = _dbus.open_bus()
     try:
         (units,) = _dbus.call(bus, "ListUnits")
+        seen: set[str] = set()
         for unit in units:
             name = str(unit[0])
             if not name.endswith(".service"):
                 continue
+            seen.add(name)
+            if str(unit[2]) in _dbus.UNLISTED_LOAD_STATES:  # ListUnits field 2 is the LoadState
+                continue
+            # ListUnits fields: 1 Description, 3 ActiveState.
             yield ServiceInfo(
                 name=name,
                 display_name=str(unit[1]),
@@ -103,20 +144,26 @@ def iter_services() -> Iterator[ServiceInfo]:
                 can_stop=True,
                 can_pause_continue=False,
             )
+        for name, state in _service_files(bus):
+            if name in seen or state in _dbus.UNLISTED_FILE_STATES:
+                continue
+            seen.add(name)
+            path = _dbus.load_unit_path(bus, name)
+            if path is None:  # a stale or broken file: systemd has no unit behind the name
+                continue
+            yield _service_at(bus, name, path, start_type=to_start_type(state))
     finally:
         bus.conn.close()
 
 
 def _get_one(bus: _dbus.Bus, name: str) -> ServiceInfo:
-    """Build a :class:`ServiceInfo` for a single unit (used to report post-mutation state)."""
-    return ServiceInfo(
-        name=name,
-        display_name=str(_dbus.unit_property(bus, name, "Description", "")),
-        status=to_service_state(_dbus.active_state(bus, name)),
-        start_type=_start_type_of(bus, name),
-        can_stop=True,
-        can_pause_continue=False,
-    )
+    """Build a :class:`ServiceInfo` for a single unit (used to report post-mutation state).
+
+    Resolved with ``LoadUnit``, never ``GetUnit``: a stopped or just-disabled service is unloaded,
+    and ``GetUnit`` would read its description as ``""``. The unit is resolved once for every
+    property read from it.
+    """
+    return _service_at(bus, name, _dbus.load_unit_path(bus, name), start_type=_start_type_of(bus, name))
 
 
 class SystemdServiceController:

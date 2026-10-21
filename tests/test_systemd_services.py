@@ -1,18 +1,28 @@
 """Native services via systemd D-Bus: pure mapping (os_agnostic) + a live read (Linux).
 
-The ActiveState/UnitFileState mappings are pure functions, so they run on every OS. The
-live D-Bus read needs Linux + jeepney; it self-skips otherwise (so a CI lane without the
-[systemd] extra skips rather than errors).
+The ActiveState/UnitFileState mappings are pure functions, so they run on every OS, and so do
+the listing and read-back tests over the fake system bus (``systemd_fake_bus``). The live D-Bus
+read needs Linux + jeepney; it self-skips otherwise (so a CI lane without jeepney skips rather
+than errors).
 """
 
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
+from typing import Any
 
 import pytest
+from systemd_fake_bus import FakeConn, use_bus
 
-from pwshpy.adapters.native.systemd_services import iter_services, to_service_state, to_start_type
+from pwshpy.adapters.native import systemd_dbus, systemd_services
+from pwshpy.adapters.native.systemd_services import (
+    SystemdServiceController,
+    iter_services,
+    to_service_state,
+    to_start_type,
+)
 from pwshpy.domain.enums import ServiceStartType, ServiceState
 from pwshpy.domain.records import ServiceInfo
 
@@ -69,3 +79,191 @@ def test_live_read_yields_services() -> None:
     assert all(isinstance(s, ServiceInfo) for s in services.values())
     assert all(s.name.endswith(".service") for s in services.values())
     assert all(s.service_type is None for s in services.values())  # no Windows ServiceType on Linux
+
+
+# --- Listing and read-back over the fake system bus ---------------------------------------------
+
+_UNIT = systemd_dbus.UNIT_IFACE
+_NOTHING_FAILS: frozenset[str] = frozenset()
+
+
+def _listing_conn(*, failing: frozenset[str] = frozenset()) -> FakeConn:
+    """A box's services as systemd 259 reports them.
+
+    ListUnits: a running service, one ``not-found`` (referenced, no unit file) and one ``masked``.
+    Unit files only (unloaded): a stopped disabled service and a static vendor service under
+    /usr/lib, plus a masked one, an alias, a template and a stale file whose LoadUnit answers
+    ``not-found`` - none of those last four is a service of its own.
+    """
+    props: dict[tuple[str, str, str], Any] = {
+        ("sshd.service", _UNIT, "ActiveState"): "active",
+        ("acpid.service", _UNIT, "ActiveState"): "inactive",
+        ("acpid.service", _UNIT, "Description"): "ACPI event daemon",
+        ("vendor.service", _UNIT, "ActiveState"): "inactive",
+        ("vendor.service", _UNIT, "Description"): "Vendor daemon",
+    }
+    unit_files = frozenset(
+        {
+            "sshd.service",
+            "acpid.service",
+            "vendor.service",
+            "veiled.service",
+            "gone.service",
+            "alias.service",
+            "getty@.service",
+            "stale.service",
+            "job.timer",
+        }
+    )
+    return FakeConn(
+        [
+            ("sshd.service", "OpenSSH server", "active"),
+            ("ghost.service", "ghost.service", "inactive"),
+            ("veiled.service", "veiled.service", "inactive"),
+            ("job.timer", "A timer", "active"),
+        ],
+        props,
+        unit_files,
+        file_states={
+            "acpid.service": "disabled",
+            "vendor.service": "static",
+            "veiled.service": "masked",
+            "gone.service": "masked",
+            "alias.service": "alias",
+        },
+        failing=failing,
+        unloaded=frozenset({"acpid.service", "vendor.service"}),
+        load_states={"ghost.service": "not-found", "veiled.service": "masked", "stale.service": "not-found"},
+        file_dirs={"vendor.service": "/usr/lib/systemd/system"},
+    )
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("failing", [_NOTHING_FAILS, frozenset({"ListUnitFilesByPatterns"})])
+def test_iter_services_lists_a_stopped_disabled_service(
+    monkeypatch: pytest.MonkeyPatch, failing: frozenset[str]
+) -> None:
+    """A stopped, disabled service is unloaded, so ListUnits misses it; its unit file lists it.
+
+    Like Get-Service listing a stopped service. Each service once (no duplicate for the loaded
+    one); a not-found or masked unit, an alias, a template and a stale file are no services. The
+    second case is a systemd without ListUnitFilesByPatterns (before 230), where the full
+    ListUnitFiles is filtered instead.
+    """
+    conn = _listing_conn(failing=failing)
+    use_bus(monkeypatch, conn)
+    sshd, acpid, vendor = list(iter_services())
+    assert (sshd.name, sshd.display_name, sshd.status) == ("sshd.service", "OpenSSH server", ServiceState.RUNNING)
+    assert (acpid.name, acpid.display_name) == ("acpid.service", "ACPI event daemon")
+    assert (acpid.status, acpid.start_type) == (ServiceState.STOPPED, ServiceStartType.DISABLED)
+    # A vendor unit under /usr/lib is a real service too; static has no Windows twin and reads Manual.
+    assert (vendor.name, vendor.display_name, vendor.start_type) == (
+        "vendor.service",
+        "Vendor daemon",
+        ServiceStartType.MANUAL,
+    )
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_iter_services_skips_a_not_found_unit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ListUnits entry whose LoadState is not-found names a service with no unit file: not listed.
+
+    Get-Service lists no service that does not exist; systemd keeps such a name loaded only
+    because another unit references it, and its Description reads back as the bare name.
+    """
+    conn = FakeConn(
+        [("ghost.service", "ghost.service", "inactive"), ("real.service", "Real", "active")],
+        {("real.service", _UNIT, "ActiveState"): "active"},
+        frozenset({"real.service"}),
+        load_states={"ghost.service": "not-found"},
+    )
+    use_bus(monkeypatch, conn)
+    assert [s.name for s in iter_services()] == ["real.service"]
+
+
+@pytest.mark.os_agnostic
+def test_iter_services_reads_each_unloaded_service_with_one_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unloaded service costs one LoadUnit and no GetUnitFileState: the file listing has its state."""
+    conn = _listing_conn()
+    use_bus(monkeypatch, conn)
+    list(iter_services())
+    assert "GetUnit" not in conn.methods
+    # acpid, vendor and the stale file are read via LoadUnit; masked, alias and template files never are.
+    assert conn.methods.count("LoadUnit") == 3
+    assert conn.methods.count("GetUnitFileState") == 1  # only the loaded sshd
+
+
+@pytest.mark.os_agnostic
+def test_iter_services_still_lists_loaded_services_when_no_unit_file_listing_answers(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Fail-soft: with both unit-file listings refused, the loaded services are still listed (and it is logged)."""
+    conn = _listing_conn(failing=frozenset({"ListUnitFilesByPatterns", "ListUnitFiles"}))
+    use_bus(monkeypatch, conn)
+    with caplog.at_level(logging.DEBUG, logger=systemd_services.__name__):
+        assert [s.name for s in iter_services()] == ["sshd.service"]
+    assert any("unit files" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.os_agnostic
+def test_iter_services_lists_unit_files_only_when_the_loaded_services_are_consumed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lazy: taking the first (loaded) service costs no unit-file listing and no LoadUnit."""
+    conn = _listing_conn()
+    use_bus(monkeypatch, conn)
+    first = next(iter_services())
+    assert first.name == "sshd.service"
+    assert "ListUnitFilesByPatterns" not in conn.methods
+    assert "ListUnitFiles" not in conn.methods
+    assert "LoadUnit" not in conn.methods
+
+
+def _acpid_conn() -> FakeConn:
+    """One stopped, disabled, unloaded service, as a real host holds it after Stop-Service or a disable."""
+    props: dict[tuple[str, str, str], Any] = {
+        ("acpid.service", _UNIT, "ActiveState"): "inactive",
+        ("acpid.service", _UNIT, "Description"): "ACPI event daemon",
+    }
+    return FakeConn(
+        [],
+        props,
+        frozenset({"acpid.service"}),
+        file_states={"acpid.service": "disabled"},
+        unloaded=frozenset({"acpid.service"}),
+    )
+
+
+@pytest.mark.os_agnostic
+def test_set_startup_reads_back_an_unloaded_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disabling a stopped service leaves it unloaded; the read-back still names it (LoadUnit, not GetUnit)."""
+    conn = _acpid_conn()
+    use_bus(monkeypatch, conn)
+    info = SystemdServiceController().set_startup("acpid.service", ServiceStartType.DISABLED)
+    assert conn.verbs == ["DisableUnitFiles", "Reload"]
+    assert (info.display_name, info.status, info.start_type) == (
+        "ACPI event daemon",
+        ServiceState.STOPPED,
+        ServiceStartType.DISABLED,
+    )
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_stop_reads_back_a_service_that_unloaded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stopped service unloads; the post-stop read-back still carries its description."""
+    conn = _acpid_conn()
+    use_bus(monkeypatch, conn)
+    info = SystemdServiceController().stop("acpid.service", timeout=1.0)
+    assert conn.verbs == ["StopUnit"]
+    assert (info.name, info.display_name, info.status) == ("acpid.service", "ACPI event daemon", ServiceState.STOPPED)
+
+
+@pytest.mark.os_agnostic
+def test_read_back_of_a_not_found_name_reports_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LoadUnit answers a name with no unit file (not-found); its Description, the bare name, is not reported."""
+    conn = FakeConn([], {})
+    use_bus(monkeypatch, conn)
+    info = SystemdServiceController().stop("ghost.service", timeout=1.0)
+    assert (info.display_name, info.status, info.start_type) == ("", ServiceState.STOPPED, None)

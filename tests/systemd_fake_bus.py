@@ -1,0 +1,182 @@
+"""A fake systemd system bus for the D-Bus adapters (services and timers), modelled on systemd 259.
+
+``open_bus`` is the adapters' connect seam onto the system D-Bus, the external edge; :func:`use_bus`
+replaces it with a :class:`FakeConn` that answers the Manager calls and property reads the
+adapters send. Its fidelity is the point: loaded versus unloaded units, ``LoadUnit`` of a name
+with no unit file, and the unit-file listings behave the way busctl shows them on a real host.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+from collections.abc import Callable
+from typing import Any, ClassVar, NamedTuple
+
+import pytest
+
+from pwshpy.adapters.native import systemd_dbus
+
+
+class Address(NamedTuple):
+    path: str
+
+
+class Message(NamedTuple):
+    path: str
+    method: str
+    body: tuple[Any, ...]
+
+
+class Reply:
+    def __init__(self, body: tuple[Any, ...], *, error: bool = False) -> None:
+        self.body = body
+        self.header = type("H", (), {"message_type": type("T", (), {"name": "error" if error else "method_return"})})
+
+
+class FakeCore:
+    """The two jeepney entry points the adapter uses: DBusAddress and new_method_call."""
+
+    @staticmethod
+    def DBusAddress(path: str, *, bus_name: str, interface: str) -> Address:  # noqa: N802 - jeepney API name
+        return Address(path)
+
+    @staticmethod
+    def new_method_call(address: Address, method: str, signature: str = "", body: tuple[Any, ...] = ()) -> Message:
+        return Message(address.path, method, body)
+
+
+class FakeConn:
+    """A system bus holding units: (unit, interface, property) -> value; unknown -> D-Bus error.
+
+    ``unit_files`` are the units with a unit file (GetUnitFileState answers ``enabled`` for them
+    only, unless ``file_states`` names another state; ListUnitFiles[ByPatterns] lists them); the
+    Manager verbs a controller sends (Reload, StopUnit, ...) are recorded and succeed, except
+    those listed in ``failing`` (which also fails the unit-file listings).
+
+    A unit holding properties is LOADED unless it is in ``unloaded``: like systemd, GetUnit and
+    property reads fail for an unloaded unit until ``LoadUnit`` loads it from its file. A
+    registered-but-not-started boot timer and a disabled, stopped timer are unloaded on a real
+    host, so modelling every unit as loaded hides read-backs that only GetUnit would miss.
+
+    ``LoadUnit`` of a name the bus knows nothing about SUCCEEDS, as on systemd 259 (measured with
+    busctl): it returns an object whose ``LoadState`` is ``not-found`` and whose properties read
+    systemd's defaults (``User`` ``""``, ``ExecMainStartTimestamp`` 0, ...). ``load_states``
+    overrides a known unit's ``LoadState`` (``loaded`` by default), in ListUnits field 2 too;
+    ``file_dirs`` puts a unit file somewhere other than ``/etc/systemd/system`` (a vendor unit).
+    """
+
+    _VERBS = frozenset({"Reload", "StartUnit", "StopUnit", "EnableUnitFiles", "DisableUnitFiles"})
+
+    def __init__(
+        self,
+        units: list[tuple[str, str, str]],
+        props: dict[tuple[str, str, str], Any],
+        unit_files: frozenset[str] = frozenset(),
+        *,
+        file_states: dict[str, str] | None = None,
+        failing: frozenset[str] = frozenset(),
+        unloaded: frozenset[str] = frozenset(),
+        load_states: dict[str, str] | None = None,
+        file_dirs: dict[str, str] | None = None,
+    ) -> None:
+        self._units = units  # (name, description, active_state)
+        self._props = props
+        self._unit_files = unit_files
+        self._file_states = file_states or {}
+        self._failing = failing
+        self._unloaded = set(unloaded)  # shrinks as LoadUnit loads them
+        self._load_states = load_states or {}
+        self._file_dirs = file_dirs or {}
+        self._known = {unit for unit, _iface, _prop in props} | set(unit_files) | set(unloaded)
+        self._not_found: set[str] = set()  # names LoadUnit answered with a not-found object
+        self.verbs: list[str] = []
+        self.methods: list[str] = []  # every method sent, in order (to count round trips)
+        self.closed = False
+
+    def _loaded(self) -> set[str]:
+        return {unit for unit, _iface, _prop in self._props} - self._unloaded
+
+    def _list_units(self, msg: Message) -> Reply:
+        rows = [(n, d, self._load_states.get(n, "loaded"), a, "", "", f"/u/{n}", 0, "", "/") for n, d, a in self._units]
+        return Reply((rows,))
+
+    def _list_unit_files(self, msg: Message) -> Reply:
+        if msg.method in self._failing:  # e.g. a systemd before 230 has no ListUnitFilesByPatterns
+            return Reply(("unknown method",), error=True)
+        patterns = list(msg.body[1]) if msg.body else []
+        files = [n for n in sorted(self._unit_files) if not patterns or any(fnmatch.fnmatch(n, p) for p in patterns)]
+        rows = [
+            (f"{self._file_dirs.get(n, '/etc/systemd/system')}/{n}", self._file_states.get(n, "enabled")) for n in files
+        ]
+        return Reply((rows,))
+
+    def _get_unit(self, msg: Message) -> Reply:
+        (name,) = msg.body
+        return Reply((f"/u/{name}",)) if name in self._loaded() else Reply(("not loaded",), error=True)
+
+    def _load_unit(self, msg: Message) -> Reply:
+        (name,) = msg.body
+        self._unloaded.discard(name)  # loaded from its unit file
+        if name not in self._known:
+            self._not_found.add(name)  # systemd still answers: a "not-found" unit object
+        return Reply((f"/u/{name}",))
+
+    def _get_unit_file_state(self, msg: Message) -> Reply:
+        (name,) = msg.body
+        state = self._file_states.get(name, "enabled")
+        return Reply((state,)) if name in self._unit_files else Reply(("no unit file",), error=True)
+
+    def _verb(self, msg: Message) -> Reply:
+        self.verbs.append(msg.method)
+        return Reply(("failed",), error=True) if msg.method in self._failing else Reply(())
+
+    #: What systemd 259 reports for a not-found unit object (busctl get-property, measured).
+    _NOT_FOUND_DEFAULTS: ClassVar[dict[str, Any]] = {
+        "LoadState": "not-found",
+        "ActiveState": "inactive",
+        "User": "",
+        "ExecMainStartTimestamp": 0,
+        "ExecMainCode": 0,
+        "ExecMainStatus": 0,
+    }
+
+    def _get(self, msg: Message) -> Reply:
+        name, _iface, prop = (msg.path[len("/u/") :], *msg.body)
+        if name in self._not_found:
+            value = self._NOT_FOUND_DEFAULTS.get(prop, name if prop == "Description" else None)
+            return Reply(("no prop",), error=True) if value is None else Reply((("t", value),))
+        if name in self._unloaded:  # an unloaded unit has no readable properties
+            return Reply(("not loaded",), error=True)
+        key = (name, _iface, prop)
+        if key in self._props:
+            return Reply((("t", self._props[key]),))
+        if prop == "LoadState" and name in self._known:
+            return Reply((("t", self._load_states.get(name, "loaded")),))
+        return Reply(("no prop",), error=True)
+
+    def send_and_get_reply(self, msg: Message) -> Reply:
+        self.methods.append(msg.method)
+        handlers: dict[str, Callable[[Message], Reply]] = {
+            "ListUnits": self._list_units,
+            "ListUnitFilesByPatterns": self._list_unit_files,
+            "ListUnitFiles": self._list_unit_files,
+            "GetUnit": self._get_unit,
+            "LoadUnit": self._load_unit,
+            "GetUnitFileState": self._get_unit_file_state,
+            "Get": self._get,
+            **dict.fromkeys(self._VERBS, self._verb),
+        }
+        handler = handlers.get(msg.method)
+        return Reply(("unexpected",), error=True) if handler is None else handler(msg)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def use_bus(monkeypatch: pytest.MonkeyPatch, conn: FakeConn) -> None:
+    # open_bus is the adapter's connect seam onto the system D-Bus (the external edge).
+    bus = systemd_dbus.Bus(conn=conn, core=FakeCore(), mgr=Address("/org/freedesktop/systemd1"))
+    monkeypatch.setattr(systemd_dbus, "open_bus", lambda: bus)
+
+
+__all__ = ["Address", "FakeConn", "FakeCore", "Message", "Reply", "use_bus"]

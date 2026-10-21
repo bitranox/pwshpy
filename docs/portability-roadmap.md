@@ -98,8 +98,13 @@ box (like the Windows mutating tests need throwaway VM 24000).
   Linux, the mutating verbs on a root scratch unit (`tests/test_systemd_controller.py`: start->Running,
   stop->Stopped, enable->Automatic, disable->Disabled over real D-Bus).
 - **D-Bus:** object `/org/freedesktop/systemd1`, interface `org.freedesktop.systemd1.Manager`.
-- **Read:** `ListUnits()` -> filter to names ending `.service`; per unit `GetUnitFileState(name)`
-  for the start type. **Mutate:** `StartUnit(name,"replace")` / `StopUnit` / `RestartUnit`;
+- **Read** (`iter_services`): two passes, as for timers. First the loaded services from `ListUnits()`
+  (filter to `.service`, skipping LoadState `not-found` / `masked`), with `GetUnitFileState(name)` for
+  the start type; then the service unit files `ListUnits` did not report (`ListUnitFilesByPatterns`, or
+  `ListUnitFiles` on systemd < 230), because a stopped, disabled service is unloaded and `ListUnits`
+  omits it - Get-Service lists a stopped service. Each is read through `LoadUnit`, its start type from
+  the file listing; masked files, aliases, templates and a file `LoadUnit` reads as `not-found` are
+  skipped, vendor units under `/usr/lib` are listed. **Mutate:** `StartUnit(name,"replace")` / `StopUnit` / `RestartUnit`;
   `EnableUnitFiles([name],false,false)` / `DisableUnitFiles([name],false)`; then `Reload()`. Each verb
   polls `ActiveState` until the unit settles, then returns its `ServiceInfo`.
 - **`ActiveState` -> `ServiceState`:** active->RUNNING, inactive/failed->STOPPED,
@@ -108,8 +113,9 @@ box (like the Windows mutating tests need throwaway VM 24000).
   DISABLED, static/indirect/generated->MANUAL (documented fuzz).
 - **`ServiceInfo` gaps:** `service_type` is Windows-shaped and left `None` on Linux (Optional);
   `can_pause_continue` is `False`. **Scope:** system units (system bus); user units later.
-- **Gotcha (recorded):** a stopped unit *unloads*, so `GetUnit` then errors "not loaded" - the
-  post-stop `ServiceInfo` reads `inactive` from that. And jeepney's `Properties.Get` returns the
+- **Gotcha (recorded):** a stopped unit *unloads*, so `GetUnit` then errors "not loaded". The
+  settle poll reads `inactive` from that, while the post-mutation `ServiceInfo` resolves the unit with
+  `LoadUnit` so its description survives the unload. And jeepney's `Properties.Get` returns the
   D-Bus variant as a `(signature, value)` tuple that must be unwrapped, and names an error reply's
   message-type `error` (lowercase) - both cost a live-test round to catch.
 - **Privilege:** start/stop/enable need polkit/root (like Windows needs admin).

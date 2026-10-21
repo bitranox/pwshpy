@@ -335,33 +335,17 @@ def _timer_task(
     )
 
 
-#: UnitFileStates of a timer file that is not a task of its own: masked is "made unstartable on
-#: purpose"; alias is a second name for a timer listed under its real name.
-_NOT_A_TASK = frozenset({"masked", "masked-runtime", "alias"})
-
-#: ListUnits LoadStates that are no task: not-found is a name some unit references with no unit
-#: file behind it; masked is made unstartable on purpose.
-_NOT_A_LOADED_TASK = frozenset({"not-found", "masked"})
-
-
 def _timer_files(bus: _dbus.Bus) -> list[tuple[str, str]]:
     """Every ``.timer`` unit file as (unit name, UnitFileState); [] when systemd lists none.
 
-    ``ListUnitFilesByPatterns`` lets systemd filter (systemd >= 230); an older manager lacks it,
-    so the full ``ListUnitFiles`` is filtered here instead. Fail-soft: when neither answers the
-    listing keeps the loaded timers rather than failing.
+    Fail-soft: when no unit-file listing answers, the listing keeps the loaded timers rather than
+    failing.
     """
     try:
-        (files,) = _dbus.call(bus, "ListUnitFilesByPatterns", "asas", ([], ["*.timer"]))
-    except NativeCallError:
-        try:
-            (files,) = _dbus.call(bus, "ListUnitFiles")
-        except NativeCallError as exc:
-            logger.debug("cannot list the timer unit files, listing loaded timers only: %s", exc)
-            return []
-    named = ((str(path).rsplit("/", 1)[-1], str(state)) for path, state in files)
-    # A template (name@.timer) is no task until instantiated: LoadUnit cannot load it.
-    return [(name, state) for name, state in named if name.endswith(".timer") and not name.endswith("@.timer")]
+        return _dbus.unit_files(bus, ".timer")
+    except NativeCallError as exc:
+        logger.debug("cannot list the timer unit files, listing loaded timers only: %s", exc)
+        return []
 
 
 def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
@@ -390,14 +374,14 @@ def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
             if not name.endswith(".timer"):
                 continue
             seen.add(name)
-            if str(unit[2]) in _NOT_A_LOADED_TASK:  # ListUnits field 2 is the LoadState
+            if str(unit[2]) in _dbus.UNLISTED_LOAD_STATES:  # ListUnits field 2 is the LoadState
                 continue
             state = _dbus.unit_file_state(bus, name) or ""
             # ListUnits fields: 1 Description, 3 ActiveState, 6 the unit object path.
             listed = _Listed(active_state=str(unit[3]), description=str(unit[1]))
             yield _timer_task(bus, name, str(unit[6]), file_state=state, listed=listed)
         for name, state in _timer_files(bus):
-            if name in seen or state in _NOT_A_TASK:
+            if name in seen or state in _dbus.UNLISTED_FILE_STATES:
                 continue
             seen.add(name)
             yield _timer_task(bus, name, _dbus.load_unit_path(bus, name), file_state=state)

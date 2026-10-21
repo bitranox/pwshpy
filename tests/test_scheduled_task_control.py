@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -23,8 +23,9 @@ import pytest
 from pwshpy.adapters.native import scheduled_task_control as mod
 from pwshpy.adapters.native import task_readback
 from pwshpy.adapters.native.scheduled_task_control import NativeScheduledTaskController
-from pwshpy.domain.enums import TaskRunLevel
-from pwshpy.domain.errors import NativeCallError, PwshPyError
+from pwshpy.domain.enums import TaskLogonType, TaskRunLevel, WellKnownSid
+from pwshpy.domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError, PwshPyError
+from pwshpy.domain.scheduling import BootTrigger, DailyTrigger, LogonTrigger, OnceTrigger, TaskPrincipal
 
 
 class _FakeRegInfo:
@@ -59,6 +60,10 @@ class _FakePrincipal:
 class _FakeTrigger:
     def __init__(self, trigger_type: int) -> None:
         self.Type = trigger_type
+        self.StartBoundary = ""
+        self.DaysInterval = 1
+        self.Delay = ""
+        self.UserId = ""
 
 
 class _FakeTriggers:
@@ -109,6 +114,8 @@ class _FakeFolder:
         self.tasks: dict[str, _FakeTask] = {}
         self.deleted: list[str] = []
         self.registered: list[str] = []
+        self.last_user: Any = "<never registered>"
+        self.last_logon: int | None = None
 
     def GetTask(self, name: str) -> _FakeTask:
         return self.tasks[name]
@@ -123,6 +130,8 @@ class _FakeFolder:
         task = _FakeTask(name, definition)
         self.tasks[name] = task
         self.registered.append(name)
+        self.last_user = user
+        self.last_logon = logon
         return task
 
 
@@ -135,6 +144,20 @@ class _FakeService:
 
     def NewTask(self, flags: int) -> _FakeDefinition:
         return _FakeDefinition()
+
+
+class _FailingTriggers(_FakeTriggers):
+    def Create(self, trigger_type: int) -> _FakeTrigger:
+        raise RuntimeError("Triggers.Create failed")
+
+
+class _TriggerFailingService(_FakeService):
+    """A service whose new definitions refuse to create a trigger (a COM fault mid-build)."""
+
+    def NewTask(self, flags: int) -> _FakeDefinition:
+        definition = _FakeDefinition()
+        definition.Triggers = _FailingTriggers()
+        return definition
 
 
 def _use(monkeypatch: pytest.MonkeyPatch, svc: _FakeService) -> None:
@@ -292,6 +315,150 @@ def test_task_info_unresolvable_principal_reads_empty(monkeypatch: pytest.Monkey
     info = NativeScheduledTaskController().enable("\\MyTask")
     assert task.Enabled is True
     assert (info.user_id, info.run_level) == ("", TaskRunLevel.HIGHEST)
+
+
+_AT = datetime(2026, 10, 21, 23, 59, tzinfo=timezone(timedelta(hours=2)))
+_USER_SID = "S-1-5-21-1-2-3-1001"
+
+
+def _no_com(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make any Task Scheduler connection fail the test: a refusal must come before COM."""
+
+    def _refuse() -> Any:
+        pytest.fail("register touched COM before refusing its input")
+
+    monkeypatch.setattr(mod, "_connect_scheduler", _refuse)
+
+
+@pytest.mark.os_agnostic
+def test_register_default_principal_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No principal keeps the interactive-token registration of every release before 1.6."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    NativeScheduledTaskController().register("\\T", program="cmd.exe")
+    assert svc.folder.last_user is None
+    assert svc.folder.last_logon == 3
+
+
+@pytest.mark.os_agnostic
+def test_register_as_system_highest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TaskPrincipal.system() registers as S-1-5-18, service-account logon, highest run level."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    NativeScheduledTaskController().register("\\T", program="cmd.exe", principal=TaskPrincipal.system())
+    definition = svc.folder.tasks["T"].Definition
+    assert definition.Principal.UserId == "S-1-5-18"
+    assert definition.Principal.LogonType == 5
+    assert definition.Principal.RunLevel == 1
+    assert svc.folder.last_user == "S-1-5-18"
+    assert svc.folder.last_logon == 5
+
+
+@pytest.mark.os_agnostic
+def test_register_as_user_sid_defaults_to_s4u(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plain user SID registers with S4U (no stored password) at the limited run level."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    NativeScheduledTaskController().register("\\T", program="cmd.exe", principal=TaskPrincipal(user_id=_USER_SID))
+    principal = svc.folder.tasks["T"].Definition.Principal
+    assert (principal.UserId, principal.LogonType, principal.RunLevel) == (_USER_SID, 2, 0)
+    assert (svc.folder.last_user, svc.folder.last_logon) == (_USER_SID, 2)
+
+
+@pytest.mark.os_agnostic
+def test_register_user_sid_with_explicit_interactive_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit interactive token for a user SID is a valid shape (runs only while that user is logged on)."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    principal = TaskPrincipal(user_id=_USER_SID, logon_type=TaskLogonType.INTERACTIVE_TOKEN)
+    NativeScheduledTaskController().register("\\T", program="cmd.exe", principal=principal)
+    assert (svc.folder.last_user, svc.folder.last_logon) == (_USER_SID, 3)
+
+
+@pytest.mark.os_agnostic
+def test_register_builds_each_trigger_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each trigger kind maps to its TASK_TRIGGER_TYPE2 and the fields Task Scheduler reads."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    triggers = [
+        OnceTrigger(at=_AT),
+        DailyTrigger(at=_AT, every_days=3),
+        BootTrigger(delay=timedelta(seconds=90)),
+        LogonTrigger(user_id=_USER_SID),
+    ]
+    NativeScheduledTaskController().register("\\T", program="cmd.exe", triggers=triggers)
+    once, daily, boot, logon = svc.folder.tasks["T"].Definition.Triggers.items
+    assert (once.Type, once.StartBoundary) == (1, "2026-10-21T23:59:00+02:00")
+    assert (daily.Type, daily.StartBoundary, daily.DaysInterval) == (2, "2026-10-21T23:59:00+02:00", 3)
+    assert (boot.Type, boot.Delay) == (8, "PT90S")
+    assert (logon.Type, logon.UserId) == (9, _USER_SID)
+
+
+@pytest.mark.os_agnostic
+def test_register_boot_without_delay_and_logon_for_any_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A zero boot delay and an any-user logon trigger leave the COM defaults untouched."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    NativeScheduledTaskController().register("\\T", program="cmd.exe", triggers=[BootTrigger(), LogonTrigger()])
+    boot, logon = svc.folder.tasks["T"].Definition.Triggers.items
+    assert (boot.Type, boot.Delay) == (8, "")
+    assert (logon.Type, logon.UserId) == (9, "")
+
+
+@pytest.mark.os_agnostic
+def test_register_without_triggers_creates_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No triggers keeps the run-on-demand task of every release before 1.6."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    NativeScheduledTaskController().register("\\T", program="cmd.exe")
+    assert svc.folder.tasks["T"].Definition.Triggers.items == []
+
+
+@pytest.mark.os_agnostic
+def test_register_refuses_a_uid_principal_before_com(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A numeric uid is POSIX-only: Windows refuses it rather than registering a nonsense principal."""
+    _no_com(monkeypatch)
+    with pytest.raises(PlatformUnsupportedError, match="uid"):
+        NativeScheduledTaskController().register("\\T", program="cmd.exe", principal=TaskPrincipal(user_id="1000"))
+
+
+@pytest.mark.os_agnostic
+def test_register_refuses_a_uid_logon_trigger_before_com(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A logon trigger naming a numeric uid is refused like a uid principal."""
+    _no_com(monkeypatch)
+    with pytest.raises(PlatformUnsupportedError, match="uid"):
+        NativeScheduledTaskController().register("\\T", program="cmd.exe", triggers=[LogonTrigger(user_id="1000")])
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("user_id", "logon_type"),
+    [
+        pytest.param(_USER_SID, TaskLogonType.SERVICE_ACCOUNT, id="service-logon-for-a-user-sid"),
+        pytest.param(None, TaskLogonType.SERVICE_ACCOUNT, id="service-logon-for-the-caller"),
+        pytest.param(WellKnownSid.LOCAL_SYSTEM.value, TaskLogonType.INTERACTIVE_TOKEN, id="interactive-system"),
+        pytest.param(WellKnownSid.LOCAL_SERVICE.value, TaskLogonType.S4U, id="s4u-local-service"),
+        pytest.param(WellKnownSid.NETWORK_SERVICE.value, TaskLogonType.INTERACTIVE_TOKEN, id="interactive-netsvc"),
+    ],
+)
+def test_register_refuses_a_logon_type_the_principal_cannot_use(
+    monkeypatch: pytest.MonkeyPatch, user_id: str | None, logon_type: TaskLogonType
+) -> None:
+    """A service SID logs on only as a service account, and only a service SID can: refused before COM."""
+    _no_com(monkeypatch)
+    principal = TaskPrincipal(user_id=user_id, logon_type=logon_type)
+    with pytest.raises(ConfigurationError, match=logon_type.value):
+        NativeScheduledTaskController().register("\\T", program="cmd.exe", principal=principal)
+
+
+@pytest.mark.os_agnostic
+def test_register_wraps_a_com_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A COM failure while building the definition surfaces as NativeCallError."""
+    svc = _TriggerFailingService()
+    _use(monkeypatch, svc)
+    with pytest.raises(NativeCallError, match=r"Triggers\.Create failed"):
+        NativeScheduledTaskController().register("\\T", program="cmd.exe", triggers=[BootTrigger()])
+    assert svc.folder.registered == []
 
 
 # --- Real integration: run only on the disposable throwaway VM ---------------

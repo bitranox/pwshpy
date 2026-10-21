@@ -406,38 +406,50 @@ def to_task_run_level(value: int) -> TaskRunLevel:
     return TaskRunLevel.HIGHEST if value == 1 else TaskRunLevel.LIMITED
 
 
-# Task Scheduler "no value" sentinels, kept together so the on-VM check (Task 6) corrects them
-# in one place. UNVERIFIED on a real Windows host: the VT_DATE zero (1899-12-30) for a task
-# that never ran / has no next run, and SCHED_S_TASK_HAS_NOT_RUN for its LastTaskResult.
+# Task Scheduler "no value" sentinels, kept together in one place. Measured on a real Task
+# Scheduler (Windows 11 25H2, 2026-10-21): a task that never ran reads LastRunTime 1999-11-30
+# 00:00 (Get-ScheduledTaskInfo prints the same date, so it is the service's own sentinel, not a
+# pywin32 artefact) and LastTaskResult SCHED_S_TASK_HAS_NOT_RUN; a task with no next run reads
+# NextRunTime as the VT_DATE zero 1899-12-30; a task that is running reads LastTaskResult
+# SCHED_S_TASK_RUNNING until it finishes.
 _COM_DATE_NEVER_BEFORE_YEAR = 1900  # any COM date before this is the VT_DATE zero (1899-12-30)
+_TASK_NEVER_RAN = datetime(1999, 11, 30)  # LastRunTime of a task that never ran
 _TASK_HAS_NOT_RUN = 0x41303  # SCHED_S_TASK_HAS_NOT_RUN: LastTaskResult of a task that never ran
+_TASK_RUNNING = 0x41301  # SCHED_S_TASK_RUNNING: LastTaskResult while the task runs (no result yet)
+_TASK_NO_RESULT = frozenset({_TASK_HAS_NOT_RUN, _TASK_RUNNING})
 
 
 def com_date_to_datetime(value: datetime | None) -> datetime | None:
-    """Map a Task Scheduler COM date to aware UTC; the VT_DATE zero (1899-12-30, "never") -> None.
+    """Map a Task Scheduler COM date (local wall time) to aware UTC; the "never" sentinels -> None.
 
     Example:
-        >>> com_date_to_datetime(datetime(1899, 12, 30)) is None
+        >>> com_date_to_datetime(datetime(1899, 12, 30)) is None, com_date_to_datetime(datetime(1999, 11, 30)) is None
+        (True, True)
+        >>> labelled = com_date_to_datetime(datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc))
+        >>> labelled == datetime(2026, 10, 21, 12, 0).astimezone(timezone.utc)
         True
-        >>> com_date_to_datetime(datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc))
-        datetime.datetime(2026, 10, 21, 12, 0, tzinfo=datetime.timezone.utc)
     """
-    if value is None or value.year < _COM_DATE_NEVER_BEFORE_YEAR:
+    if value is None:
         return None
-    # astimezone treats a naive value as local wall time, which is what a COM DATE is;
-    # an aware value is converted as labelled (whether pywin32 labels it right is checked in Task 6).
-    return value.astimezone(timezone.utc)
+    # A VT_DATE has no zone and holds local wall time, yet pywin32 hands it back labelled with a
+    # UTC-like TimeZoneInfo('GMT Standard Time'). Honouring that label put every run time off by
+    # the host's UTC offset (measured: 18:53 "UTC" for a run at 16:53 UTC on a CEST host), so the
+    # label is dropped and the wall time read as local.
+    wall = datetime(value.year, value.month, value.day, value.hour, value.minute, value.second, value.microsecond)
+    if wall.year < _COM_DATE_NEVER_BEFORE_YEAR or wall == _TASK_NEVER_RAN:
+        return None
+    return wall.astimezone(timezone.utc)
 
 
 def to_task_result(value: int) -> int | None:
-    """Map ``LastTaskResult`` to an unsigned 32-bit code; has-not-run (0x41303) -> None.
+    """Map ``LastTaskResult`` to an unsigned 32-bit code; has-not-run / still-running -> None.
 
     Example:
-        >>> to_task_result(0), to_task_result(0x41303)
-        (0, None)
+        >>> to_task_result(0), to_task_result(0x41303), to_task_result(0x41301)
+        (0, None, None)
     """
     code = value & 0xFFFFFFFF  # pywin32 can hand an HRESULT back signed; Get-ScheduledTaskInfo prints it unsigned
-    return None if code == _TASK_HAS_NOT_RUN else code
+    return None if code in _TASK_NO_RESULT else code
 
 
 # Win32 ACCESS_DENIED_* ACE type ids (all other DACL ACE types grant access).

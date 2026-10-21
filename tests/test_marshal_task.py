@@ -37,22 +37,37 @@ def test_to_task_run_level(value: int, expected: TaskRunLevel) -> None:
     assert to_task_run_level(value) is expected
 
 
+# What a real Task Scheduler hands back through pywin32 (measured on Windows 11 25H2, VM 24000,
+# 2026-10-21, host zone CEST): a VT_DATE carries LOCAL wall time, and pywin32 labels it with a
+# UTC-like TimeZoneInfo('GMT Standard Time'), so the label must be ignored. A never-run task reads
+# LastRunTime 1999-11-30 00:00 (Get-ScheduledTaskInfo shows the same date); "no next run" is the
+# VT_DATE zero 1899-12-30.
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(
-    ("value", "expected"),
+    "value",
     [
-        (None, None),
-        (datetime(1899, 12, 30), None),  # VT_DATE zero: never
-        (datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc), datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)),
-        (
-            datetime(2026, 10, 21, 14, 0, tzinfo=timezone(timedelta(hours=2))),
-            datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc),
-        ),
+        None,
+        datetime(1899, 12, 30),  # NextRunTime: no next run (VT_DATE zero)
+        datetime(1899, 12, 30, tzinfo=timezone.utc),  # the same, as pywin32 labels it
+        datetime(1999, 11, 30),  # LastRunTime of a task that never ran
+        datetime(1999, 11, 30, tzinfo=timezone.utc),  # the same, as pywin32 labels it
     ],
 )
-def test_com_date_to_datetime(value: datetime | None, expected: datetime | None) -> None:
-    """A COM date maps to aware UTC; the VT_DATE zero maps to None."""
-    assert com_date_to_datetime(value) == expected
+def test_com_date_never_sentinels_read_none(value: datetime | None) -> None:
+    """The measured "never" dates map to None, whatever tzinfo pywin32 attached."""
+    assert com_date_to_datetime(value) is None
+
+
+@pytest.mark.os_agnostic
+def test_com_date_is_local_wall_time_whatever_the_label() -> None:
+    """The tzinfo pywin32 attaches is discarded: the wall time is read as local time.
+
+    Two different labels on the same wall time must give the same instant; with the label
+    honoured they would differ by two hours on every host.
+    """
+    as_utc = com_date_to_datetime(datetime(2026, 10, 21, 18, 53, 12, tzinfo=timezone.utc))
+    as_plus2 = com_date_to_datetime(datetime(2026, 10, 21, 18, 53, 12, tzinfo=timezone(timedelta(hours=2))))
+    assert as_utc == as_plus2 == datetime(2026, 10, 21, 18, 53, 12).astimezone(timezone.utc)
 
 
 @pytest.mark.os_agnostic
@@ -66,8 +81,13 @@ def test_com_date_to_datetime_labels_the_result_utc() -> None:
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [(0, 0), (1, 1), (0x41303, None), (-2147216609, 0x8004131F)],  # last: a negative HRESULT read unsigned
+    # last: a negative HRESULT read unsigned
+    [(0, 0), (1, 1), (0x41303, None), (0x41301, None), (-2147216609, 0x8004131F)],
 )
 def test_to_task_result(value: int, expected: int | None) -> None:
-    """LastTaskResult: has-not-run -> None, an HRESULT -> its unsigned 32-bit value, 0 stays 0."""
+    """LastTaskResult: has-not-run and still-running -> None, an HRESULT -> its unsigned value, 0 stays 0.
+
+    0x41301 (SCHED_S_TASK_RUNNING) is what a real Task Scheduler reports while the task runs
+    (measured on VM 24000): no result exists yet, so it is not a result code.
+    """
     assert to_task_result(value) == expected

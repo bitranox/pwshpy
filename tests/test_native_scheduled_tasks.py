@@ -47,9 +47,9 @@ class _FakeTask:
         self.State = state
         self.Enabled = enabled
         self.Definition = _FakeDef(_FakeReg(author, description))
-        self.LastRunTime = datetime(1899, 12, 30)  # VT_DATE zero: Task Scheduler's "never ran" (UNVERIFIED, Task 6)
+        self.LastRunTime = datetime(1999, 11, 30, tzinfo=timezone.utc)  # never ran (measured; pywin32's UTC label)
         self.LastTaskResult = 0x41303  # SCHED_S_TASK_HAS_NOT_RUN
-        self.NextRunTime = datetime(1899, 12, 30)  # no next run
+        self.NextRunTime = datetime(1899, 12, 30, tzinfo=timezone.utc)  # no next run: the VT_DATE zero
 
 
 class _FakeCollection:
@@ -196,7 +196,7 @@ def test_listing_reads_principal_run_level_and_run_info(monkeypatch: pytest.Monk
     """The listing carries the principal SID, run level and [120] run info, like the controller."""
     ran = _FakeTask("Ran", 3, True)
     ran.Definition = _FakeDef(_FakeReg("", ""), _FakePrincipal("S-1-5-18", 1))
-    ran.LastRunTime = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
+    ran.LastRunTime = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)  # local wall time, pywin32's UTC label
     ran.LastTaskResult = -2147216609  # a negative HRESULT as pywin32 can return it
     ran.NextRunTime = datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
     never = _FakeTask("Never", 3, True)
@@ -205,9 +205,9 @@ def test_listing_reads_principal_run_level_and_run_info(monkeypatch: pytest.Monk
     monkeypatch.setattr(task_readback, "sid_string", _sid_as_given)  # external edge: LookupAccountName
     first, second = list(iter_scheduled_tasks())
     assert (first.user_id, first.run_level) == ("S-1-5-18", TaskRunLevel.HIGHEST)
-    assert first.last_run_time == datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
+    assert first.last_run_time == datetime(2026, 10, 21, 12, 0).astimezone(timezone.utc)  # read as local
     assert first.last_task_result == 0x8004131F  # read unsigned, like Get-ScheduledTaskInfo
-    assert first.next_run_time == datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
+    assert first.next_run_time == datetime(2026, 10, 22, 3, 0).astimezone(timezone.utc)
     assert (second.user_id, second.run_level) == ("", TaskRunLevel.LIMITED)
     assert (second.last_run_time, second.last_task_result, second.next_run_time) == (None, None, None)
 

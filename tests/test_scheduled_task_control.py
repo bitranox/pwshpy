@@ -14,7 +14,10 @@ full lifecycle, and unregisters it - throwaway VM only.
 from __future__ import annotations
 
 import contextlib
+import json
+import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
@@ -23,7 +26,7 @@ import pytest
 from pwshpy.adapters.native import scheduled_task_control as mod
 from pwshpy.adapters.native import task_readback
 from pwshpy.adapters.native.scheduled_task_control import NativeScheduledTaskController
-from pwshpy.domain.enums import TaskLogonType, TaskRunLevel, WellKnownSid
+from pwshpy.domain.enums import TaskLogonType, TaskRunLevel, TaskState, WellKnownSid
 from pwshpy.domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError, PwshPyError
 from pwshpy.domain.scheduling import BootTrigger, DailyTrigger, LogonTrigger, OnceTrigger, TaskPrincipal
 
@@ -98,9 +101,9 @@ class _FakeTask:
         self.State = 3
         self.Definition = definition or _FakeDefinition()
         self.actions: list[str] = []
-        self.LastRunTime = datetime(1899, 12, 30)  # VT_DATE zero: Task Scheduler's "never ran" (UNVERIFIED, Task 6)
+        self.LastRunTime = datetime(1999, 11, 30, tzinfo=timezone.utc)  # never ran (measured; pywin32's UTC label)
         self.LastTaskResult = 0x41303  # SCHED_S_TASK_HAS_NOT_RUN
-        self.NextRunTime = datetime(1899, 12, 30)  # no next run
+        self.NextRunTime = datetime(1899, 12, 30, tzinfo=timezone.utc)  # no next run: the VT_DATE zero
 
     def Run(self, params: Any) -> None:
         self.actions.append("run")
@@ -275,21 +278,21 @@ def test_task_info_reads_run_info(monkeypatch: pytest.MonkeyPatch) -> None:
     """[120]: last run, last result and next run read back from the IRegisteredTask as aware UTC / int."""
     svc = _FakeService()
     task = _FakeTask("MyTask")
-    task.LastRunTime = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
+    task.LastRunTime = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)  # local wall time, pywin32's UTC label
     task.LastTaskResult = 0
     task.NextRunTime = datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
     svc.folder.tasks["MyTask"] = task
     _use(monkeypatch, svc)
     monkeypatch.setattr(task_readback, "sid_string", _sid_as_given)  # external edge: LookupAccountName
     info = NativeScheduledTaskController().enable("\\MyTask")
-    assert info.last_run_time == datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
+    assert info.last_run_time == datetime(2026, 10, 21, 12, 0).astimezone(timezone.utc)  # read as local
     assert info.last_task_result == 0  # 0 is a real result ("ran, succeeded"), never folded into None
-    assert info.next_run_time == datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
+    assert info.next_run_time == datetime(2026, 10, 22, 3, 0).astimezone(timezone.utc)
 
 
 @pytest.mark.os_agnostic
 def test_task_info_never_run_reads_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """[120]: the never-run sentinels (1899-12-30, 0x41303) read back as None, not as a date or a code."""
+    """[120]: the never-run sentinels (1999-11-30, 0x41303, 1899-12-30) read back as None, not as a date or a code."""
     svc = _FakeService()
     svc.folder.tasks["MyTask"] = _FakeTask("MyTask")
     _use(monkeypatch, svc)
@@ -567,3 +570,113 @@ def test_scheduled_task_lifecycle() -> None:
         with contextlib.suppress(PwshPyError):
             ps.unregister_scheduled_task(_TASK)
     assert ps.get_scheduled_task().where(lambda t: t.task_name == "pwshpy_test_task").first() is None
+
+
+def _pwsh_json(script: str) -> Any:
+    """Run ``script`` in pwsh and parse its JSON output (the oracle module skips itself off Windows)."""
+    pwsh = r"C:\Program Files\PowerShell\7\pwsh.exe"
+    completed = subprocess.run(  # noqa: S603 - fixed pwsh argv with a constant script; test oracle only
+        [pwsh, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+
+@pytest.mark.local_only
+@pytest.mark.mutating
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only scheduled-task mutation; skip off Windows")
+def test_register_as_system_with_every_trigger_kind() -> None:
+    """The item's acceptance test: SYSTEM/HIGHEST reads back by SID, and all four trigger kinds register."""
+    from pwshpy.composition import build_ps
+
+    ps = build_ps()
+    at = datetime.now(timezone.utc) + timedelta(days=1)
+    with contextlib.suppress(PwshPyError):
+        ps.unregister_scheduled_task(_TASK)
+    try:
+        info = ps.register_scheduled_task(
+            _TASK,
+            program="cmd.exe",
+            arguments="/c exit",
+            principal=TaskPrincipal.system(),
+            triggers=[OnceTrigger(at=at), DailyTrigger(at=at), BootTrigger(delay=timedelta(minutes=5)), LogonTrigger()],
+        )
+        assert info.user_id == WellKnownSid.LOCAL_SYSTEM.value
+        assert info.run_level is TaskRunLevel.HIGHEST
+        # The CIM class names are locale-independent, unlike any display text pwsh prints.
+        kinds = _pwsh_json(
+            "ConvertTo-Json -Compress -InputObject @((Get-ScheduledTask -TaskName pwshpy_test_task).Triggers"
+            " | ForEach-Object { $_.CimClass.CimClassName })"
+        )
+        assert sorted(kinds) == sorted(
+            ["MSFT_TaskTimeTrigger", "MSFT_TaskDailyTrigger", "MSFT_TaskBootTrigger", "MSFT_TaskLogonTrigger"]
+        )
+        ps.start_scheduled_task(_TASK)  # on-demand start still works with triggers present
+    finally:
+        with contextlib.suppress(PwshPyError):
+            ps.unregister_scheduled_task(_TASK)
+
+
+_RAN = "pwshpy_test_ran"
+_NEVER = "pwshpy_test_never"
+
+
+def _pwsh_task_info(name: str) -> Any:
+    """Get-ScheduledTaskInfo as JSON: LastRunTime in UTC (invariant format), LastTaskResult as a number."""
+    return _pwsh_json(
+        f"$i = Get-ScheduledTaskInfo -TaskName {name}; [pscustomobject]@{{"
+        " LastRunUtc = $i.LastRunTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss',"
+        " [cultureinfo]::InvariantCulture); LastTaskResult = [int64]$i.LastTaskResult } | ConvertTo-Json -Compress"
+    )
+
+
+@pytest.mark.local_only
+@pytest.mark.mutating
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only scheduled-task mutation; skip off Windows")
+def test_run_info_for_a_just_run_and_a_never_run_task() -> None:
+    """[120] on a real Task Scheduler: a finished run reads its UTC time and result; a never-run task reads None.
+
+    The pwsh cross-check catches a run time off by the host's UTC offset (pywin32 labels a
+    local VT_DATE as UTC), and shows the never-run values are the service's own sentinels.
+    """
+    from pwshpy.composition import build_ps
+
+    ps = build_ps()
+    for name in (_RAN, _NEVER):
+        with contextlib.suppress(PwshPyError):
+            ps.unregister_scheduled_task("\\" + name)
+    try:
+        ps.register_scheduled_task("\\" + _RAN, program="cmd.exe", arguments="/c exit 0")
+        ps.register_scheduled_task("\\" + _NEVER, program="cmd.exe", arguments="/c exit 0")
+        ps.start_scheduled_task("\\" + _RAN)
+        deadline = time.monotonic() + 60
+        ran = ps.get_scheduled_task().first(lambda t: t.task_name == _RAN)
+        while ran is not None and ran.state is TaskState.RUNNING and time.monotonic() < deadline:
+            time.sleep(1)
+            ran = ps.get_scheduled_task().first(lambda t: t.task_name == _RAN)
+        never = ps.get_scheduled_task().first(lambda t: t.task_name == _NEVER)
+        assert ran is not None
+        assert never is not None
+        assert ran.state is not TaskState.RUNNING
+        assert ran.last_task_result == 0
+        assert ran.last_run_time is not None
+        assert ran.last_run_time.tzinfo is timezone.utc
+        assert timedelta(0) <= datetime.now(timezone.utc) - ran.last_run_time < timedelta(minutes=5)
+        oracle = _pwsh_task_info(_RAN)
+        oracle_utc = datetime.fromisoformat(oracle["LastRunUtc"] + "+00:00")
+        assert abs(ran.last_run_time - oracle_utc) <= timedelta(seconds=2)
+        assert oracle["LastTaskResult"] == ran.last_task_result
+        assert (never.last_run_time, never.last_task_result, never.next_run_time) == (None, None, None)
+        never_oracle = _pwsh_task_info(_NEVER)
+        assert never_oracle["LastTaskResult"] == 0x41303  # SCHED_S_TASK_HAS_NOT_RUN, read as None above
+        assert never_oracle["LastRunUtc"].startswith("1999-11-")  # 1999-11-30 local: the never-ran date
+    finally:
+        for name in (_RAN, _NEVER):
+            with contextlib.suppress(PwshPyError):
+                ps.unregister_scheduled_task("\\" + name)

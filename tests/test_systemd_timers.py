@@ -25,13 +25,15 @@ from pwshpy.adapters.native.systemd_timers import (
     service_task_state,
     service_unit,
     service_user_id,
+    starts_when_armed,
     timer_enabled,
+    timer_task_state,
     timer_to_task_state,
     timer_unit,
     usec_to_datetime,
 )
 from pwshpy.domain.enums import TaskLogonType, TaskRunLevel, TaskState
-from pwshpy.domain.errors import PlatformUnsupportedError
+from pwshpy.domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError
 from pwshpy.domain.records import ScheduledTaskInfo
 from pwshpy.domain.scheduling import (
     BootTrigger,
@@ -70,6 +72,38 @@ def test_timer_state_maps(active_state: str, state: TaskState) -> None:
 def test_timer_enabled_maps(unit_file_state: str, enabled: bool) -> None:
     """timer_enabled is True only for the enabled UnitFileStates."""
     assert timer_enabled(unit_file_state) is enabled
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("active_state", "enabled", "state"),
+    [
+        ("inactive", True, TaskState.READY),  # enabled but not started: armed for the next boot
+        ("inactive", False, TaskState.DISABLED),
+        ("active", True, TaskState.READY),
+        ("failed", True, TaskState.DISABLED),  # every other mapping is timer_to_task_state's
+        ("deactivating", True, TaskState.DISABLED),
+        ("activating", False, TaskState.QUEUED),
+    ],
+)
+def test_timer_task_state(active_state: str, enabled: bool, state: TaskState) -> None:
+    """An enabled, inactive timer is Ready (it arms at the next boot); the rest maps by ActiveState."""
+    assert timer_task_state(active_state, enabled=enabled) is state
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("bases", "starts"),
+    [
+        ([], True),
+        (["OnUnitActiveUSec", "OnActiveUSec"], True),  # relative to the timer/service, not to boot
+        (["OnBootUSec"], False),
+        (["OnUnitActiveUSec", "OnStartupUSec"], False),
+    ],
+)
+def test_starts_when_armed(bases: list[str], starts: bool) -> None:
+    """A timer with a boot-relative monotonic timer must not be started: it would elapse at once."""
+    assert starts_when_armed(bases) is starts
 
 
 @pytest.mark.os_agnostic
@@ -142,6 +176,43 @@ def test_timer_unit_renders_each_supported_trigger_in_utc() -> None:
     assert "OnBootSec=90s\n" in text
     assert "Unit=job.service\n" in text
     assert "WantedBy=timers.target\n" in text
+
+
+@pytest.mark.os_agnostic
+def test_timer_unit_fires_on_time() -> None:
+    """AccuracySec=1s: systemd's default 1 min window would let a calendar trigger fire late."""
+    assert "\nAccuracySec=1s\n" in timer_unit("job", "d", [OnceTrigger(at=_AT)])
+
+
+@pytest.mark.os_agnostic
+def test_unit_text_escapes_percent_specifiers() -> None:
+    """A literal % reaches the program and the description, never a systemd specifier."""
+    service = service_unit("/usr/bin/date", "+%Y-%m-%d", "100% done")
+    assert "ExecStart=/usr/bin/date +%%Y-%%m-%%d\n" in service
+    assert "Description=100%% done\n" in service
+    assert "Description=50%% off\n" in timer_unit("job", "50% off", [OnceTrigger(at=_AT)])
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("program", "arguments", "description"),
+    [
+        ("/bin/true", "x\nExecStartPre=/bin/evil", ""),
+        ("/bin/true\nUser=0", "", ""),
+        ("/bin/true", "", "d\n[Service]\nUser=0"),
+        ("/bin/true", "x\ry", ""),
+    ],
+)
+def test_service_unit_refuses_a_line_break(program: str, arguments: str, description: str) -> None:
+    """A line break would inject unit-file directives, so it is refused, not escaped."""
+    with pytest.raises(ConfigurationError):
+        service_unit(program, arguments, description)
+
+
+@pytest.mark.os_agnostic
+def test_timer_unit_refuses_a_line_break_in_the_description() -> None:
+    with pytest.raises(ConfigurationError):
+        timer_unit("job", "d\nOnBootSec=0", [OnceTrigger(at=_AT)])
 
 
 @pytest.mark.os_agnostic
@@ -312,8 +383,10 @@ class _FakeCore:
 class _FakeConn:
     """A system bus holding loaded units: (unit, interface, property) -> value; unknown -> D-Bus error.
 
-    ``unit_files`` are the units with a unit file (GetUnitFileState answers for them only); the
-    Manager verbs a controller sends (Reload, StopUnit, ...) are recorded and succeed.
+    ``unit_files`` are the units with a unit file (GetUnitFileState answers ``enabled`` for them
+    only, unless ``file_states`` names another state); the Manager verbs a controller sends
+    (Reload, StopUnit, ...) are recorded and succeed, except those listed in ``failing``.
+    ``LoadUnit`` answers for a loaded unit or one with a unit file, like systemd loading it.
     """
 
     _VERBS = frozenset({"Reload", "StartUnit", "StopUnit", "EnableUnitFiles", "DisableUnitFiles"})
@@ -323,10 +396,15 @@ class _FakeConn:
         units: list[tuple[str, str, str]],
         props: dict[tuple[str, str, str], Any],
         unit_files: frozenset[str] = frozenset(),
+        *,
+        file_states: dict[str, str] | None = None,
+        failing: frozenset[str] = frozenset(),
     ) -> None:
         self._units = units  # (name, description, active_state)
         self._props = props
         self._unit_files = unit_files
+        self._file_states = file_states or {}
+        self._failing = failing
         self.verbs: list[str] = []
         self.methods: list[str] = []  # every method sent, in order (to count round trips)
         self.closed = False
@@ -336,15 +414,18 @@ class _FakeConn:
         loaded = {unit for unit, _iface, _prop in self._props}
         if msg.method == "ListUnits":
             return _Reply(([(n, d, "loaded", a, "", "", f"/u/{n}", 0, "", "/") for n, d, a in self._units],))
-        if msg.method == "GetUnit":
+        if msg.method in ("GetUnit", "LoadUnit"):
             (name,) = msg.body
-            return _Reply((f"/u/{name}",)) if name in loaded else _Reply(("not loaded",), error=True)
+            # GetUnit answers only for a loaded unit; LoadUnit also loads one from its unit file.
+            known = name in loaded or (msg.method == "LoadUnit" and name in self._unit_files)
+            return _Reply((f"/u/{name}",)) if known else _Reply(("not loaded",), error=True)
         if msg.method == "GetUnitFileState":
             (name,) = msg.body
-            return _Reply(("enabled",)) if name in self._unit_files else _Reply(("no unit file",), error=True)
+            state = self._file_states.get(name, "enabled")
+            return _Reply((state,)) if name in self._unit_files else _Reply(("no unit file",), error=True)
         if msg.method in self._VERBS:
             self.verbs.append(msg.method)
-            return _Reply(())
+            return _Reply(("failed",), error=True) if msg.method in self._failing else _Reply(())
         if msg.method == "Get":
             key = (msg.path[len("/u/") :], *msg.body)
             return _Reply((("t", self._props[key]),)) if key in self._props else _Reply(("no prop",), error=True)
@@ -473,7 +554,8 @@ def test_register_with_a_boot_trigger_enables_but_does_not_start(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A boot timer is only enabled: starting it now would fire an already-elapsed OnBootSec= at once."""
-    conn = _FakeConn([], _job_props("boot", user=""), frozenset({"boot.timer"}))
+    props = {**_job_props("boot", user=""), ("boot.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "inactive"}
+    conn = _FakeConn([], props, frozenset({"boot.timer"}))
     _use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
     info = SystemdScheduledTaskController().register(
@@ -483,6 +565,7 @@ def test_register_with_a_boot_trigger_enables_but_does_not_start(
     assert "User=" not in (tmp_path / "boot.service").read_text(encoding="utf-8")
     assert conn.verbs == ["Reload", "EnableUnitFiles"]
     assert info.user_id == "0"
+    assert (info.state, info.enabled) == (TaskState.READY, True)  # armed for the next boot, not "Disabled"
 
 
 @pytest.mark.os_agnostic
@@ -504,6 +587,19 @@ def test_register_refuses_before_writing_or_connecting(
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
     with pytest.raises(PlatformUnsupportedError):
         SystemdScheduledTaskController().register("job", program="/bin/true", principal=principal, triggers=triggers)
+    assert list(tmp_path.iterdir()) == []
+    assert conn.methods == []
+
+
+@pytest.mark.os_agnostic
+def test_register_refuses_a_line_break_before_writing_or_connecting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    conn = _FakeConn([], {})
+    _use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(ConfigurationError):
+        SystemdScheduledTaskController().register("job", program="/bin/true", description="a\nb")
     assert list(tmp_path.iterdir()) == []
     assert conn.methods == []
 
@@ -582,3 +678,79 @@ def test_unregister_never_disables_a_timer_it_did_not_write(monkeypatch: pytest.
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
     SystemdScheduledTaskController().unregister("apt-daily")
     assert "DisableUnitFiles" not in conn.verbs
+
+
+@pytest.mark.os_agnostic
+def test_unregister_keeps_the_timer_file_when_disabling_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A real DisableUnitFiles failure raises before the file goes, so the wants link never dangles."""
+    (tmp_path / "job.timer").write_text("", encoding="utf-8")
+    conn = _FakeConn([], {}, failing=frozenset({"DisableUnitFiles"}))
+    _use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(NativeCallError, match="DisableUnitFiles"):
+        SystemdScheduledTaskController().unregister("job")
+    assert (tmp_path / "job.timer").exists()
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_unregister_wraps_a_failed_delete(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A unit file that cannot be deleted is a NativeCallError, not a raw OSError."""
+    (tmp_path / "job.timer").mkdir()  # unlink() on a directory raises IsADirectoryError
+    conn = _FakeConn([], {})
+    _use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(NativeCallError, match="cannot delete unit"):
+        SystemdScheduledTaskController().unregister("job")
+
+
+def _enable_props(base: str, monotonic: list[tuple[str, int, int]] | None) -> dict[tuple[str, str, str], Any]:
+    """An inactive, enabled timer task; ``monotonic`` is TimersMonotonic (None: unreadable)."""
+    props = {**_job_props(base, user=""), (f"{base}.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "inactive"}
+    if monotonic is not None:
+        props[(f"{base}.timer", _TIMER, "TimersMonotonic")] = monotonic
+    return props
+
+
+@pytest.mark.os_agnostic
+def test_enable_a_boot_timer_does_not_start_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """enable on a boot timer only enables it: starting it would run the job now (elapsed OnBootSec=)."""
+    props = _enable_props("boot", [("OnBootUSec", 600_000_000, 0)])
+    conn = _FakeConn([], props, frozenset({"boot.timer"}))
+    _use_bus(monkeypatch, conn)
+    info = SystemdScheduledTaskController().enable("boot")
+    assert conn.verbs == ["EnableUnitFiles", "Reload"]
+    assert (info.state, info.enabled) == (TaskState.READY, True)
+
+
+@pytest.mark.os_agnostic
+def test_enable_a_calendar_timer_starts_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timer with no boot-relative part is enabled AND started, armed from now on."""
+    conn = _FakeConn([], _enable_props("cal", [("OnUnitActiveUSec", 86_400_000_000, 0)]), frozenset({"cal.timer"}))
+    _use_bus(monkeypatch, conn)
+    SystemdScheduledTaskController().enable("cal")
+    assert conn.verbs == ["EnableUnitFiles", "StartUnit", "Reload"]
+
+
+@pytest.mark.os_agnostic
+def test_enable_does_not_start_a_timer_it_cannot_inspect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unreadable TimersMonotonic: fail safe toward not running the job; it still arms at the next boot."""
+    conn = _FakeConn([], _enable_props("odd", None), frozenset({"odd.timer"}))
+    _use_bus(monkeypatch, conn)
+    SystemdScheduledTaskController().enable("odd")
+    assert "StartUnit" not in conn.verbs
+
+
+@pytest.mark.os_agnostic
+def test_listing_reads_an_enabled_inactive_timer_as_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """iter_timers applies the same enabled-and-inactive -> Ready rule as the controller."""
+    props: dict[tuple[str, str, str], Any] = {
+        ("armed.timer", _TIMER, "Unit"): "armed.service",
+        ("off.timer", _TIMER, "Unit"): "off.service",
+    }
+    units = [("armed.timer", "", "inactive"), ("off.timer", "", "inactive")]
+    conn = _FakeConn(units, props, frozenset({"armed.timer", "off.timer"}), file_states={"off.timer": "disabled"})
+    _use_bus(monkeypatch, conn)
+    armed, off = list(iter_timers())
+    assert (armed.state, armed.enabled) == (TaskState.READY, True)
+    assert (off.state, off.enabled) == (TaskState.DISABLED, False)

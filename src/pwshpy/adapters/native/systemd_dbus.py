@@ -13,6 +13,7 @@ Contents:
       ``Timer`` / ``Service``) property of a loaded unit.
     * :func:`unit_path` / :func:`path_property` - resolve a unit's object path once, then read
       several properties from it (one ``GetUnit`` instead of one per property).
+    * :func:`load_unit_path` - the same, but ``LoadUnit`` loads an unloaded unit from its file.
 """
 
 from __future__ import annotations
@@ -84,6 +85,15 @@ def unit_path(bus: Bus, name: str) -> str | None:
     return str(path)
 
 
+def load_unit_path(bus: Bus, name: str) -> str | None:
+    """The object path of a unit, loading it from its unit file if needed; None if it has none."""
+    try:
+        (path,) = call(bus, "LoadUnit", "s", (name,))
+    except NativeCallError:
+        return None  # no unit file and not loaded: nothing to read
+    return str(path)
+
+
 def unit_property(bus: Bus, name: str, prop: str, default: Any, *, interface: str = UNIT_IFACE) -> Any:
     """Read one property of a loaded unit; ``default`` if the unit is not loaded or lacks it.
 
@@ -132,6 +142,7 @@ __all__ = [
     "active_state",
     "call",
     "is_error",
+    "load_unit_path",
     "open_bus",
     "path_property",
     "unit_file_state",

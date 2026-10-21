@@ -112,6 +112,8 @@ def test_register_with_boot_trigger_writes_and_arms_a_timer(ondemand_task: str) 
     controller = SystemdScheduledTaskController()
     info = controller.register(ondemand_task, program="/bin/true", triggers=[BootTrigger(delay=timedelta(seconds=600))])
     assert info.enabled is True
+    assert info.state is TaskState.READY  # armed for the next boot
+    assert info.last_run_time is None  # the elapsed OnBootSec= did not run the job at registration
     assert info.user_id == "0"  # no principal: a system unit with no User= runs as root
     assert (_UNIT_DIR / f"{ondemand_task}.timer").read_text(encoding="utf-8").count("OnBootSec=600s") == 1
     controller.unregister(ondemand_task)

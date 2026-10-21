@@ -38,15 +38,15 @@ from __future__ import annotations
 
 import contextlib
 import importlib
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple, cast
 
 from pydantic import ValidationError
 
 from ...domain.enums import TaskRunLevel, TaskState, WellKnownSid
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
 from ...domain.scheduling import BootTrigger, DailyTrigger, OnceTrigger, TaskPrincipal, TaskTrigger
 from . import systemd_dbus as _dbus
@@ -88,6 +88,40 @@ def timer_enabled(unit_file_state: str) -> bool:
         (True, False)
     """
     return unit_file_state in ("enabled", "enabled-runtime")
+
+
+def timer_task_state(active_state: str, *, enabled: bool) -> TaskState:
+    """A timer task's state: an enabled but inactive timer is READY, else :func:`timer_to_task_state`.
+
+    An enabled timer that is not running is armed for the next boot (timers.target starts it),
+    which is what a freshly registered boot task looks like - waiting to fire, not disabled.
+
+    Example:
+        >>> timer_task_state("inactive", enabled=True).value, timer_task_state("inactive", enabled=False).value
+        ('Ready', 'Disabled')
+    """
+    if active_state == "inactive" and enabled:
+        return TaskState.READY
+    return timer_to_task_state(active_state)
+
+
+#: Monotonic timer bases (Timer.TimersMonotonic names) that systemd fires at once when the timer
+#: is started after they have elapsed - OnBootSec= / OnStartupSec= (systemd.timer(5)).
+_BOOT_RELATIVE = frozenset({"OnBootUSec", "OnStartupUSec"})
+
+
+def starts_when_armed(monotonic_bases: Iterable[str]) -> bool:
+    """Whether arming a timer may also start it now: False when any monotonic timer is boot-relative.
+
+    The one decision behind both ``register`` (from the triggers) and ``enable`` (from the
+    timer's live ``TimersMonotonic``): a started boot-relative timer whose boot offset is already
+    past runs its job immediately, so such a timer is only enabled and waits for the next boot.
+
+    Example:
+        >>> starts_when_armed(["OnUnitActiveUSec"]), starts_when_armed(["OnBootUSec"])
+        (True, False)
+    """
+    return _BOOT_RELATIVE.isdisjoint(monotonic_bases)
 
 
 def service_task_state(active_state: str) -> TaskState:
@@ -173,6 +207,8 @@ def service_user_id(configured: str | None, *, resolve: Callable[[str], int | No
     if configured is None:
         return ""
     if configured == "":
+        # A DynamicUser=yes service also reads "0" here although it runs as a uid allocated at
+        # start; its User= is empty and the dynamic uid exists only while it runs.
         return "0"
     # systemd itself reads a numeric User= as a uid before trying it as a name.
     uid = _canonical_uid(configured)
@@ -259,7 +295,7 @@ def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
             yield ScheduledTaskInfo.model_construct(
                 task_name=base,
                 task_path=_ROOT,
-                state=timer_to_task_state(str(unit[3])),
+                state=timer_task_state(str(unit[3]), enabled=timer_enabled(state)),
                 enabled=timer_enabled(state),
                 author="",
                 description=str(unit[1]),  # ListUnits field 1 is the unit Description
@@ -282,17 +318,41 @@ def base_name(task_path: str) -> str:
     return name
 
 
+def _single_line(text: str, field: str) -> str:
+    """``text`` unchanged, or ConfigurationError when it holds a line break or NUL.
+
+    A unit file is line-oriented, so a newline in a value starts a new directive (``User=0``,
+    ``ExecStartPre=``); refusing is the only safe answer - there is no escape for it. The value
+    itself is not echoed: arguments may carry a secret.
+    """
+    if "\n" in text or "\r" in text or "\0" in text:
+        raise ConfigurationError(f"{field} must not contain a line break or NUL: it would inject unit-file directives.")
+    return text
+
+
+def _unit_value(text: str, field: str) -> str:
+    """A single-line ``text`` with ``%`` doubled, so systemd reads it literally, not as a specifier."""
+    return _single_line(text, field).replace("%", "%%")
+
+
 def service_unit(program: str, arguments: str, description: str, *, user: str | None = None) -> str:
     """The unit-file text for a oneshot ``.service`` (the exec action), run as ``user`` if given.
+
+    Raises:
+        ConfigurationError: ``program``, ``arguments`` or ``description`` holds a line break.
 
     Example:
         >>> "User=1000" in service_unit("/bin/true", "", "d", user="1000")
         True
+        >>> "ExecStart=/usr/bin/date +%%Y" in service_unit("/usr/bin/date", "+%Y", "")
+        True
     """
+    program = _unit_value(program, "program")
+    arguments = _unit_value(arguments, "arguments")
     exec_line = program if not arguments else f"{program} {arguments}"
     user_line = f"User={user}\n" if user is not None else ""
     return (
-        f"[Unit]\nDescription={description or 'pwshpy task'}\n\n"
+        f"[Unit]\nDescription={_unit_value(description, 'description') or 'pwshpy task'}\n\n"
         f"[Service]\nType=oneshot\n{user_line}ExecStart={exec_line}\n"
     )
 
@@ -323,17 +383,22 @@ def _timer_line(trigger: TaskTrigger) -> str:
 def timer_unit(base: str, description: str, triggers: Sequence[TaskTrigger]) -> str:
     """The ``.timer`` text that starts ``<base>.service`` on each trigger.
 
+    ``AccuracySec=1s`` because systemd's default one-minute accuracy window lets a calendar
+    trigger fire up to a minute late; Task Scheduler starts on the second.
+
     Raises:
         PlatformUnsupportedError: a logon trigger, or a daily trigger with ``every_days`` > 1.
+        ConfigurationError: ``base`` or ``description`` holds a line break.
 
     Example:
         >>> "OnBootSec=90s" in timer_unit("job", "", [BootTrigger(delay=timedelta(seconds=90))])
         True
     """
     lines = "".join(f"{_timer_line(t)}\n" for t in triggers)
+    unit = _single_line(base, "task_path")
     return (
-        f"[Unit]\nDescription={description or 'pwshpy task'}\n\n"
-        f"[Timer]\n{lines}Unit={base}.service\n\n[Install]\nWantedBy=timers.target\n"
+        f"[Unit]\nDescription={_unit_value(description, 'description') or 'pwshpy task'}\n\n"
+        f"[Timer]\n{lines}AccuracySec=1s\nUnit={unit}.service\n\n[Install]\nWantedBy=timers.target\n"
     )
 
 
@@ -341,7 +406,8 @@ def arms_on_register(triggers: Sequence[TaskTrigger]) -> bool:
     """Whether register starts the ``.timer`` now (calendar) or leaves it for the next boot (boot).
 
     systemd fires an ``OnBootSec=`` that is already in the past the moment the timer starts,
-    so a boot timer is only enabled: timers.target starts it early at the next boot.
+    so a boot timer is only enabled: timers.target starts it early at the next boot. The
+    decision itself is :func:`starts_when_armed`, shared with ``enable``.
 
     Raises:
         PlatformUnsupportedError: boot and calendar triggers are mixed - starting the timer
@@ -357,7 +423,8 @@ def arms_on_register(triggers: Sequence[TaskTrigger]) -> bool:
             "on Linux a boot trigger cannot share a task with calendar triggers: one systemd timer "
             "cannot both wait for the next boot and run on schedule from now. Register them separately."
         )
-    return not any(boot)
+    # A boot trigger renders as OnBootSec=, which systemd reports as the OnBootUSec monotonic base.
+    return starts_when_armed("OnBootUSec" for t in triggers if isinstance(t, BootTrigger))
 
 
 def linux_user(principal: TaskPrincipal) -> str | None:
@@ -380,6 +447,21 @@ def linux_user(principal: TaskPrincipal) -> str | None:
     if principal.run_level is TaskRunLevel.HIGHEST and principal.user_id != "0":
         raise PlatformUnsupportedError("run level HIGHEST needs root on Linux; there is no split token to raise.")
     return principal.user_id
+
+
+def _monotonic_bases(bus: _dbus.Bus, timer: str) -> list[str] | None:
+    """The base names of a timer's monotonic timers (``Timer.TimersMonotonic``), None if unreadable.
+
+    ``LoadUnit`` rather than ``GetUnit``: a disabled, stopped timer is usually unloaded, and this
+    reads ANY timer the same way - pwshpy's own and one it did not write - from what systemd parsed.
+    """
+    raw = _dbus.path_property(
+        bus, _dbus.load_unit_path(bus, timer), "TimersMonotonic", None, interface=_dbus.TIMER_IFACE
+    )
+    if not isinstance(raw, list):
+        return None
+    entries = cast("list[tuple[Any, ...]]", raw)  # a(stt): (base, offset usec, next elapse usec)
+    return [str(entry[0]) for entry in entries]
 
 
 def _has_timer(bus: _dbus.Bus, base: str) -> bool:
@@ -427,6 +509,8 @@ class SystemdScheduledTaskController:
         Raises:
             PlatformUnsupportedError: the principal or a trigger has no systemd analog
                 (:func:`linux_user`, :func:`timer_unit`, :func:`arms_on_register`).
+            ConfigurationError: ``task_path``, ``program``, ``arguments`` or ``description``
+                holds a line break.
             NativeCallError: a unit file could not be written or a D-Bus call failed.
 
         Example:
@@ -437,9 +521,9 @@ class SystemdScheduledTaskController:
             ...
             pwshpy.domain.errors.PlatformUnsupportedError: on Linux a principal is a decimal uid ...
         """
-        base = base_name(task_path)
-        # Validate everything first: a refusal must not leave a half-written task or cost a bus.
-        user = linux_user(principal or TaskPrincipal())
+        base = _single_line(base_name(task_path), "task_path")
+        # Validate and render everything first: a refusal must not leave a half-written task or cost a bus.
+        service_text = service_unit(program, arguments, description, user=linux_user(principal or TaskPrincipal()))
         timer_text = timer_unit(base, description, triggers) if triggers else None
         arm_now = arms_on_register(triggers)
         timer = f"{base}.timer"
@@ -448,7 +532,7 @@ class SystemdScheduledTaskController:
         try:
             if timer_file.exists():  # a previous registration: stop its schedule before replacing it
                 self._retire_timer(bus, timer, remove=timer_text is None)
-            self._write(_UNIT_DIR / f"{base}.service", service_unit(program, arguments, description, user=user))
+            self._write(_UNIT_DIR / f"{base}.service", service_text)
             if timer_text is not None:
                 self._write(timer_file, timer_text)
             _dbus.call(bus, "Reload")
@@ -468,7 +552,14 @@ class SystemdScheduledTaskController:
             raise NativeCallError(f"cannot write unit {path}: {exc}") from exc
 
     @staticmethod
-    def _retire_timer(bus: _dbus.Bus, timer: str, *, remove: bool) -> None:
+    def _remove(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise NativeCallError(f"cannot delete unit {path}: {exc}") from exc
+
+    @classmethod
+    def _retire_timer(cls, bus: _dbus.Bus, timer: str, *, remove: bool) -> None:
         """Stop a pwshpy ``.timer``; with ``remove`` also disable it and delete its unit file."""
         with contextlib.suppress(NativeCallError):  # not loaded -> nothing is scheduled to stop
             _dbus.call(bus, "StopUnit", "ss", (timer, "replace"))
@@ -476,9 +567,10 @@ class SystemdScheduledTaskController:
         if not remove or not path.exists():  # no file under /etc: not ours (a vendor timer), never disable it
             return
         # Disable while the unit file still exists, so its timers.target.wants link goes with it.
-        with contextlib.suppress(NativeCallError):  # never enabled -> no link to drop
-            _dbus.call(bus, "DisableUnitFiles", "asb", ([timer], False))
-        path.unlink(missing_ok=True)
+        # Not suppressed: disabling a never-enabled unit succeeds, and "no such unit" cannot occur
+        # with the file present, so any error is real and must stop us before the file is deleted.
+        _dbus.call(bus, "DisableUnitFiles", "asb", ([timer], False))
+        cls._remove(path)
 
     def unregister(self, task_path: str) -> None:
         """Stop and delete a task's units (only the files pwshpy could have written, under /etc)."""
@@ -489,7 +581,7 @@ class SystemdScheduledTaskController:
             service = f"{base}.service"
             with contextlib.suppress(NativeCallError):  # not loaded / already gone -> nothing to stop
                 _dbus.call(bus, "StopUnit", "ss", (service, "replace"))
-            (_UNIT_DIR / service).unlink(missing_ok=True)
+            self._remove(_UNIT_DIR / service)
             _dbus.call(bus, "Reload")
         finally:
             bus.conn.close()
@@ -503,13 +595,22 @@ class SystemdScheduledTaskController:
         self._start_stop(base_name(task_path), "StopUnit")
 
     def enable(self, task_path: str) -> ScheduledTaskInfo:
-        """Arm a task's ``.timer`` so it runs on schedule (like Enable-ScheduledTask)."""
+        """Arm a task's ``.timer`` so it runs on schedule (like Enable-ScheduledTask).
+
+        A timer with a boot-relative part (``OnBootSec=`` / ``OnStartupSec=``) is enabled but not
+        started (:func:`starts_when_armed`): started now, its elapsed boot offset would run the
+        job at once. It arms at the next boot. A timer whose monotonic timers cannot be read is
+        treated the same way - never running the job unexpectedly is the safe side.
+        """
         base = base_name(task_path)
+        timer = f"{base}.timer"
         bus = _dbus.open_bus()
         try:
             self._require_timer(bus, base, "enable")
-            _dbus.call(bus, "EnableUnitFiles", "asbb", ([f"{base}.timer"], False, False))
-            _dbus.call(bus, "StartUnit", "ss", (f"{base}.timer", "replace"))
+            bases = _monotonic_bases(bus, timer)
+            _dbus.call(bus, "EnableUnitFiles", "asbb", ([timer], False, False))
+            if bases is not None and starts_when_armed(bases):
+                _dbus.call(bus, "StartUnit", "ss", (timer, "replace"))
             _dbus.call(bus, "Reload")
             return self._info(bus, base)
         finally:
@@ -553,7 +654,9 @@ class SystemdScheduledTaskController:
             return ScheduledTaskInfo.model_construct(
                 task_name=base,
                 task_path=_ROOT,
-                state=timer_to_task_state(str(_dbus.path_property(bus, path, "ActiveState", "inactive"))),
+                state=timer_task_state(
+                    str(_dbus.path_property(bus, path, "ActiveState", "inactive")), enabled=timer_enabled(state)
+                ),
                 enabled=timer_enabled(state),
                 author="",
                 description=str(_dbus.path_property(bus, path, "Description", "")),
@@ -590,7 +693,9 @@ __all__ = [
     "service_task_state",
     "service_unit",
     "service_user_id",
+    "starts_when_armed",
     "timer_enabled",
+    "timer_task_state",
     "timer_to_task_state",
     "timer_unit",
     "usec_to_datetime",

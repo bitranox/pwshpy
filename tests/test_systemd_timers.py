@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -17,17 +17,30 @@ import pytest
 from pwshpy.adapters.native import systemd_dbus, systemd_timers
 from pwshpy.adapters.native.systemd_timers import (
     SystemdScheduledTaskController,
+    arms_on_register,
     base_name,
     iter_timers,
+    linux_user,
     service_last_result,
     service_task_state,
     service_unit,
+    service_user_id,
     timer_enabled,
     timer_to_task_state,
+    timer_unit,
     usec_to_datetime,
 )
-from pwshpy.domain.enums import TaskState
+from pwshpy.domain.enums import TaskLogonType, TaskRunLevel, TaskState
+from pwshpy.domain.errors import PlatformUnsupportedError
 from pwshpy.domain.records import ScheduledTaskInfo
+from pwshpy.domain.scheduling import (
+    BootTrigger,
+    DailyTrigger,
+    LogonTrigger,
+    OnceTrigger,
+    TaskPrincipal,
+    TaskTrigger,
+)
 
 _HAS_JEEPNEY = importlib.util.find_spec("jeepney") is not None
 
@@ -103,6 +116,130 @@ def test_service_unit_text() -> None:
 def test_service_unit_no_arguments() -> None:
     """With no arguments, ExecStart is just the program (no trailing space)."""
     assert "ExecStart=/bin/true\n" in service_unit("/bin/true", "", "")
+
+
+_AT = datetime(2026, 10, 21, 21, 59, tzinfo=timezone.utc)
+
+
+@pytest.mark.os_agnostic
+def test_service_unit_runs_as_the_given_uid() -> None:
+    text = service_unit("/bin/true", "", "d", user="1000")
+    assert "\nUser=1000\n" in text
+
+
+@pytest.mark.os_agnostic
+def test_service_unit_without_a_user_has_no_user_line() -> None:
+    """No user: no User= line at all, so the system manager runs the unit as root."""
+    assert "User=" not in service_unit("/bin/true", "", "d")
+
+
+@pytest.mark.os_agnostic
+def test_timer_unit_renders_each_supported_trigger_in_utc() -> None:
+    once_local = OnceTrigger(at=datetime(2026, 10, 21, 23, 59, tzinfo=timezone(timedelta(hours=2))))
+    text = timer_unit("job", "d", [once_local, DailyTrigger(at=_AT), BootTrigger(delay=timedelta(seconds=90))])
+    assert "OnCalendar=2026-10-21 21:59:00 UTC\n" in text
+    assert "OnCalendar=*-*-* 21:59:00 UTC\n" in text
+    assert "OnBootSec=90s\n" in text
+    assert "Unit=job.service\n" in text
+    assert "WantedBy=timers.target\n" in text
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("trigger", [DailyTrigger(at=_AT, every_days=2), LogonTrigger()])
+def test_timer_unit_refuses_what_systemd_cannot_express(trigger: TaskTrigger) -> None:
+    with pytest.raises(PlatformUnsupportedError):
+        timer_unit("job", "d", [trigger])
+
+
+@pytest.mark.os_agnostic
+def test_timer_unit_refuses_a_logon_trigger_naming_why() -> None:
+    """The refusal names the reason: a user unit fires at the user manager's start, not each logon."""
+    with pytest.raises(PlatformUnsupportedError, match="first session"):
+        timer_unit("job", "d", [LogonTrigger(user_id="1000")])
+
+
+@pytest.mark.os_agnostic
+def test_linux_user_mapping() -> None:
+    assert linux_user(TaskPrincipal()) is None
+    assert linux_user(TaskPrincipal.system()) is None  # SYSTEM is root: a system unit with no User=
+    assert linux_user(TaskPrincipal(user_id="1000")) == "1000"
+    with pytest.raises(PlatformUnsupportedError):
+        linux_user(TaskPrincipal(user_id="S-1-5-21-1-2-3-1001"))
+    with pytest.raises(PlatformUnsupportedError):
+        linux_user(TaskPrincipal(user_id="1000", run_level=TaskRunLevel.HIGHEST))
+    with pytest.raises(PlatformUnsupportedError):
+        linux_user(TaskPrincipal(logon_type=TaskLogonType.S4U))
+
+
+@pytest.mark.os_agnostic
+def test_linux_user_refuses_the_other_service_sids() -> None:
+    """Only SYSTEM maps to root; LOCAL SERVICE / NETWORK SERVICE have no Linux account to map to."""
+    with pytest.raises(PlatformUnsupportedError):
+        linux_user(TaskPrincipal(user_id="S-1-5-19"))
+
+
+@pytest.mark.os_agnostic
+def test_linux_user_allows_highest_for_root() -> None:
+    """Root already holds every privilege, so HIGHEST is satisfiable for uid 0."""
+    assert linux_user(TaskPrincipal(user_id="0", run_level=TaskRunLevel.HIGHEST)) == "0"
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("triggers", "arms"),
+    [
+        ([OnceTrigger(at=_AT)], True),
+        ([DailyTrigger(at=_AT), OnceTrigger(at=_AT)], True),
+        ([BootTrigger()], False),  # started now, an elapsed OnBootSec= would fire at once
+        ([BootTrigger(), BootTrigger(delay=timedelta(minutes=5))], False),
+    ],
+)
+def test_arms_on_register(triggers: list[TaskTrigger], arms: bool) -> None:
+    """A calendar timer is started at once; a boot timer only waits for the next boot."""
+    assert arms_on_register(triggers) is arms
+
+
+@pytest.mark.os_agnostic
+def test_arms_on_register_refuses_boot_mixed_with_calendar() -> None:
+    """Boot and calendar triggers cannot share one timer: starting it would fire the boot one now."""
+    with pytest.raises(PlatformUnsupportedError, match="boot"):
+        arms_on_register([BootTrigger(), OnceTrigger(at=_AT)])
+
+
+def _no_account(name: str) -> int | None:
+    return None
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (None, ""),  # service not loaded / property unreadable: unknown, never a guess
+        ("", "0"),  # no User=: the system manager runs the service as root
+        ("1000", "1000"),
+        ("0", "0"),
+        ("01", ""),  # not a canonical uid and not an account name either
+        ("S-1-5-18", ""),
+    ],
+)
+def test_service_user_id_without_accounts(configured: str | None, expected: str) -> None:
+    """User= read back as a decimal uid; an unresolvable value is "" (the task is still listed)."""
+    assert service_user_id(configured, resolve=_no_account) == expected
+
+
+@pytest.mark.os_agnostic
+def test_service_user_id_resolves_an_account_name() -> None:
+    """A User= account name resolves to its uid through the injected account lookup."""
+    accounts = {"alice": 1001}
+    assert service_user_id("alice", resolve=accounts.get) == "1001"
+    assert service_user_id("ghost", resolve=accounts.get) == ""
+
+
+@pytest.mark.os_linux
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs the Linux account database")
+def test_service_user_id_resolves_root_by_name() -> None:
+    """The default lookup reads the real account database: root is uid 0 on every Linux."""
+    assert service_user_id("root") == "0"
 
 
 @pytest.mark.os_agnostic
@@ -239,6 +376,7 @@ def test_iter_timers_reads_run_info_from_the_timer_and_its_unit(monkeypatch: pyt
         ("backup.timer", _TIMER, "NextElapseUSecRealtime"): _T1,
         ("backup.timer", _TIMER, "Unit"): "backup-job.service",  # Unit= differs from the timer's base name
         **_service_props("backup-job.service", code=1, status=3, started=_T0),
+        ("backup-job.service", _SERVICE, "User"): "",  # no User=: root
         ("never.timer", _TIMER, "LastTriggerUSec"): 0,
         ("never.timer", _TIMER, "NextElapseUSecRealtime"): 2**64 - 1,
         ("never.timer", _TIMER, "Unit"): "never.service",
@@ -252,6 +390,8 @@ def test_iter_timers_reads_run_info_from_the_timer_and_its_unit(monkeypatch: pyt
     assert backup.next_run_time == datetime(2023, 11, 14, 23, 13, 20, tzinfo=timezone.utc)
     assert backup.last_task_result == 3
     assert (never.last_run_time, never.last_task_result, never.next_run_time) == (None, None, None)
+    assert (backup.user_id, backup.run_level) == ("0", None)
+    assert never.user_id == ""  # its service is not loaded: unknown, and the timer is still listed
     assert conn.closed is True
     # The timer's own path comes from ListUnits; only the triggered service needs one GetUnit.
     assert conn.methods.count("GetUnit") == 2
@@ -266,6 +406,7 @@ def test_controller_info_timer_task(monkeypatch: pytest.MonkeyPatch) -> None:
         ("job.timer", _TIMER, "NextElapseUSecRealtime"): _T1,
         ("job.timer", _TIMER, "Unit"): "job.service",
         **_service_props("job.service", code=2, status=9, started=_T0),
+        ("job.service", _SERVICE, "User"): "1000",
     }
     conn = _FakeConn([], props, frozenset({"job.timer"}))
     _use_bus(monkeypatch, conn)
@@ -276,12 +417,13 @@ def test_controller_info_timer_task(monkeypatch: pytest.MonkeyPatch) -> None:
     assert info.last_run_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
     assert info.next_run_time == datetime(2023, 11, 14, 23, 13, 20, tzinfo=timezone.utc)
     assert info.last_task_result == 137  # killed by SIGKILL
+    assert (info.user_id, info.run_level) == ("1000", None)
 
 
 @pytest.mark.os_agnostic
 def test_controller_info_on_demand_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """An on-demand service: last run is its own last start, the result its exit, nothing scheduled."""
-    props = _service_props("adhoc.service", code=1, status=0, started=_T0)
+    props = {**_service_props("adhoc.service", code=1, status=0, started=_T0), ("adhoc.service", _SERVICE, "User"): ""}
     conn = _FakeConn([], props)
     _use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)  # filesystem edge: never write /etc here
@@ -291,6 +433,119 @@ def test_controller_info_on_demand_task(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert info.last_run_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
     assert info.last_task_result == 0  # ran and succeeded, never folded into None
     assert info.next_run_time is None
+    assert info.user_id == "0"  # an empty User= is root
+
+
+def _job_props(base: str, *, user: str) -> dict[tuple[str, str, str], Any]:
+    """A loaded timer + service pair, as systemd reports it right after register arms it."""
+    return {
+        (f"{base}.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "active",
+        (f"{base}.timer", _TIMER, "LastTriggerUSec"): 0,
+        (f"{base}.timer", _TIMER, "NextElapseUSecRealtime"): _T1,
+        (f"{base}.timer", _TIMER, "Unit"): f"{base}.service",
+        **_service_props(f"{base}.service", code=0, status=0, started=0),
+        (f"{base}.service", _SERVICE, "User"): user,
+    }
+
+
+@pytest.mark.os_agnostic
+def test_register_with_a_calendar_trigger_writes_and_arms_a_timer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A uid principal lands as User=, the trigger as a .timer that is enabled AND started now."""
+    conn = _FakeConn([], _job_props("job", user="1000"), frozenset({"job.timer"}))
+    _use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)  # filesystem edge: never write /etc here
+    info = SystemdScheduledTaskController().register(
+        "job", program="/bin/true", principal=TaskPrincipal(user_id="1000"), triggers=[DailyTrigger(at=_AT)]
+    )
+    assert "\nUser=1000\n" in (tmp_path / "job.service").read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* 21:59:00 UTC\n" in (tmp_path / "job.timer").read_text(encoding="utf-8")
+    assert conn.verbs == ["Reload", "EnableUnitFiles", "StartUnit"]
+    assert (info.user_id, info.enabled, info.state) == ("1000", True, TaskState.READY)
+    assert info.next_run_time == datetime(2023, 11, 14, 23, 13, 20, tzinfo=timezone.utc)
+    assert conn.methods.count("GetUnit") == 2  # one for the timer, one for its service
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_register_with_a_boot_trigger_enables_but_does_not_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A boot timer is only enabled: starting it now would fire an already-elapsed OnBootSec= at once."""
+    conn = _FakeConn([], _job_props("boot", user=""), frozenset({"boot.timer"}))
+    _use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    info = SystemdScheduledTaskController().register(
+        "boot", program="/bin/true", triggers=[BootTrigger(delay=timedelta(seconds=600))]
+    )
+    assert "OnBootSec=600s\n" in (tmp_path / "boot.timer").read_text(encoding="utf-8")
+    assert "User=" not in (tmp_path / "boot.service").read_text(encoding="utf-8")
+    assert conn.verbs == ["Reload", "EnableUnitFiles"]
+    assert info.user_id == "0"
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("principal", "triggers"),
+    [
+        (TaskPrincipal(user_id="S-1-5-21-1-2-3-1001"), []),
+        (None, [LogonTrigger()]),
+        (None, [DailyTrigger(at=_AT, every_days=7)]),
+        (None, [BootTrigger(), OnceTrigger(at=_AT)]),
+    ],
+)
+def test_register_refuses_before_writing_or_connecting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, principal: TaskPrincipal | None, triggers: list[TaskTrigger]
+) -> None:
+    """Every refusal happens before a unit file is written or the bus is opened."""
+    conn = _FakeConn([], {})
+    _use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(PlatformUnsupportedError):
+        SystemdScheduledTaskController().register("job", program="/bin/true", principal=principal, triggers=triggers)
+    assert list(tmp_path.iterdir()) == []
+    assert conn.methods == []
+
+
+@pytest.mark.os_agnostic
+def test_register_without_triggers_retires_a_previous_timer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Re-registering as on demand replaces the task (like CREATE_OR_UPDATE): the old .timer goes."""
+    (tmp_path / "job.timer").write_text("[Timer]\nOnBootSec=1s\n", encoding="utf-8")
+    props = {**_service_props("job.service", code=0, status=0, started=0), ("job.service", _SERVICE, "User"): ""}
+    conn = _FakeConn([], props)
+    _use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    info = SystemdScheduledTaskController().register("job", program="/bin/true")
+    assert not (tmp_path / "job.timer").exists()
+    assert (tmp_path / "job.service").is_file()
+    assert conn.verbs == ["StopUnit", "DisableUnitFiles", "Reload"]
+    assert info.next_run_time is None  # on demand again
+
+
+@pytest.mark.os_agnostic
+def test_register_with_triggers_stops_the_previous_timer_first(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A re-registered timer is stopped before its file is rewritten, so the old schedule cannot fire."""
+    (tmp_path / "job.timer").write_text("[Timer]\nOnCalendar=daily\n", encoding="utf-8")
+    conn = _FakeConn([], _job_props("job", user=""), frozenset({"job.timer"}))
+    _use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    SystemdScheduledTaskController().register("job", program="/bin/true", triggers=[OnceTrigger(at=_AT)])
+    assert "OnCalendar=2026-10-21 21:59:00 UTC\n" in (tmp_path / "job.timer").read_text(encoding="utf-8")
+    assert conn.verbs == ["StopUnit", "Reload", "EnableUnitFiles", "StartUnit"]
+
+
+@pytest.mark.os_agnostic
+def test_unregister_disables_the_timer_before_deleting_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """unregister drops the timers.target.wants link too, so no dangling enablement is left behind."""
+    for unit in ("job.timer", "job.service"):
+        (tmp_path / unit).write_text("", encoding="utf-8")
+    conn = _FakeConn([], {})
+    _use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    SystemdScheduledTaskController().unregister("job")
+    assert list(tmp_path.iterdir()) == []
+    assert conn.verbs == ["StopUnit", "DisableUnitFiles", "StopUnit", "Reload"]
 
 
 @pytest.mark.os_linux
@@ -317,3 +572,13 @@ def test_live_read_reports_run_info() -> None:
     assert any(t.next_run_time is not None for t in tasks)
     assert all(t.next_run_time is None or t.next_run_time.tzinfo is timezone.utc for t in tasks)
     assert all(t.last_run_time is None or t.last_run_time.tzinfo is timezone.utc for t in tasks)
+
+
+@pytest.mark.os_agnostic
+def test_unregister_never_disables_a_timer_it_did_not_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A same-named vendor timer (no file under /etc) is not disabled: pwshpy owns only its own units."""
+    conn = _FakeConn([], {})
+    _use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    SystemdScheduledTaskController().unregister("apt-daily")
+    assert "DisableUnitFiles" not in conn.verbs

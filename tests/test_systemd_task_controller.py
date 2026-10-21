@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Iterator
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ import pytest
 from pwshpy.adapters.native.systemd_timers import SystemdScheduledTaskController
 from pwshpy.domain.enums import TaskState
 from pwshpy.domain.errors import NativeCallError
+from pwshpy.domain.scheduling import BootTrigger
 
 _UNIT_DIR = Path("/etc/systemd/system")
 _ONDEMAND = "pwshpy-pytest-task"
@@ -46,10 +48,13 @@ def _reload() -> None:
 
 @pytest.fixture
 def ondemand_task() -> Iterator[str]:
-    """Yield an on-demand task name; on teardown remove its unit file and reload."""
+    """Yield a task name; on teardown disarm and remove any .timer and the .service, then reload."""
     try:
         yield _ONDEMAND
     finally:
+        subprocess.run(["systemctl", "stop", f"{_ONDEMAND}.timer"], check=False)  # noqa: S603, S607
+        subprocess.run(["systemctl", "disable", f"{_ONDEMAND}.timer"], check=False)  # noqa: S603, S607
+        (_UNIT_DIR / f"{_ONDEMAND}.timer").unlink(missing_ok=True)
         (_UNIT_DIR / f"{_ONDEMAND}.service").unlink(missing_ok=True)
         _reload()
 
@@ -100,3 +105,15 @@ def test_enable_disable_timer(timer_task: str) -> None:
 
     disabled = controller.disable(timer_task)
     assert disabled.enabled is False
+
+
+def test_register_with_boot_trigger_writes_and_arms_a_timer(ondemand_task: str) -> None:
+    """A boot trigger becomes an enabled .timer (armed for the next boot), and unregister removes it."""
+    controller = SystemdScheduledTaskController()
+    info = controller.register(ondemand_task, program="/bin/true", triggers=[BootTrigger(delay=timedelta(seconds=600))])
+    assert info.enabled is True
+    assert info.user_id == "0"  # no principal: a system unit with no User= runs as root
+    assert (_UNIT_DIR / f"{ondemand_task}.timer").read_text(encoding="utf-8").count("OnBootSec=600s") == 1
+    controller.unregister(ondemand_task)
+    assert not (_UNIT_DIR / f"{ondemand_task}.timer").exists()
+    assert not (_UNIT_DIR / "timers.target.wants" / f"{ondemand_task}.timer").exists()

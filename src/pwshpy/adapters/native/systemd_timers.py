@@ -5,12 +5,20 @@ The portable counterpart to the Task Scheduler adapter. On systemd a scheduled t
 
 * **read** (:func:`iter_timers`) lists the ``.timer`` units - the box's real scheduled tasks -
   and marshals each into the same :class:`ScheduledTaskInfo`.
-* **register** creates an on-demand ``.service`` (``Type=oneshot``), exactly matching the
-  Windows ``Register-ScheduledTask`` shape pwshpy exposes (a run-on-demand exec action, no
-  trigger). ``run`` starts it. ``enable``/``disable`` arm/disarm a task's ``.timer`` (via
+* **register** writes a ``.service`` (``Type=oneshot``, the exec action; ``User=`` for a uid
+  principal) and, when triggers are given, a ``.timer`` that starts it (``OnCalendar=`` in UTC
+  for once/daily, ``OnBootSec=`` for boot), enabled over D-Bus. A calendar timer is started at
+  once; a boot timer is only enabled, because systemd fires an already-elapsed ``OnBootSec=``
+  the moment the timer starts, while a boot trigger must wait for the next boot. Like the
+  Windows ``TASK_CREATE_OR_UPDATE`` registration, registering over an existing task replaces
+  it, retiring a ``.timer`` the new definition no longer has. With no triggers the task runs
+  only on demand: ``run`` starts it. ``enable``/``disable`` arm/disarm a task's ``.timer`` (via
   ``EnableUnitFiles``/``DisableUnitFiles``); an on-demand task has no schedule to toggle, so
   they raise a clear error pointing at ``run``/``unregister`` instead. (systemd cannot "disable"
   a static oneshot: a mask symlink cannot shadow the unit file we wrote under ``/etc``.)
+* **principals** are a decimal uid (``User=``) or SYSTEM / none (root: a system unit's
+  default); a Windows SID, a logon type or HIGHEST for a non-root uid has no Linux meaning and
+  is refused. Read back, ``user_id`` is the triggered service's ``User=`` as a decimal uid.
 
 Shared D-Bus plumbing lives in :mod:`.systemd_dbus`. Mutation writes unit files under
 ``/etc/systemd/system`` (needs root, like the Windows verbs need admin) and never touches a
@@ -19,6 +27,9 @@ vendor unit under ``/lib``.
 Contents:
     * :func:`timer_to_task_state` / :func:`timer_enabled` - pure systemd -> domain mappers.
     * :func:`usec_to_datetime` / :func:`service_last_result` - pure run-info mappers.
+    * :func:`service_user_id` - a service's ``User=`` as a decimal uid.
+    * :func:`service_unit` / :func:`timer_unit` / :func:`linux_user` / :func:`arms_on_register` -
+      pure unit-file rendering and register policy.
     * :func:`iter_timers` - stream the ``.timer`` units as records.
     * :class:`SystemdScheduledTaskController` - register/unregister, run/stop, enable/disable.
 """
@@ -26,14 +37,18 @@ Contents:
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterator
+import importlib
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from ...domain.enums import TaskState
-from ...domain.errors import NativeCallError
+from pydantic import ValidationError
+
+from ...domain.enums import TaskRunLevel, TaskState, WellKnownSid
+from ...domain.errors import NativeCallError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
+from ...domain.scheduling import BootTrigger, DailyTrigger, OnceTrigger, TaskPrincipal, TaskTrigger
 from . import systemd_dbus as _dbus
 
 _ROOT = "/"  # systemd timers are a flat namespace; task_path is this neutral root (no folder tree)
@@ -118,6 +133,62 @@ def service_last_result(*, exec_code: int, exec_status: int, started_usec: int) 
     return exec_status if exec_code == _CLD_EXITED else 128 + exec_status
 
 
+def _canonical_uid(text: str) -> str | None:
+    """``text`` when it is a canonical decimal uid (the domain's own predicate), else None."""
+    try:
+        principal = TaskPrincipal(user_id=text)
+    except ValidationError:  # an account name, a padded or out-of-range number
+        return None
+    return text if principal.is_uid else None
+
+
+def _passwd_uid(name: str) -> int | None:
+    """The uid of account ``name`` from the account database, or None when it does not resolve."""
+    try:
+        pwd = importlib.import_module("pwd")  # POSIX-only stdlib: imported lazily so Windows can import us
+        return int(pwd.getpwnam(name).pw_uid)
+    except (ImportError, KeyError, OSError):
+        return None
+
+
+def service_user_id(configured: str | None, *, resolve: Callable[[str], int | None] = _passwd_uid) -> str:
+    """A service's ``User=`` setting as the decimal uid :class:`ScheduledTaskInfo` carries.
+
+    Fail-soft like the rest of the read-back: a value that is neither a uid nor a resolvable
+    account yields ``""`` and the task is still listed.
+
+    Args:
+        configured: The ``Service.User`` D-Bus property (the configured text), or None when it
+            could not be read (the service is not loaded).
+        resolve: Account-name lookup returning a uid or None; the account database by default.
+
+    Returns:
+        The decimal uid; ``"0"`` for an empty ``User=`` (a system service runs as root); ``""``
+        when unknown.
+
+    Example:
+        >>> service_user_id(""), service_user_id("1000"), service_user_id(None)
+        ('0', '1000', '')
+    """
+    if configured is None:
+        return ""
+    if configured == "":
+        return "0"
+    # systemd itself reads a numeric User= as a uid before trying it as a name.
+    uid = _canonical_uid(configured)
+    if uid is not None:
+        return uid
+    resolved = resolve(configured)
+    return "" if resolved is None else str(resolved)
+
+
+def _service_user(bus: _dbus.Bus, service_path: str | None) -> str:
+    """The decimal uid a loaded service runs as, read from its already-resolved object path."""
+    # User lives on the Service interface (ExecContext), not on Unit; None marks "not readable".
+    configured = _dbus.path_property(bus, service_path, "User", None, interface=_dbus.SERVICE_IFACE)
+    return service_user_id(None if configured is None else str(configured))
+
+
 def _timer_property(bus: _dbus.Bus, timer_path: str | None, prop: str) -> int:
     """One ``Timer`` USec property as an int (0 - "none" - when the timer is not loaded)."""
     return int(_dbus.path_property(bus, timer_path, prop, 0, interface=_dbus.TIMER_IFACE))
@@ -137,27 +208,30 @@ def _service_run(bus: _dbus.Bus, service_path: str | None) -> tuple[int | None, 
 
 
 class _RunInfo(NamedTuple):
-    """The [120] run-info fields of a task, as they land on :class:`ScheduledTaskInfo`."""
+    """The fields a timer task reads from its timer and its triggered service."""
 
     last_run_time: datetime | None
     last_task_result: int | None
     next_run_time: datetime | None
+    user_id: str
 
 
 def _timer_run_info(bus: _dbus.Bus, timer_path: str | None, base: str) -> _RunInfo:
-    """The [120] fields of a timer task: last trigger, next realtime elapse, and the triggered service's result.
+    """A timer task's last trigger, next realtime elapse, and its triggered service's result and user.
 
     The service is the one the timer's ``Unit`` property names (``<base>.service`` unless the
     timer sets ``Unit=``), so listing and controller report the same result for the same timer.
     Properties are read from the already-resolved ``timer_path``; only the service costs a
-    ``GetUnit``.
+    ``GetUnit``, and its result and ``User=`` share that one resolved path.
     """
     service = str(_dbus.path_property(bus, timer_path, "Unit", f"{base}.service", interface=_dbus.TIMER_IFACE))
-    result, _started = _service_run(bus, _dbus.unit_path(bus, service))
+    service_path = _dbus.unit_path(bus, service)
+    result, _started = _service_run(bus, service_path)
     return _RunInfo(
         last_run_time=usec_to_datetime(_timer_property(bus, timer_path, "LastTriggerUSec")),
         last_task_result=result,
         next_run_time=usec_to_datetime(_timer_property(bus, timer_path, "NextElapseUSecRealtime")),
+        user_id=_service_user(bus, service_path),
     )
 
 
@@ -189,6 +263,8 @@ def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
                 enabled=timer_enabled(state),
                 author="",
                 description=str(unit[1]),  # ListUnits field 1 is the unit Description
+                user_id=run.user_id,
+                run_level=None,  # systemd has no split token, so no run level to report
                 last_run_time=run.last_run_time,
                 last_task_result=run.last_task_result,
                 next_run_time=run.next_run_time,
@@ -206,10 +282,104 @@ def base_name(task_path: str) -> str:
     return name
 
 
-def service_unit(program: str, arguments: str, description: str) -> str:
-    """The unit-file text for an on-demand oneshot ``.service`` (the run-on-demand exec action)."""
+def service_unit(program: str, arguments: str, description: str, *, user: str | None = None) -> str:
+    """The unit-file text for a oneshot ``.service`` (the exec action), run as ``user`` if given.
+
+    Example:
+        >>> "User=1000" in service_unit("/bin/true", "", "d", user="1000")
+        True
+    """
     exec_line = program if not arguments else f"{program} {arguments}"
-    return f"[Unit]\nDescription={description or 'pwshpy task'}\n\n[Service]\nType=oneshot\nExecStart={exec_line}\n"
+    user_line = f"User={user}\n" if user is not None else ""
+    return (
+        f"[Unit]\nDescription={description or 'pwshpy task'}\n\n"
+        f"[Service]\nType=oneshot\n{user_line}ExecStart={exec_line}\n"
+    )
+
+
+def _utc(at: datetime) -> datetime:
+    return at.astimezone(timezone.utc)
+
+
+def _timer_line(trigger: TaskTrigger) -> str:
+    """One [Timer] line; UTC with an explicit suffix so the host's zone cannot shift it."""
+    if isinstance(trigger, OnceTrigger):
+        return f"OnCalendar={_utc(trigger.at):%Y-%m-%d %H:%M:%S} UTC"
+    if isinstance(trigger, DailyTrigger):
+        if trigger.every_days != 1:
+            raise PlatformUnsupportedError(
+                "systemd has no every-N-days calendar; only every_days=1 is supported on Linux."
+            )
+        # A calendar spec has no start date, so this runs daily from now on even when ``at`` lies ahead.
+        return f"OnCalendar=*-*-* {_utc(trigger.at):%H:%M:%S} UTC"
+    if isinstance(trigger, BootTrigger):
+        return f"OnBootSec={int(trigger.delay.total_seconds())}s"
+    raise PlatformUnsupportedError(
+        "a logon trigger has no systemd analog on Linux: a user unit fires when the user's service "
+        "manager starts (the user's first session), not at each logon."
+    )
+
+
+def timer_unit(base: str, description: str, triggers: Sequence[TaskTrigger]) -> str:
+    """The ``.timer`` text that starts ``<base>.service`` on each trigger.
+
+    Raises:
+        PlatformUnsupportedError: a logon trigger, or a daily trigger with ``every_days`` > 1.
+
+    Example:
+        >>> "OnBootSec=90s" in timer_unit("job", "", [BootTrigger(delay=timedelta(seconds=90))])
+        True
+    """
+    lines = "".join(f"{_timer_line(t)}\n" for t in triggers)
+    return (
+        f"[Unit]\nDescription={description or 'pwshpy task'}\n\n"
+        f"[Timer]\n{lines}Unit={base}.service\n\n[Install]\nWantedBy=timers.target\n"
+    )
+
+
+def arms_on_register(triggers: Sequence[TaskTrigger]) -> bool:
+    """Whether register starts the ``.timer`` now (calendar) or leaves it for the next boot (boot).
+
+    systemd fires an ``OnBootSec=`` that is already in the past the moment the timer starts,
+    so a boot timer is only enabled: timers.target starts it early at the next boot.
+
+    Raises:
+        PlatformUnsupportedError: boot and calendar triggers are mixed - starting the timer
+            would fire the boot trigger now, not starting it would leave the calendar idle.
+
+    Example:
+        >>> arms_on_register([BootTrigger()])
+        False
+    """
+    boot = [isinstance(t, BootTrigger) for t in triggers]
+    if any(boot) and not all(boot):
+        raise PlatformUnsupportedError(
+            "on Linux a boot trigger cannot share a task with calendar triggers: one systemd timer "
+            "cannot both wait for the next boot and run on schedule from now. Register them separately."
+        )
+    return not any(boot)
+
+
+def linux_user(principal: TaskPrincipal) -> str | None:
+    """The ``User=`` value for a principal, or None for root (a system unit's default).
+
+    Raises:
+        PlatformUnsupportedError: a logon type, a Windows SID other than SYSTEM, or HIGHEST for
+            a non-root uid - none has a Linux meaning.
+
+    Example:
+        >>> linux_user(TaskPrincipal(user_id="1000")), linux_user(TaskPrincipal.system())
+        ('1000', None)
+    """
+    if principal.logon_type is not None:
+        raise PlatformUnsupportedError("logon_type is Windows-only; systemd has no logon types.")
+    if principal.user_id is None or principal.user_id == WellKnownSid.LOCAL_SYSTEM.value:
+        return None
+    if not principal.is_uid:
+        raise PlatformUnsupportedError("on Linux a principal is a decimal uid (or SYSTEM for root), not a Windows SID.")
+    if principal.run_level is TaskRunLevel.HIGHEST and principal.user_id != "0":
+        raise PlatformUnsupportedError("run level HIGHEST needs root on Linux; there is no split token to raise.")
+    return principal.user_id
 
 
 def _has_timer(bus: _dbus.Bus, base: str) -> bool:
@@ -228,32 +398,98 @@ class SystemdScheduledTaskController:
         True
     """
 
-    def register(
-        self, task_path: str, *, program: str, arguments: str = "", description: str = ""
+    def register(  # noqa: PLR0913 - mirrors Register-ScheduledTask's independent, all-optional parameters
+        self,
+        task_path: str,
+        *,
+        program: str,
+        arguments: str = "",
+        description: str = "",
+        principal: TaskPrincipal | None = None,
+        triggers: Sequence[TaskTrigger] = (),
     ) -> ScheduledTaskInfo:
-        """Create a run-on-demand oneshot ``.service`` (``program`` + ``arguments``); return it."""
+        """Create a oneshot ``.service`` and, with triggers, an enabled ``.timer``; return the task.
+
+        Registering over an existing task replaces it (its old ``.timer`` is stopped first and
+        removed when ``triggers`` is empty), like Task Scheduler's create-or-update.
+
+        Args:
+            task_path: The task identifier; reduced to the unit base name (:func:`base_name`).
+            program: Executable the service's ``ExecStart=`` runs.
+            arguments: Command-line arguments for ``program``.
+            description: The units' ``Description=``.
+            principal: Who the task runs as; None or SYSTEM is root, a decimal uid is ``User=``.
+            triggers: When the task fires; empty means on demand only.
+
+        Returns:
+            The registered task, read back.
+
+        Raises:
+            PlatformUnsupportedError: the principal or a trigger has no systemd analog
+                (:func:`linux_user`, :func:`timer_unit`, :func:`arms_on_register`).
+            NativeCallError: a unit file could not be written or a D-Bus call failed.
+
+        Example:
+            >>> SystemdScheduledTaskController().register(
+            ...     "job", program="/bin/true", principal=TaskPrincipal(user_id="S-1-5-21-1-2-3-1001")
+            ... )
+            Traceback (most recent call last):
+            ...
+            pwshpy.domain.errors.PlatformUnsupportedError: on Linux a principal is a decimal uid ...
+        """
         base = base_name(task_path)
-        path = _UNIT_DIR / f"{base}.service"
-        try:
-            path.write_text(service_unit(program, arguments, description), encoding="utf-8")
-        except OSError as exc:
-            raise NativeCallError(f"cannot write unit {path}: {exc}") from exc
+        # Validate everything first: a refusal must not leave a half-written task or cost a bus.
+        user = linux_user(principal or TaskPrincipal())
+        timer_text = timer_unit(base, description, triggers) if triggers else None
+        arm_now = arms_on_register(triggers)
+        timer = f"{base}.timer"
+        timer_file = _UNIT_DIR / timer
         bus = _dbus.open_bus()
         try:
+            if timer_file.exists():  # a previous registration: stop its schedule before replacing it
+                self._retire_timer(bus, timer, remove=timer_text is None)
+            self._write(_UNIT_DIR / f"{base}.service", service_unit(program, arguments, description, user=user))
+            if timer_text is not None:
+                self._write(timer_file, timer_text)
             _dbus.call(bus, "Reload")
+            if timer_text is not None:
+                _dbus.call(bus, "EnableUnitFiles", "asbb", ([timer], False, False))
+                if arm_now:
+                    _dbus.call(bus, "StartUnit", "ss", (timer, "replace"))
             return self._info(bus, base)
         finally:
             bus.conn.close()
+
+    @staticmethod
+    def _write(path: Path, text: str) -> None:
+        try:
+            path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            raise NativeCallError(f"cannot write unit {path}: {exc}") from exc
+
+    @staticmethod
+    def _retire_timer(bus: _dbus.Bus, timer: str, *, remove: bool) -> None:
+        """Stop a pwshpy ``.timer``; with ``remove`` also disable it and delete its unit file."""
+        with contextlib.suppress(NativeCallError):  # not loaded -> nothing is scheduled to stop
+            _dbus.call(bus, "StopUnit", "ss", (timer, "replace"))
+        path = _UNIT_DIR / timer
+        if not remove or not path.exists():  # no file under /etc: not ours (a vendor timer), never disable it
+            return
+        # Disable while the unit file still exists, so its timers.target.wants link goes with it.
+        with contextlib.suppress(NativeCallError):  # never enabled -> no link to drop
+            _dbus.call(bus, "DisableUnitFiles", "asb", ([timer], False))
+        path.unlink(missing_ok=True)
 
     def unregister(self, task_path: str) -> None:
         """Stop and delete a task's units (only the files pwshpy could have written, under /etc)."""
         base = base_name(task_path)
         bus = _dbus.open_bus()
         try:
-            for unit in (f"{base}.timer", f"{base}.service"):
-                with contextlib.suppress(NativeCallError):  # not loaded / already gone -> nothing to stop
-                    _dbus.call(bus, "StopUnit", "ss", (unit, "replace"))
-                (_UNIT_DIR / unit).unlink(missing_ok=True)
+            self._retire_timer(bus, f"{base}.timer", remove=True)
+            service = f"{base}.service"
+            with contextlib.suppress(NativeCallError):  # not loaded / already gone -> nothing to stop
+                _dbus.call(bus, "StopUnit", "ss", (service, "replace"))
+            (_UNIT_DIR / service).unlink(missing_ok=True)
             _dbus.call(bus, "Reload")
         finally:
             bus.conn.close()
@@ -321,6 +557,8 @@ class SystemdScheduledTaskController:
                 enabled=timer_enabled(state),
                 author="",
                 description=str(_dbus.path_property(bus, path, "Description", "")),
+                user_id=run.user_id,
+                run_level=None,  # systemd has no split token, so no run level to report
                 last_run_time=run.last_run_time,
                 last_task_result=run.last_task_result,
                 next_run_time=run.next_run_time,
@@ -334,6 +572,8 @@ class SystemdScheduledTaskController:
             enabled=True,  # an on-demand oneshot has no schedule to disable; it can always be run
             author="",
             description=str(_dbus.path_property(bus, path, "Description", "")),
+            user_id=_service_user(bus, path),
+            run_level=None,  # systemd has no split token, so no run level to report
             last_run_time=started,  # no timer: the last run is the service's own last start
             last_task_result=result,
             next_run_time=None,  # on demand: nothing is scheduled
@@ -342,12 +582,16 @@ class SystemdScheduledTaskController:
 
 __all__ = [
     "SystemdScheduledTaskController",
+    "arms_on_register",
     "base_name",
     "iter_timers",
+    "linux_user",
     "service_last_result",
     "service_task_state",
     "service_unit",
+    "service_user_id",
     "timer_enabled",
     "timer_to_task_state",
+    "timer_unit",
     "usec_to_datetime",
 ]

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import multiprocessing
 import multiprocessing.spawn
+import re
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -62,6 +64,11 @@ def test_a_child_that_dies_without_a_result_becomes_native_call_error() -> None:
     assert set(multiprocessing.active_children()) - before == set()
 
 
+_START_FAILED = r"could not be started"
+# A real integer exit code: "exit code None" would mean the child was never reaped.
+_EXITED_WITH_CODE = r"exited without a result \(exit code -?[0-9]+\)"
+
+
 @pytest.fixture
 def missing_interpreter(tmp_path: Path) -> Iterator[None]:
     """Point spawn at an interpreter that does not exist, so the OS itself refuses the start."""
@@ -77,6 +84,20 @@ def missing_interpreter(tmp_path: Path) -> Iterator[None]:
 @pytest.mark.os_agnostic
 @pytest.mark.usefixtures("missing_interpreter")
 def test_a_child_that_cannot_be_started_becomes_native_call_error() -> None:
-    with pytest.raises(NativeCallError, match="could not be started") as caught:
+    """An unstartable child is a NativeCallError at once, never a raw OSError, a hang, or a leftover.
+
+    Where the missing interpreter surfaces depends on the platform: Windows' CreateProcess fails
+    inside start(), and so does POSIX spawn on the CPython builds whose launcher closes the
+    child's read end before writing to it (EPIPE).  Other POSIX builds (measured: 3.10-3.12,
+    3.14.0) return from start() and the child dies with exit code 255, which run_bounded reports
+    as a worker without a result.  Both are correct; only Windows is pinned to the start path.
+    """
+    before = set(multiprocessing.active_children())
+    started = time.monotonic()
+    with pytest.raises(NativeCallError) as caught:
         run_bounded(echo, (1,), timeout=30)
+    assert time.monotonic() - started < 20  # reported at once, not after the 30 s timeout
     assert not isinstance(caught.value, OperationTimeoutError)
+    expected = _START_FAILED if sys.platform == "win32" else f"{_START_FAILED}|{_EXITED_WITH_CODE}"
+    assert re.search(expected, str(caught.value)), str(caught.value)
+    assert set(multiprocessing.active_children()) - before == set()

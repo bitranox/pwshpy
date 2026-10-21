@@ -99,7 +99,7 @@ def _await_result(parent: Connection, process: SpawnProcess, *, name: str, timeo
     # as EOFError on every OS, but on Windows PipeConnection.poll calls PeekNamedPipe unwrapped,
     # which raises BrokenPipeError instead when the child died before the parent reached poll.
     except (EOFError, BrokenPipeError, ConnectionResetError) as exc:
-        _reap(process)
+        _reap_exited(process)
         raise NativeCallError(f"{name} worker exited without a result (exit code {process.exitcode})") from exc
     finally:
         _reap(process)
@@ -111,6 +111,17 @@ def _reap(process: SpawnProcess) -> None:
     if process.is_alive():
         process.kill()
     process.join(_KILL_GRACE_SECONDS)
+
+
+def _reap_exited(process: SpawnProcess) -> None:
+    """Wait for a child whose pipe already closed, and kill it only if it does not exit.
+
+    The pipe closes while the child is still shutting down, so killing first would replace its
+    real exit code with the kill's; that code is the only clue the caller gets about why no
+    result came.
+    """
+    process.join(_KILL_GRACE_SECONDS)
+    _reap(process)
 
 
 __all__ = ["run_bounded"]

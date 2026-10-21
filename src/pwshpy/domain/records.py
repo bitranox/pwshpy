@@ -581,7 +581,9 @@ class ScheduledTaskInfo(PSRecord):
     ``last_task_result`` is the last exit code or HRESULT (unsigned on Windows); 0 means it ran
     and succeeded. It is None until the task has run AND while a run is in progress: Windows
     reports no result until the run finishes, and Linux reads None for a running service too.
-    ``last_run_time`` tells the two apart (None only for a task that never ran).
+    ``last_run_time`` tells the two apart: it is None for a task that never ran (or whose run
+    time cannot be read) and set once a run has started, an on-demand start included on both
+    backends (Linux takes the later of the timer's last trigger and the service's last start).
 
     Example:
         >>> t = ScheduledTaskInfo(task_name="Backup", task_path="Root", state=TaskState.READY, enabled=True)

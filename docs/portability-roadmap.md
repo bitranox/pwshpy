@@ -160,8 +160,9 @@ box (like the Windows mutating tests need throwaway VM 24000).
 - **The boot-timer gotcha (recorded):** systemd fires an `OnBootSec=` whose offset is already past
   the moment the timer starts, so `register` and `enable` only enable a timer with a boot-relative
   part (it starts at the next boot via timers.target); starting it would run the job at once.
-- **`TaskState` map:** armed timer -> READY (an enabled but not yet started boot timer included),
-  activating -> QUEUED, inactive/failed -> DISABLED; an on-demand service is RUNNING while executing
+- **`TaskState` map:** active timer -> READY, and an inactive timer that is enabled (or static) ->
+  READY too (an enabled but not yet started boot timer); activating -> QUEUED; an inactive timer
+  that is not enabled, or a failed one -> DISABLED; an on-demand service is RUNNING while executing
   else READY.
 - **Privilege:** system units need root (like the Windows verbs need admin); user timers are future work.
 

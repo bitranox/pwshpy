@@ -114,8 +114,8 @@ newest-first (memory-bounded). `L` is a Windows channel (`"System"`) or, on Linu
 ## Scheduled tasks  *(portable: read + mutation)*
 
 Portable: the Task Scheduler on Windows, systemd timers over D-Bus on Linux (built in, via the
-base Linux dep jeepney). On Linux `get_scheduled_task` lists the `.timer` units (`task_name` is
-the unit base name, `task_path` is `/`); `register` writes a oneshot `.service` (the action, with
+base Linux dep jeepney). On Linux `get_scheduled_task` lists the `.timer` units, disabled and
+not-yet-started ones included (`task_name` is the unit base name, `task_path` is `/`); `register` writes a oneshot `.service` (the action, with
 `User=` for a uid principal) and, when triggers are given, a `.timer` that starts it, so a task
 without triggers runs only on demand; `run`/`stop` start/stop the service; `enable`/`disable`
 arm/disarm a task's `.timer` and raise a clear error for an on-demand task (systemd cannot disable

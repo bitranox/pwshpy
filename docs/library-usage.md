@@ -95,9 +95,12 @@ exported from `pwshpy`, that refuse unknown keys:
   any of them. Every `at` must be timezone-aware; a naive datetime is refused. `delay` counts whole
   seconds. An empty sequence means the task runs only on demand (`ps.start_scheduled_task`).
 
-A daily trigger fires at the same UTC time of day on both OSes: Windows keeps the offset the
-`datetime` carries, Linux converts it to UTC. A `03:00+01:00` daily trigger therefore fires at
-`04:00` local time once a `+01:00` zone switches to summer time.
+A daily trigger is written with a fixed UTC offset on both OSes: Linux converts `at` to UTC, and
+Windows stores it in the trigger's `StartBoundary` with the offset the `datetime` carries. On Linux
+it therefore fires at the same UTC time of day all year, so a `03:00+01:00` trigger fires at `04:00`
+local time once a `+01:00` zone switches to summer time. On Windows a fixed offset implies the
+same; that follows from `StartBoundary`'s format and was not observed across a DST change on a
+Windows host.
 
 ```python
 from datetime import datetime, timedelta, timezone
@@ -182,13 +185,13 @@ because systemd runs a started boot timer at once when its offset has already pa
 `register_scheduled_task` returns the task read back as a `ScheduledTaskInfo`, the same record
 `ps.get_scheduled_task()` yields. Its principal and run-information fields:
 
-| Field              | Windows                                                                               | Linux                                                                                           |
-|--------------------|---------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
-| `user_id`          | the principal's SID; `""` for a group principal or an account that no longer resolves | the service's `User=` as a decimal uid, `"0"` for root; `""` when it cannot be read or resolved |
-| `run_level`        | `Limited` / `Highest`; None when unreadable                                           | always None (no split token)                                                                    |
-| `last_run_time`    | aware UTC; None when the task never ran                                               | the timer's last trigger (the service's last start for an on-demand task); None if never        |
-| `last_task_result` | the exit code or HRESULT, unsigned 32-bit; None when it never ran                     | the exit status, `128 + signal` when killed; None when it never ran or is running now           |
-| `next_run_time`    | aware UTC; None when nothing is scheduled                                             | the timer's next wall-clock elapse; None for an on-demand task or a boot-only timer             |
+| Field              | Windows                                                                               | Linux                                                                                                |
+|--------------------|---------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
+| `user_id`          | the principal's SID; `""` for a group principal or an account that no longer resolves | the service's `User=` as a decimal uid, `"0"` for root; `""` when it cannot be read or resolved      |
+| `run_level`        | `Limited` / `Highest`; None when unreadable                                           | always None (no split token)                                                                         |
+| `last_run_time`    | aware UTC; None when the task never ran                                               | the later of the timer's last trigger and the service's last start, so a `run` counts; None if never |
+| `last_task_result` | the exit code or HRESULT, unsigned 32-bit; None when it never ran or is running now   | the exit status, `128 + signal` when killed; None when it never ran or is running now                |
+| `next_run_time`    | aware UTC; None when nothing is scheduled                                             | the timer's next wall-clock elapse; None for an on-demand task or a boot-only timer                  |
 
 `last_task_result` 0 means the last run succeeded. On Linux a registered calendar or boot task
 reads `Ready`, a disabled one `Disabled`, and an on-demand task `Ready` (`Running` while it runs).
@@ -197,6 +200,7 @@ reads `Ready`, a disabled one `Disabled`, and an on-demand task `Ready` (`Runnin
 
 Every failure across both backends raises a subclass of `PwshPyError`: `NativeCallError` (a wrapped
 native/OS failure), `PowerShellError` (a .NET error record), `FeatureUnavailableError` (a .NET
-call without the `[full]` extra), `PlatformUnsupportedError` (a Windows-only call off Windows, or an
-input the running OS has no analog for), and `ConfigurationError`. No terminating-vs-non-terminating distinction, no `-ErrorAction Stop` to
-remember, no silently swallowed error.
+call without the `[full]` extra), `PlatformUnsupportedError` (a Windows-only call off Windows, or a
+scheduled-task input the running OS has no analog for), and `ConfigurationError`. No
+terminating-vs-non-terminating distinction, no `-ErrorAction Stop` to remember, no silently
+swallowed error.

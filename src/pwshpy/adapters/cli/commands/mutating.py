@@ -373,6 +373,24 @@ def _principal(run_as: str | None, run_level: str, logon_type: str | None) -> Ta
     )
 
 
+def _principal_label(user_id: str) -> str:
+    """How the register confirmation names the principal the task read back as.
+
+    A bare ``0`` would not read as root, so a decimal uid is labelled; an empty ``user_id``
+    means the backend could not report one, which is not the same as "the caller" (a Linux
+    task with no principal runs as root).
+
+    Example:
+        >>> _principal_label("0"), _principal_label("S-1-5-18"), _principal_label("")
+        ('uid 0', 'S-1-5-18', 'an unknown principal')
+    """
+    if not user_id:
+        return "an unknown principal"
+    if user_id.isascii() and user_id.isdigit():
+        return f"uid {user_id}"
+    return user_id
+
+
 def _check_modifiers(
     *, daily: bool, every_days: int, at_boot: bool, boot_delay: int, at_logon: bool, logon_user: str | None
 ) -> None:
@@ -503,7 +521,7 @@ def cli_register_scheduled_task(
         principal=principal,
         triggers=triggers,
     )
-    click.echo(f"registered {task_path} as {info.user_id or 'the caller'}")
+    click.echo(f"registered {task_path} as {_principal_label(info.user_id)}")
 
 
 @click.command("unregister_scheduled_task")

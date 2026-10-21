@@ -82,7 +82,7 @@ several, it fires on any of them.
 | `--run-level LEVEL` | `limited` (default) or `highest` (the elevated token; on Linux root only)                                      |
 | `--logon-type TYPE` | `interactivetoken`, `serviceaccount` or `s4u` (Windows only); by default it follows `--run-as`                 |
 | `--at TIME`         | run once at `TIME` (repeatable)                                                                                |
-| `--daily TIME`      | run daily at the time of day of `TIME`, starting then (repeatable)                                             |
+| `--daily TIME`      | run daily at the time of day of `TIME` (repeatable); Windows starts on that date, Linux runs from today        |
 | `--every-days N`    | day interval for every `--daily` trigger (default 1; above 1 is Windows only)                                  |
 | `--at-boot`         | run at boot                                                                                                    |
 | `--boot-delay S`    | seconds after boot (with `--at-boot`)                                                                          |
@@ -109,9 +109,10 @@ Exit codes: a malformed option exits 2 with a usage error before anything is reg
 account name for `--run-as`, an unparseable or offset-less time, a negative `--boot-delay`, or a
 modifier without its trigger (`--every-days` without `--daily`, `--boot-delay` without `--at-boot`,
 `--logon-user` without `--at-logon`). A refusal from the OS backend exits 1 with one
-`ErrorName: message` line on stderr and no traceback: on Linux a logon trigger, `--every-days`
-above 1, or boot and calendar triggers in one task; on Windows a uid, or a logon type that does not
-fit `--run-as`. The full per-OS mapping and the fields the task reads back are in
+`ErrorName: message` line on stderr and no traceback. For example, on Linux a SID for `--run-as`,
+any `--logon-type`, `--run-level highest` with a non-root uid, a logon trigger, `--every-days` above
+1, or boot and calendar triggers in one task; on Windows a uid, a group SID such as
+`--run-as administrators`, or a logon type that does not fit `--run-as`. The full per-OS mapping and the fields the task reads back are in
 [Library & Pipeline](library-usage.md#scheduled-tasks-principal-run-level-and-triggers).
 
 ## Power-tool commands

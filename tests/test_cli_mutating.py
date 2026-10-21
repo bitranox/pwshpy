@@ -269,7 +269,25 @@ def test_register_scheduled_task_cli_without_schedule_options_passes_no_principa
     result = CliRunner().invoke(cli, ["register_scheduled_task", "\\T", "--program", "x"], obj=_factory(fake))
     assert result.exit_code == 0, result.output
     assert fake.calls[-1] == ("register_scheduled_task", "\\T", None, ())
-    assert "registered \\T as the caller" in result.output
+    assert "registered \\T as an unknown principal" in result.output
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("run_as", "expected"),
+    [
+        ("0", "registered \\T as uid 0"),
+        ("1000", "registered \\T as uid 1000"),
+        ("S-1-5-21-1-2-3-1001", "registered \\T as S-1-5-21-1-2-3-1001"),
+    ],
+)
+def test_register_scheduled_task_cli_names_the_read_back_principal(run_as: str, expected: str) -> None:
+    """A decimal uid reads 'uid <n>' (root's "0" too, never a bare 0), a SID reads as itself."""
+    fake = _FakePs()
+    args = ["register_scheduled_task", "\\T", "--program", "x", "--run-as", run_as]
+    result = CliRunner().invoke(cli, args, obj=_factory(fake))
+    assert result.exit_code == 0, result.output
+    assert expected in result.output.splitlines()
 
 
 @pytest.mark.os_agnostic

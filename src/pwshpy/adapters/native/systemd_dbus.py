@@ -11,6 +11,8 @@ Contents:
     * :func:`call` - one Manager method call, mapping a D-Bus error to :class:`NativeCallError`.
     * :func:`unit_property` / :func:`active_state` - read a ``Unit`` (or, with ``interface``, a
       ``Timer`` / ``Service``) property of a loaded unit.
+    * :func:`unit_path` / :func:`path_property` - resolve a unit's object path once, then read
+      several properties from it (one ``GetUnit`` instead of one per property).
 """
 
 from __future__ import annotations
@@ -73,17 +75,30 @@ def call(bus: Bus, method: str, signature: str = "", body: tuple[Any, ...] = ())
     return reply.body
 
 
+def unit_path(bus: Bus, name: str) -> str | None:
+    """The object path of a loaded unit, or None when it is not loaded."""
+    try:
+        (path,) = call(bus, "GetUnit", "s", (name,))
+    except NativeCallError:
+        return None  # a stopped/absent unit unloads -> GetUnit reports "not loaded"
+    return str(path)
+
+
 def unit_property(bus: Bus, name: str, prop: str, default: Any, *, interface: str = UNIT_IFACE) -> Any:
     """Read one property of a loaded unit; ``default`` if the unit is not loaded or lacks it.
 
     ``interface`` picks the property's D-Bus interface: the generic ``Unit`` one by default, or
     the type-specific :data:`TIMER_IFACE` / :data:`SERVICE_IFACE` for a timer's or service's own
-    properties (systemd exposes those only under the type's interface).
+    properties (systemd exposes those only under the type's interface). To read several
+    properties of one unit, resolve :func:`unit_path` once and use :func:`path_property`.
     """
-    try:
-        (path,) = call(bus, "GetUnit", "s", (name,))
-    except NativeCallError:
-        return default  # a stopped/absent unit unloads -> GetUnit reports "not loaded"
+    return path_property(bus, unit_path(bus, name), prop, default, interface=interface)
+
+
+def path_property(bus: Bus, path: str | None, prop: str, default: Any, *, interface: str = UNIT_IFACE) -> Any:
+    """Read one property from a unit object ``path``; ``default`` for a None path or a missing property."""
+    if path is None:
+        return default
     props = bus.core.DBusAddress(path, bus_name=MANAGER_BUS, interface=_PROPERTIES_IFACE)
     reply = bus.conn.send_and_get_reply(bus.core.new_method_call(props, "Get", "ss", (interface, prop)))
     if is_error(reply):
@@ -118,6 +133,8 @@ __all__ = [
     "call",
     "is_error",
     "open_bus",
+    "path_property",
     "unit_file_state",
+    "unit_path",
     "unit_property",
 ]

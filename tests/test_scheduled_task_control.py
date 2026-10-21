@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from pwshpy.adapters.native import scheduled_task_control as mod
+from pwshpy.adapters.native import task_readback
 from pwshpy.adapters.native.scheduled_task_control import NativeScheduledTaskController
 from pwshpy.domain.enums import TaskRunLevel
 from pwshpy.domain.errors import NativeCallError, PwshPyError
@@ -224,7 +225,7 @@ def test_task_info_reads_principal_sid_and_run_level(monkeypatch: pytest.MonkeyP
     task.Definition.Principal.RunLevel = 1
     svc.folder.tasks["MyTask"] = task
     _use(monkeypatch, svc)
-    monkeypatch.setattr(mod, "sid_string", _sid_as_given)  # external edge: LookupAccountName
+    monkeypatch.setattr(task_readback, "sid_string", _sid_as_given)  # external edge: LookupAccountName
     info = NativeScheduledTaskController().enable("\\MyTask")
     assert info.user_id == "S-1-5-18"
     assert info.run_level is TaskRunLevel.HIGHEST
@@ -238,7 +239,9 @@ def test_task_info_resolves_an_account_name_through_sid_string(monkeypatch: pyte
     task.Definition.Principal.UserId = "SYSTEM"
     svc.folder.tasks["MyTask"] = task
     _use(monkeypatch, svc)
-    monkeypatch.setattr(mod, "sid_string", {"SYSTEM": "S-1-5-18"}.__getitem__)  # external edge: LookupAccountName
+    monkeypatch.setattr(
+        task_readback, "sid_string", {"SYSTEM": "S-1-5-18"}.__getitem__
+    )  # external edge: LookupAccountName
     info = NativeScheduledTaskController().enable("\\MyTask")
     assert info.user_id == "S-1-5-18"
     assert info.run_level is TaskRunLevel.LIMITED
@@ -254,7 +257,7 @@ def test_task_info_reads_run_info(monkeypatch: pytest.MonkeyPatch) -> None:
     task.NextRunTime = datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
     svc.folder.tasks["MyTask"] = task
     _use(monkeypatch, svc)
-    monkeypatch.setattr(mod, "sid_string", _sid_as_given)  # external edge: LookupAccountName
+    monkeypatch.setattr(task_readback, "sid_string", _sid_as_given)  # external edge: LookupAccountName
     info = NativeScheduledTaskController().enable("\\MyTask")
     assert info.last_run_time == datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
     assert info.last_task_result == 0  # 0 is a real result ("ran, succeeded"), never folded into None
@@ -267,9 +270,28 @@ def test_task_info_never_run_reads_none(monkeypatch: pytest.MonkeyPatch) -> None
     svc = _FakeService()
     svc.folder.tasks["MyTask"] = _FakeTask("MyTask")
     _use(monkeypatch, svc)
-    monkeypatch.setattr(mod, "sid_string", _sid_as_given)
+    monkeypatch.setattr(task_readback, "sid_string", _sid_as_given)
     info = NativeScheduledTaskController().enable("\\MyTask")
     assert (info.last_run_time, info.last_task_result, info.next_run_time) == (None, None, None)
+
+
+# An account name that resolves nowhere: off Windows sid_string cannot resolve any name
+# (no pywin32), on Windows LookupAccountName finds no such account - both raise.
+_UNRESOLVABLE = "pwshpy-test-no-such-account-7f3a"
+
+
+@pytest.mark.os_agnostic
+def test_task_info_unresolvable_principal_reads_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A verb that succeeded is not turned into a failure by a principal that no longer resolves."""
+    svc = _FakeService()
+    task = _FakeTask("MyTask")
+    task.Definition.Principal.UserId = _UNRESOLVABLE
+    task.Definition.Principal.RunLevel = 1
+    svc.folder.tasks["MyTask"] = task
+    _use(monkeypatch, svc)
+    info = NativeScheduledTaskController().enable("\\MyTask")
+    assert task.Enabled is True
+    assert (info.user_id, info.run_level) == ("", TaskRunLevel.HIGHEST)
 
 
 # --- Real integration: run only on the disposable throwaway VM ---------------

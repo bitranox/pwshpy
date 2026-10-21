@@ -573,8 +573,10 @@ class ScheduledTaskInfo(PSRecord):
     task is a systemd ``.timer`` unit: ``task_name`` is the unit base name (no ``.timer``),
     ``task_path`` is the flat root ``"/"``, and ``description`` comes from the unit.
 
-    ``user_id`` is the principal's SID on Windows and its decimal uid on Linux (``""`` when
-    unknown); ``run_level`` is None where the backend has no run-level concept.
+    ``user_id`` is the principal's SID on Windows and its decimal uid on Linux; it is ``""``
+    when unknown, when the principal is a group rather than a user, or when the account no
+    longer resolves to a SID (the task is still listed). ``run_level`` is None where the
+    backend has no run-level concept or it cannot be read.
     ``last_run_time`` / ``next_run_time`` are aware UTC (None = never ran / nothing scheduled);
     ``last_task_result`` is the last exit code or HRESULT (unsigned on Windows), None until the
     task has run - 0 means it ran and succeeded.

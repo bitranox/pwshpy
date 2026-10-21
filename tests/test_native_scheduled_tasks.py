@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from pwshpy.adapters.native import scheduled_tasks as st_mod
+from pwshpy.adapters.native import task_readback
 from pwshpy.adapters.native.scheduled_tasks import iter_scheduled_tasks
 from pwshpy.domain.enums import TaskRunLevel, TaskState
 from pwshpy.domain.errors import NativeCallError
@@ -201,7 +202,7 @@ def test_listing_reads_principal_run_level_and_run_info(monkeypatch: pytest.Monk
     never = _FakeTask("Never", 3, True)
     root = _FakeFolder("\\", [ran, never], [])
     monkeypatch.setattr(st_mod, "_connect_scheduler", lambda: _FakeService(root))
-    monkeypatch.setattr(st_mod, "sid_string", _sid_as_given)  # external edge: LookupAccountName
+    monkeypatch.setattr(task_readback, "sid_string", _sid_as_given)  # external edge: LookupAccountName
     first, second = list(iter_scheduled_tasks())
     assert (first.user_id, first.run_level) == ("S-1-5-18", TaskRunLevel.HIGHEST)
     assert first.last_run_time == datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
@@ -209,6 +210,49 @@ def test_listing_reads_principal_run_level_and_run_info(monkeypatch: pytest.Monk
     assert first.next_run_time == datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
     assert (second.user_id, second.run_level) == ("", TaskRunLevel.LIMITED)
     assert (second.last_run_time, second.last_task_result, second.next_run_time) == (None, None, None)
+
+
+# An account name that resolves nowhere: off Windows sid_string cannot resolve any name
+# (no pywin32), on Windows LookupAccountName finds no such account - both raise.
+_UNRESOLVABLE = "pwshpy-test-no-such-account-7f3a"
+
+
+@pytest.mark.os_agnostic
+def test_listing_keeps_a_task_whose_principal_cannot_be_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unresolvable principal (deleted account) reads user_id "" - the task is never dropped."""
+    orphan = _FakeTask("Orphan", 3, True)
+    orphan.Definition = _FakeDef(_FakeReg("", ""), _FakePrincipal(_UNRESOLVABLE, 1))
+    orphan.LastTaskResult = 0
+    root = _FakeFolder("\\", [orphan], [])
+    monkeypatch.setattr(st_mod, "_connect_scheduler", lambda: _FakeService(root))
+    (info,) = list(iter_scheduled_tasks())
+    assert info.task_name == "Orphan"
+    assert info.user_id == ""
+    assert info.run_level is TaskRunLevel.HIGHEST  # the other fields still read back
+    assert info.last_task_result == 0
+
+
+@pytest.mark.os_agnostic
+def test_listing_keeps_a_task_whose_run_info_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run-info property COM refuses reads None for that field only; the task stays listed."""
+
+    class _HalfReadableTask(_FakeTask):
+        @property
+        def LastRunTime(self) -> Any:  # noqa: N802 - COM API name
+            raise OSError("access denied")
+
+        @LastRunTime.setter
+        def LastRunTime(self, value: Any) -> None:  # noqa: N802 - COM API name
+            del value  # the base __init__ assigns it; this task refuses to read it back
+
+    task = _HalfReadableTask("Half", 3, True)
+    task.LastTaskResult = 1
+    root = _FakeFolder("\\", [task], [])
+    monkeypatch.setattr(st_mod, "_connect_scheduler", lambda: _FakeService(root))
+    (info,) = list(iter_scheduled_tasks())
+    assert info.task_name == "Half"
+    assert info.last_run_time is None
+    assert info.last_task_result == 1
 
 
 @pytest.mark.os_windows

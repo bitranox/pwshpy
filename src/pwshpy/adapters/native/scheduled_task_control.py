@@ -21,8 +21,8 @@ from typing import Any
 
 from ...domain.errors import NativeCallError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
-from .marshal import com_date_to_datetime, to_task_result, to_task_run_level, to_task_state
-from .sid import sid_string
+from .marshal import to_task_state
+from .task_readback import read_task_extras
 
 _TASK_ACTION_EXEC = 0
 _TASK_CREATE_OR_UPDATE = 6
@@ -55,7 +55,7 @@ def _split_path(task_path: str) -> tuple[str, str]:
 def _task_info(task: Any, folder_path: str) -> ScheduledTaskInfo:
     """Marshal an IRegisteredTask into a :class:`ScheduledTaskInfo` snapshot."""
     registration = task.Definition.RegistrationInfo
-    principal = task.Definition.Principal
+    extras = read_task_extras(task)  # fail-soft per field: never costs the task
     return ScheduledTaskInfo.model_construct(
         task_name=str(task.Name),
         task_path=folder_path if folder_path.endswith("\\") else folder_path + "\\",
@@ -63,11 +63,11 @@ def _task_info(task: Any, folder_path: str) -> ScheduledTaskInfo:
         enabled=bool(task.Enabled),
         author=str(registration.Author or ""),
         description=str(registration.Description or ""),
-        user_id=sid_string(str(principal.UserId or "")),
-        run_level=to_task_run_level(int(principal.RunLevel)),
-        last_run_time=com_date_to_datetime(task.LastRunTime),
-        last_task_result=to_task_result(int(task.LastTaskResult)),
-        next_run_time=com_date_to_datetime(task.NextRunTime),
+        user_id=extras.user_id,
+        run_level=extras.run_level,
+        last_run_time=extras.last_run_time,
+        last_task_result=extras.last_task_result,
+        next_run_time=extras.next_run_time,
     )
 
 

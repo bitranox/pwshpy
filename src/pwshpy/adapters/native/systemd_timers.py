@@ -118,16 +118,16 @@ def service_last_result(*, exec_code: int, exec_status: int, started_usec: int) 
     return exec_status if exec_code == _CLD_EXITED else 128 + exec_status
 
 
-def _timer_property(bus: _dbus.Bus, timer: str, prop: str) -> int:
+def _timer_property(bus: _dbus.Bus, timer_path: str | None, prop: str) -> int:
     """One ``Timer`` USec property as an int (0 - "none" - when the timer is not loaded)."""
-    return int(_dbus.unit_property(bus, timer, prop, 0, interface=_dbus.TIMER_IFACE))
+    return int(_dbus.path_property(bus, timer_path, prop, 0, interface=_dbus.TIMER_IFACE))
 
 
-def _service_run(bus: _dbus.Bus, service: str) -> tuple[int | None, datetime | None]:
+def _service_run(bus: _dbus.Bus, service_path: str | None) -> tuple[int | None, datetime | None]:
     """A service's last result and the start time of its last run (None, None if it never ran)."""
 
     def read(prop: str) -> int:
-        return int(_dbus.unit_property(bus, service, prop, 0, interface=_dbus.SERVICE_IFACE))
+        return int(_dbus.path_property(bus, service_path, prop, 0, interface=_dbus.SERVICE_IFACE))
 
     started = read("ExecMainStartTimestamp")
     result = service_last_result(
@@ -144,18 +144,20 @@ class _RunInfo(NamedTuple):
     next_run_time: datetime | None
 
 
-def _timer_run_info(bus: _dbus.Bus, timer: str, base: str) -> _RunInfo:
+def _timer_run_info(bus: _dbus.Bus, timer_path: str | None, base: str) -> _RunInfo:
     """The [120] fields of a timer task: last trigger, next realtime elapse, and the triggered service's result.
 
     The service is the one the timer's ``Unit`` property names (``<base>.service`` unless the
     timer sets ``Unit=``), so listing and controller report the same result for the same timer.
+    Properties are read from the already-resolved ``timer_path``; only the service costs a
+    ``GetUnit``.
     """
-    service = str(_dbus.unit_property(bus, timer, "Unit", f"{base}.service", interface=_dbus.TIMER_IFACE))
-    result, _started = _service_run(bus, service)
+    service = str(_dbus.path_property(bus, timer_path, "Unit", f"{base}.service", interface=_dbus.TIMER_IFACE))
+    result, _started = _service_run(bus, _dbus.unit_path(bus, service))
     return _RunInfo(
-        last_run_time=usec_to_datetime(_timer_property(bus, timer, "LastTriggerUSec")),
+        last_run_time=usec_to_datetime(_timer_property(bus, timer_path, "LastTriggerUSec")),
         last_task_result=result,
-        next_run_time=usec_to_datetime(_timer_property(bus, timer, "NextElapseUSecRealtime")),
+        next_run_time=usec_to_datetime(_timer_property(bus, timer_path, "NextElapseUSecRealtime")),
     )
 
 
@@ -163,7 +165,8 @@ def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
     """Yield a :class:`ScheduledTaskInfo` per systemd ``.timer`` unit (like Get-ScheduledTask, Linux).
 
     ``folder_path`` is accepted for signature parity with the Windows source and ignored (systemd
-    timers are flat). Lazy: ``GetUnitFileState`` and the run-info reads run only for consumed timers.
+    timers are flat). Lazy: ``GetUnitFileState`` and the run-info reads run only for consumed timers;
+    the timer's object path comes from ``ListUnits`` itself, so a timer costs no ``GetUnit``.
 
     Example:
         >>> callable(iter_timers)
@@ -178,7 +181,7 @@ def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
                 continue
             state = _dbus.unit_file_state(bus, name) or ""
             base = name[: -len(".timer")]
-            run = _timer_run_info(bus, name, base)
+            run = _timer_run_info(bus, str(unit[6]), base)  # ListUnits field 6 is the unit object path
             yield ScheduledTaskInfo.model_construct(
                 task_name=base,
                 task_path=_ROOT,
@@ -309,27 +312,28 @@ class SystemdScheduledTaskController:
         if _has_timer(bus, base):
             unit = f"{base}.timer"
             state = _dbus.unit_file_state(bus, unit) or ""
-            run = _timer_run_info(bus, unit, base)
+            path = _dbus.unit_path(bus, unit)  # resolved once for every property below
+            run = _timer_run_info(bus, path, base)
             return ScheduledTaskInfo.model_construct(
                 task_name=base,
                 task_path=_ROOT,
-                state=timer_to_task_state(_dbus.active_state(bus, unit)),
+                state=timer_to_task_state(str(_dbus.path_property(bus, path, "ActiveState", "inactive"))),
                 enabled=timer_enabled(state),
                 author="",
-                description=str(_dbus.unit_property(bus, unit, "Description", "")),
+                description=str(_dbus.path_property(bus, path, "Description", "")),
                 last_run_time=run.last_run_time,
                 last_task_result=run.last_task_result,
                 next_run_time=run.next_run_time,
             )
-        unit = f"{base}.service"
-        result, started = _service_run(bus, unit)
+        path = _dbus.unit_path(bus, f"{base}.service")  # resolved once for every property below
+        result, started = _service_run(bus, path)
         return ScheduledTaskInfo.model_construct(
             task_name=base,
             task_path=_ROOT,
-            state=service_task_state(_dbus.active_state(bus, unit)),
+            state=service_task_state(str(_dbus.path_property(bus, path, "ActiveState", "inactive"))),
             enabled=True,  # an on-demand oneshot has no schedule to disable; it can always be run
             author="",
-            description=str(_dbus.unit_property(bus, unit, "Description", "")),
+            description=str(_dbus.path_property(bus, path, "Description", "")),
             last_run_time=started,  # no timer: the last run is the service's own last start
             last_task_result=result,
             next_run_time=None,  # on demand: nothing is scheduled

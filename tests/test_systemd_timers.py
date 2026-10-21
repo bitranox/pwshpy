@@ -191,9 +191,11 @@ class _FakeConn:
         self._props = props
         self._unit_files = unit_files
         self.verbs: list[str] = []
+        self.methods: list[str] = []  # every method sent, in order (to count round trips)
         self.closed = False
 
     def send_and_get_reply(self, msg: _Message) -> _Reply:
+        self.methods.append(msg.method)
         loaded = {unit for unit, _iface, _prop in self._props}
         if msg.method == "ListUnits":
             return _Reply(([(n, d, "loaded", a, "", "", f"/u/{n}", 0, "", "/") for n, d, a in self._units],))
@@ -251,6 +253,8 @@ def test_iter_timers_reads_run_info_from_the_timer_and_its_unit(monkeypatch: pyt
     assert backup.last_task_result == 3
     assert (never.last_run_time, never.last_task_result, never.next_run_time) == (None, None, None)
     assert conn.closed is True
+    # The timer's own path comes from ListUnits; only the triggered service needs one GetUnit.
+    assert conn.methods.count("GetUnit") == 2
 
 
 @pytest.mark.os_agnostic
@@ -267,6 +271,7 @@ def test_controller_info_timer_task(monkeypatch: pytest.MonkeyPatch) -> None:
     _use_bus(monkeypatch, conn)
     info = SystemdScheduledTaskController().disable("job")
     assert conn.verbs == ["StopUnit", "DisableUnitFiles", "Reload"]
+    assert conn.methods.count("GetUnit") == 2  # one for the timer, one for its service
     assert info.state is TaskState.READY
     assert info.last_run_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
     assert info.next_run_time == datetime(2023, 11, 14, 23, 13, 20, tzinfo=timezone.utc)
@@ -277,10 +282,12 @@ def test_controller_info_timer_task(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_controller_info_on_demand_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """An on-demand service: last run is its own last start, the result its exit, nothing scheduled."""
     props = _service_props("adhoc.service", code=1, status=0, started=_T0)
-    _use_bus(monkeypatch, _FakeConn([], props))
+    conn = _FakeConn([], props)
+    _use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)  # filesystem edge: never write /etc here
     info = SystemdScheduledTaskController().register("adhoc", program="/bin/true")
     assert (tmp_path / "adhoc.service").is_file()
+    assert conn.methods.count("GetUnit") == 1  # the service, once, for every field
     assert info.last_run_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
     assert info.last_task_result == 0  # ran and succeeded, never folded into None
     assert info.next_run_time is None

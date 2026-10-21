@@ -15,6 +15,7 @@ Contents:
     * :func:`iter_env` — portable environment-variable source (os.environ).
     * :func:`iter_registry_values` — Windows registry values (lib_registry, win32-gated).
     * :func:`iter_registry_keys` — Windows registry subkeys (lib_registry, win32-gated).
+    * :func:`iter_wim_images` - portable WIM image list (header + XML resource, no DISM).
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ from .systemd_services import iter_services as systemd_iter_services
 from .systemd_timers import SystemdScheduledTaskController
 from .systemd_timers import iter_timers as systemd_iter_timers
 from .web import download_file, invoke_rest_method, invoke_web_request
+from .wim import iter_wim_images
 
 __all__ = [
     "NativeAclController",
@@ -100,6 +102,7 @@ __all__ = [
     "invoke_rest_method",
     "invoke_web_request",
     "iter_services",
+    "iter_wim_images",
     "SystemdServiceController",
     "systemd_iter_services",
     "SystemdScheduledTaskController",

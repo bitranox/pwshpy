@@ -474,7 +474,8 @@ def test_register_refuses_a_group_principal_before_com(
     """A well-known group SID fits no logon type: refused before COM instead of an opaque HRESULT."""
     _no_com(monkeypatch)
     principal = TaskPrincipal(user_id=user_id, logon_type=logon_type)
-    with pytest.raises(ConfigurationError, match="group"):
+    # [B3]: Task Scheduler itself takes a group principal; the refusal is pwshpy's own choice.
+    with pytest.raises(ConfigurationError, match="group SID; pwshpy registers a single account"):
         NativeScheduledTaskController().register("\\T", program="cmd.exe", principal=principal)
 
 

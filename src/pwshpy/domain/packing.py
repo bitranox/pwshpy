@@ -391,10 +391,15 @@ def extract_script_metadata(source: str) -> str:
     return ""
 
 
-#: A ``requires-python`` line inside a PEP 723 block, the key at the start of a line; the value is a
-#: basic or literal TOML string.
+#: The ``requires-python`` key at the start of a (left-stripped) line, bare or as a quoted TOML key:
+#: ``"requires-python" =`` and an indented key are valid TOML that uv honours (measured), and a longer
+#: bare key such as ``requires-python-note`` is another key.
+_REQUIRES_PYTHON_KEY = re.compile(r"""(?:requires-python|"requires-python"|'requires-python')(?=\s*=)""")
+
+#: A whole ``requires-python`` line inside a PEP 723 block (left-stripped); the value is a basic or
+#: literal TOML string.
 _REQUIRES_PYTHON_LINE = re.compile(
-    r"""requires-python\s*=\s*"""
+    _REQUIRES_PYTHON_KEY.pattern + r"""\s*=\s*"""
     r"""(?:"(?P<basic>[^"\\]*)"|'(?P<literal>[^']*)')"""
     r"""\s*(?:#.*)?"""
 )
@@ -426,12 +431,13 @@ def extract_requires_python(metadata: str) -> str:
         ''
     """
     for raw in metadata.splitlines()[1:-1]:
-        line = raw[2:] if raw.startswith("# ") else raw[1:]
+        # TOML allows whitespace before a key and a table header, so neither has to start the line.
+        line = (raw[2:] if raw.startswith("# ") else raw[1:]).strip()
         if line.startswith("["):
             return ""
-        if not line.startswith("requires-python"):
+        if not _REQUIRES_PYTHON_KEY.match(line):
             continue
-        match = _REQUIRES_PYTHON_LINE.fullmatch(line.rstrip())
+        match = _REQUIRES_PYTHON_LINE.fullmatch(line)
         value = None if match is None else match.group("basic") or match.group("literal") or ""
         if value is None or _SPECIFIER_CHARACTERS.fullmatch(value) is None:
             raise PackError(

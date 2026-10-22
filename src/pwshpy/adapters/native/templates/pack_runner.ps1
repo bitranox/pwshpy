@@ -300,13 +300,13 @@ function Test-PwshPyAbsolutePath {
 }
 
 function Get-PwshPyAclDistrust {
-    param([string] $Path, [int] $Rights, [object] $Security = $null)
+    param([string] $Path, [int] $Rights, [object] $Security = $null, [string[]] $Trusted = $null)
 
     # Returns why another account could change $Path through any of $Rights, or '' when none can.
     # The owner counts as a writer whatever the ACL says, because an owner may always rewrite it.
-    # $Security is the path's security descriptor when the caller already read it (the tree walk, see
-    # Get-PwshPyPythonTreeDistrust); otherwise it is read here.
-    $trusted = Get-PwshPyTrustedSid
+    # $Security is the path's security descriptor and $Trusted the trusted SIDs when the caller already
+    # has them (the tree walk, see Get-PwshPyWindowsTreeDistrust); otherwise both are asked for here.
+    $trusted = if ($Trusted) { $Trusted } else { Get-PwshPyTrustedSid }
     $acl = $Security
     if ($null -eq $acl) {
         try {
@@ -387,11 +387,11 @@ function Get-PwshPyModeDistrust {
 }
 
 function Get-PwshPyLeafDistrust {
-    param([string] $Path, [bool] $Directory, [object] $Security = $null)
+    param([string] $Path, [bool] $Directory)
 
     if (-not $PwshPyOnWindows) { return (Get-PwshPyModeDistrust -Path $Path -Ancestor $false) }
     $rights = if ($Directory) { $PwshPyDirectoryWriteRights } else { $PwshPyFileWriteRights }
-    return (Get-PwshPyAclDistrust -Path $Path -Rights $rights -Security $Security)
+    return (Get-PwshPyAclDistrust -Path $Path -Rights $rights)
 }
 
 function Get-PwshPyAncestorDistrust {
@@ -819,11 +819,15 @@ function Get-PwshPyWindowsTreeDistrust {
     param([string] $Path)
 
     # Windows half of Get-PwshPyPythonTreeDistrust: every entry below $Path judged with the rights of
-    # its kind (Get-PwshPyLeafDistrust), a link (symlink or junction) as the link object it is
-    # (Get-PwshPyLinkDistrust) and never followed: its target inside the directory is judged where it
-    # lies. uv's lock file inherits the directory's ACL here (measured with uv 0.13), so unlike POSIX
-    # no entry is exempt. Measured on vm-pydev-win: about 1.7 s for one install (2,541 entries) under
-    # both PowerShells, 7.5 s (pwsh 7) to 11.3 s (5.1) for five.
+    # its kind, as Get-PwshPyLeafDistrust judges one, a link (symlink or junction) as the link object it
+    # is (Get-PwshPyLinkDistrust) and never followed: its target inside the directory is judged where
+    # it lies. uv's lock file inherits the directory's ACL here (measured with uv 0.13), so unlike POSIX
+    # no entry is exempt. The trusted SIDs are asked for once, and a verdict is kept per distinct owner
+    # and DACL (their SDDL) and kind: the entries of an install share a few, so most are judged by a
+    # lookup (measured on vm-pydev-win, five installs: see Get-PwshPyPythonTreeDistrust).
+    $trusted = Get-PwshPyTrustedSid
+    $sections = [Security.AccessControl.AccessControlSections]'Access, Owner'
+    $verdicts = @{}
     $stack = New-Object System.Collections.Generic.Stack[IO.DirectoryInfo]
     $stack.Push((New-Object IO.DirectoryInfo $Path))
     while ($stack.Count -gt 0) {
@@ -843,7 +847,14 @@ function Get-PwshPyWindowsTreeDistrust {
                 } catch {
                     return "the ACL of $($child.FullName) cannot be read ($($_.Exception.Message))"
                 }
-                $why = Get-PwshPyLeafDistrust -Path $child.FullName -Directory $isDirectory -Security $security
+                $key = [string]$isDirectory + '|' + $security.GetSecurityDescriptorSddlForm($sections)
+                $why = $verdicts[$key]
+                if ($null -eq $why) {
+                    $rights = if ($isDirectory) { $PwshPyDirectoryWriteRights } else { $PwshPyFileWriteRights }
+                    $why = Get-PwshPyAclDistrust -Path $child.FullName -Rights $rights -Security $security -Trusted $trusted
+                    # A refusal names its path, so only an acceptance is kept for the others.
+                    if (-not $why) { $verdicts[$key] = '' }
+                }
                 if ($isDirectory) { $stack.Push([IO.DirectoryInfo]$child) }
             }
             if ($why) { return $why }

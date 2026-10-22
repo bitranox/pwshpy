@@ -585,6 +585,106 @@ def test_a_silent_elevated_child_is_reported_not_swallowed(tmp_path: Path) -> No
     assert "pwshpy: the elevated child produced no output" in stderr
 
 
+#: What the runner's elevated child writes ahead of its error when it fails before the script runs.
+_EARLY_FAILURE_LINE = "pwshpy: the elevated child failed before running the script"
+#: The exit code of that failure (EX_SOFTWARE), kept apart from PowerShell's generic 1.
+_EARLY_FAILURE_EXIT = 70
+
+#: The three exact substitutions that turn a whole packed runner into a relaunch stand-in.
+_WHOLE_RUNNER_SUBSTITUTIONS = (
+    (
+        "if ($null -eq $IsWindows) { $PwshPyOnWindows = $true } else { $PwshPyOnWindows = $IsWindows }",
+        "$PwshPyOnWindows = $true",
+    ),
+    ("'runas'", "''"),
+    (
+        "function Test-PwshPyElevated {",
+        "function Test-PwshPyElevated {\n    return $false\n}\n\nfunction Test-PwshPyElevatedOnHost {",
+    ),
+)
+
+
+def _whole_runner_stand_in(runner: Path, output: Path) -> Path:
+    """Turn a whole packed runner into a Windows-relaunch stand-in that runs its REAL body.
+
+    Three exact, counted substitutions and nothing else: the host is declared Windows so the UAC
+    branch of Invoke-PwshPyElevated is taken; the 'runas' verb becomes '' because no test can answer
+    a UAC prompt; and the elevation probe answers "not elevated" (the Windows token API does not
+    exist off Windows). The child the relaunch starts is this same file, so it unpacks, finds uv
+    and fails exactly where the shipped runner would.
+    """
+    text = runner.read_text(encoding="utf-8")
+    for old, new in _WHOLE_RUNNER_SUBSTITUTIONS:
+        assert text.count(old) == 1, f"expected exactly one {old!r} in the runner"
+        text = text.replace(old, new)
+    output.write_text(text, encoding="utf-8")
+    return output
+
+
+def _run_whole_runner_elevated(
+    tmp_path: Path, runner: Path, *arguments: str, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """Run a whole-runner stand-in with -PwshPyElevate and capture what the PARENT printed."""
+    assert _PWSH is not None
+    stand_in = _whole_runner_stand_in(runner, tmp_path / "stand_in.ps1")
+    child_env = {**os.environ, **env}
+    child_env["PATH"] = os.pathsep.join([str(Path(_UV or "uv").parent), child_env.get("PATH", "")])
+    return subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(stand_in), "-PwshPyElevate", *arguments],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+        check=False,
+        env=child_env,
+    )
+
+
+def test_an_elevated_child_that_fails_unpacking_relays_its_error(tmp_path: Path) -> None:
+    """A corrupt payload stops the elevated child before uv; the parent prints the child's reason.
+
+    On Windows the elevated child has its own console window, which closes when it exits, so an
+    error it prints there is gone. It must reach the parent's stderr through the relay file, with
+    exit 70 rather than PowerShell's generic 1 and without the "produced no output" line.
+    """
+    manifest = pack_script(_project(tmp_path))
+    runner = Path(manifest.output_path)
+    lines = runner.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == "$PwshPyPayload = @'")
+    body = lines[start + 1]
+    lines[start + 1] = ("B" if body[0] != "B" else "C") + body[1:]
+    runner.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    result = _run_whole_runner_elevated(tmp_path, runner, "plain", env=_isolated_cache(tmp_path))
+    assert result.returncode == _EARLY_FAILURE_EXIT, result.stderr
+    assert _EARLY_FAILURE_LINE in result.stderr, result.stderr
+    assert "the embedded payload is corrupt" in result.stderr, result.stderr
+    assert "produced no output" not in result.stderr, result.stderr
+
+
+def test_an_elevated_child_whose_cache_cannot_be_created_relays_its_error(tmp_path: Path) -> None:
+    """A cache root that is a FILE fails the child's directory creation; that error is relayed."""
+    manifest = pack_script(_project(tmp_path))
+    blocker = tmp_path / "not_a_directory"
+    blocker.write_text("a file where the cache root should be\n", encoding="utf-8")
+    result = _run_whole_runner_elevated(
+        tmp_path, Path(manifest.output_path), "plain", env={"PWSHPY_PACK_CACHE": str(blocker)}
+    )
+    assert result.returncode == _EARLY_FAILURE_EXIT, result.stderr
+    assert _EARLY_FAILURE_LINE in result.stderr, result.stderr
+    assert "is not a directory" in result.stderr, result.stderr
+    assert "produced no output" not in result.stderr, result.stderr
+
+
+def test_an_elevated_child_that_runs_the_script_relays_its_output_and_code(tmp_path: Path) -> None:
+    """Control: the same stand-in reaches uv run, so its output and the script's own code come back."""
+    manifest = pack_script(_project(tmp_path, exit_code=4))
+    result = _run_whole_runner_elevated(tmp_path, Path(manifest.output_path), "plain", env=_isolated_cache(tmp_path))
+    assert result.returncode == 4, result.stderr
+    assert "greeting:hello from the submodule" in result.stdout, result.stdout + result.stderr
+    assert _EARLY_FAILURE_LINE not in result.stderr, result.stderr
+    assert "produced no output" not in result.stderr, result.stderr
+
+
 def test_the_windows_elevated_relaunch_keeps_spaced_paths_and_arguments_whole(tmp_path: Path) -> None:
     """A space in the script path, the temp dir or an argument reaches the child as one argument.
 

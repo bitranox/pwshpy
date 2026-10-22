@@ -258,9 +258,13 @@ Details worth knowing:
   from your profile, so variables set only in the calling shell (`PWSHPY_PACK_CACHE` among them) do
   not reach it. It is started as `powershell.exe -ExecutionPolicy Bypass -File runner.ps1 ...`, so
   the `-Name:Value` caveat above applies to the elevated run even when you called the runner from a
-  PowerShell prompt. If it stops before running the script (a Group Policy execution policy, a
-  closed window), the parent prints a `pwshpy: the elevated child produced no output` line and
-  exits with the child's code.
+  PowerShell prompt. Its own console window closes when it exits, so everything it has to say
+  comes back through the parent: the script's stdout and stderr on the parent's stdout and stderr,
+  and an error it hits before the script starts (a corrupt payload, a cache it cannot write, a
+  failed `uv` install) as a `pwshpy: the elevated child failed before running the script: <error>`
+  line on stderr with exit code 70. Only a child stopped before it can run a line of the runner (a
+  Group Policy execution policy, a closed window) leaves nothing to relay; then the parent prints a
+  `pwshpy: the elevated child produced no output` line and exits with the child's code.
 - **Self-elevation keeps working.** A packed script calling `ps.elevate()` re-execs the extracted
   entry with the environment uv already built, so it elevates exactly as it would unpacked.
 - **The cache is verified before every run** against per-file hashes embedded in the artefact, and

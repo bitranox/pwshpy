@@ -109,6 +109,12 @@ function Invoke-PwshPyUnpackLocked {
     # The warm path (a verified tree) never reaches here, so a normal run pays no lock cost.
     $parent = Split-Path -Parent $CacheDir
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    # New-Item -Force does not complain when a FILE sits at that path, and opening the lock under
+    # it then raises the same IOException as a held lock, so the loop below would wait out its
+    # 60 s and blame another process. Say what is actually wrong instead.
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        throw "the cache root $parent is not a directory (check PWSHPY_PACK_CACHE)"
+    }
     $lockPath = "$CacheDir.lock"
     for ($attempt = 0; $attempt -lt 600; $attempt++) {
         $lock = $null
@@ -335,22 +341,42 @@ function Invoke-PwshPyElevated {
     }
     if ($null -eq $process) { throw 'the elevated PowerShell did not start' }
     $process.WaitForExit()
-    # The child opens the relay files only when it starts the script, so a failure with neither
-    # means it never got that far (refused by the execution policy, a window closed early, or a
-    # failure while preparing the cache or uv). Its own window is gone by now, so say so rather
-    # than exit with a bare code and nothing on screen. The exit code itself is left unchanged.
-    $relayWritten = (Test-Path -LiteralPath "$relay.out") -or (Test-Path -LiteralPath "$relay.err")
-    if ($process.ExitCode -ne 0 -and -not $relayWritten) {
-        [Console]::Error.WriteLine("pwshpy: the elevated child produced no output and exited $($process.ExitCode) (it stopped before running the script, e.g. refused by the execution policy or its window was closed)")
-    }
-    foreach ($stream in @(@("$relay.out", $false), @("$relay.err", $true))) {
-        if (Test-Path -LiteralPath $stream[0]) {
-            $text = Get-Content -LiteralPath $stream[0] -Raw
-            if ($text) { if ($stream[1]) { Write-Host $text -ForegroundColor Red } else { Write-Host $text -NoNewline } }
-            Remove-Item -LiteralPath $stream[0] -Force -ErrorAction SilentlyContinue
+    # Read with ReadAllText, not Get-Content: the child's own failure text is UTF-8 without a BOM,
+    # which Get-Content on 5.1 decodes as the ANSI code page (a German error message would arrive
+    # mangled), while the script's redirected streams carry a BOM that ReadAllText honours.
+    $relayText = @{}
+    foreach ($suffix in @('out', 'err')) {
+        $path = "$relay.$suffix"
+        $relayText[$suffix] = $null
+        if (Test-Path -LiteralPath $path) {
+            $relayText[$suffix] = [IO.File]::ReadAllText($path)
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
         }
     }
+    # The child writes .out only when it starts the script, and .err earlier only to say why it
+    # stopped, so a failure with neither means it never ran a line that could tell us (refused by
+    # the execution policy, a window closed early). Its own window is gone by now, so say so
+    # rather than exit with a bare code and nothing on screen. The exit code is left unchanged.
+    if ($process.ExitCode -ne 0 -and $null -eq $relayText['out'] -and -not $relayText['err']) {
+        [Console]::Error.WriteLine("pwshpy: the elevated child produced no output and exited $($process.ExitCode) (it stopped before running the script, e.g. refused by the execution policy or its window was closed)")
+    }
+    if ($relayText['out']) { Write-Host $relayText['out'] -NoNewline }
+    # The child's stderr goes back to stderr, so a caller capturing stdout gets only the script's
+    # output, and an early failure reads as the error it is.
+    if ($relayText['err']) { [Console]::Error.Write($relayText['err']) }
     exit $process.ExitCode
+}
+
+function Write-PwshPyFailure {
+    param([string] $Message)
+
+    # An elevated child's console is a window of its own that closes the moment it exits, so a
+    # line printed there is never seen: it goes to the relay file the parent replays instead.
+    if ($PwshPyRelay) {
+        [IO.File]::AppendAllText("$PwshPyRelay.err", $Message + [Environment]::NewLine)
+        return
+    }
+    [Console]::Error.WriteLine($Message)
 }
 
 function Write-PwshPyHelp {
@@ -412,42 +438,65 @@ foreach ($argument in $args) {
 }
 $PwshPyForward = @($PwshPyRest.ToArray())
 
-if ($PwshPyHelp) { Write-PwshPyHelp; exit 0 }
+# Everything up to the script run, as one block. Run in place (dot-sourced) it behaves exactly as
+# if written inline; an elevated child runs it under a guard, because any error it raises there -
+# a corrupt payload, an unwritable cache, a failed uv install - would otherwise be printed only in
+# the child's own console window, which closes at once.
+$PwshPyPrepare = {
+    if ($PwshPyHelp) { Write-PwshPyHelp; exit 0 }
 
-$PwshPyCacheDir = Join-Path (Get-PwshPyCacheRoot) $PwshPySha.Substring(0, 16)
+    $PwshPyCacheDir = Join-Path (Get-PwshPyCacheRoot) $PwshPySha.Substring(0, 16)
 
-if ($PwshPyInfo) { Write-PwshPyManifest -CacheDir $PwshPyCacheDir; exit 0 }
+    if ($PwshPyInfo) { Write-PwshPyManifest -CacheDir $PwshPyCacheDir; exit 0 }
 
-if ($PwshPyWantElevate -and -not (Test-PwshPyElevated)) {
-    exit (Invoke-PwshPyElevated -ForwardArgs (@($PwshPyRelaunchSwitches.ToArray()) + $PwshPyForward))
-}
+    if ($PwshPyWantElevate -and -not (Test-PwshPyElevated)) {
+        exit (Invoke-PwshPyElevated -ForwardArgs (@($PwshPyRelaunchSwitches.ToArray()) + $PwshPyForward))
+    }
 
-# --- unpack -----------------------------------------------------------------------------
+    # --- unpack -----------------------------------------------------------------------------
 
-if ($PwshPyClean -and (Test-Path -LiteralPath $PwshPyCacheDir)) {
-    Remove-Item -LiteralPath $PwshPyCacheDir -Recurse -Force
-}
-if (-not (Test-PwshPyTree -Root $PwshPyCacheDir)) {
-    Invoke-PwshPyUnpackLocked -CacheDir $PwshPyCacheDir
-}
+    if ($PwshPyClean -and (Test-Path -LiteralPath $PwshPyCacheDir)) {
+        Remove-Item -LiteralPath $PwshPyCacheDir -Recurse -Force
+    }
+    if (-not (Test-PwshPyTree -Root $PwshPyCacheDir)) {
+        Invoke-PwshPyUnpackLocked -CacheDir $PwshPyCacheDir
+    }
 
-# --- uv ---------------------------------------------------------------------------------
+    # --- uv ---------------------------------------------------------------------------------
 
-$PwshPyUv = Get-PwshPyUvPath
-if (-not $PwshPyUv) {
-    if ($PwshPyNoInstallUv) {
-        # Written straight to stderr rather than through Write-Error: with
-        # $ErrorActionPreference = 'Stop' the error stream terminates the script on the spot,
-        # and the caller would get PowerShell's exit 1 instead of the 127 meant here.
-        [Console]::Error.WriteLine('uv is not installed and -PwshPyNoInstallUv was given. Install it from https://astral.sh/uv')
+    $PwshPyUv = Get-PwshPyUvPath
+    if (-not $PwshPyUv) {
+        if ($PwshPyNoInstallUv) {
+            # Written by Write-PwshPyFailure rather than through Write-Error: with
+            # $ErrorActionPreference = 'Stop' the error stream terminates the script on the spot,
+            # and the caller would get PowerShell's exit 1 (or an elevated child's 70) instead of
+            # the 127 meant here.
+            Write-PwshPyFailure 'uv is not installed and -PwshPyNoInstallUv was given. Install it from https://astral.sh/uv'
+            exit 127
+        }
+        Install-PwshPyUv
+        $PwshPyUv = Get-PwshPyUvPath
+    }
+    if (-not $PwshPyUv) {
+        Write-PwshPyFailure 'uv is still not on PATH after installation. Install it manually from https://astral.sh/uv'
         exit 127
     }
-    Install-PwshPyUv
-    $PwshPyUv = Get-PwshPyUvPath
 }
-if (-not $PwshPyUv) {
-    [Console]::Error.WriteLine('uv is still not on PATH after installation. Install it manually from https://astral.sh/uv')
-    exit 127
+
+if ($PwshPyRelay) {
+    try {
+        # Created first, so a child that fails from here on has a file to say why in; the run
+        # below truncates it again for the script's own stderr.
+        [IO.File]::WriteAllText("$PwshPyRelay.err", '')
+        . $PwshPyPrepare
+    } catch {
+        # 70 (EX_SOFTWARE), so a caller can tell "the runner never started the script" from
+        # PowerShell's generic 1; the stderr line covers a script that itself exits 70.
+        Write-PwshPyFailure "pwshpy: the elevated child failed before running the script: $($_.Exception.Message) [$($_.CategoryInfo.Category)]"
+        exit 70
+    }
+} else {
+    . $PwshPyPrepare
 }
 
 # --- run --------------------------------------------------------------------------------

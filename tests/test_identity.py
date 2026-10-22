@@ -261,11 +261,10 @@ def test_get_current_identity_cli_jsonl(cli_runner: CliRunner, production_factor
 def test_get_current_identity_cli_table(
     cli_runner: CliRunner, production_factory: Callable[[], AppServices], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The default human table renders the record and exits 0."""
-    # Off a terminal rich sizes the table to 80 columns and clips each cell with an ellipsis, so a
-    # 46-character domain SID never appears whole (measured on Windows); rich reads COLUMNS for
-    # every Console the renderer builds, so a wide one shows the full cell.
-    monkeypatch.setenv("COLUMNS", "240")
+    """The default human table renders the record whole and exits 0."""
+    # No COLUMNS: a piped table is sized to its content, so a 46-character domain SID (which an
+    # 80-column fallback cut with an ellipsis, measured on Windows) must appear whole without one.
+    monkeypatch.delenv("COLUMNS", raising=False)
     result = cli_runner.invoke(cli, ["get_current_identity"], obj=production_factory)
     assert result.exit_code == 0, result.output
     assert build_ps().get_current_identity().sid in result.stdout

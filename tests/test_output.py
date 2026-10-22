@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING
 
 import pytest
+from click.testing import CliRunner
 
+from pwshpy.adapters import cli as cli_mod
 from pwshpy.adapters.cli.output import RecordFormat, emit
 from pwshpy.domain.enums import ProcessStatus
-from pwshpy.domain.records import ProcessInfo
+from pwshpy.domain.records import EnvVar, ProcessInfo
+
+if TYPE_CHECKING:
+    from pwshpy.composition import AppServices
 
 _RECORDS = [
     ProcessInfo(pid=1, name="init", status=ProcessStatus.SLEEPING),
@@ -122,3 +128,76 @@ def test_json_of_an_empty_source_is_still_an_empty_array(capsys: pytest.CaptureF
     """Pulling the first record ahead keeps an empty source rendering as ``[]``."""
     emit(iter(()), RecordFormat.JSON)
     assert capsys.readouterr().out == "[]\n"
+
+
+# --- piped human table: no cell is cut off a terminal ([84]) ---------------------------------------
+
+#: Longer than the 80 columns rich falls back to off a terminal, and free of spaces, so a wrap
+#: inside the cell or a cut with an ellipsis both break it as one contiguous substring.
+_LONG_VALUE = "S-1-5-21-" + "-".join(str(n) * 10 for n in range(1, 9))
+_LONG_SPACED_VALUE = " ".join(f"word{n:02d}" for n in range(16))
+
+
+def _invoke_env_table(cli_runner: CliRunner, production_factory: Callable[[], AppServices]) -> str:
+    result = cli_runner.invoke(cli_mod.cli, ["env"], obj=production_factory)
+    assert result.exit_code == 0, result.output
+    return result.stdout
+
+
+@pytest.mark.os_agnostic
+def test_piped_table_keeps_a_long_value_whole(
+    cli_runner: CliRunner,
+    production_factory: Callable[[], AppServices],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Off a terminal with no COLUMNS, a value wider than 80 columns appears whole, not cut."""
+    assert len(_LONG_VALUE) > 80
+    monkeypatch.delenv("COLUMNS", raising=False)
+    monkeypatch.setenv("ZZPWSHPY_X15_PROBE", _LONG_VALUE)
+    assert _LONG_VALUE in _invoke_env_table(cli_runner, production_factory)
+
+
+@pytest.mark.os_agnostic
+def test_piped_table_keeps_a_spaced_long_value_on_one_line(
+    cli_runner: CliRunner,
+    production_factory: Callable[[], AppServices],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A long value with spaces is not word-wrapped inside its cell either, so a grep finds it."""
+    assert len(_LONG_SPACED_VALUE) > 80
+    monkeypatch.delenv("COLUMNS", raising=False)
+    monkeypatch.setenv("ZZPWSHPY_X15_SPACED", _LONG_SPACED_VALUE)
+    lines = [
+        line for line in _invoke_env_table(cli_runner, production_factory).splitlines() if "ZZPWSHPY_X15_SPACED" in line
+    ]
+    assert len(lines) == 1
+    assert _LONG_SPACED_VALUE in lines[0]
+
+
+@pytest.mark.os_agnostic
+def test_piped_table_honours_an_explicit_columns(
+    cli_runner: CliRunner,
+    production_factory: Callable[[], AppServices],
+    monkeypatch: pytest.MonkeyPatch,
+    strip_ansi: Callable[[str], str],
+) -> None:
+    """A COLUMNS the user set still decides the width: no line is wider, the long value is cut."""
+    monkeypatch.setenv("COLUMNS", "60")
+    monkeypatch.setenv("ZZPWSHPY_X15_PROBE", _LONG_VALUE)
+    out = strip_ansi(_invoke_env_table(cli_runner, production_factory))
+    assert max(len(line) for line in out.splitlines()) <= 60
+    assert _LONG_VALUE not in out
+
+
+@pytest.mark.os_agnostic
+def test_piped_table_hint_stays_on_one_line_for_a_narrow_table(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sizing to the content never narrows the console below its default, so the hint does not wrap."""
+    import pwshpy.adapters.cli.output as output_mod
+
+    monkeypatch.delenv("COLUMNS", raising=False)
+    monkeypatch.setattr(output_mod, "_MAX_TABLE_ROWS", 1)
+    emit([EnvVar(name="A", value="1"), EnvVar(name="B", value="2")], RecordFormat.HUMAN)
+    assert "use --jsonl for the full stream, or --limit N." in capsys.readouterr().out

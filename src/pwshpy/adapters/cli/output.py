@@ -18,6 +18,9 @@ field into mojibake for a consumer reading the pipe.  Lines end in LF on every O
 human table and :func:`emit_lines` stay on the console's own encoding: they are text for
 a person or a text tool, not JSON.
 
+The human table fits a terminal's width; piped or redirected it is sized to its content, so
+no cell is cut (an explicit ``COLUMNS`` still sets the width either way).
+
 Contents:
     * :class:`RecordFormat` - human / json / jsonl selector.
     * :func:`emit` - render an iterable of records in the chosen format.
@@ -36,6 +39,7 @@ from typing import BinaryIO, TextIO
 
 import orjson
 from rich.console import Console
+from rich.measure import Measurement
 from rich.table import Table
 
 from ...domain.records import PSRecord
@@ -179,6 +183,59 @@ def _cell(value: object) -> str:
     return "" if value is None else str(value)
 
 
+def _stdout_is_terminal() -> bool:
+    """Whether stdout is a real terminal (a closed, missing or odd stream counts as not one).
+
+    Asks the stream itself rather than ``Console.is_terminal``: rich reports a terminal whenever
+    FORCE_COLOR is set, even into a pipe, and still has no terminal width to read there.
+
+    Example:
+        >>> _stdout_is_terminal()  # doctest captures stdout, so it is no terminal here
+        False
+    """
+    try:
+        return bool(sys.stdout.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _columns_is_explicit() -> bool:
+    """Whether COLUMNS names a width rich will use (the same digits-only test rich applies).
+
+    Example:
+        >>> import os
+        >>> _columns_is_explicit() == os.environ.get("COLUMNS", "").isdigit()
+        True
+    """
+    return os.environ.get("COLUMNS", "").isdigit()
+
+
+def _table_console(table: Table) -> Console:
+    """Build the console that prints ``table``: as wide as its content when stdout is piped.
+
+    Off a terminal rich has no width to read and falls back to 80 columns, so every wider cell was
+    cut with an ellipsis and ``pwshpy env | grep`` found half a value. Sizing the console to the
+    table's natural width keeps each value whole AND on one line; folding long values inside the
+    cell was rejected because it splits a SID or a path across lines, which a grep cannot match.
+    A terminal keeps its own width, and an explicit COLUMNS still wins, so neither a person at a
+    terminal nor a user who chose a width sees a change. The floor is the default width, so a
+    narrow table never wraps the truncation hint printed after it.
+
+    Example:
+        >>> table = Table("name")
+        >>> table.add_row("x" * 200)
+        >>> _columns_is_explicit() or _table_console(table).width >= 200
+        True
+    """
+    console = Console()
+    if _stdout_is_terminal() or _columns_is_explicit():
+        return console
+    # Measure without a ceiling: rich clamps a measurement to the width it is offered, and the
+    # point is to learn the width the content needs rather than the one rich guessed.
+    natural = Measurement.get(console, console.options.update_width(sys.maxsize), table).maximum
+    return Console(width=max(console.width, natural))
+
+
 def _render_table(records: Iterable[PSRecord]) -> None:
     # The human table must see every row it renders to size columns, so it cannot
     # stay lazy like --jsonl. Bound memory with a soft cap: render the first
@@ -186,15 +243,15 @@ def _render_table(records: Iterable[PSRecord]) -> None:
     iterator = iter(records)
     materialized = [record.to_dict() for record in itertools.islice(iterator, _MAX_TABLE_ROWS)]
     truncated = next(iterator, None) is not None
-    console = Console()
     if not materialized:
-        console.print("[dim]No records.[/dim]")
+        Console().print("[dim]No records.[/dim]")
         return
     table = Table(show_header=True, header_style="bold")
     for column in materialized[0]:
         table.add_column(column)
     for row in materialized:
         table.add_row(*(_cell(value) for value in row.values()))
+    console = _table_console(table)
     console.print(table)
     if truncated:
         console.print(

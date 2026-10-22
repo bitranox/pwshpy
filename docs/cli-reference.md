@@ -24,6 +24,11 @@ the pipe decodes it as UTF-8 even from a cp1252 Windows console. The JSON that `
 `get_command` and `invoke_rest_method` print is written the same way. The human table and
 `get_content` stay on the console's own encoding.
 
+At a terminal the human table fits the terminal's width and may shorten long cells. Piped or
+redirected (`pwshpy env | grep PATH`, `> out.txt`), it is as wide as its content instead, so no
+cell is cut or wrapped and every value is on one line, whole. An explicit `COLUMNS` in the
+environment still sets the width in both cases.
+
 **Everywhere** - one binding on Windows, macOS and Linux:
 
 | Command                         | Shows                         | Binding                                |

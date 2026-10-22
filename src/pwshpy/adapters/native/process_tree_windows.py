@@ -135,6 +135,11 @@ class WindowsJobTree:
         psutil = _load("psutil")
         win32process = _load("win32process")
         threads = _native("thread enumeration", lambda: psutil.Process(pid).threads())
+        if not threads:
+            # Created suspended, the program runs only once its thread is resumed: with none found it
+            # would never run and the job would never empty, so wait() would block for ever. launch()
+            # kills and reaps the process on this error.
+            raise NativeCallError(f"wait_tree: no thread of the suspended process {pid} was found to resume")
         for thread in threads:
             handle = _native(
                 "OpenThread", self._win32api.OpenThread, _THREAD_SUSPEND_RESUME, _INHERIT_HANDLE, thread.id

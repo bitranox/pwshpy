@@ -13,6 +13,7 @@ import sys
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 from process_tree_programs import finished, is_stopped, parent_argv, wait_for_beats
 
@@ -277,3 +278,28 @@ def test_tree_output_reader_returns_what_it_has_when_the_pipe_stays_open() -> No
         assert time.monotonic() - started < 5.0
     finally:
         os.close(write_fd)
+
+
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 job objects")
+def test_a_launch_that_finds_no_thread_to_resume_raises_and_reaps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[B2]: the program is created suspended; with no thread to resume it would never run and the wait
+    would never end, so launch raises NativeCallError and the suspended process is killed and reaped."""
+    # Imported here: the module needs pywin32, which only a Windows install has.
+    from pwshpy.adapters.native.process_tree_windows import WindowsJobTree
+
+    launched: list[int] = []
+
+    def _no_threads(process: psutil.Process) -> list[object]:
+        launched.append(process.pid)
+        return []
+
+    # psutil is the third-party edge: no real process can be made to report no thread.
+    monkeypatch.setattr(psutil.Process, "threads", _no_threads)
+    tree = WindowsJobTree()
+    try:
+        with pytest.raises(NativeCallError, match="no thread"):
+            tree.launch([sys.executable, "-c", "pass"], cwd=None, env=None, with_stdin=False)
+    finally:
+        tree.close()
+    assert launched and not psutil.pid_exists(launched[0])

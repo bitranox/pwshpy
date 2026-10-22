@@ -31,6 +31,7 @@ import pytest
 from elevation_doubles import (
     INTERPRETER_VARIABLES,
     LIBRARY_PATH_PLANTS,
+    LIBRARY_VARIABLES,
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
     RUNNING_AS_ROOT,
@@ -1179,8 +1180,11 @@ def _run_with_path(
 ) -> subprocess.CompletedProcess[str]:
     """Run a runner with exactly ``path_first`` ahead of the inherited PATH (no real uv added).
 
-    The interpreter variables a suite run may carry (bmk's VIRTUAL_ENV among them) are dropped
-    unless ``env`` sets them, so uv's interpreter choice is the one the test arranged. Python
+    The interpreter and library variables a suite run may carry (bmk's VIRTUAL_ENV among them) are
+    dropped unless ``env`` sets them, so uv's interpreter choice is the one the test arranged, and an
+    env file a test plants can set PYTHONPATH: uv does not override a variable the environment already
+    holds (measured: with PYTHONPATH in the suite's environment the env-file control under make test
+    never ran its plant). Python
     downloads are off unless ``env`` says otherwise ([92]); a runner forced elevated runs on this
     host's managed Python (read only), or the test skips when there is none, unless ``env`` names
     the managed directory itself. ``real_probe`` keeps a plain runner's own elevation probe on an
@@ -1189,7 +1193,7 @@ def _run_with_path(
     assert _PWSH is not None
     if not real_probe:
         runner = _as_this_invoker(runner, arguments)
-    child_env = {k: v for k, v in os.environ.items() if k not in INTERPRETER_VARIABLES}
+    child_env = {k: v for k, v in os.environ.items() if k not in (*INTERPRETER_VARIABLES, *LIBRARY_VARIABLES)}
     child_env.update({**_isolated_cache(tmp_path), "PYTHONIOENCODING": "utf-8", "UV_PYTHON_DOWNLOADS": "never"})
     if f"{_STAND_IN_PROBE}$true" in runner.read_text(encoding="utf-8") and "UV_PYTHON_INSTALL_DIR" not in (env or {}):
         child_env.update(managed_python_env(tmp_path, managed=_needs_managed_python()))

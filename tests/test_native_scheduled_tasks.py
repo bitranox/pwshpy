@@ -305,13 +305,14 @@ def _tree_with(unreadable: _FakeFolder) -> _FakeFolder:
     return _FakeFolder("\\", [_FakeTask("First", 3, True)], [unreadable, after])
 
 
-def _unreadable_cases() -> list[tuple[_FakeFolder, str]]:
-    """Each way the walk can fail to read an item, with the path the error must name (literal text)."""
+def _unreadable_cases() -> list[tuple[_FakeFolder, str, list[str]]]:
+    """Each way the walk can fail to read an item: the path the error must name (literal text) and
+    the tasks of that same folder the lenient walk must still list."""
     return [
-        (_DeniedTasksFolder("\\Locked", [_FakeTask("Hidden", 3, True)], []), "'\\Locked\\'"),
-        (_DeniedSubfoldersFolder("\\NoKids", [_FakeTask("Kept", 3, True)], []), "'\\NoKids\\'"),
-        (_FakeFolder("\\Bad", [_DeniedTask("Broken", 3, True)], []), "'\\Bad\\Broken'"),
-        (_DeniedChildFolder("\\Parent", [], []), "'\\Parent\\'"),
+        (_DeniedTasksFolder("\\Locked", [_FakeTask("Hidden", 3, True)], []), "'\\Locked\\'", []),
+        (_DeniedSubfoldersFolder("\\NoKids", [_FakeTask("Kept", 3, True)], []), "'\\NoKids\\'", ["Kept"]),
+        (_FakeFolder("\\Bad", [_DeniedTask("Broken", 3, True)], []), "'\\Bad\\Broken'", []),
+        (_DeniedChildFolder("\\Parent", [], []), "'\\Parent\\'", []),
     ]
 
 
@@ -319,15 +320,16 @@ _CASE_IDS = ["GetTasks", "GetFolders", "task", "subfolder"]
 
 
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize(("unreadable", "path"), _unreadable_cases(), ids=_CASE_IDS)
+@pytest.mark.parametrize(("unreadable", "path", "kept"), _unreadable_cases(), ids=_CASE_IDS)
 def test_strict_raises_naming_what_it_could_not_read(
-    monkeypatch: pytest.MonkeyPatch, unreadable: _FakeFolder, path: str
+    monkeypatch: pytest.MonkeyPatch, unreadable: _FakeFolder, path: str, kept: list[str]
 ) -> None:
     """[54] strict=True: an unreadable folder, subfolder list, subfolder or task raises, naming its path.
 
     The source is lazy, so the records before the failure are still yielded; the raise comes
     when the walk reaches the unreadable item, and nothing after it is listed.
     """
+    del kept  # what the lenient walk keeps; strict stops at the failure
     monkeypatch.setattr(st_mod, "_connect_scheduler", lambda: _FakeService(_tree_with(unreadable)))
     walk = iter_scheduled_tasks(strict=True)
     assert next(walk).task_name == "First"
@@ -338,9 +340,13 @@ def test_strict_raises_naming_what_it_could_not_read(
 
 
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize(("unreadable", "path"), _unreadable_cases(), ids=_CASE_IDS)
+@pytest.mark.parametrize(("unreadable", "path", "kept"), _unreadable_cases(), ids=_CASE_IDS)
 def test_lenient_skips_what_it_could_not_read_and_warns(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, unreadable: _FakeFolder, path: str
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    unreadable: _FakeFolder,
+    path: str,
+    kept: list[str],
 ) -> None:
     """[54] The default lists on past an unreadable item, but never silently: one WARNING names it."""
     monkeypatch.setattr(st_mod, "_connect_scheduler", lambda: _FakeService(_tree_with(unreadable)))
@@ -350,6 +356,7 @@ def test_lenient_skips_what_it_could_not_read_and_warns(
     assert names[-1] == "Later"  # the walk went on past the unreadable item
     assert "Hidden" not in names
     assert "Broken" not in names
+    assert all(name in names for name in kept)  # the folder's own readable tasks are still listed
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert path in warnings[0].getMessage()

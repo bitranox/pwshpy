@@ -16,8 +16,8 @@ Contents:
       several properties from it (one ``GetUnit`` instead of one per property).
     * :func:`load_unit_path` - the same, but ``LoadUnit`` loads an unloaded unit from its file
       (None for a name with no unit file, which systemd answers as a ``not-found`` object).
-    * :func:`load_unit` - :func:`load_unit_path` that raises when the ``LoadUnit`` call itself
-      fails, for a caller that must tell "no such unit" from "could not ask".
+    * :func:`load_unit` - :func:`load_unit_path` that raises when the ``LoadUnit`` call or the
+      ``LoadState`` read fails, for a caller that must tell "no such unit" from "could not ask".
     * :func:`unit_files` - every unit file of one type with its UnitFileState: the units
       ``ListUnits`` omits because nothing has loaded them (a stopped, disabled service or timer).
     * :data:`UNLISTED_LOAD_STATES` / :data:`UNLISTED_FILE_STATES` - the states that are no unit
@@ -136,22 +136,30 @@ def load_unit(bus: Bus, name: str) -> str | None:
     their "unknown" defaults.
 
     Raises:
-        NativeCallError: When the ``LoadUnit`` call itself fails (an invalid name, a refused or
-            broken bus call): systemd gave no answer, which is not the same as "no such unit".
+        NativeCallError: When the ``LoadUnit`` call itself or the ``LoadState`` read fails (an
+            invalid name, a refused or broken bus call): systemd gave no answer, which is not
+            the same as "no such unit".
     """
     (path,) = call(bus, "LoadUnit", "s", (name,))
     resolved = str(path)
-    if path_property(bus, resolved, "LoadState", "not-found") == "not-found":
+    # None, not "not-found", as the default: a failed read must not pass for systemd's answer.
+    load_state = path_property(bus, resolved, "LoadState", None)
+    if load_state is None:
+        raise NativeCallError(f"cannot read the LoadState of '{name}'")
+    if load_state == "not-found":
         return None
     return resolved
 
 
 def load_unit_path(bus: Bus, name: str) -> str | None:
-    """:func:`load_unit`, but a failed ``LoadUnit`` call is also None (fail-soft, for field read-backs)."""
+    """:func:`load_unit`, but a failed ``LoadUnit`` call or ``LoadState`` read is also None (fail-soft).
+
+    For field read-backs and the controllers, whose callers apply their "unknown" defaults to None.
+    """
     try:
         return load_unit(bus, name)
     except NativeCallError:
-        return None  # an invalid unit name: nothing to read
+        return None  # an invalid unit name or an unreadable unit: nothing to read
 
 
 def unit_files(bus: Bus, suffix: str) -> list[tuple[str, str]]:

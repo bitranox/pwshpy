@@ -802,8 +802,12 @@ def test_strict_raises_when_no_unit_file_listing_answers(monkeypatch: pytest.Mon
     assert conn.closed is True
 
 
-def _refused_load_conn() -> FakeConn:
-    """Two unloaded timer files, the first of which systemd refuses to LoadUnit."""
+def _refused_load_conn(failure: str) -> FakeConn:
+    """Two unloaded timer files; reading the first fails at ``failure``.
+
+    ``LoadUnit``: the LoadUnit call itself fails. ``LoadState``: LoadUnit answers, but reading
+    the loaded object's LoadState fails - which must not pass for systemd saying "not-found".
+    """
     props: dict[tuple[str, str, str], Any] = {
         ("good.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "inactive",
         ("good.timer", systemd_dbus.UNIT_IFACE, "Description"): "Good job",
@@ -814,29 +818,56 @@ def _refused_load_conn() -> FakeConn:
         frozenset({"denied.timer", "good.timer"}),
         file_states={"denied.timer": "disabled", "good.timer": "disabled"},
         unloaded=frozenset({"denied.timer", "good.timer"}),
-        refused_loads=frozenset({"denied.timer"}),
+        refused_loads=frozenset({"denied.timer"}) if failure == "LoadUnit" else frozenset(),
+        refused_reads=frozenset({("denied.timer", "LoadState")}) if failure == "LoadState" else frozenset(),
     )
 
 
+_LOAD_FAILURES = ["LoadUnit", "LoadState"]
+
+
 @pytest.mark.os_agnostic
-def test_strict_raises_naming_a_timer_file_that_cannot_be_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
-    """[54] strict=True: a listed timer file whose LoadUnit call fails raises, naming the unit."""
-    use_bus(monkeypatch, _refused_load_conn())
-    with pytest.raises(NativeCallError, match=r"'denied\.timer'"):
+@pytest.mark.parametrize("failure", _LOAD_FAILURES)
+def test_strict_raises_naming_a_timer_file_that_cannot_be_loaded(monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+    """[54] strict=True: a listed timer file whose LoadUnit call or LoadState read fails raises, naming it."""
+    use_bus(monkeypatch, _refused_load_conn(failure))
+    with pytest.raises(NativeCallError, match=r"'denied\.timer'") as caught:
         list(iter_timers(strict=True))
+    assert failure in str(caught.value)
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("failure", _LOAD_FAILURES)
 def test_lenient_skips_a_timer_file_that_cannot_be_loaded_and_warns(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure: str
 ) -> None:
     """[54] The default lists on past a timer file it cannot load, but logs a WARNING naming it."""
-    use_bus(monkeypatch, _refused_load_conn())
+    use_bus(monkeypatch, _refused_load_conn(failure))
     with caplog.at_level(logging.WARNING, logger=systemd_timers.__name__):
         assert [t.task_name for t in iter_timers()] == ["good"]
     (warning,) = caplog.records
     assert warning.levelno == logging.WARNING
     assert "'denied.timer'" in warning.getMessage()
+    assert failure in warning.getMessage()
+
+
+@pytest.mark.os_agnostic
+def test_load_unit_raises_on_an_unreadable_load_state_and_load_unit_path_stays_fail_soft() -> None:
+    """A failed LoadState read is "could not ask", not "not-found"; the fail-soft wrapper still reads None.
+
+    load_unit_path's callers (field read-backs, the controllers, the services listing) keep their
+    behaviour: before, the failed read defaulted to not-found and they got None too.
+    """
+    conn = FakeConn(
+        [],
+        {("real.service", _SERVICE, "User"): "1000"},
+        refused_reads=frozenset({("real.service", "LoadState")}),
+    )
+    bus = systemd_dbus.Bus(conn=conn, core=FakeCore(), mgr=Address("/org/freedesktop/systemd1"))
+    with pytest.raises(NativeCallError, match=r"LoadState of 'real\.service'"):
+        systemd_dbus.load_unit(bus, "real.service")
+    assert systemd_dbus.load_unit_path(bus, "real.service") is None
+    assert systemd_dbus.load_unit(bus, "ghost.service") is None  # systemd's own not-found answer
 
 
 @pytest.mark.os_agnostic

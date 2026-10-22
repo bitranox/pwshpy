@@ -74,6 +74,8 @@ class FakeConn:
 
     ``refused_loads`` names units whose ``LoadUnit`` call itself fails with a D-Bus error (an
     invalid name, a refused or broken bus call) - unlike a not-found unit, which systemd answers.
+    ``refused_reads`` names (unit, property) pairs whose ``Properties.Get`` fails with a D-Bus
+    error although the unit is loaded (a refused or broken property read).
 
     ``Unit.Job`` is ``(0, "/")`` (no job, as busctl and jeepney show it) unless the unit's
     ActiveState is a transition (activating, deactivating, reloading), which holds a job path, as a
@@ -102,6 +104,7 @@ class FakeConn:
         appeared: frozenset[str] = frozenset(),
         walks: dict[str, list[str]] | None = None,
         refused_loads: frozenset[str] = frozenset(),
+        refused_reads: frozenset[tuple[str, str]] = frozenset(),
     ) -> None:
         self._units = units  # (name, description, active_state)
         self._props = props
@@ -114,6 +117,7 @@ class FakeConn:
         self._file_dirs = file_dirs or {}
         self._walks = walks or {}
         self._refused_loads = refused_loads
+        self._refused_reads = refused_reads
         self._walking: dict[str, list[str]] = {}  # unit -> ActiveStates still ahead of it
         self._known = {unit for unit, _iface, _prop in props} | set(unit_files) | set(unloaded)
         self._not_found: set[str] = set()  # names LoadUnit answered with a not-found object
@@ -234,6 +238,8 @@ class FakeConn:
             "Get": self._get,
             **dict.fromkeys(self._VERBS, self._verb),
         }
+        if msg.method == "Get" and (msg.path[len("/u/") :], msg.body[1]) in self._refused_reads:
+            return Reply(("org.freedesktop.DBus.Error.AccessDenied",), error=True)
         handler = handlers.get(msg.method)
         return Reply(("unexpected",), error=True) if handler is None else handler(msg)
 

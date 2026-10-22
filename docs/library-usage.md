@@ -201,7 +201,7 @@ reads `Ready`, a disabled one `Disabled`, and an on-demand task `Ready` (`Runnin
 `ps.get_scheduled_task(folder_path="\\", *, strict=False)` streams the tasks under a folder
 (Windows) or every systemd timer (Linux). Something the caller cannot read - on Windows a folder
 whose tasks or subfolders it may not list, or a protected or corrupt task; on Linux a refused
-unit-file listing or a timer unit systemd will not load - is skipped by default, so a non-elevated
+unit-file listing or a timer unit systemd will not load or read - is skipped by default, so a non-elevated
 caller still gets everything it can read, and each skip logs a WARNING through the `logging`
 module naming what was skipped and why. With `strict=True` the same item raises `NativeCallError`
 naming the folder, task or unit. Pass it whenever an absent record must mean an absent task, such as

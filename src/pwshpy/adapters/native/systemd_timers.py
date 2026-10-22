@@ -389,12 +389,13 @@ def iter_timers(folder_path: str = _ROOT, *, strict: bool = False) -> Iterator[S
     Args:
         folder_path: Ignored (systemd timers are flat); kept for parity with the Windows source.
         strict: What happens when systemd does not answer a read the listing needs - the
-            unit-file listing (without it no unloaded timer can be listed) or the ``LoadUnit`` of
-            one timer file. False (default) skips what it could not read and logs a WARNING naming
-            it; True raises :class:`NativeCallError` naming it, when iteration reaches it. The
-            deliberate filtering above (not-found, masked, alias, template, stale) is systemd's
-            answer, not a failure, and is the same either way; a single property that cannot be
-            read still falls back to its default in both modes (the task is kept).
+            unit-file listing (without it no unloaded timer can be listed), or the ``LoadUnit`` of
+            one timer file or its ``LoadState`` read. False (default) skips what it could not read
+            and logs a WARNING naming it; True raises :class:`NativeCallError` naming it, when
+            iteration reaches it. The deliberate filtering above (not-found, masked, alias,
+            template, stale) is systemd's answer, not a failure, and is the same either way; a
+            single property that cannot be read still falls back to its default in both modes
+            (the task is kept).
 
     Raises:
         NativeCallError: The system bus or ``ListUnits`` cannot be reached, or (with ``strict``)

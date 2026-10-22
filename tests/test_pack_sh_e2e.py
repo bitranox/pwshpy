@@ -30,6 +30,7 @@ from elevation_doubles import (
     LIBRARY_PATH_PLANTS,
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
+    NETWORK_VARIABLES,
     RUNNING_AS_ROOT,
     UV_SOURCE_VARIABLES,
     default_uv_cache_dir,
@@ -1849,3 +1850,27 @@ def test_as_root_a_uv_toml_directory_above_the_anchor_changes_nothing(tmp_path: 
         assert _reported_python(result) is not None, result.stdout
     else:
         assert result.returncode == 2 and "uv.toml" in result.stderr, result.stdout + result.stderr
+
+
+# --- [X22 E1] how uv connects: proxies, certificate roots, a client certificate, a keyring helper -------
+
+
+@pytest.mark.parametrize("name", NETWORK_VARIABLES)
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_no_proxy_certificate_or_keyring_variable_reaches_uv(tmp_path: Path, name: str, as_root: bool) -> None:
+    """[X22 E1]: as root a proxy (uv 0.13 sends its requests through each of these spellings), a
+    certificate bundle or directory (they replace uv's trust roots), a client certificate, the
+    platform-store switches and a keyring helper are each dropped with a line on stderr, before uv
+    python find already; not root (the control), each reaches uv unchanged and no line is printed."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root)
+    value = "1" if name in ("UV_NATIVE_TLS", "UV_SYSTEM_CERTS") else str(tmp_path / f"given-{name}")
+    environment = {**_trust_env(tmp_path), name: value}
+    result = _run_in(["sh"], runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = _recorded_variables(record)
+    dropped_line = f"pwshpy: ignoring {name}: " in result.stderr
+    if as_root:
+        found = _recorded_variables(Path(f"{record}.python"))
+        assert name not in recorded and name not in found and dropped_line, (recorded, found, result.stderr)
+    else:
+        assert recorded.get(name) == value and not dropped_line, (recorded, result.stderr)

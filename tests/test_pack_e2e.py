@@ -34,6 +34,7 @@ from elevation_doubles import (
     LIBRARY_VARIABLES,
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
+    NETWORK_VARIABLES,
     RUNNING_AS_ROOT,
     UV_SOURCE_VARIABLES,
     data_home,
@@ -2773,3 +2774,30 @@ def test_an_entry_with_a_non_ascii_name_runs_on_every_powershell(tmp_path: Path)
     result = _run(runner, env=_isolated_cache(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ran" in result.stdout, result.stdout
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("name", NETWORK_VARIABLES)
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_run_lets_no_proxy_certificate_or_keyring_variable_reach_uv(
+    tmp_path: Path, name: str, elevated: str
+) -> None:
+    """[X22 E1]: elevated, a proxy (uv 0.13 sends its requests through each of these spellings), a
+    certificate bundle or directory (they replace uv's trust roots), a client certificate, the
+    platform-store switches and a keyring helper are each dropped with a line on stderr, before uv
+    python find already; the control passes each on unchanged and prints no line."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
+    value = "1" if name in ("UV_NATIVE_TLS", "UV_SYSTEM_CERTS") else str(tmp_path / f"given-{name}")
+    result = _run_with_path(
+        tmp_path, runner, "-PwshPyUv", str(uv), path_first=[], env={name: value}, cwd=_clean_cwd(tmp_path)
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = _recorded_variables(record)
+    dropped_line = _VARIABLE_DROPPED.format(name=name) in result.stderr
+    if elevated == "$true":
+        found = _recorded_variables(Path(f"{record}.python"))
+        assert name not in recorded and name not in found and dropped_line, (recorded, found, result.stderr)
+    else:
+        assert recorded.get(name) == value and not dropped_line, (recorded, result.stderr)

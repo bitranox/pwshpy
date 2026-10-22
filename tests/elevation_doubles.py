@@ -129,12 +129,17 @@ def link_tools(bin_dir: Path, names: tuple[str, ...]) -> Path:
 
 
 #: The variables that decide where uv looks for, or fetches, the Pythons it manages: another install
-#: directory, another config file, another download mirror or download list ([59]).
+#: directory, another config file, another download mirror or download list ([59]); [X22 E1] the
+#: mirrors uv 0.13 also fetches CPython (UV_ASTRAL_MIRROR_URL), PyPy, GraalPy and Pyodide through.
 MANAGED_PYTHON_VARIABLES = (
     "UV_PYTHON_INSTALL_DIR",
     "UV_CONFIG_FILE",
     "UV_PYTHON_INSTALL_MIRROR",
     "UV_PYTHON_DOWNLOADS_JSON_URL",
+    "UV_ASTRAL_MIRROR_URL",
+    "UV_PYPY_INSTALL_MIRROR",
+    "UV_GRAALPY_INSTALL_MIRROR",
+    "UV_PYODIDE_INSTALL_MIRROR",
 )
 
 #: Every variable an elevated run drops: those through which a caller picks the interpreter past
@@ -168,6 +173,25 @@ UV_SOURCE_VARIABLES = (
     "UV_CACHE_DIR",
     "UV_PYTHON_CACHE_DIR",
     "UV_ENV_FILE",
+)
+
+
+#: The variables that decide how uv connects ([X22 E1]): a proxy (each spelling uv 0.13 reads), the
+#: certificate roots it trusts, the client certificate it presents, and a keyring helper it runs. An
+#: elevated run drops them; mirrors the runners' list, in its order.
+NETWORK_VARIABLES = (
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "SSL_CLIENT_CERT",
+    "UV_NATIVE_TLS",
+    "UV_SYSTEM_CERTS",
+    "UV_KEYRING_PROVIDER",
 )
 
 
@@ -313,7 +337,8 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
     """Write a ``uv`` double (POSIX) that records its argv, one argument per line, then exits 0.
 
     After the arguments it records ``env:<NAME>=<value>`` for each of :data:`INTERPRETER_VARIABLES`,
-    :data:`LIBRARY_VARIABLES`, :data:`UV_SOURCE_VARIABLES` and ``PYTHONNOUSERSITE`` it was handed, so a
+    :data:`LIBRARY_VARIABLES`, :data:`UV_SOURCE_VARIABLES`, :data:`NETWORK_VARIABLES` and
+    ``PYTHONNOUSERSITE`` it was handed, so a
     test can read both what a runner passed, dropped and set. A ``uv python ...`` call (an elevated
     run resolving its interpreter) is recorded the same way into ``record`` with ``.python`` appended
     to its name, and ``uv python find`` prints the path of a stand-in ``python`` beside the double, so
@@ -327,7 +352,7 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
     """
     report = "".join(
         f'if [ -n "${{{name}+set}}" ]; then printf \'env:%s\\n\' "{name}=${name}" >> "$record"; fi\n'
-        for name in (*INTERPRETER_VARIABLES, *LIBRARY_VARIABLES, *UV_SOURCE_VARIABLES, "PYTHONNOUSERSITE")
+        for name in (*INTERPRETER_VARIABLES, *LIBRARY_VARIABLES, *UV_SOURCE_VARIABLES, *NETWORK_VARIABLES, "PYTHONNOUSERSITE")
     )
     python = directory / "python"
     python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
@@ -763,6 +788,7 @@ __all__ = [
     "LIBRARY_VARIABLES",
     "LOCAL_WHEEL_DISTRIBUTION",
     "MANAGED_PYTHON_VARIABLES",
+    "NETWORK_VARIABLES",
     "OTHER_UID",
     "PS1_CACHE_HOME_LOOKUP",
     "PS1_DATA_HOME_LOOKUP",

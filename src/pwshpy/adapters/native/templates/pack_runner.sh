@@ -33,12 +33,19 @@
 # itself still runs in your directory). That directory passes the same check before uv searches it
 # (uv runs every Python it finds there), and so does every file and directory below it (a regular
 # file named .lock aside, mode only); one another account can modify is refused with exit code 127.
-# Every uv call it makes as root reads no uv.toml (--no-config). UV_PYTHON, VIRTUAL_ENV,
-# CONDA_PREFIX, UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON, UV_PYTHON_INSTALL_DIR, UV_CONFIG_FILE,
-# UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL, PYTHONHOME, PYTHONPATH, PYTHONUSERBASE,
-# UV_INDEX_URL, UV_DEFAULT_INDEX, UV_INDEX, UV_EXTRA_INDEX_URL, UV_FIND_LINKS, UV_INSECURE_HOST,
-# UV_CACHE_DIR, UV_PYTHON_CACHE_DIR and UV_ENV_FILE are ignored, each with a line on stderr; the
-# user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file (--no-env-file).
+# uv's cache is root's own too (<home from the passwd database>/.cache/uv, named on stderr). Every
+# uv call it makes as root reads no uv.toml (--no-config). UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX,
+# UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON, UV_PYTHON_INSTALL_DIR, UV_CONFIG_FILE,
+# UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL, UV_ASTRAL_MIRROR_URL,
+# UV_PYPY_INSTALL_MIRROR, UV_GRAALPY_INSTALL_MIRROR, UV_PYODIDE_INSTALL_MIRROR, PYTHONHOME,
+# PYTHONPATH, PYTHONUSERBASE, UV_INDEX_URL, UV_DEFAULT_INDEX, UV_INDEX, UV_EXTRA_INDEX_URL,
+# UV_FIND_LINKS, UV_INSECURE_HOST, UV_CACHE_DIR, UV_PYTHON_CACHE_DIR, UV_ENV_FILE, HTTPS_PROXY,
+# HTTP_PROXY, ALL_PROXY (and their lower-case forms), SSL_CERT_FILE, SSL_CERT_DIR, SSL_CLIENT_CERT,
+# UV_NATIVE_TLS, UV_SYSTEM_CERTS and UV_KEYRING_PROVIDER are ignored, each with a line on stderr;
+# the user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file (--no-env-file).
+# In a network that reaches the internet only through a proxy, a root run can download nothing: the
+# managed Python and every package the script needs must already be in root's directories named
+# above.
 #
 # Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -520,14 +527,17 @@ pwshpy_find_uv() {
 # only-managed (measured with uv 0.13: an explicit UV_PYTHON path and an active virtual or conda
 # environment each run their own python), or that uv refuses beside that flag; then the ones that
 # move where uv's managed Pythons live or come from (another install directory, config file, download
-# mirror or download list), which would let the caller's environment supply the interpreter after all
-# (user decision on [59]); then the library variables the interpreter reads itself; then the ones that
-# name where uv takes packages, its cache or an env file from. A root run drops each one that is set,
-# naming it on stderr, and turns the user's own site-packages off; identical to the .ps1 runner.
+# mirror or download list; uv 0.13 also fetches CPython through UV_ASTRAL_MIRROR_URL and PyPy, GraalPy
+# and Pyodide through their own mirror variables, measured), which would let the caller's environment
+# supply the interpreter after all (user decision on [59]); then the library variables the interpreter
+# reads itself; then the ones that name where uv takes packages, its cache or an env file from; then
+# the ones that decide how uv connects. A root run drops each one that is set, naming it on stderr, and
+# turns the user's own site-packages off; identical to the .ps1 runner.
 pwshpy_drop_interpreter_variables() {
     _iv_why="as root only a uv-managed Python from the running account's own data directory runs"
     for _iv in UV_PYTHON VIRTUAL_ENV CONDA_PREFIX UV_MANAGED_PYTHON UV_NO_MANAGED_PYTHON \
-        UV_PYTHON_INSTALL_DIR UV_CONFIG_FILE UV_PYTHON_INSTALL_MIRROR UV_PYTHON_DOWNLOADS_JSON_URL; do
+        UV_PYTHON_INSTALL_DIR UV_CONFIG_FILE UV_PYTHON_INSTALL_MIRROR UV_PYTHON_DOWNLOADS_JSON_URL \
+        UV_ASTRAL_MIRROR_URL UV_PYPY_INSTALL_MIRROR UV_GRAALPY_INSTALL_MIRROR UV_PYODIDE_INSTALL_MIRROR; do
         if eval "[ -n \"\${$_iv+set}\" ]"; then
             printf '%s\n' "pwshpy: ignoring $_iv: $_iv_why" >&2
             unset "$_iv"
@@ -555,6 +565,21 @@ pwshpy_drop_interpreter_variables() {
         UV_CACHE_DIR UV_PYTHON_CACHE_DIR UV_ENV_FILE; do
         if eval "[ -n \"\${$_iv+set}\" ]"; then
             _iv_text="as root uv uses its defaults for package sources, caches and env files"
+            printf '%s\n' "pwshpy: ignoring $_iv: $_iv_text" >&2
+            unset "$_iv"
+        fi
+    done
+    # How uv connects: a proxy (uv 0.13 sends https through HTTPS_PROXY, http through HTTP_PROXY and
+    # both through ALL_PROXY, each also in lower case, measured), the certificate roots it trusts
+    # (SSL_CERT_FILE and SSL_CERT_DIR replace them, measured; UV_NATIVE_TLS and UV_SYSTEM_CERTS switch to
+    # the platform store), the client certificate it presents, and a keyring helper it runs for
+    # credentials (UV_KEYRING_PROVIDER=subprocess runs `keyring` from PATH). Each lets the caller decide
+    # what the default index serves to a root run, or what runs as root; NO_PROXY only exempts hosts
+    # from a proxy and changes nothing once these are gone. The packed script runs without them too.
+    for _iv in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy SSL_CERT_FILE SSL_CERT_DIR \
+        SSL_CLIENT_CERT UV_NATIVE_TLS UV_SYSTEM_CERTS UV_KEYRING_PROVIDER; do
+        if eval "[ -n \"\${$_iv+set}\" ]"; then
+            _iv_text="as root uv connects with its own defaults: no proxy, its built-in certificate roots, no keyring"
             printf '%s\n' "pwshpy: ignoring $_iv: $_iv_text" >&2
             unset "$_iv"
         fi

@@ -32,29 +32,35 @@
                             exit code 77 if the elevation is refused
         -PwshPyUv PATH      run the uv at this absolute path instead of searching for one
 
-    Run elevated (an administrator token, SYSTEM, or root), it only runs a uv that no other
-    account can modify: neither the file nor the directory holding it may be owned by, or grant
-    write access to, any account other than the running one, SYSTEM, Administrators, LOCAL
-    SERVICE, NETWORK SERVICE or TrustedInstaller, and no directory above may let another account
-    delete, rename or take it over (on POSIX: root must own all of them, and nobody else may write
-    them; a directory above may be writable only with the sticky bit). Any other uv it finds is
-    skipped with a line on stderr, and a -PwshPyUv path that fails the check is refused with exit
-    code 127. As root on POSIX it runs its own helpers only from the fixed system directories.
-    Elevated, the script runs only on a Python uv manages in the running account's own data
-    directory (the RoamingAppData known folder on Windows, <home from the passwd
-    database>/.local/share on POSIX; downloaded on first use unless UV_PYTHON_DOWNLOADS is never or
-    manual), found with `uv python find --system` and handed to uv run as --python after the same
-    check as uv itself, so no .venv anywhere is ever run; that directory, and every file and
-    directory below it, passes the same check before uv searches it (uv runs every Python it finds
-    there), or the run exits 127; uv starts in a directory only administrators can write (/ on
-    POSIX, System32 on Windows), and the script
-    itself still runs in your directory. Every uv call an elevated run makes reads no uv.toml
-    (--no-config). UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX, UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON,
-    UV_PYTHON_INSTALL_DIR, UV_CONFIG_FILE, UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL,
-    PYTHONHOME, PYTHONPATH, PYTHONUSERBASE, UV_INDEX_URL, UV_DEFAULT_INDEX, UV_INDEX,
-    UV_EXTRA_INDEX_URL, UV_FIND_LINKS, UV_INSECURE_HOST, UV_CACHE_DIR, UV_PYTHON_CACHE_DIR and
-    UV_ENV_FILE are ignored, each with a line on stderr; the user site-packages is off
-    (PYTHONNOUSERSITE=1) and uv run reads no .env file (--no-env-file).
+    Run elevated (an administrator token, SYSTEM, or root), it only runs a uv that no other account
+    can modify: neither the file nor the directory holding it may be owned by, or grant write access
+    to, any account other than the running one, SYSTEM, Administrators, LOCAL SERVICE, NETWORK
+    SERVICE or TrustedInstaller, and no directory above may let another account delete, rename or
+    take it over (on POSIX: root must own all of them, and nobody else may write them; a directory
+    above may be writable only with the sticky bit). Any other uv it finds is skipped with a line on
+    stderr, and a -PwshPyUv path that fails the check is refused with exit code 127. As root on
+    POSIX it runs its own helpers only from the fixed system directories. Elevated, the script runs
+    only on a Python uv manages in the running account's own data directory (the RoamingAppData
+    known folder on Windows, <home from the passwd database>/.local/share on POSIX; downloaded on
+    first use unless UV_PYTHON_DOWNLOADS is never or manual), found with `uv python find --system`
+    and handed to uv run as --python after the same check as uv itself, so no .venv anywhere is ever
+    run; that directory, and every file and directory below it, passes the same check before uv
+    searches it (uv runs every Python it finds there), or the run exits 127; uv starts in a
+    directory only administrators can write (/ on POSIX, System32 on Windows), and the script itself
+    still runs in your directory. uv's cache is the running account's own too (the LocalAppData
+    known folder on Windows, <home from the passwd database>/.cache on POSIX; named on stderr).
+    Every uv call an elevated run makes reads no uv.toml (--no-config). UV_PYTHON, VIRTUAL_ENV,
+    CONDA_PREFIX, UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON, UV_PYTHON_INSTALL_DIR, UV_CONFIG_FILE,
+    UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL, UV_ASTRAL_MIRROR_URL,
+    UV_PYPY_INSTALL_MIRROR, UV_GRAALPY_INSTALL_MIRROR, UV_PYODIDE_INSTALL_MIRROR, PYTHONHOME,
+    PYTHONPATH, PYTHONUSERBASE, UV_INDEX_URL, UV_DEFAULT_INDEX, UV_INDEX, UV_EXTRA_INDEX_URL,
+    UV_FIND_LINKS, UV_INSECURE_HOST, UV_CACHE_DIR, UV_PYTHON_CACHE_DIR, UV_ENV_FILE, HTTPS_PROXY,
+    HTTP_PROXY, ALL_PROXY (and their lower-case forms), SSL_CERT_FILE, SSL_CERT_DIR,
+    SSL_CLIENT_CERT, UV_NATIVE_TLS, UV_SYSTEM_CERTS and UV_KEYRING_PROVIDER are ignored, each with a
+    line on stderr; the user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file
+    (--no-env-file). In a network that reaches the internet only through a proxy, an elevated run
+    can download nothing: the managed Python and every package the script needs must already be in
+    the account's directories named above.
 
     Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -234,11 +240,14 @@ $PwshPyFixedIds = @('/usr/bin/id', '/bin/id', '/usr/sbin/id', '/sbin/id', '/run/
 # only-managed (measured with uv 0.13: an explicit UV_PYTHON path and an active virtual or conda
 # environment each run their own python), or that uv refuses beside that flag; then the ones that
 # move where uv's managed Pythons live or come from (another install directory, config file, download
-# mirror or download list), which would let the caller's environment supply the interpreter after
-# all (user decision on [59]). An elevated run drops them all; identical to the .sh runner.
+# mirror or download list; uv 0.13 also fetches CPython through UV_ASTRAL_MIRROR_URL and PyPy, GraalPy
+# and Pyodide through their own mirror variables, measured), which would let the caller's environment
+# supply the interpreter after all (user decision on [59]). An elevated run drops them all; identical
+# to the .sh runner.
 $PwshPyInterpreterVariables = @(
     'UV_PYTHON', 'VIRTUAL_ENV', 'CONDA_PREFIX', 'UV_MANAGED_PYTHON', 'UV_NO_MANAGED_PYTHON',
-    'UV_PYTHON_INSTALL_DIR', 'UV_CONFIG_FILE', 'UV_PYTHON_INSTALL_MIRROR', 'UV_PYTHON_DOWNLOADS_JSON_URL'
+    'UV_PYTHON_INSTALL_DIR', 'UV_CONFIG_FILE', 'UV_PYTHON_INSTALL_MIRROR', 'UV_PYTHON_DOWNLOADS_JSON_URL',
+    'UV_ASTRAL_MIRROR_URL', 'UV_PYPY_INSTALL_MIRROR', 'UV_GRAALPY_INSTALL_MIRROR', 'UV_PYODIDE_INSTALL_MIRROR'
 )
 # The variables the interpreter reads itself, whichever one runs: PYTHONHOME replaces its standard
 # library, PYTHONPATH puts the caller's directories ahead of it and PYTHONUSERBASE names the user
@@ -253,6 +262,18 @@ $PwshPyLibraryVariables = @('PYTHONHOME', 'PYTHONPATH', 'PYTHONUSERBASE')
 $PwshPyUvSourceVariables = @(
     'UV_INDEX_URL', 'UV_DEFAULT_INDEX', 'UV_INDEX', 'UV_EXTRA_INDEX_URL', 'UV_FIND_LINKS', 'UV_INSECURE_HOST',
     'UV_CACHE_DIR', 'UV_PYTHON_CACHE_DIR', 'UV_ENV_FILE'
+)
+# How uv connects: a proxy (uv 0.13 sends https through HTTPS_PROXY, http through HTTP_PROXY and both
+# through ALL_PROXY, each also in lower case, measured; on Windows the two spellings are one variable),
+# the certificate roots it trusts (SSL_CERT_FILE and SSL_CERT_DIR replace them, measured; UV_NATIVE_TLS
+# and UV_SYSTEM_CERTS switch to the platform store), the client certificate it presents, and a keyring
+# helper it runs for credentials (UV_KEYRING_PROVIDER=subprocess runs `keyring` from PATH). Each lets
+# the caller decide what the default index serves to an elevated run, or what runs elevated; NO_PROXY
+# only exempts hosts from a proxy and changes nothing once these are gone. The packed script runs
+# without them too. Identical to the .sh runner.
+$PwshPyNetworkVariables = @(
+    'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+    'SSL_CLIENT_CERT', 'UV_NATIVE_TLS', 'UV_SYSTEM_CERTS', 'UV_KEYRING_PROVIDER'
 )
 
 function Get-PwshPyRunningUserSid {
@@ -956,6 +977,11 @@ function Clear-PwshPyInterpreterVariable {
     foreach ($name in $PwshPyUvSourceVariables) {
         if ($null -eq [Environment]::GetEnvironmentVariable($name)) { continue }
         Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run lets uv use its defaults for package sources, caches and env files"
+        Remove-Item -LiteralPath "Env:$name"
+    }
+    foreach ($name in $PwshPyNetworkVariables) {
+        if ($null -eq [Environment]::GetEnvironmentVariable($name)) { continue }
+        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run lets uv connect with its own defaults: no proxy, its built-in certificate roots, no keyring"
         Remove-Item -LiteralPath "Env:$name"
     }
 }

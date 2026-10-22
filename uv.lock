@@ -18,7 +18,6 @@ lib-cli-exit-tools = false
 lib-layered-config = false
 lib-log-rich = false
 lib-registry = false
-ruff = "2026-10-15T15:23:19Z"
 virtualenv = "2026-10-18T07:06:35Z"
 
 [[package]]

@@ -114,8 +114,7 @@ def _refuse_group(user_id: str | None, role: str) -> None:
     """Raise :class:`ConfigurationError` when ``user_id`` is a well-known group SID."""
     if _is_group_sid(user_id):
         raise ConfigurationError(
-            f"{role} {user_id} is a group SID; pwshpy registers a single account - pass a user or "
-            "service account SID."
+            f"{role} {user_id} is a group SID; pwshpy registers a single account - pass a user or service account SID."
         )
 
 

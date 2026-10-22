@@ -519,3 +519,20 @@ def test_the_shim_prefers_the_out_of_band_argument_vector(tmp_path: Path) -> Non
     result = _run_shim(tmp_path, "ignored", env={ARGV_ENV_VAR: "v1|" + "eA=="})
     assert result.returncode == 0, result.stderr
     assert "argv:['x']" in result.stdout, result.stdout
+
+
+#: The UTF-8 byte-order mark: Windows PowerShell 5.1 reads a .ps1 without it in the ANSI code page.
+_UTF8_BOM = b"\xef\xbb\xbf"
+
+
+@pytest.mark.os_agnostic
+def test_the_powershell_runner_carries_a_utf8_byte_order_mark(tmp_path: Path) -> None:
+    """Windows PowerShell 5.1 decodes a BOM-less script as ANSI, mangling every non-ASCII name and
+    --with value; the .sh (read as bytes by any sh) carries none."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('hi')\n")
+    ps1 = Path(pack_script(entry, tmp_path / "app.ps1").output_path).read_bytes()
+    sh = Path(pack_script(entry, tmp_path / "app.sh").output_path).read_bytes()
+    assert ps1.startswith(_UTF8_BOM + b"#Requires")
+    assert sh.startswith(b"#!/bin/sh")
+    assert unpack_script(tmp_path / "app.ps1", tmp_path / "out").entry == "app.py"

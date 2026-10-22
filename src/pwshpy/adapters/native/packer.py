@@ -145,7 +145,7 @@ def pack_script(
     )
     template = _read_template(fmt)
     runner = render_runner(template, content) if fmt is RunnerFormat.PS1 else render_posix_runner(template, content)
-    _write_runner(destination, runner)
+    _write_runner(destination, runner, bom=fmt is RunnerFormat.PS1)
     return PackedScript(
         output_path=str(destination),
         entry=entry_arc,
@@ -186,7 +186,8 @@ def unpack_script(source: str | Path, dest: str | Path, *, force: bool = False) 
         ['tool.py']
     """
     packed = _existing_file(Path(source), "packed script")
-    text = _read_bytes(packed).decode("utf-8", "replace")
+    # utf-8-sig: a .ps1 starts with a byte-order mark (see _write_runner).
+    text = _read_bytes(packed).decode("utf-8-sig", "replace")
     payload, fmt = _extract_payload(text, packed)
     target = Path(dest).expanduser()
     extract = _extract_zip_members if fmt is RunnerFormat.PS1 else _extract_tar_members
@@ -297,16 +298,18 @@ def _read_bytes(path: Path) -> bytes:
         raise PackError(f"cannot read {path}: {exc}") from exc
 
 
-def _write_runner(destination: Path, runner: str) -> None:
-    """Write the artefact through the shared UTF-8-no-BOM writer, creating parent dirs.
+def _write_runner(destination: Path, runner: str, *, bom: bool) -> None:
+    """Write the artefact through the shared UTF-8 writer, creating parent dirs.
 
     ``write_text`` is the project's one predictable-bytes seam, but it does not create
     directories, and a bare ``OSError`` escaping here would break the invariant that every
-    pwshpy failure is a :class:`PwshPyError`.
+    pwshpy failure is a :class:`PwshPyError`. ``bom`` is for the ``.ps1``: Windows PowerShell 5.1
+    reads a script without one in the ANSI code page, which mangled every non-ASCII entry name,
+    packed file name and ``--with`` value (measured: a file list that then never verified).
     """
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        write_text(destination, runner)
+        write_text(destination, runner, bom=bom)
     except OSError as exc:
         raise PackError(f"cannot write {destination}: {exc}") from exc
 

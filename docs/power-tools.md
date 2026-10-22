@@ -372,7 +372,9 @@ Details worth knowing:
   literals, so `it's.py`, a typographic quote, `$`, a backtick or a space in a name, or in a `--with`
   value, reaches the runner and uv as given. Refused at pack time, with the reason: a name holding a
   line break (both runners keep one name per line), and `#>` in the entry name of a `.ps1` (it would
-  end the runner's help block, which has no escape).
+  end the runner's help block, which has no escape). The `.ps1` is written as UTF-8 with a byte-order
+  mark, without which Windows PowerShell 5.1 reads it in the ANSI code page and mangles every
+  non-ASCII name and value.
 - **Self-elevation keeps working.** A packed script calling `ps.elevate()` re-execs the extracted
   entry with the environment uv already built, so it elevates exactly as it would unpacked.
 - **The cache is verified before every run** against per-file hashes embedded in the artefact, and

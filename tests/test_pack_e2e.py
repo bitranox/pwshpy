@@ -2215,3 +2215,16 @@ def test_an_entry_named_with_a_quote_runs_and_round_trips(tmp_path: Path, name: 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ran:1" in result.stdout, result.stdout
     assert unpack_script(runner, tmp_path / "out").entry == name
+
+
+def test_an_entry_with_a_non_ascii_name_runs_on_every_powershell(tmp_path: Path) -> None:
+    """Windows PowerShell 5.1 reads a script without a BOM as ANSI: the name, and the file list that
+    verifies the cache, must still arrive as packed."""
+    name = "gr" + chr(0xFC) + chr(0xDF) + "e.py"
+    entry = tmp_path / name
+    entry.write_text("print('ran')\n", encoding="utf-8")
+    runner = Path(pack_script(entry, tmp_path / "umlaut.ps1").output_path)
+    assert _literal_values(tmp_path, runner, "PwshPyEntry") == [name]
+    result = _run(runner, env=_isolated_cache(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ran" in result.stdout, result.stdout

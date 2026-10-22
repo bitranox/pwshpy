@@ -1006,9 +1006,11 @@ def test_enable_and_disable_refuse_a_static_timer(monkeypatch: pytest.MonkeyPatc
     props = _enable_props("tmpfiles", [("OnBootUSec", 900_000_000, 0)])
     conn = FakeConn([], props, frozenset({"tmpfiles.timer"}), file_states={"tmpfiles.timer": "static"})
     use_bus(monkeypatch, conn)
-    with pytest.raises(NativeCallError, match=r"static.*no \[Install\]"):
+    with pytest.raises(NativeCallError, match=r"static.*no \[Install\]") as refused:
         getattr(SystemdScheduledTaskController(), verb)("tmpfiles")
     assert conn.verbs == []
+    # [C4]: masking only ever stops a timer, so it is offered for disable and never for enable.
+    assert ("mask" in str(refused.value)) is (verb == "disable"), str(refused.value)
 
 
 _RUNNING_STATES = ["active", "activating", "deactivating", "reloading"]

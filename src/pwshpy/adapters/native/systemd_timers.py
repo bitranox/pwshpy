@@ -929,9 +929,16 @@ class SystemdScheduledTaskController:
                 f"task {base!r} is on-demand (no .timer); nothing to {verb} - run it directly, or unregister it."
             )
         if _dbus.unit_file_state(bus, f"{base}.timer") == "static":
+            # What does work differs by verb: a static timer runs whenever the unit that wants it starts,
+            # so only that unit (or an [Install] section) arms it, and only a mask keeps it from running.
+            remedy = (
+                "it runs whenever the unit that wants it starts; give it an [Install] section to enable it on its own"
+                if verb == "enable"
+                else "change the unit that wants it, or mask the timer to keep it from running"
+            )
             raise NativeCallError(
                 f"task {base!r} is a static timer (no [Install] section; another unit pulls it in), so systemd "
-                f"has nothing to {verb} - change the unit that wants it, or mask the timer."
+                f"has nothing to {verb} - {remedy}."
             )
 
     def _start_stop(self, base: str, method: str) -> None:

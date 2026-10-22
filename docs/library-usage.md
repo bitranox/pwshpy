@@ -209,20 +209,22 @@ does not allow in a command line.
 
 The task name must be a name systemd accepts for a unit, at most 247 characters (255 with
 `.service`), or the call raises `ConfigurationError` before anything is written or sent. `register`
-and `unregister`, which write and delete unit files, take ASCII letters, digits, `:`, `-`, `_` and `.`
-only, so no `@` (a template or instance unit). `run`, `stop`, `enable` and `disable` write nothing
-and also take an instance name such as `zfs-scrub-monthly@rpool`, as `ps.get_scheduled_task()` lists
-it: a non-empty part before the first `@`, then an instance of the same characters plus `@`; a bare
-template (`scrub@`, nothing after the `@`) is refused. Every unit pwshpy writes carries `X-PwshPy=<version>` in `[Unit]`,
-which systemd ignores, and pwshpy only replaces or deletes a unit that carries it: `register` raises
-`NativeCallError` when `/etc/systemd/system` holds a unit of that name without the key, or systemd
-already has one from anywhere else (a vendor unit under `/lib`, a runtime or masked one), and
-`unregister` stops, disables and deletes only the marked files: it raises `NativeCallError` ("not
-written by pwshpy") when a file of that name without the key is there, and ("no such task") when
-there is no file at all. A unit registered by pwshpy 1.5 or earlier carries no key and is refused the
-same way; to take such a task over, remove its `.service` / `.timer` files under `/etc/systemd/system`
-by hand (`systemctl disable --now` the timer first), or add `X-PwshPy=` to their `[Unit]` section. `ps.enable_scheduled_task` on a boot timer also only enables it,
-because systemd runs a started boot timer at once when its offset has already passed.
+and `unregister`, which write and delete unit files, take ASCII letters, digits, `:`, `-`, `_` and
+`.` only, so no `@` (a template or instance unit). `run`, `stop`, `enable` and `disable` write
+nothing and also take an instance name such as `zfs-scrub-monthly@rpool`, as
+`ps.get_scheduled_task()` lists it: a non-empty part before the first `@`, then an instance of the
+same characters plus `@`; a bare template (`scrub@`, nothing after the `@`) is refused. Every unit
+pwshpy writes carries `X-PwshPy=<version>` in `[Unit]`, which systemd ignores, and pwshpy only
+replaces or deletes a unit that carries it: `register` raises `NativeCallError` when
+`/etc/systemd/system` holds a unit of that name without the key, or systemd already has one from
+anywhere else (a vendor unit under `/lib`, a runtime or masked one), and `unregister` stops,
+disables and deletes only the marked files: it raises `NativeCallError` ("not written by pwshpy")
+when a file of that name without the key is there, and ("no such task") when there is no file at
+all. A unit registered by pwshpy 1.5 or earlier carries no key and is refused the same way; to take
+such a task over, remove its `.service` / `.timer` files under `/etc/systemd/system` by hand
+(`systemctl disable --now` the timer first), or add `X-PwshPy=` to their `[Unit]` section.
+`ps.enable_scheduled_task` on a boot timer also only enables it, because systemd runs a started boot
+timer at once when its offset has already passed.
 
 `register_scheduled_task` returns the task read back as a `ScheduledTaskInfo`, the same record
 `ps.get_scheduled_task()` yields. Its principal and run-information fields:
@@ -316,11 +318,25 @@ rather than guessed at) and an `index` the file does not hold all raise `NativeC
 
 ## Deadlines and long waits
 
-Every call that waits takes a `timeout` in seconds, and running out of it raises
-`OperationTimeoutError` (its `.timeout` holds the limit), with two exceptions: `ps.run` (.NET) has
-no timeout and reports a failure as `PowerShellError`, and `ps.elevate(wait=True)` waits for the
-elevated child without a limit. `OperationTimeoutError` subclasses `NativeCallError`, so catch it
-first to tell "ran out of time" from "refused" or "could not start":
+Calls that can wait take a `timeout` in seconds. What running out of it raises depends on the call:
+
+- `OperationTimeoutError` (its `.timeout` holds the limit; CLI exit 110): `exec`, `start_service`,
+  `stop_service`, `restart_service`, `get_windows_update`, `wait_process`, `resolve_dns_name`, and
+  on Linux the local-account verbs (`new_local_user`, `add_local_group_member`, ...), whose
+  shadow-utils command it bounds (Windows accepts their `timeout` and does not use it: the calls
+  are synchronous).
+- `PowerShellError`: the hosted .NET calls `ps.run`, `ps.cmdlet` and the wrappers over it
+  (`get_ad_user`, `get_ad_group`, `get_ad_computer`, `get_mailbox`, `get_az_vm`,
+  `get_az_resource_group`); the pipeline is stopped. Their `timeout` defaults to `None`, no limit.
+- `NativeCallError` ("timed out"): `download_file`, `invoke_web_request` and `invoke_rest_method`,
+  whose `timeout` (default 30 s) bounds each connect and each read, not the whole transfer.
+- Nothing: `test_connection` returns a `ConnectionTest` with `reachable=False` and the reason in
+  `error`.
+
+`exec`, `wait_process` and `resolve_dns_name` wait without a limit when `timeout` is `None` (their
+default), and `ps.elevate(wait=True)` takes no `timeout`: it waits for the elevated child without a
+limit. `OperationTimeoutError` subclasses `NativeCallError`, so catch it first to tell "ran out of
+time" from "refused" or "could not start":
 
 ```python
 from pwshpy import NativeCallError, OperationTimeoutError, ps

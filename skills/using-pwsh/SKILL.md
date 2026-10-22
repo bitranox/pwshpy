@@ -154,7 +154,11 @@ catch a subclass before its parent:
   A control the OS refuses (a service stop denied, a missing executable) is the plain
   `NativeCallError`: `except OperationTimeoutError` first, then `except NativeCallError`.
 - `ElevationRequiredError` (`require_elevation()`), `PlatformUnsupportedError` (no analog on this OS),
-  `ConfigurationError`, `PowerShellError` / `FeatureUnavailableError` (.NET, `[full]`), `PackError`.
+  `ConfigurationError`, `PowerShellError` / `FeatureUnavailableError` (.NET, `[full]`; `run`, `cmdlet`
+  and the `get_ad_*` wrappers raise `PowerShellError` past their `timeout`, default none), `PackError`.
+  `download_file`, `invoke_web_request` and `invoke_rest_method` raise the plain `NativeCallError`
+  ("timed out") when a connect or read outlasts `timeout`; `test_connection` returns `reachable=False`;
+  `elevate(wait=True)` has no limit.
 
 `get_service()` and `get_scheduled_task()` skip, with a logged WARNING, an item the caller cannot
 read; pass `strict=True` (CLI `--strict`) when "not listed" must mean "does not exist" (a raise
@@ -166,7 +170,7 @@ not shorten it. `exec` drops the output written before a timeout.
 
 CLI and packed-runner exit codes (an error also writes one `ErrorName: message` line, or a `pwshpy: ...`
 line from a runner, to stderr): 0 ok, 1 any other `PwshPyError`, 2 usage error, 22 a refused value
-(`ValueError`), 64 a relative `-PwshPyUv` / `--pwshpy-uv`, 70 the runner failed before the script ran
+(`ValueError`; 87 on Windows), 64 a relative `-PwshPyUv` / `--pwshpy-uv`, 70 the runner failed before the script ran
 (the elevated `.ps1` child, or an elevated run that cannot return to the caller's directory), 77
 elevation declined (`pwshpy --elevate`, `-PwshPyElevate`, `--pwshpy-elevate`; stderr line `pwshpy:
 elevation declined`), 110 `OperationTimeoutError`, 127 a missing or untrusted `uv`, or no `sudo` for a

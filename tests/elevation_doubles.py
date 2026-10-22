@@ -196,13 +196,13 @@ def write_planted_environment(root: Path, marker: Path) -> Path:
     return root
 
 
-def write_planted_venv(root: Path, marker: Path) -> Path:
+def write_planted_venv(root: Path, marker: Path, *, interpreter: str | None = None) -> Path:
     """A real virtual environment at ``root`` whose interpreter appends a line to ``marker`` on every start.
 
-    Built with the suite's own interpreter (``venv --without-pip``), so it works on every OS, Windows
-    included, where no test can write a ``python.exe`` double. A ``sitecustomize`` in its
-    site-packages records each start: uv queries an interpreter with ``python -I``, which still
-    imports it. Planted as ``.venv`` in a working directory or above, it is what uv probes (and,
+    Built with the suite's own interpreter (``venv --without-pip``), or ``interpreter`` when given, so
+    it works on every OS, Windows included, where no test can write a ``python.exe`` double. A ``.pth``
+    file in its site-packages records each start: uv queries an interpreter with ``python -I``, which
+    still processes it. Planted as ``.venv`` in a working directory or above, it is what uv probes (and,
     measured with uv 0.13.0, even RUNS under ``--python-preference only-managed``) unless started
     elsewhere. Returns ``root``.
 
@@ -213,15 +213,36 @@ def write_planted_venv(root: Path, marker: Path) -> Path:
         True
     """
     subprocess.run(  # noqa: S603 - fixed argv from the running interpreter
-        [sys.executable, "-m", "venv", "--without-pip", str(root)], check=True, capture_output=True, timeout=120
+        [interpreter or sys.executable, "-m", "venv", "--without-pip", str(root)],
+        check=True,
+        capture_output=True,
+        timeout=120,
     )
-    site_packages = Path(sysconfig.get_path("purelib", vars={"base": str(root), "platbase": str(root)}))
+    site_packages = _venv_site_packages(root)
     site_packages.mkdir(parents=True, exist_ok=True)
-    (site_packages / "sitecustomize.py").write_text(
-        f"import sys\nwith open({str(marker)!r}, 'a', encoding='utf-8') as _f:\n    _f.write(sys.executable + '\\n')\n",
+    # A .pth line that starts with "import" is executed by the site module at every start, isolated
+    # (-I) ones included. Not a sitecustomize.py: Debian and Ubuntu ship one in the system Python's own
+    # library directory, which is found first and shadows the venv's.
+    (site_packages / "pwshpy_planted_marker.pth").write_text(
+        f"import sys; open({str(marker)!r}, 'a', encoding='utf-8').write(sys.executable + '\\n')\n",
         encoding="utf-8",
     )
     return root
+
+
+def _venv_site_packages(root: Path) -> Path:
+    """The ``site-packages`` directory of the virtual environment at ``root``, whichever Python built it.
+
+    Read from the layout on disk rather than from this interpreter's ``sysconfig``: a venv built from
+    another Python (a Debian ``/usr/bin/python3.X``) has that version in its ``lib/pythonX.Y`` path.
+    """
+    windows = root / "Lib" / "site-packages"
+    if windows.is_dir():
+        return windows
+    found = sorted((root / "lib").glob("python*/site-packages"))
+    if found:
+        return found[0]
+    return Path(sysconfig.get_path("purelib", vars={"base": str(root), "platbase": str(root)}))
 
 
 #: The distribution :func:`write_local_wheel` builds, and the module it carries.

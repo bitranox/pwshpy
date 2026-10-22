@@ -87,7 +87,7 @@ exits nonzero is no error: the result holds its `exit_code` until you call `.che
 CLI: `pwshpy exec -- git status` (put the program after `--` so its flags are not parsed by pwshpy).
 A run that hits `--timeout` exits 110 (ETIMEDOUT) with an `OperationTimeoutError` line on stderr; a
 program that cannot start exits 1. A `--timeout` outside `(0, 2147483]` is a usage error (exit 2), and
-`nan` exits 22.
+`nan` exits 22 (87 on Windows), the code for a `ValueError`.
 
 ### Waiting for the whole process tree (`wait_tree=True`, like `Start-Process -Wait`)
 

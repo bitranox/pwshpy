@@ -143,7 +143,7 @@ Logon triggers, `every_days > 1` and a logon type are Windows-only (`PlatformUns
 
 ## Errors, timeouts and exit codes
 
-Every failure raises a `PwshPyError` subclass, except a bad argument (`ValueError`, CLI exit 22);
+Every failure raises a `PwshPyError` subclass, except a bad argument (`ValueError`, CLI exit 22, 87 on Windows);
 catch a subclass before its parent:
 
 - `NativeCallError` - an OS call failed, `.check()` saw a nonzero exit, or a `strict=True` listing

@@ -11,6 +11,7 @@ itself, as a console script does, with the services replaced at the composition 
 from __future__ import annotations
 
 import dataclasses
+import os
 import subprocess
 import sys
 import time
@@ -175,11 +176,17 @@ def test_a_timed_out_resolve_dns_name_exits_110_through_main(
     assert "OperationTimeoutError" in capsys.readouterr().err
 
 
+#: The exit code lib_cli_exit_tools gives a ValueError: EINVAL on POSIX, ERROR_INVALID_PARAMETER on Windows
+#: (its table is keyed on os.name).
+_VALUE_ERROR_EXIT = 87 if os.name == "nt" else 22
+
+
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize(("value", "code"), [("-1", 2), ("0", 2), ("1e12", 2), ("nan", 22)])
+@pytest.mark.parametrize(("value", "code"), [("-1", 2), ("0", 2), ("1e12", 2), ("nan", _VALUE_ERROR_EXIT)])
 def test_an_exec_timeout_outside_the_accepted_range_is_refused(value: str, code: int) -> None:
     """[D3]: exec --timeout takes (0, 2147483] like get_windows_update: out of range is a usage error
-    (2) before any child starts, NaN (which passes a range check) the facade's ValueError (22). It
+    (2) before any child starts, NaN (which passes a range check) the facade's ValueError (22, or 87 on
+    Windows). It
     was: -1 a timeout at once (110), NaN an internal message (22), 1e12 a raw OverflowError."""
     argv = ["exec", "--timeout", value, "--", sys.executable, "-c", "pass"]
     assert main(argv, services_factory=_services({})) == code

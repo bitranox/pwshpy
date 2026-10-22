@@ -800,6 +800,19 @@ function Get-PwshPyPasswdHome {
     return $accountHome
 }
 
+function Get-PwshPyPasswdAnswer {
+    param([string] $FilePath, [string[]] $ArgumentList)
+
+    # The lines one passwd source prints (getent, id -P), or none when it cannot run: GNU id has no
+    # -P, and a source that fails is simply not an answer - the next source is asked, and no answer
+    # at all makes Get-PwshPyAccountDataHome throw.
+    try {
+        return @(. (ConvertTo-PwshPyNativeCall -FilePath $FilePath -ArgumentList $ArgumentList -StderrPath '/dev/null'))
+    } catch {
+        return @()
+    }
+}
+
 function Get-PwshPyAccountDataHome {
     # The data directory of the account this run is (uv keeps its managed Pythons in
     # <it>/uv/python), asked of the system rather than of the environment: APPDATA, HOME and
@@ -821,12 +834,12 @@ function Get-PwshPyAccountDataHome {
     foreach ($directory in ($PwshPyFixedPath -split ':')) {
         $getent = "$directory/getent"
         if (-not (Test-Path -LiteralPath $getent -PathType Leaf)) { continue }
-        try { $answers.AddRange([string[]]@(. (ConvertTo-PwshPyNativeCall -FilePath $getent -ArgumentList @('passwd', $uid) -StderrPath '/dev/null'))) } catch { }
+        $answers.AddRange([string[]]@(Get-PwshPyPasswdAnswer -FilePath $getent -ArgumentList @('passwd', $uid)))
         break
     }
     foreach ($id in $PwshPyFixedIds) {
         if (-not (Test-Path -LiteralPath $id -PathType Leaf)) { continue }
-        try { $answers.AddRange([string[]]@(. (ConvertTo-PwshPyNativeCall -FilePath $id -ArgumentList @('-P') -StderrPath '/dev/null'))) } catch { }
+        $answers.AddRange([string[]]@(Get-PwshPyPasswdAnswer -FilePath $id -ArgumentList @('-P')))
         break
     }
     if (Test-Path -LiteralPath '/etc/passwd' -PathType Leaf) { $answers.AddRange([IO.File]::ReadAllLines('/etc/passwd')) }
@@ -1122,7 +1135,8 @@ $PwshPyPrepare = {
         Clear-PwshPyInterpreterVariable
         $PwshPyDataHome = Get-PwshPyAccountDataHome
         Set-Item -LiteralPath 'Env:UV_PYTHON_INSTALL_DIR' -Value (Join-Path (Join-Path $PwshPyDataHome 'uv') 'python')
-        $PwshPyPython = Resolve-PwshPyManagedPython -Uv $PwshPyUv
+        # Script scope by name: the run preparation, a block of its own, reads it.
+        $script:PwshPyPython = Resolve-PwshPyManagedPython -Uv $PwshPyUv
     }
 }
 
@@ -1157,7 +1171,7 @@ $PwshPyPrepareRun = {
     # first, or it would resolve against the anchor.
     $PwshPyRunArgs = @('run', '--no-project')
     if ($PwshPyElevatedRun) {
-        $PwshPyRunArgs += Get-PwshPyManagedPythonOption -Python $PwshPyPython
+        $PwshPyRunArgs += Get-PwshPyManagedPythonOption -Python $script:PwshPyPython
         $PwshPyCallerCwd = Get-PwshPyCallerDirectory
         $PwshPyRunArgs += Get-PwshPyAnchoredUvArg -CallerDirectory $PwshPyCallerCwd
         $PwshPyTarget = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PwshPyTarget)

@@ -197,23 +197,27 @@ How each input maps, and what each OS refuses before touching the scheduler:
 
 On Linux every timer pwshpy writes carries `AccuracySec=1s` (systemd's default window would let it
 fire up to a minute late). `program`, `arguments` and `description` go into the unit file, so a line
-break or NUL in any of them is a `ConfigurationError` and `%` is escaped. The `ExecStart=` line is
+break, NUL or any other control character (a tab, an escape, DEL; systemd allows none in a command
+line) in any of them is a `ConfigurationError` and `%` is escaped. The `ExecStart=` line is
 `program`, written as one double-quoted word (so a path with a space stays one path), followed by
 `arguments`, which systemd reads with its own rules, not a shell's: it splits and unquotes them
 itself and expands `$VAR` / `${VAR}` from the unit's environment (write `$$` for a literal dollar).
 A `program` starting with `@`, `-`, `:`, `+`, `!` or `|` is a `ConfigurationError`: systemd reads
 that character as an `ExecStart=` prefix even inside quotes, `+` would run it with full privileges,
 ignoring `User=`, and `|` through a shell. So is a `program` that is a lone `;` (systemd's
-command-line separator) or holds any other control character (a tab, an escape, DEL), which systemd
-does not allow in a command line.
+command-line separator).
 
 The task name must be a name systemd accepts for a unit, at most 247 characters (255 with
 `.service`), or the call raises `ConfigurationError` before anything is written or sent. `register`
 and `unregister`, which write and delete unit files, take ASCII letters, digits, `:`, `-`, `_` and
-`.` only, so no `@` (a template or instance unit). `run`, `stop`, `enable` and `disable` write
-nothing and also take an instance name such as `zfs-scrub-monthly@rpool`, as
+`.` only, so no `@` (a template or instance unit) and no backslash. `run`, `stop`, `enable` and
+`disable` write no unit file (`enable` and `disable` only add or remove the `timers.target.wants`
+link) and also take an instance name such as `zfs-scrub-monthly@rpool`, as
 `ps.get_scheduled_task()` lists it: a non-empty part before the first `@`, then an instance of the
-same characters plus `@`; a bare template (`scrub@`, nothing after the `@`) is refused. Every unit
+same characters plus `@`; either part may hold systemd's `\xNN` escapes
+(`zfs-scrub-monthly@my\x2dpool`, as `systemd-escape` writes `my-pool`), which are part of the name. A
+bare template (`scrub@`, nothing after the `@`) is refused. In a task path a folder ends at `/` or at
+a backslash that does not start such an escape, so the Windows form `\Tasks\backup` names `backup`. Every unit
 pwshpy writes carries `X-PwshPy=<version>` in `[Unit]`, which systemd ignores, and pwshpy only
 replaces or deletes a unit that carries it: `register` raises `NativeCallError` when
 `/etc/systemd/system` holds a unit of that name without the key, or systemd already has one from
@@ -322,9 +326,10 @@ Calls that can wait take a `timeout` in seconds. What running out of it raises d
 
 - `OperationTimeoutError` (its `.timeout` holds the limit; CLI exit 110): `exec`, `start_service`,
   `stop_service`, `restart_service`, `get_windows_update`, `wait_process`, `resolve_dns_name`, and
-  on Linux the local-account verbs (`new_local_user`, `add_local_group_member`, ...), whose
-  shadow-utils command it bounds (Windows accepts their `timeout` and does not use it: the calls
-  are synchronous).
+  on Linux the local-account verbs (`new_local_user`, `remove_local_user`, `enable_local_user`,
+  `disable_local_user`, `new_local_group`, `remove_local_group`, `add_local_group_member` and
+  `remove_local_group_member`), whose shadow-utils command it bounds, 30 s by default (Windows
+  accepts their `timeout` and does not use it: the calls are synchronous).
 - `PowerShellError`: the hosted .NET calls `ps.run`, `ps.cmdlet` and the wrappers over it
   (`get_ad_user`, `get_ad_group`, `get_ad_computer`, `get_mailbox`, `get_az_vm`,
   `get_az_resource_group`); the pipeline is stopped. Their `timeout` defaults to `None`, no limit.
@@ -387,7 +392,10 @@ if __name__ == "__main__":
     main()
 ```
 
-On the CLI a timeout exits 110 (see [CLI Reference](cli-reference.md#exit-codes)).
+On the CLI an `OperationTimeoutError` exits 110 (see [CLI Reference](cli-reference.md#exit-codes)).
+The other timeouts exit 1: `pwshpy run`, `pwshpy cmdlet` and the module shortcuts (`get_ad_user`,
+...) with `--timeout` raise `PowerShellError`, and `download_file`, `invoke_web_request` and
+`invoke_rest_method` with `--timeout` raise `NativeCallError`.
 
 ## Errors
 

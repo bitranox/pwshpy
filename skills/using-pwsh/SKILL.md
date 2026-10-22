@@ -149,13 +149,17 @@ catch a subclass before its parent:
 - `NativeCallError` - an OS call failed, `.check()` saw a nonzero exit, or a `strict=True` listing
   hit an item it cannot read. Its subclasses: `OperationTimeoutError` (`.timeout` holds the limit:
   `exec(timeout=)`, a service start/stop/restart that did not settle - the control WAS issued -,
-  `get_windows_update`, `wait_process(timeout=)` and `resolve_dns_name(timeout=)`) and
-  `ElevationDeclinedError` (the UAC prompt or sudo's password refused).
+  `get_windows_update`, `wait_process(timeout=)`, `resolve_dns_name(timeout=)` and, on Linux, the
+  local-account verbs (`new_local_user`, `remove_local_user`, `enable_local_user`,
+  `disable_local_user`, `new_local_group`, `remove_local_group`, `add_local_group_member` and
+  `remove_local_group_member`, `timeout=` default 30 s)) and `ElevationDeclinedError` (the UAC
+  prompt or sudo's password refused).
   A control the OS refuses (a service stop denied, a missing executable) is the plain
   `NativeCallError`: `except OperationTimeoutError` first, then `except NativeCallError`.
 - `ElevationRequiredError` (`require_elevation()`), `PlatformUnsupportedError` (no analog on this OS),
   `ConfigurationError`, `PowerShellError` / `FeatureUnavailableError` (.NET, `[full]`; `run`, `cmdlet`
-  and the `get_ad_*` wrappers raise `PowerShellError` past their `timeout`, default none), `PackError`.
+  and the module wrappers `get_ad_user`, `get_ad_group`, `get_ad_computer`, `get_mailbox`, `get_az_vm`
+  and `get_az_resource_group` raise `PowerShellError` past their `timeout`, default none), `PackError`.
   `download_file`, `invoke_web_request` and `invoke_rest_method` raise the plain `NativeCallError`
   ("timed out") when a connect or read outlasts `timeout`; `test_connection` returns `reachable=False`;
   `elevate(wait=True)` has no limit.

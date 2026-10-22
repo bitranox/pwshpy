@@ -351,70 +351,100 @@ Details worth knowing:
   with uv 0.13). Elevated (an administrator token, SYSTEM, or root, decided exactly as for the `uv`
   check above), the runner therefore resolves the interpreter itself before the run: `uv python find
   --system --python-preference only-managed`, which probes no `.venv` at all, with the packed
-  script's `requires-python` as the request (read from its PEP 723 block when packing; `uv run` would
-  only warn about an interpreter outside it). uv's managed Pythons are the ones in the running
+  script's `requires-python` as the request (read from its PEP 723 block when packing; `uv run`
+  would only warn about an interpreter outside it). uv's managed Pythons are the ones in the running
   account's own data directory, which the runner names to uv itself (`UV_PYTHON_INSTALL_DIR`):
   `<RoamingAppData>\uv\python` on Windows, the RoamingAppData known folder of the running token, and
   `<home>/.local/share/uv/python` on POSIX, the home the passwd database records for the euid (asked
-  of `getent`, `id -P` or `/etc/passwd` in the fixed helper directories; no answer stops the run with
-  exit code 70), whatever `APPDATA`, `HOME` or `XDG_DATA_HOME` say. A machine with none gets one on
-  the first elevated run: the runner calls `uv python install --no-bin` (plus `--no-registry` on
-  Windows), which downloads a CPython build (about 36 MiB, unpacked to about 100 MB, hence a slow
+  of `getent`, `id -P` or `/etc/passwd` in the fixed helper directories; no answer stops the run
+  with exit code 70), whatever `APPDATA`, `HOME` or `XDG_DATA_HOME` say. A machine with none gets
+  one on the first elevated run: the runner calls `uv python install --no-bin` (plus `--no-registry`
+  on Windows), which downloads a CPython build (about 36 MiB, unpacked to about 100 MB, hence a slow
   first run and a failure without network access), unless `UV_PYTHON_DOWNLOADS` is `never` or
-  `manual`, in which case the run stops with uv's own `No interpreter found in managed installations`
-  and its exit code 2; `uv python install` as the elevated account provides one ahead of time.
-  `uv python find` executes every interpreter it considers in that directory to ask its version, so
-  a `.pth` file planted in an install's `site-packages` would run with the elevated rights before
-  any check of the path uv answers. The runner therefore judges the directory before uv starts, as
-  it judges a `uv`: the directory itself and every directory above it (one that does not exist yet
-  by the nearest one that does, where `uv python install` creates it). One another account can
-  modify stops the run with `refusing uv's managed-Python directory <dir>: <reason>` and exit code
-  127, and uv never runs. The path uv then finds must pass the same check (see above, the
-  directories above it included), or the run stops with `refusing the Python uv found at <path>:
-  <reason>` and exit code 127. Both refusals name the remedy: on POSIX make the directory named in
-  the reason root's alone (`chown root`, then `chmod go-w`), on Windows take every other account's
-  write access off it; or remove it and install the Python again elevated (`uv python install`). The
-  run is then
-  `uv run --no-config --python-preference only-managed --no-env-file --python <that path>`, started in `/` on POSIX
-  or `System32` on Windows (`--directory`, `--project`), so the `.python-version` uv would read from
-  the script's directory upwards (the cache, which `PWSHPY_PACK_CACHE` can put anywhere) and every
-  `.venv` above the caller's directory or above `System32` (any authenticated user can create
-  `C:\.venv`) are never consulted. `--no-config`, on every uv call an elevated run makes (`uv run`,
-  `uv python find`, `uv python install`), means no `uv.toml` is read at all: not the system-wide one
+  `manual`, in which case the run stops with uv's own `No interpreter found in managed
+  installations` and its exit code 2; `uv python install` as the elevated account provides one ahead
+  of time. `uv python find` executes every interpreter it considers in that directory to ask its
+  version, so a `.pth` file planted in an install's `site-packages` would run with the elevated
+  rights before any check of the path uv answers. The runner therefore judges the directory before
+  uv starts, as it judges a `uv`: the directory itself and every directory above it (one that does
+  not exist yet by the nearest one that does, where `uv python install` creates it), and then every
+  file and directory below it, each install with its standard library and `site-packages` included.
+  On POSIX root must own each entry, neither its group nor anyone else may write it, and it may
+  carry no ACL; a symlink is judged by its owner (its target inside the directory where it lies),
+  and a regular file named `.lock` is exempt from the write check (uv creates its lock file mode
+  0666 and only ever locks it). On Windows no entry may let an account other than the trusted ones
+  change it, with the rights of its kind; a link (symlink or junction) is judged as the link and
+  never followed. One another account can modify stops the run with `refusing uv's managed-Python
+  directory <dir>: <reason>` (the reason names the entry) and exit code 127, and uv never runs.
+  Measured, read only: on a Linux host its two listings took about 0.8 s for 85,640 entries (15
+  installs); on a Windows host about 2 s per install under PowerShell 7 and about 3 s under Windows
+  PowerShell 5.1 (9.9 s and 13.8 s for five installs, 18,771 entries), paid by every elevated `.ps1`
+  run there. The path uv then finds must pass the same check (see above, the directories above it
+  included), or the run stops with `refusing the Python uv found at <path>: <reason>` and exit code
+  127. Both refusals name the remedy: on POSIX make the path named in the reason root's alone
+  (`chown root`, then `chmod go-w`, with `-R` for a directory), on Windows take every other
+  account's write access off it; or remove uv's managed-Python directory and install the Python
+  again elevated (`uv python install`). The run is then `uv run --no-config --python-preference
+  only-managed --no-env-file --python <that path>`, started in `/` on POSIX or `System32` on Windows
+  (`--directory`, `--project`), so the `.python-version` uv would read from the script's directory
+  upwards (the cache, which `PWSHPY_PACK_CACHE` can put anywhere) and every `.venv` above the
+  caller's directory or above `System32` (any authenticated user can create `C:\.venv`) are never
+  consulted. `--no-config`, on every uv call an elevated run makes (`uv run`, `uv python find`, `uv
+  python install`), means no `uv.toml` is read at all: not the system-wide one
   (`%SYSTEMDRIVE%\ProgramData\uv\uv.toml` on Windows, `/etc/uv/uv.toml` or one under
-  `XDG_CONFIG_DIRS` on POSIX), not the user's, and not one above the starting directory, since any of
-  them could name a cache directory, a package index or a Python download mirror. With the variables
-  that name the same dropped too (listed below) and `--no-env-file` on `uv run` (no `.env` file,
-  whatever `UV_NO_ENV_FILE` says), an elevated run uses uv's defaults plus the runner's own flags
-  (user decision): the default package index, no find-links location or insecure host, and uv's
-  default cache directory, which follows `XDG_CACHE_HOME` or `HOME` on POSIX and `LOCALAPPDATA` on
-  Windows as the elevated process sees them. A custom install directory, download mirror, package
-  index or cache directory cannot be configured for it. A directory named `C:\uv.toml` therefore no longer stops
-  elevated `.ps1` runs. The packed script still runs in your directory: uv runs the generated shim,
-  which changes back to it first, or stops with `pwshpy pack: cannot return to the working directory
-  <dir>` and exit code 70 when the elevated account cannot enter it (a root-squashed NFS export). What
-  you gave relative to your directory is made absolute before uv starts elsewhere: a relative
-  `PWSHPY_PACK_CACHE`, and a `--with` value that names one relative path: `./x.whl`, `../x`,
-  `dist/x.whl`, a bare distribution file name (`x.whl`, `x.tar.gz`) and `name @ ./x` (any form
-  holding a directory separator). Not rewritten, so in an elevated run they still resolve against
-  uv's starting directory: a comma-separated list (only its first entry is prefixed), `name @ dir`
-  with a bare directory name, and a `file:` URL. Give such a value as an absolute path, one `--with`
-  per entry. Dropped from the environment, each with a `pwshpy: ignoring <NAME>` line on stderr:
-  `UV_PYTHON`, `VIRTUAL_ENV`, `CONDA_PREFIX`, `UV_MANAGED_PYTHON` and `UV_NO_MANAGED_PYTHON` (they
-  name an interpreter), `UV_PYTHON_INSTALL_DIR`, `UV_CONFIG_FILE`, `UV_PYTHON_INSTALL_MIRROR` and
-  `UV_PYTHON_DOWNLOADS_JSON_URL` (they move where uv's managed Pythons live or come from);
-  `PYTHONHOME`, `PYTHONPATH` and `PYTHONUSERBASE`, which the interpreter itself reads (another
-  standard library, the caller's directories ahead of it, the caller's own site-packages), so the
-  packed script does not see them either; and `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `UV_INDEX`,
-  `UV_EXTRA_INDEX_URL`, `UV_FIND_LINKS`, `UV_INSECURE_HOST`, `UV_CACHE_DIR`, `UV_PYTHON_CACHE_DIR`
-  and `UV_ENV_FILE` (where uv takes packages, its caches and an env file from; an env file can set
-  `PYTHONPATH` again, and `uv run` loads the one `UV_ENV_FILE` names despite `--no-config`). The
-  user's own site-packages is switched off (`PYTHONNOUSERSITE=1`, which the packed script inherits):
-  without `PYTHONUSERBASE` it comes from `HOME` (POSIX, which some `sudo` setups keep) or `APPDATA`
-  (Windows), so a `.pth` the caller put there would otherwise run with the elevated rights. Not elevated,
-  nothing changes: uv starts in your directory with your environment and configuration, and the
-  `.sh` runs the entry itself. The `-PwshPyUv` / `--pwshpy-uv` pin is unaffected: it chooses the
-  `uv`, not the Python.
+  `XDG_CONFIG_DIRS` on POSIX), not the user's, and not one above the starting directory, since any
+  of them could name a cache directory, a package index or a Python download mirror. With the
+  variables that name the same dropped too (listed below) and `--no-env-file` on `uv run` (no `.env`
+  file, whatever `UV_NO_ENV_FILE` says), an elevated run uses uv's defaults plus the runner's own
+  flags and directories (user decision): the default package index, no find-links location or
+  insecure host, and the running account's own cache directory, which the runner names to uv
+  (`UV_CACHE_DIR`, with a `pwshpy: uv caches in <dir>` line on stderr) the way it names the
+  managed-Python directory, so not uv's default, which would follow `XDG_CACHE_HOME` or `HOME`
+  (POSIX; `sudo -E` or `env_keep` can hand both over) or `LOCALAPPDATA` (Windows):
+  `<LocalAppData>\uv\cache` on Windows, the LocalAppData known folder of the running token, and
+  `<home>/.cache/uv` on POSIX, the home the passwd database records. A custom install directory,
+  download mirror, package index or cache directory cannot be configured for it. A directory named
+  `C:\uv.toml` therefore no longer stops elevated `.ps1` runs. The packed script still runs in your
+  directory: uv runs the generated shim, which changes back to it first, or stops with `pwshpy pack:
+  cannot return to the working directory <dir>` and exit code 70 when the elevated account cannot
+  enter it (a root-squashed NFS export). What you gave relative to your directory is made absolute
+  before uv starts elsewhere: a relative `PWSHPY_PACK_CACHE`, and a `--with` value that names one
+  relative path: `./x.whl`, `../x`, `dist/x.whl`, a bare distribution file name (`x.whl`,
+  `x.tar.gz`) and `name @ ./x` (any form holding a directory separator). Not rewritten, so in an
+  elevated run they still resolve against uv's starting directory: a comma-separated list (only its
+  first entry is prefixed), `name @ dir` with a bare directory name, and a `file:` URL. Give such a
+  value as an absolute path, one `--with` per entry. Dropped from the environment, each with a
+  `pwshpy: ignoring <NAME>` line on stderr: `UV_PYTHON`, `VIRTUAL_ENV`, `CONDA_PREFIX`,
+  `UV_MANAGED_PYTHON` and `UV_NO_MANAGED_PYTHON` (they name an interpreter),
+  `UV_PYTHON_INSTALL_DIR`, `UV_CONFIG_FILE`, `UV_PYTHON_INSTALL_MIRROR`,
+  `UV_PYTHON_DOWNLOADS_JSON_URL`, `UV_ASTRAL_MIRROR_URL`, `UV_PYPY_INSTALL_MIRROR`,
+  `UV_GRAALPY_INSTALL_MIRROR` and `UV_PYODIDE_INSTALL_MIRROR` (they move where uv's managed Pythons
+  live or come from; uv 0.13 downloads CPython through `UV_ASTRAL_MIRROR_URL` too); `PYTHONHOME`,
+  `PYTHONPATH` and `PYTHONUSERBASE`, which the interpreter itself reads (another standard library,
+  the caller's directories ahead of it, the caller's own site-packages), so the packed script does
+  not see them either; and `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `UV_INDEX`, `UV_EXTRA_INDEX_URL`,
+  `UV_FIND_LINKS`, `UV_INSECURE_HOST`, `UV_CACHE_DIR`, `UV_PYTHON_CACHE_DIR` and `UV_ENV_FILE`
+  (where uv takes packages, its caches and an env file from; an env file can set `PYTHONPATH` again,
+  and `uv run` loads the one `UV_ENV_FILE` names despite `--no-config`); and `HTTPS_PROXY`,
+  `HTTP_PROXY` and `ALL_PROXY` with their lower-case forms, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+  `SSL_CLIENT_CERT`, `UV_NATIVE_TLS`, `UV_SYSTEM_CERTS` and `UV_KEYRING_PROVIDER` (how uv connects:
+  a proxy, which uv 0.13 sends its requests through in each of these spellings, the certificate
+  roots it trusts, which `SSL_CERT_FILE` and `SSL_CERT_DIR` replace, the client certificate it
+  presents, and a keyring helper it would run from `PATH`), so the packed script does not see these
+  either. The runner cannot tell who set a variable, so an elevated run in a network that reaches
+  the internet only through a proxy downloads nothing: the proxy can be named neither in the
+  environment (root's own included) nor in a `uv.toml` (none is read), and the certificate of a
+  TLS-inspecting proxy is not trusted. What still works there: a script with no dependencies (no PEP
+  723 `dependencies`, no `--with`) on a managed Python already in the account's managed-Python
+  directory, installed beforehand as that account with the proxy set (`uv python install` with
+  `UV_PYTHON_INSTALL_DIR` naming that directory); an unelevated run, which keeps every variable;
+  and, by the same reasoning (not measured), a proxy that needs no setting on the machine, such as a
+  transparent one. The user's own site-packages is switched off (`PYTHONNOUSERSITE=1`, which the
+  packed script inherits): without `PYTHONUSERBASE` it comes from `HOME` (POSIX, which some `sudo`
+  setups keep) or `APPDATA` (Windows), so a `.pth` the caller put there would otherwise run with the
+  elevated rights. Not elevated, nothing changes: uv starts in your directory with your environment
+  and configuration, and the `.sh` runs the entry itself. The `-PwshPyUv` / `--pwshpy-uv` pin is
+  unaffected: it chooses the `uv`, not the Python.
 - **Any file name packs.** The entry name and every packed file name land in the runner as quoted
   literals, so `it's.py`, a typographic quote, `$`, a backtick or a space in a name, or in a `--with`
   value, reaches the runner and uv as given. Refused at pack time, with the reason: a name holding a

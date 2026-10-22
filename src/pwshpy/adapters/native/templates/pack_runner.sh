@@ -565,15 +565,16 @@ pwshpy_account_data_home() {
     return 1
 }
 
-# Runs `uv python $1 ...` started in the anchor, with the packed script's requires-python as the
-# request when it has one, so the Python found or installed is one the script accepts.
+# Runs `uv python $1 ...` started in the anchor and reading no uv.toml (--no-config, see the run
+# below), with the packed script's requires-python as the request when it has one, so the Python found
+# or installed is one the script accepts.
 pwshpy_uv_python() {
     _up_command=$1
     shift
     if [ -n "$PWSHPY_PYTHON_REQUEST" ]; then
-        "$PWSHPY_UV" python "$_up_command" --directory "$PWSHPY_ANCHOR" "$@" "$PWSHPY_PYTHON_REQUEST"
+        "$PWSHPY_UV" python "$_up_command" --no-config --directory "$PWSHPY_ANCHOR" "$@" "$PWSHPY_PYTHON_REQUEST"
     else
-        "$PWSHPY_UV" python "$_up_command" --directory "$PWSHPY_ANCHOR" "$@"
+        "$PWSHPY_UV" python "$_up_command" --no-config --directory "$PWSHPY_ANCHOR" "$@"
     fi
 }
 
@@ -827,7 +828,11 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # own helpers.
     PATH=$PWSHPY_CALLER_PATH
     export PATH
-    set -- --python-preference only-managed --python "$PWSHPY_PYTHON" \
+    # --no-config: a uv.toml (system-wide under XDG_CONFIG_DIRS or /etc, or the user's own) can name a
+    # cache directory, a package index or a Python download mirror, each a way to choose what runs as
+    # root, and its location is the caller's to set; a root run takes uv's defaults plus the flags
+    # here (user decision).
+    set -- --no-config --python-preference only-managed --python "$PWSHPY_PYTHON" \
         --project "$PWSHPY_ANCHOR" --directory "$PWSHPY_ANCHOR" "$@"
 else
     set -- "$PWSHPY_CACHE/$PWSHPY_ENTRY" "$@"

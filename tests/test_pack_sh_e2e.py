@@ -1263,11 +1263,30 @@ def test_the_uv_command_line_carries_only_managed_exactly_as_root(
     argv = record.read_text(encoding="utf-8").splitlines()
     if as_root:
         python = str(uv.parent / "python")
-        managed = ["--python-preference", "only-managed", "--python", python, "--project", "/", "--directory", "/"]
-        assert argv[:10] == ["run", "--no-project", *managed], argv
-        assert argv[10].startswith("/") and argv[10].endswith("/" + SHIM_MODULE), argv
+        managed = [
+            "--no-config",
+            "--python-preference",
+            "only-managed",
+            "--python",
+            python,
+            "--project",
+            "/",
+            "--directory",
+            "/",
+        ]
+        assert argv[:11] == ["run", "--no-project", *managed], argv
+        assert argv[11].startswith("/") and argv[11].endswith("/" + SHIM_MODULE), argv
         found = [line for line in Path(f"{record}.python").read_text(encoding="utf-8").splitlines() if ":" not in line]
-        assert found == ["python", "find", "--directory", "/", "--system", "--python-preference", "only-managed"], found
+        assert found == [
+            "python",
+            "find",
+            "--no-config",
+            "--directory",
+            "/",
+            "--system",
+            "--python-preference",
+            "only-managed",
+        ], found
     else:
         assert argv[:2] == ["run", "--no-project"], argv
         assert "--python-preference" not in argv and "--project" not in argv, argv
@@ -1381,6 +1400,29 @@ def test_as_root_the_python_is_found_for_the_scripts_requires_python(tmp_path: P
         assert calls[-1] == ">=3.10,<4", calls
     else:
         assert not found.exists()
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize("scope", ["system", "user"])
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_no_uv_configuration_file_is_read(
+    tmp_path: Path, shell_id: str, shell: list[str], scope: str, as_root: bool
+) -> None:
+    """[A2] (user decision: ignore all uv config): a uv.toml can name a cache directory, an index or a
+    Python download mirror, so a root run passes --no-config to every uv call. The planted config names
+    a cache directory; the control shows uv reads it (system: XDG_CONFIG_DIRS, user: XDG_CONFIG_HOME)."""
+    _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=as_root)
+    planted_cache = tmp_path / "planted-cache"
+    config_root = tmp_path / f"config-{scope}"
+    (config_root / "uv").mkdir(parents=True)
+    (config_root / "uv" / "uv.toml").write_text(f"cache-dir = '{planted_cache}'\n", encoding="utf-8")
+    variable = "XDG_CONFIG_DIRS" if scope == "system" else "XDG_CONFIG_HOME"
+    environment = {**_trust_env(tmp_path, uv.parent), variable: str(config_root)}
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    # Not root (the control), uv reads it and the planted cache directory appears.
+    assert planted_cache.exists() is not as_root, result.stdout + result.stderr
 
 
 # --- [57] as root uv starts in / and the shim returns to the caller's directory -------------------------

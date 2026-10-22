@@ -661,26 +661,30 @@ function Get-PwshPyAnchorDirectory {
 function Get-PwshPyManagedPythonOption {
     param([string] $Python)
 
-    # The uv options an elevated run adds: only a uv-managed Python, named outright (--python, see
-    # Resolve-PwshPyManagedPython); project discovery (the .python-version and uv.toml uv would
+    # The uv options an elevated run adds: no uv.toml at all (--no-config: a system-wide one under
+    # %ProgramData% or /etc, or the user's own, can name a cache directory, a package index or a Python
+    # download mirror, each a way to choose what runs elevated, and its location is the caller's to set;
+    # an elevated run takes uv's defaults plus these flags, user decision); only a uv-managed Python,
+    # named outright (--python, see Resolve-PwshPyManagedPython); project discovery (the .python-version and uv.toml uv would
     # otherwise read from the packed script's directory and every directory above it, the cache,
     # which a non-administrator may be able to write) moved to the anchor; and uv itself started
     # there (--directory), so nothing in the caller's directory is read either. The generated shim
     # changes back to the caller's directory before the script runs.
     $anchor = Get-PwshPyAnchorDirectory
-    return @('--python-preference', 'only-managed', '--python', $Python, '--project', $anchor, '--directory', $anchor)
+    return @('--no-config', '--python-preference', 'only-managed', '--python', $Python, '--project', $anchor, '--directory', $anchor)
 }
 
 function Invoke-PwshPyUvPython {
     param([string] $Uv, [string[]] $Arguments)
 
-    # Runs `uv python <Arguments>` started in the anchor, with the packed script's requires-python as
-    # the request when it has one. Returns its exit code, its stdout (trimmed) and its stderr, which
+    # Runs `uv python <Arguments>` started in the anchor and reading no uv.toml (--no-config, see
+    # Get-PwshPyManagedPythonOption), with the packed script's requires-python as the request when it
+    # has one. Returns its exit code, its stdout (trimmed) and its stderr, which
     # is kept in a file rather than shown: an elevated child's console window is never seen, so the
     # caller hands it to Write-PwshPyNotice or Write-PwshPyFailure. With $ErrorActionPreference at
     # 'Stop', Windows PowerShell 5.1 would stop at the first line a native program writes to a
     # redirected stderr, so the call runs under 'Continue'.
-    $words = @('python') + $Arguments + @('--directory', (Get-PwshPyAnchorDirectory))
+    $words = @('python') + $Arguments + @('--no-config', '--directory', (Get-PwshPyAnchorDirectory))
     if ($PwshPyPythonRequest) { $words += $PwshPyPythonRequest }
     $stderr = [IO.Path]::GetTempFileName()
     $saved = $ErrorActionPreference

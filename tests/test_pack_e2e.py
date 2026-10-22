@@ -2027,11 +2027,30 @@ def test_the_uv_command_line_carries_only_managed_exactly_when_elevated(tmp_path
     assert result.returncode == 0, result.stdout + result.stderr
     argv = record.read_text(encoding="utf-8").splitlines()
     python = str(uv.parent / "python")
-    managed = ["--python-preference", "only-managed", "--python", python, "--project", "/", "--directory", "/"]
+    managed = [
+        "--no-config",
+        "--python-preference",
+        "only-managed",
+        "--python",
+        python,
+        "--project",
+        "/",
+        "--directory",
+        "/",
+    ]
     if elevated == "$true":
-        assert argv[:10] == ["run", "--no-project", *managed], argv
+        assert argv[:11] == ["run", "--no-project", *managed], argv
         found = [line for line in Path(f"{record}.python").read_text(encoding="utf-8").splitlines() if ":" not in line]
-        assert found == ["python", "find", "--system", "--python-preference", "only-managed", "--directory", "/"], found
+        assert found == [
+            "python",
+            "find",
+            "--system",
+            "--python-preference",
+            "only-managed",
+            "--no-config",
+            "--directory",
+            "/",
+        ], found
     else:
         assert argv[:2] == ["run", "--no-project"], argv
         assert "--python-preference" not in argv and "--project" not in argv, argv
@@ -2146,6 +2165,40 @@ def test_the_windows_data_home_is_the_known_folder_not_appdata(tmp_path: Path) -
     lines = dict(line.split(":", 1) for line in result.stdout.splitlines() if line.startswith(("known:", "answer:")))
     assert lines["known"] and Path(lines["known"]) != planted, lines
     assert lines["answer"] == lines["known"], lines
+
+
+@pytest.mark.local_only
+@pytest.mark.parametrize("scope", ["system", "user"])
+@pytest.mark.parametrize(
+    ("elevated", "config_read"),
+    [pytest.param("$true", False, id="elevated"), pytest.param("$false", True, id="not-elevated-control")],
+)
+def test_an_elevated_run_reads_no_uv_configuration_file(
+    tmp_path: Path, scope: str, elevated: str, config_read: bool
+) -> None:
+    """[A2] (user decision: ignore all uv config): a uv.toml can name a cache directory, an index or a
+    Python download mirror, so an elevated run passes --no-config to every uv call. The planted config
+    names a cache directory; the control shows uv reads it. System scope: XDG_CONFIG_DIRS (POSIX) or
+    PROGRAMDATA (Windows); user scope: XDG_CONFIG_HOME (POSIX) or APPDATA (Windows, which the probe
+    environment already points at the test's data home).
+    """
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated=elevated)
+    probe = interpreter_probe_env(tmp_path, managed=managed)
+    probe.pop("UV_CACHE_DIR")
+    planted_cache = tmp_path / "planted-cache"
+    if sys.platform == "win32" and scope == "user":
+        config_root = data_home(tmp_path)
+    else:
+        config_root = tmp_path / f"config-{scope}"
+        variables = {"system": "PROGRAMDATA", "user": "APPDATA"} if sys.platform == "win32" else {}
+        posix = {"system": "XDG_CONFIG_DIRS", "user": "XDG_CONFIG_HOME"}
+        probe[variables.get(scope, posix[scope])] = str(config_root)
+    (config_root / "uv").mkdir(parents=True, exist_ok=True)
+    (config_root / "uv" / "uv.toml").write_text(f"cache-dir = '{planted_cache}'\n", encoding="utf-8")
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert planted_cache.exists() is config_read, result.stdout + result.stderr
 
 
 # --- [57] an elevated run starts uv in a directory only administrators can write -------------------

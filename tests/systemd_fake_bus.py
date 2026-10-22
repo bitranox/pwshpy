@@ -72,6 +72,9 @@ class FakeConn:
     loads them from the new file (systemd's unit-cache retry, ``manager_unit_cache_should_retry_load``,
     which applies to a not-found unit only, never to a masked one).
 
+    ``refused_loads`` names units whose ``LoadUnit`` call itself fails with a D-Bus error (an
+    invalid name, a refused or broken bus call) - unlike a not-found unit, which systemd answers.
+
     ``Unit.Job`` is ``(0, "/")`` (no job, as busctl and jeepney show it) unless the unit's
     ActiveState is a transition (activating, deactivating, reloading), which holds a job path, as a
     start or stop job does on systemd; a ``Job`` entry in ``props`` overrides that. ``walks`` maps a
@@ -98,6 +101,7 @@ class FakeConn:
         file_dirs: dict[str, str] | None = None,
         appeared: frozenset[str] = frozenset(),
         walks: dict[str, list[str]] | None = None,
+        refused_loads: frozenset[str] = frozenset(),
     ) -> None:
         self._units = units  # (name, description, active_state)
         self._props = props
@@ -109,6 +113,7 @@ class FakeConn:
         self._appeared = appeared
         self._file_dirs = file_dirs or {}
         self._walks = walks or {}
+        self._refused_loads = refused_loads
         self._walking: dict[str, list[str]] = {}  # unit -> ActiveStates still ahead of it
         self._known = {unit for unit, _iface, _prop in props} | set(unit_files) | set(unloaded)
         self._not_found: set[str] = set()  # names LoadUnit answered with a not-found object
@@ -139,6 +144,8 @@ class FakeConn:
 
     def _load_unit(self, msg: Message) -> Reply:
         (name,) = msg.body
+        if name in self._refused_loads:
+            return Reply(("org.freedesktop.DBus.Error.AccessDenied",), error=True)
         self._unloaded.discard(name)  # loaded from its unit file
         if name in self._appeared and self._load_states.get(name) == "not-found":
             self._load_states[name] = "loaded"  # the unit-cache retry finds the file written since

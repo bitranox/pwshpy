@@ -347,9 +347,13 @@ class CimSource(Protocol):
 
 
 class ScheduledTaskSource(Protocol):
-    """Stream Windows scheduled tasks as :class:`ScheduledTaskInfo` records (native)."""
+    """Stream scheduled tasks as :class:`ScheduledTaskInfo` records (native).
 
-    def __call__(self, folder_path: str = "\\") -> Iterator[ScheduledTaskInfo]: ...
+    ``strict`` decides what happens to an item the source cannot read: False skips it with a
+    logged WARNING, True raises :class:`~pwshpy.domain.errors.NativeCallError` naming it.
+    """
+
+    def __call__(self, folder_path: str = "\\", *, strict: bool = False) -> Iterator[ScheduledTaskInfo]: ...
 
 
 class ScheduledTaskController(Protocol):

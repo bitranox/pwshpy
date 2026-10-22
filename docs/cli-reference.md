@@ -64,6 +64,17 @@ Match on `sid` (a SID on Windows, the effective uid as text on POSIX); `account`
 are display only. `integrity_level` is the token's mandatory label (`Untrusted` to `System`, or
 `Protected`) on Windows and `null` on POSIX, where `is_system` and `elevated` both mean euid 0.
 
+`get_scheduled_task [--folder PATH] [--strict]` skips what the caller cannot read and logs a
+warning naming it: on Windows a folder whose tasks or subfolders it may not list, or a protected or
+corrupt task; on Linux a refused unit-file listing or a timer unit systemd will not load. So a
+non-elevated caller still lists everything it can read. `--strict` turns each such skip into an
+error: the command exits 1 with one `NativeCallError` line on stderr naming the folder, task or unit.
+Use it when "not listed" has to mean "does not exist", for example to check that a task was really
+deleted. The listing streams, so the records before the unreadable item are already written: with
+`--jsonl` they stay valid lines, with `--json` a failure on the first item leaves stdout empty and a
+later one leaves an unterminated array (see [Portable record commands](#portable-record-commands)).
+Timers systemd reports as not-found or masked, aliases and templates are no tasks in either mode.
+
 **Windows only** - no honest Linux analog: `pwshpy get_item_property KEY` / `pwshpy registry_keys KEY`,
 `pwshpy get_cim_instance CLASS`, `pwshpy get_hotfix`, `pwshpy get_windows_update`.
 

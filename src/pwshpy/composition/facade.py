@@ -595,19 +595,33 @@ class Ps:
         """
         return Pipeline(self._cim_source(class_name, where=where, namespace=namespace))
 
-    def get_scheduled_task(self, folder_path: str = "\\") -> Pipeline[ScheduledTaskInfo]:
+    def get_scheduled_task(self, folder_path: str = "\\", *, strict: bool = False) -> Pipeline[ScheduledTaskInfo]:
         """Return a lazy, STREAMING pipeline over scheduled tasks (native, portable).
 
         Recurses the Task Scheduler folder tree under ``folder_path`` on Windows (like
         Get-ScheduledTask); on Linux lists the systemd ``.timer`` units (``folder_path``
         ignored). Yields one record at a time.
 
+        Args:
+            folder_path: The Task Scheduler folder to recurse (Windows); the root by default.
+            strict: What happens to an item that cannot be read - on Windows a folder whose
+                tasks or subfolders the caller may not list, or a protected or corrupt task; on
+                Linux a refused unit-file listing or ``LoadUnit``. False (default) skips it and
+                logs a WARNING naming it, so a non-elevated caller still lists what it can read.
+                True raises :class:`NativeCallError` naming the folder, task or unit instead: use
+                it when "not listed" must mean "does not exist", e.g. to check a task is gone.
+                The pipeline is lazy, so the error is raised when iteration reaches the item.
+
+        Raises:
+            NativeCallError: The scheduler cannot be reached, ``folder_path`` cannot be opened,
+                or (with ``strict``) an item cannot be read - raised during iteration.
+
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
-            >>> isinstance(build_ps().get_scheduled_task(), Pipeline)
+            >>> isinstance(build_ps().get_scheduled_task(strict=True), Pipeline)
             True
         """
-        return Pipeline(self._scheduled_task_source(folder_path))
+        return Pipeline(self._scheduled_task_source(folder_path, strict=strict))
 
     def register_scheduled_task(
         self,

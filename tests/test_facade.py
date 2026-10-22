@@ -398,8 +398,11 @@ def _fake_cim(class_name: str, *, where: str | None = None, namespace: str = "ro
     yield CimInstance(class_name=class_name, properties={"where": where, "namespace": namespace})
 
 
-def _fake_scheduled_tasks(folder_path: str = "\\") -> Iterator[ScheduledTaskInfo]:
-    yield ScheduledTaskInfo(task_name="T", task_path=folder_path, state=TaskState.READY, enabled=True)
+def _fake_scheduled_tasks(folder_path: str = "\\", *, strict: bool = False) -> Iterator[ScheduledTaskInfo]:
+    # The description echoes the strict choice so a test can see what the facade forwarded.
+    yield ScheduledTaskInfo(
+        task_name="T", task_path=folder_path, state=TaskState.READY, enabled=True, description=f"strict={strict}"
+    )
 
 
 def _fake_local_users() -> Iterator[LocalUser]:
@@ -818,6 +821,11 @@ def test_injected_scheduled_task_adapters(injected: _InjectedPs) -> None:
     facade = injected.facade
     fake_scheduled_task_controller = injected.scheduled_task_controller
     assert facade.get_scheduled_task().select(lambda t: t.task_name).to_list() == ["T"]
+    # [54] the per-call strict choice reaches the source; lenient is the default.
+    assert facade.get_scheduled_task().select(lambda t: t.description).to_list() == ["strict=False"]
+    assert facade.get_scheduled_task("\\F\\", strict=True).select(lambda t: (t.task_path, t.description)).to_list() == [
+        ("\\F\\", "strict=True")
+    ]
     assert facade.register_scheduled_task("\\T", program="cmd.exe", arguments="/c exit").task_name == "T"
     facade.unregister_scheduled_task("\\T")
     assert facade.enable_scheduled_task("\\T").enabled is True

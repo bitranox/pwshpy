@@ -337,20 +337,40 @@ def _timer_task(
     )
 
 
-def _timer_files(bus: _dbus.Bus) -> list[tuple[str, str]]:
-    """Every ``.timer`` unit file as (unit name, UnitFileState); [] when systemd lists none.
+def _skip_or_raise(what: str, exc: NativeCallError, *, strict: bool) -> None:
+    """Raise NativeCallError naming ``what`` under ``strict``; otherwise log a WARNING and return.
 
-    Fail-soft: when no unit-file listing answers, the listing keeps the loaded timers rather than
-    failing.
+    The default listing still skips what it cannot read, but never silently: a skipped timer
+    reads exactly like "no such task" to a caller that looks a task up.
+    """
+    if strict:
+        raise NativeCallError(f"{what}: {exc}") from exc
+    logger.warning("skipped (pass strict=True to raise instead) - %s: %s", what, exc)
+
+
+def _timer_files(bus: _dbus.Bus, *, strict: bool) -> list[tuple[str, str]]:
+    """Every ``.timer`` unit file as (unit name, UnitFileState); [] when no listing answers.
+
+    When no unit-file listing answers, the default keeps the loaded timers with a WARNING (every
+    unloaded timer is then missing); ``strict`` raises instead.
     """
     try:
         return _dbus.unit_files(bus, ".timer")
     except NativeCallError as exc:
-        logger.debug("cannot list the timer unit files, listing loaded timers only: %s", exc)
+        _skip_or_raise("cannot list the timer unit files, so no unloaded timer is listed", exc, strict=strict)
         return []
 
 
-def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
+def _timer_file_path(bus: _dbus.Bus, name: str, *, strict: bool) -> str | None:
+    """The loaded object path of timer file ``name``; None for a stale file or (by default) a failed load."""
+    try:
+        return _dbus.load_unit(bus, name)
+    except NativeCallError as exc:
+        _skip_or_raise(f"cannot load timer unit '{name}'", exc, strict=strict)
+        return None
+
+
+def iter_timers(folder_path: str = _ROOT, *, strict: bool = False) -> Iterator[ScheduledTaskInfo]:
     """Yield a :class:`ScheduledTaskInfo` per systemd ``.timer`` unit (like Get-ScheduledTask, Linux).
 
     ``folder_path`` is accepted for signature parity with the Windows source and ignored (systemd
@@ -365,6 +385,20 @@ def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
     Lazy: the unit-file listing,
     ``GetUnitFileState`` and the run-info reads run only for consumed timers. Reading an unloaded
     timer loads it transiently; systemd unloads it again when nothing references it.
+
+    Args:
+        folder_path: Ignored (systemd timers are flat); kept for parity with the Windows source.
+        strict: What happens when systemd does not answer a read the listing needs - the
+            unit-file listing (without it no unloaded timer can be listed) or the ``LoadUnit`` of
+            one timer file. False (default) skips what it could not read and logs a WARNING naming
+            it; True raises :class:`NativeCallError` naming it, when iteration reaches it. The
+            deliberate filtering above (not-found, masked, alias, template, stale) is systemd's
+            answer, not a failure, and is the same either way; a single property that cannot be
+            read still falls back to its default in both modes (the task is kept).
+
+    Raises:
+        NativeCallError: The system bus or ``ListUnits`` cannot be reached, or (with ``strict``)
+            a read named above fails.
 
     Example:
         >>> callable(iter_timers)
@@ -387,12 +421,12 @@ def iter_timers(folder_path: str = _ROOT) -> Iterator[ScheduledTaskInfo]:
             state = _dbus.unit_file_state(bus, name) or ""
             listed = _Listed(active_state=str(unit[3]), description=str(unit[1]))
             yield _timer_task(bus, name, str(unit[6]), file_state=state, listed=listed)
-        for name, state in _timer_files(bus):
+        for name, state in _timer_files(bus, strict=strict):
             if name in seen or state in _dbus.UNLISTED_FILE_STATES:
                 continue
             seen.add(name)
-            path = _dbus.load_unit_path(bus, name)
-            if path is None:  # a stale or broken file: systemd has no unit behind the name
+            path = _timer_file_path(bus, name, strict=strict)
+            if path is None:  # a stale or broken file (no unit behind the name), or a refused load
                 continue
             yield _timer_task(bus, name, path, file_state=state)
     finally:

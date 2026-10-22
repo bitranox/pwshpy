@@ -783,7 +783,79 @@ def test_iter_timers_still_lists_loaded_timers_when_no_unit_file_listing_answers
     use_bus(monkeypatch, conn)
     with caplog.at_level(logging.DEBUG, logger=systemd_timers.__name__):
         assert [t.task_name for t in iter_timers()] == ["loaded"]
-    assert any("unit files" in r.getMessage() for r in caplog.records)
+    # [54] a WARNING, not a debug line: every unloaded timer is missing from what was listed.
+    assert [r.levelno for r in caplog.records if "unit files" in r.getMessage()] == [logging.WARNING]
+
+
+@pytest.mark.os_agnostic
+def test_strict_raises_when_no_unit_file_listing_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[54] strict=True: the refused unit-file listing raises instead of dropping every unloaded timer.
+
+    Lazy: the loaded timer from ListUnits is yielded first; the raise comes with the file pass.
+    """
+    conn = _listing_conn(failing=frozenset({"ListUnitFilesByPatterns", "ListUnitFiles"}))
+    use_bus(monkeypatch, conn)
+    timers = iter_timers(strict=True)
+    assert next(timers).task_name == "loaded"
+    with pytest.raises(NativeCallError, match="timer unit files"):
+        list(timers)
+    assert conn.closed is True
+
+
+def _refused_load_conn() -> FakeConn:
+    """Two unloaded timer files, the first of which systemd refuses to LoadUnit."""
+    props: dict[tuple[str, str, str], Any] = {
+        ("good.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "inactive",
+        ("good.timer", systemd_dbus.UNIT_IFACE, "Description"): "Good job",
+    }
+    return FakeConn(
+        [],
+        props,
+        frozenset({"denied.timer", "good.timer"}),
+        file_states={"denied.timer": "disabled", "good.timer": "disabled"},
+        unloaded=frozenset({"denied.timer", "good.timer"}),
+        refused_loads=frozenset({"denied.timer"}),
+    )
+
+
+@pytest.mark.os_agnostic
+def test_strict_raises_naming_a_timer_file_that_cannot_be_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[54] strict=True: a listed timer file whose LoadUnit call fails raises, naming the unit."""
+    use_bus(monkeypatch, _refused_load_conn())
+    with pytest.raises(NativeCallError, match=r"'denied\.timer'"):
+        list(iter_timers(strict=True))
+
+
+@pytest.mark.os_agnostic
+def test_lenient_skips_a_timer_file_that_cannot_be_loaded_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """[54] The default lists on past a timer file it cannot load, but logs a WARNING naming it."""
+    use_bus(monkeypatch, _refused_load_conn())
+    with caplog.at_level(logging.WARNING, logger=systemd_timers.__name__):
+        assert [t.task_name for t in iter_timers()] == ["good"]
+    (warning,) = caplog.records
+    assert warning.levelno == logging.WARNING
+    assert "'denied.timer'" in warning.getMessage()
+
+
+@pytest.mark.os_agnostic
+def test_strict_lists_a_readable_box_like_lenient_and_keeps_the_deliberate_filtering(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """[54] strict changes only read FAILURES: not-found, masked, alias and template units stay unlisted.
+
+    The listing box holds every kind of unit the listing filters on purpose; strict must neither
+    raise on them nor list them, and must yield what the default yields, with no warning.
+    """
+    use_bus(monkeypatch, _listing_conn())
+    with caplog.at_level(logging.WARNING, logger=systemd_timers.__name__):
+        lenient = [t.to_dict() for t in iter_timers()]
+        use_bus(monkeypatch, _listing_conn())
+        strict = [t.to_dict() for t in iter_timers(strict=True)]
+    assert strict == lenient
+    assert [t["task_name"] for t in strict] == ["loaded", "off", "vendor"]
+    assert caplog.records == []
 
 
 @pytest.mark.os_agnostic
@@ -887,15 +959,19 @@ def test_iter_timers_lists_a_running_timer_whose_unit_is_gone_or_masked(
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
 @pytest.mark.parametrize("load_state", ["not-found", "masked"])
 @pytest.mark.parametrize("active_state", ["inactive", "failed"])
 def test_iter_timers_skips_a_stopped_timer_whose_unit_is_gone_or_masked(
-    monkeypatch: pytest.MonkeyPatch, load_state: str, active_state: str
+    monkeypatch: pytest.MonkeyPatch, load_state: str, active_state: str, strict: bool
 ) -> None:
-    """Stopped, a not-found or masked timer is no task: only a reference or an unstartable name is left."""
+    """Stopped, a not-found or masked timer is no task: only a reference or an unstartable name is left.
+
+    Deliberate filtering, not a read failure, so ``strict`` skips it the same way.
+    """
     conn = _orphan_timer_conn(load_state, active_state)
     use_bus(monkeypatch, conn)
-    assert list(iter_timers()) == []
+    assert list(iter_timers(strict=strict)) == []
 
 
 @pytest.mark.os_agnostic
@@ -923,13 +999,15 @@ def test_iter_timers_lists_a_cached_not_found_timer_whose_file_appeared(monkeypa
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
 @pytest.mark.parametrize("cached", [False, True])
-def test_iter_timers_skips_a_stale_timer_file(monkeypatch: pytest.MonkeyPatch, cached: bool) -> None:
+def test_iter_timers_skips_a_stale_timer_file(monkeypatch: pytest.MonkeyPatch, cached: bool, strict: bool) -> None:
     """A listed timer file whose LoadUnit still reads not-found (a broken or dangling file) is no task.
 
     The services listing skips such a file too; listing it would show a task with every field a
     default. ``cached``: ListUnits also carries the name as a stopped not-found entry, which no
-    longer marks it seen, so the file pass is what must skip it.
+    longer marks it seen, so the file pass is what must skip it. ``strict`` does not turn this
+    deliberate filtering into an error: systemd answered, and its answer is "no such unit".
     """
     conn = FakeConn(
         [("stale.timer", "stale.timer", "inactive")] if cached else [],
@@ -939,4 +1017,4 @@ def test_iter_timers_skips_a_stale_timer_file(monkeypatch: pytest.MonkeyPatch, c
         load_states={"stale.timer": "not-found"},
     )
     use_bus(monkeypatch, conn)
-    assert list(iter_timers()) == []
+    assert list(iter_timers(strict=strict)) == []

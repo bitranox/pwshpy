@@ -8,6 +8,7 @@ pinned against Get-ScheduledTask in ``test_scheduled_tasks_pwsh_oracle``.
 
 from __future__ import annotations
 
+import logging
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -253,6 +254,119 @@ def test_listing_keeps_a_task_whose_run_info_cannot_be_read(monkeypatch: pytest.
     assert info.task_name == "Half"
     assert info.last_run_time is None
     assert info.last_task_result == 1
+
+
+class _DeniedTask(_FakeTask):
+    """A task whose definition COM refuses to read (a protected or corrupt task)."""
+
+    @property
+    def Definition(self) -> Any:  # noqa: N802 - COM API name
+        raise OSError("access denied")
+
+    @Definition.setter
+    def Definition(self, value: Any) -> None:  # noqa: N802 - COM API name
+        del value  # the base __init__ assigns it; this task refuses to read it back
+
+
+class _DeniedTasksFolder(_FakeFolder):
+    """A folder whose task list cannot be enumerated (GetTasks raises), its subfolders still readable."""
+
+    def GetTasks(self, flag: int) -> _FakeCollection:  # noqa: N802 - COM API name
+        raise OSError("access denied")
+
+
+class _DeniedSubfoldersFolder(_FakeFolder):
+    """A folder whose tasks read fine but whose subfolders cannot be listed (GetFolders raises)."""
+
+    def GetFolders(self, flag: int) -> _FakeCollection:  # noqa: N802 - COM API name
+        raise OSError("access denied")
+
+
+class _DeniedItemCollection(_FakeCollection):
+    """A subfolder collection whose items cannot be opened (Item raises)."""
+
+    def Item(self, index: int) -> Any:  # noqa: N802 - COM API name
+        raise OSError("access denied")
+
+
+class _DeniedChildFolder(_FakeFolder):
+    """A folder that lists one subfolder it then refuses to open."""
+
+    def GetFolders(self, flag: int) -> _FakeCollection:  # noqa: N802 - COM API name
+        return _DeniedItemCollection([object()])
+
+
+def _tree_with(unreadable: _FakeFolder) -> _FakeFolder:
+    """A root holding a readable task, then ``unreadable``, then a readable sibling folder."""
+    after = _FakeFolder("\\After", [_FakeTask("Later", 3, True)], [])
+    return _FakeFolder("\\", [_FakeTask("First", 3, True)], [unreadable, after])
+
+
+def _unreadable_cases() -> list[tuple[_FakeFolder, str]]:
+    """Each way the walk can fail to read an item, with the path the error must name (literal text)."""
+    return [
+        (_DeniedTasksFolder("\\Locked", [_FakeTask("Hidden", 3, True)], []), "'\\Locked\\'"),
+        (_DeniedSubfoldersFolder("\\NoKids", [_FakeTask("Kept", 3, True)], []), "'\\NoKids\\'"),
+        (_FakeFolder("\\Bad", [_DeniedTask("Broken", 3, True)], []), "'\\Bad\\Broken'"),
+        (_DeniedChildFolder("\\Parent", [], []), "'\\Parent\\'"),
+    ]
+
+
+_CASE_IDS = ["GetTasks", "GetFolders", "task", "subfolder"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("unreadable", "path"), _unreadable_cases(), ids=_CASE_IDS)
+def test_strict_raises_naming_what_it_could_not_read(
+    monkeypatch: pytest.MonkeyPatch, unreadable: _FakeFolder, path: str
+) -> None:
+    """[54] strict=True: an unreadable folder, subfolder list, subfolder or task raises, naming its path.
+
+    The source is lazy, so the records before the failure are still yielded; the raise comes
+    when the walk reaches the unreadable item, and nothing after it is listed.
+    """
+    monkeypatch.setattr(st_mod, "_connect_scheduler", lambda: _FakeService(_tree_with(unreadable)))
+    walk = iter_scheduled_tasks(strict=True)
+    assert next(walk).task_name == "First"
+    with pytest.raises(NativeCallError) as caught:
+        list(walk)
+    assert path in str(caught.value)
+    assert "access denied" in str(caught.value)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("unreadable", "path"), _unreadable_cases(), ids=_CASE_IDS)
+def test_lenient_skips_what_it_could_not_read_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, unreadable: _FakeFolder, path: str
+) -> None:
+    """[54] The default lists on past an unreadable item, but never silently: one WARNING names it."""
+    monkeypatch.setattr(st_mod, "_connect_scheduler", lambda: _FakeService(_tree_with(unreadable)))
+    with caplog.at_level(logging.WARNING, logger=st_mod.__name__):
+        names = [t.task_name for t in iter_scheduled_tasks()]
+    assert names[0] == "First"
+    assert names[-1] == "Later"  # the walk went on past the unreadable item
+    assert "Hidden" not in names
+    assert "Broken" not in names
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert path in warnings[0].getMessage()
+    assert "access denied" in warnings[0].getMessage()
+
+
+@pytest.mark.os_agnostic
+def test_strict_on_a_readable_tree_yields_what_lenient_yields(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """[54] strict only changes what happens on a failure: a readable tree lists identically, warning-free."""
+    sub = _FakeFolder("\\Sub", [_FakeTask("Alpha", 3, True, "me", "d"), _FakeTask("Beta", 1, False)], [])
+    root = _FakeFolder("\\", [_FakeTask("Top", 3, True)], [sub])
+    monkeypatch.setattr(st_mod, "_connect_scheduler", lambda: _FakeService(root))
+    with caplog.at_level(logging.WARNING, logger=st_mod.__name__):
+        lenient = list(iter_scheduled_tasks())
+        strict = list(iter_scheduled_tasks(strict=True))
+    assert [t.to_dict() for t in strict] == [t.to_dict() for t in lenient]
+    assert [t.task_name for t in strict] == ["Top", "Alpha", "Beta"]
+    assert caplog.records == []
 
 
 @pytest.mark.os_windows

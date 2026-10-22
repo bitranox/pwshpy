@@ -196,6 +196,33 @@ because systemd runs a started boot timer at once when its offset has already pa
 `last_task_result` 0 means the last run succeeded. On Linux a registered calendar or boot task
 reads `Ready`, a disabled one `Disabled`, and an on-demand task `Ready` (`Running` while it runs).
 
+### Listing tasks: skipped versus strict
+
+`ps.get_scheduled_task(folder_path="\\", *, strict=False)` streams the tasks under a folder
+(Windows) or every systemd timer (Linux). Something the caller cannot read - on Windows a folder
+whose tasks or subfolders it may not list, or a protected or corrupt task; on Linux a refused
+unit-file listing or a timer unit systemd will not load - is skipped by default, so a non-elevated
+caller still gets everything it can read, and each skip logs a WARNING through the `logging`
+module naming what was skipped and why. With `strict=True` the same item raises `NativeCallError`
+naming the folder, task or unit. Pass it whenever an absent record must mean an absent task, such as
+checking that a cleanup really deleted one:
+
+```python
+from pwshpy import NativeCallError, ps
+
+try:
+    leftover = ps.get_scheduled_task("\\Maintenance\\", strict=True).first(lambda t: t.task_name == "Old")
+except NativeCallError as exc:
+    print(f"cannot tell whether the task is gone: {exc}")
+else:
+    print("still there" if leftover else "deleted")
+```
+
+The pipeline is lazy, so the error is raised when iteration reaches the unreadable item: records
+before it have already been yielded. Systemd timers that are not-found or masked, aliases and
+templates are no tasks in either mode; a single field that cannot be read (a run time, a principal)
+falls back to its documented default and the task stays listed.
+
 ## Errors
 
 Every failure across both backends raises a subclass of `PwshPyError`: `NativeCallError` (a wrapped

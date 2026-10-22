@@ -17,6 +17,7 @@ Contents:
     * :func:`iter_registry_keys` — Windows registry subkeys (lib_registry, win32-gated).
     * :func:`iter_wim_images` - portable WIM image list (header + XML resource, no DISM).
     * :func:`search_updates` - Windows Update search in a killable child (Windows-only).
+    * :func:`windows_current_identity` / :func:`posix_current_identity` - who this process runs as.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from .event_log import iter_event_log
 from .event_log_control import NativeEventLogController
 from .fileio import write_records, write_text, write_text_stream
 from .filesystem import NativeFileSystem
+from .identity import posix_current_identity, windows_current_identity
 from .inventory import get_computer_info, iter_hotfixes
 from .journald import iter_event_log as journald_iter_event_log
 from .local_account_control import NativeLocalAccountController
@@ -111,6 +113,8 @@ __all__ = [
     "systemd_iter_timers",
     "posix_iter_local_groups",
     "posix_iter_local_users",
+    "posix_current_identity",
+    "windows_current_identity",
     "prompt_credential",
     "pack_script",
     "resolve",

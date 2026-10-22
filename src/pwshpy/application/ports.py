@@ -25,6 +25,7 @@ from ..domain.records import (
     ComputerInfo,
     ConnectionTest,
     Credential,
+    CurrentIdentity,
     DiskUsage,
     DnsRecord,
     EnvVar,
@@ -262,6 +263,12 @@ class ComputerInfoSource(Protocol):
     def __call__(self) -> ComputerInfo: ...
 
 
+class CurrentIdentitySource(Protocol):
+    """Return the :class:`CurrentIdentity` this process runs as, from its token (native, portable)."""
+
+    def __call__(self) -> CurrentIdentity: ...
+
+
 class ElevationCheck(Protocol):
     """Report whether the current process has administrative (elevated) rights (native)."""
 
@@ -491,6 +498,7 @@ __all__ = [
     "ComputerInfoSource",
     "CredentialPrompter",
     "CredentialStore",
+    "CurrentIdentitySource",
     "FileDownloader",
     "HotfixSource",
     "WindowsUpdateSource",

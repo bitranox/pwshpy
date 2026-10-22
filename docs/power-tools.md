@@ -48,6 +48,23 @@ relaunched command's own failure. The packed runners below do the same for `--pw
 a refusal). A command that itself exits 77 still looks the same by exit code alone; the stderr line
 is what tells them apart.
 
+## Who am I: the token, not `USERNAME`
+
+`$env:USERNAME` / `$env:USERDOMAIN` describe the logon environment, not the token: inside a SYSTEM
+scheduled task they name the computer account (`DOMAIN\HOST$`) while the process runs as
+`S-1-5-18`. `ps.get_current_identity()` reads the process token instead, like `whoami /user`:
+
+```python
+me = ps.get_current_identity()
+me.sid  # "S-1-5-18" under SYSTEM; the effective uid ("0" for root) on POSIX
+me.is_system  # SID S-1-5-18 / euid 0
+me.elevated, me.integrity_level  # token elevation + IntegrityLevel (None on POSIX)
+me.account  # "DOMAIN\\name" - display only, localized for built-in accounts
+```
+
+Match on `sid` (or `WellKnownSid.LOCAL_SYSTEM`), never on the name. CLI: `pwshpy get_current_identity
+--jsonl`.
+
 ## `ps.exec` - run a program without the quoting / `$LASTEXITCODE` traps
 
 An argv list (no shell, no quoting hell), an exit code that is **always** set, and stderr as plain

@@ -23,6 +23,7 @@ native read commands return typed records through the lazy pipeline (`.where` / 
 | `Get-Uptime`                               | `ps.get_uptime()`                                                        | `pwshpy get_uptime`                                     |
 | `Get-ChildItem Env:` / `$env:X`            | `ps.environment()`                                                       | `pwshpy env`                                            |
 | `Get-ComputerInfo`                         | `ps.get_computer_info()`                                                 | `pwshpy get_computer_info`                              |
+| `whoami /user`                             | `ps.get_current_identity()`                                              | `pwshpy get_current_identity`                           |
 | `Get-Hotfix`                               | `ps.get_hotfix()`  *(Windows)*                                           | `pwshpy get_hotfix`                                     |
 | `Get-WindowsImage -ImagePath P [-Index N]` | `ps.get_windows_image("P", index=None)`                                  | `pwshpy get_windows_image P [--index N]`                |
 | `Stop-Process -Id N`                       | `ps.stop_process(N, force=False)`  *(mutating)*                          | `pwshpy stop_process N [-f]`                            |
@@ -32,6 +33,8 @@ native read commands return typed records through the lazy pipeline (`.where` / 
 Filtering: in Python use `.where(predicate)` (or a plain `for`/`if`); on the CLI pipe `--jsonl` to `jq`.
 `Get-EventLog` (the classic API) is covered by `ps.get_win_event` (Get-WinEvent). `restart_computer` /
 `stop_computer` are library-only by design - too destructive for a casual CLI reboot.
+`get_current_identity` reads the process token (the SID, integrity level and elevation flag) on Windows
+and the effective uid on POSIX, never `USERNAME`, which names the computer account inside a SYSTEM task.
 `get_windows_image` with an index the file does not hold raises `NativeCallError` (the CLI exits
 non-zero with a message on stderr); an index below 1 is refused at the
 call (`ValueError`, CLI usage error).

@@ -9,6 +9,7 @@ Contents:
     * :func:`to_process_status` - raw status string -> :class:`ProcessStatus`.
     * :func:`to_task_run_level` / :func:`com_date_to_datetime` / :func:`to_task_result` -
       Task Scheduler principal run level, COM dates and ``LastTaskResult``.
+    * :func:`to_integrity_level` - mandatory-label RID -> :class:`IntegrityLevel`.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from ...domain.enums import (
     AddressFamily,
     ConnectionState,
     EventLevel,
+    IntegrityLevel,
     ProcessStatus,
     RegistryHive,
     RegistryValueType,
@@ -406,6 +408,30 @@ def to_task_run_level(value: int) -> TaskRunLevel:
     return TaskRunLevel.HIGHEST if value == 1 else TaskRunLevel.LIMITED
 
 
+#: Lower bound of each mandatory integrity band (winnt.h SECURITY_MANDATORY_*_RID), highest first.
+#: Bands, not exact values: a token can carry an in-between RID such as MEDIUM_PLUS (0x2100).
+_INTEGRITY_BANDS = (
+    (0x5000, IntegrityLevel.PROTECTED),
+    (0x4000, IntegrityLevel.SYSTEM),
+    (0x3000, IntegrityLevel.HIGH),
+    (0x2000, IntegrityLevel.MEDIUM),
+    (0x1000, IntegrityLevel.LOW),
+)
+
+
+def to_integrity_level(rid: int) -> IntegrityLevel:
+    """Map a mandatory-label RID (the last part of ``S-1-16-<rid>``) to :class:`IntegrityLevel`.
+
+    Example:
+        >>> to_integrity_level(0x3000).value, to_integrity_level(0x2100).value, to_integrity_level(0).value
+        ('High', 'Medium', 'Untrusted')
+    """
+    for floor, level in _INTEGRITY_BANDS:
+        if rid >= floor:
+            return level
+    return IntegrityLevel.UNTRUSTED
+
+
 # Task Scheduler "no value" sentinels, kept together in one place. Measured on a real Task
 # Scheduler (Windows 11 25H2, 2026-10-21): a task that never ran reads LastRunTime 1999-11-30
 # 00:00 (Get-ScheduledTaskInfo prints the same date, so it is the service's own sentinel, not a
@@ -482,6 +508,7 @@ __all__ = [
     "to_address_family",
     "to_connection_state",
     "to_event_level",
+    "to_integrity_level",
     "to_process_name",
     "to_process_status",
     "to_registry_hive",

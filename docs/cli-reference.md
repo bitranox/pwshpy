@@ -48,14 +48,21 @@ usage error (exit 2).
 
 **Windows + Linux** - one command, a native backend on each (never a subprocess, never text scraping):
 
-| Command                     | Shows                       | Windows        | Linux           |
-|-----------------------------|-----------------------------|----------------|-----------------|
-| `pwshpy get_service`        | services                    | win32service   | systemd (D-Bus) |
-| `pwshpy get_win_event LOG`  | event-log / journal entries | win32evtlog    | journald        |
-| `pwshpy get_scheduled_task` | scheduled tasks             | Task Scheduler | systemd timers  |
-| `pwshpy get_local_user`     | local user accounts         | win32net       | `pwd`           |
-| `pwshpy get_local_group`    | local groups                | win32net       | `grp`           |
-| `pwshpy get_acl PATH`       | ACL entries                 | win32security  | POSIX ACL xattr |
+| Command                       | Shows                            | Windows                       | Linux                 |
+|-------------------------------|----------------------------------|-------------------------------|-----------------------|
+| `pwshpy get_service`          | services                         | win32service                  | systemd (D-Bus)       |
+| `pwshpy get_win_event LOG`    | event-log / journal entries      | win32evtlog                   | journald              |
+| `pwshpy get_scheduled_task`   | scheduled tasks                  | Task Scheduler                | systemd timers        |
+| `pwshpy get_local_user`       | local user accounts              | win32net                      | `pwd`                 |
+| `pwshpy get_local_group`      | local groups                     | win32net                      | `grp`                 |
+| `pwshpy get_acl PATH`         | ACL entries                      | win32security                 | POSIX ACL xattr       |
+| `pwshpy get_current_identity` | the account this process runs as | process token (win32security) | effective uid + `pwd` |
+
+`get_current_identity` (`whoami /user`) reads the process token, never `USERNAME`/`USERDOMAIN`: inside a
+SYSTEM scheduled task those name the computer account (`DOMAIN\HOST$`) while the token is `S-1-5-18`.
+Match on `sid` (a SID on Windows, the effective uid as text on POSIX); `account`, `name` and `domain`
+are display only. `integrity_level` is the token's mandatory label (`Untrusted` to `System`, or
+`Protected`) on Windows and `null` on POSIX, where `is_system` and `elevated` both mean euid 0.
 
 **Windows only** - no honest Linux analog: `pwshpy get_item_property KEY` / `pwshpy registry_keys KEY`,
 `pwshpy get_cim_instance CLASS`, `pwshpy get_hotfix`, `pwshpy get_windows_update`.

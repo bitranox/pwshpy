@@ -1,13 +1,14 @@
-"""``pwshpy local-users`` / ``local-groups`` - list local accounts through the pipeline.
+"""``pwshpy get_local_user`` / ``get_local_group`` / ``get_current_identity`` - local accounts.
 
-Thin front ends over the ``ps`` facade (native / win32net), mirroring
-``Get-LocalUser`` and ``Get-LocalGroup``.  Records are identified by SID
-(locale-independent); the SAM name is localized for built-ins.  Filtering is done
-in Python via the pipeline.
+Thin front ends over the ``ps`` facade (native / win32net, pwd/grp on POSIX), mirroring
+``Get-LocalUser`` and ``Get-LocalGroup``, plus ``whoami /user`` for the account this
+process runs as.  Records are identified by SID (locale-independent); the SAM name is
+localized for built-ins.  Filtering is done in Python via the pipeline.
 
 Contents:
-    * :func:`cli_local_users` - the ``local-users`` subcommand.
-    * :func:`cli_local_groups` - the ``local-groups`` subcommand.
+    * :func:`cli_local_users` - the ``get_local_user`` subcommand.
+    * :func:`cli_local_groups` - the ``get_local_group`` subcommand.
+    * :func:`cli_current_identity` - the ``get_current_identity`` subcommand.
 """
 
 from __future__ import annotations
@@ -71,4 +72,27 @@ def cli_local_groups(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
         emit(ps.get_local_group(), fmt)
 
 
-__all__ = ["cli_local_groups", "cli_local_users"]
+@click.command("get_current_identity", context_settings=CLICK_CONTEXT_SETTINGS)
+@option("--json", "as_json", is_flag=True, default=False, help="Emit the record as a JSON array.")
+@option("--jsonl", "as_jsonl", is_flag=True, default=False, help="Emit the record as one JSON line.")
+@click.pass_context
+def cli_current_identity(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
+    """Show the account this process runs as, from its token (native; like whoami /user).
+
+    The SID on Windows (S-1-5-18 under a SYSTEM task, whatever USERNAME says) or the
+    effective uid on POSIX, with the integrity level and elevation flag.
+
+    \f
+    Example:
+        >>> from click.testing import CliRunner
+        >>> CliRunner().invoke(cli_current_identity, ["--help"]).exit_code
+        0
+    """
+    fmt = resolve_format(as_json, as_jsonl)
+    ps = get_cli_context(ctx).services.ps
+    with lib_log_rich.runtime.bind(job_id="cli-current-identity", extra={"command": "get_current_identity"}):
+        logger.info("Reading the current identity")
+        emit([ps.get_current_identity()], fmt)
+
+
+__all__ = ["cli_current_identity", "cli_local_groups", "cli_local_users"]

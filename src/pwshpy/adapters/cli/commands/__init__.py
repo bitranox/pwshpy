@@ -25,7 +25,7 @@ from .event_log import cli_event_log
 from .fileio import FILEIO_COMMANDS
 from .filesystem import FILESYSTEM_COMMANDS
 from .info import cli_fail, cli_info
-from .local_accounts import cli_local_groups, cli_local_users
+from .local_accounts import cli_current_identity, cli_local_groups, cli_local_users
 from .logging import cli_logdemo
 from .mutating import MUTATING_COMMANDS
 from .netcheck import cli_test_connection
@@ -57,6 +57,7 @@ __all__ = [
     "cli_config_deploy",
     "cli_config_generate_examples",
     "cli_connections",
+    "cli_current_identity",
     "cli_disks",
     "cli_env",
     "cli_event_log",

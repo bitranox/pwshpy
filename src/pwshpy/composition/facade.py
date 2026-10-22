@@ -58,6 +58,7 @@ from ..adapters.native import iter_services as _iter_services
 from ..adapters.native import iter_wim_images as _iter_wim_images
 from ..adapters.native import journald_iter_event_log as _journald_iter_event_log
 from ..adapters.native import pack_script as _pack_script
+from ..adapters.native import posix_current_identity as _posix_current_identity
 from ..adapters.native import posix_iter_acl as _posix_iter_acl
 from ..adapters.native import posix_iter_local_groups as _posix_iter_local_groups
 from ..adapters.native import posix_iter_local_users as _posix_iter_local_users
@@ -69,6 +70,7 @@ from ..adapters.native import systemd_iter_services as _systemd_iter_services
 from ..adapters.native import systemd_iter_timers as _systemd_iter_timers
 from ..adapters.native import test_connection as _test_connection
 from ..adapters.native import unpack_script as _unpack_script
+from ..adapters.native import windows_current_identity as _windows_current_identity
 from ..adapters.native import write_records as _write_records
 from ..adapters.native import write_text as _write_text
 from ..adapters.native import write_text_stream as _write_text_stream
@@ -85,6 +87,7 @@ from ..application.ports import (
     ConnectionTester,
     CredentialPrompter,
     CredentialStore,
+    CurrentIdentitySource,
     DiskSource,
     DnsResolver,
     ElevationCheck,
@@ -135,6 +138,7 @@ from ..domain.records import (
     ComputerInfo,
     ConnectionTest,
     Credential,
+    CurrentIdentity,
     DiskUsage,
     DnsRecord,
     EnvVar,
@@ -259,6 +263,7 @@ class Ps:
         windows_image_source: WindowsImageSource,
         windows_update_source: WindowsUpdateSource,
         computer_info_source: ComputerInfoSource,
+        current_identity_source: CurrentIdentitySource,
         elevation_check: ElevationCheck,
         elevator: Elevator,
         script_packer: ScriptPacker,
@@ -309,6 +314,7 @@ class Ps:
         self._windows_image_source = windows_image_source
         self._windows_update_source = windows_update_source
         self._computer_info_source = computer_info_source
+        self._current_identity_source = current_identity_source
         self._elevation_check = elevation_check
         self._elevator = elevator
 
@@ -1325,6 +1331,24 @@ class Ps:
         """
         return self._computer_info_source()
 
+    def get_current_identity(self) -> CurrentIdentity:
+        """Return the account this process runs as, from its token (native, portable; like ``whoami /user``).
+
+        Read from the process token on Windows (SID, integrity level, elevation) and from the
+        effective uid on POSIX - never from ``USERNAME``/``USERDOMAIN``, which name the computer
+        account inside a SYSTEM scheduled task.  Match on ``sid`` (a SID, or the uid as a
+        string); the names are display only and localized for built-in accounts.
+
+        Raises:
+            NativeCallError: The process token (or the user database) could not be read.
+
+        Example:
+            >>> from pwshpy.domain.records import CurrentIdentity
+            >>> isinstance(build_ps().get_current_identity(), CurrentIdentity)
+            True
+        """
+        return self._current_identity_source()
+
     def get_credential(
         self, username: str | None = None, *, prompt: str = "Password: ", target: str = ""
     ) -> Credential:
@@ -1485,6 +1509,8 @@ def build_ps() -> Ps:
         windows_image_source=_iter_wim_images,
         windows_update_source=_search_updates,
         computer_info_source=_get_computer_info,
+        # The current identity is portable: the process token on Windows, the euid + pwd on POSIX.
+        current_identity_source=_windows_current_identity if _ON_WINDOWS else _posix_current_identity,
         elevation_check=_is_elevated,
         elevator=_elevate,
         script_packer=_pack_script,

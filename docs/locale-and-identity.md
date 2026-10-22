@@ -59,8 +59,8 @@ locale-independent SIDs:
 | Authenticated Users | S-1-5-11     |
 
 So every pwshpy subsystem that exposes a security principal (ACLs / `Get-Acl`,
-local accounts / `Get-LocalUser` + `Get-LocalGroup`, an event's `user_id`, a
-service's log-on account) carries the **SID as the canonical field** and the
+local accounts / `Get-LocalUser` + `Get-LocalGroup`, the current identity /
+`whoami /user`, an event's `user_id`, a service's log-on account) carries the **SID as the canonical field** and the
 localized readable name (via `LookupAccountSid`) only as a secondary display
 field.  Callers match and filter on the SID - or on a `WellKnownSid` enum keyed
 by the English name that resolves to the SID - so a script written on English

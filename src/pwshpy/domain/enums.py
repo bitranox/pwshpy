@@ -345,6 +345,27 @@ class WellKnownSid(str, Enum):
     REMOTE_DESKTOP_USERS = "S-1-5-32-555"
 
 
+class IntegrityLevel(str, Enum):
+    """Mandatory integrity level of a Windows process token (the ``S-1-16-<rid>`` label).
+
+    Mapped from the label's numeric RID by the band it falls in (``0x1000`` low,
+    ``0x2000`` medium, ``0x3000`` high, ``0x4000`` system, ``0x5000`` and above a
+    protected process), so the values are canonical English whatever the OS language;
+    ``whoami /groups`` prints the same level as a localized "Mandatory Label" name.
+
+    Example:
+        >>> IntegrityLevel.HIGH.value
+        'High'
+    """
+
+    UNTRUSTED = "Untrusted"
+    LOW = "Low"
+    MEDIUM = "Medium"
+    HIGH = "High"
+    SYSTEM = "System"
+    PROTECTED = "Protected"
+
+
 class AceType(str, Enum):
     """Type of a DACL access-control entry: grant or deny.
 
@@ -448,6 +469,7 @@ __all__ = [
     "FileItemType",
     "ImageArchitecture",
     "ImportKind",
+    "IntegrityLevel",
     "OutputFormat",
     "ProcessStatus",
     "RunnerFormat",

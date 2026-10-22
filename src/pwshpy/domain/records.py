@@ -28,6 +28,7 @@ from .enums import (
     ConnectionState,
     EventLevel,
     ImageArchitecture,
+    IntegrityLevel,
     ProcessStatus,
     RegistryHive,
     RegistryValueType,
@@ -630,6 +631,40 @@ class LocalUser(PSRecord):
     description: str = ""
 
 
+class CurrentIdentity(PSRecord):
+    """The account this process runs as, read from its token (the ``get_current_identity`` record).
+
+    Portable, like ``whoami /user``.  ``sid`` is the canonical, locale-independent identity:
+    the token user's SID on Windows (``"S-1-5-18"`` for SYSTEM), or the **effective uid** as a
+    string on POSIX (``"0"`` for root), the same convention as :class:`LocalUser`.  ``account``
+    (``DOMAIN\\name`` on Windows, the passwd name on POSIX), ``name`` and ``domain`` are
+    display only: they are localized for built-in Windows accounts and empty when the SID or
+    uid has no name (an orphaned SID, a container uid with no passwd entry).  The record never
+    reads ``USERNAME``/``USERDOMAIN``, which under a SYSTEM scheduled task name the computer
+    account rather than SYSTEM.
+
+    ``is_system`` is SID ``S-1-5-18`` on Windows and euid 0 on POSIX; ``elevated`` is the token's
+    elevation flag on Windows and euid 0 on POSIX (as :func:`ps.is_elevated` reports it).
+    ``integrity_level`` is the token's mandatory label on Windows and ``None`` on POSIX, which has
+    no such label; the field is kept so the record has one shape on every OS.
+
+    Example:
+        >>> me = CurrentIdentity(sid="S-1-5-18", account="NT AUTHORITY\\\\SYSTEM", name="SYSTEM",
+        ...                      domain="NT AUTHORITY", is_system=True, elevated=True,
+        ...                      integrity_level=IntegrityLevel.SYSTEM)
+        >>> me.sid, me.is_system, me.integrity_level.value
+        ('S-1-5-18', True, 'System')
+    """
+
+    sid: str
+    account: str = ""
+    name: str = ""
+    domain: str = ""
+    is_system: bool = False
+    elevated: bool = False
+    integrity_level: IntegrityLevel | None = None
+
+
 class LocalGroup(PSRecord):
     """A local group (the native ``Get-LocalGroup`` record; portable).
 
@@ -783,6 +818,7 @@ __all__ = [
     "ComputerInfo",
     "ConnectionTest",
     "Credential",
+    "CurrentIdentity",
     "FileSystemItem",
     "Hotfix",
     "DiskUsage",

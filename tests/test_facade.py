@@ -38,6 +38,7 @@ from pwshpy.domain.records import (
     ComputerInfo,
     ConnectionTest,
     Credential,
+    CurrentIdentity,
     DiskUsage,
     DnsRecord,
     EnvVar,
@@ -287,6 +288,10 @@ def _fake_windows_images(path: Path) -> Iterator[WindowsImage]:
 
 def _fake_computer_info() -> ComputerInfo:
     return ComputerInfo(hostname="pc1", os_name="TestOS", cpu_count=4)
+
+
+def _fake_current_identity() -> CurrentIdentity:
+    return CurrentIdentity(sid="S-1-5-18", account="NT AUTHORITY\\SYSTEM", is_system=True, elevated=True)
 
 
 class _FakeCredentialStore:
@@ -672,6 +677,7 @@ class _InjectedPs:
             windows_image_source=self.windows_image_source,
             windows_update_source=self.windows_updates,
             computer_info_source=_fake_computer_info,
+            current_identity_source=_fake_current_identity,
             elevation_check=self.elevator.is_elevated,
             elevator=self.elevator.elevate,
             script_packer=self.packer.pack_script,
@@ -698,6 +704,7 @@ def test_injected_system_sources_feed_the_facade(injected: _InjectedPs) -> None:
     assert facade.environment().select(lambda e: e.name).to_list() == ["FOO"]
     assert facade.get_hotfix().select(lambda h: h.hotfix_id).to_list() == ["KB5001"]
     assert facade.get_computer_info().hostname == "pc1"
+    assert facade.get_current_identity().sid == "S-1-5-18"
     assert facade.get_net_adapter().select(lambda a: a.name).to_list() == ["eth0"]
     assert facade.get_net_ip_address().select(lambda a: a.address).to_list() == ["10.0.0.5"]
     assert facade.get_net_udp_endpoint().select(lambda c: c.local_port).to_list() == [53]

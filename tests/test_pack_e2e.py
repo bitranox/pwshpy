@@ -36,6 +36,8 @@ from elevation_doubles import (
     interpreter_probe_env,
     link_tools,
     managed_python_dir,
+    managed_python_env,
+    owned_by_another_account,
     write_fake_sudo,
     write_local_wheel,
     write_planted_environment,
@@ -124,6 +126,9 @@ def _run(runner: Path, *arguments: str, env: dict[str, str] | None = None) -> su
     # `text=True` decodes the child's UTF-8 output as cp1252 on Windows and mangles it - a capture
     # artefact, not a packer defect (the argument reaches sys.argv intact either way).
     child_env["PYTHONIOENCODING"] = "utf-8"
+    # Never a Python download into a real user directory ([92]): uv uses what is installed.
+    child_env["UV_PYTHON_DOWNLOADS"] = "never"
+    runner = _as_this_invoker(runner, arguments)
     return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
         [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), _NEVER_INSTALL_UV, *arguments],
         capture_output=True,
@@ -133,6 +138,31 @@ def _run(runner: Path, *arguments: str, env: dict[str, str] | None = None) -> su
         check=False,
         env=child_env,
     )
+
+
+def _host_elevated() -> bool:
+    """Whether the suite itself runs elevated: as root, or with a Windows administrator token."""
+    return RUNNING_AS_ROOT or _windows_elevated()
+
+
+#: What a whole-runner stand-in starts with in place of the elevation probe (see _elevation_stand_in).
+_STAND_IN_PROBE = "function Test-PwshPyElevated {\n    return "
+
+
+def _as_this_invoker(runner: Path, arguments: Sequence[str]) -> Path:
+    """The runner a test of an UNELEVATED run executes: ``runner`` itself, or on an elevated host a
+    stand-in whose probe answers not elevated ([92]).
+
+    The real probe would take the elevated path there (only a uv-managed Python, which a host may not
+    have and the suite never downloads), so the same test would test something else as root or on an
+    elevated Windows CI runner. A runner that is already a stand-in, or a run asking to elevate, is
+    left as it is.
+    """
+    if not _host_elevated() or "-PwshPyElevate" in arguments:
+        return runner
+    if _STAND_IN_PROBE in runner.read_text(encoding="utf-8"):
+        return runner
+    return _elevation_stand_in(runner, runner.with_name(runner.stem + ".unelevated.ps1"), elevated="$false")
 
 
 def _project(root: Path, *, exit_code: int = 0) -> Path:
@@ -252,14 +282,15 @@ def test_concurrent_cold_starts_do_not_race(tmp_path: Path) -> None:
     Launches both processes against one empty cache so they contend for the first extraction;
     the runner's lock must serialize it so neither yanks the directory the other runs from.
     """
-    manifest = pack_script(_project(tmp_path))
+    runner = _as_this_invoker(Path(pack_script(_project(tmp_path)).output_path), ())
     environment = {
         **os.environ,
         "PATH": os.pathsep.join([str(_UvLocation.directory), os.environ.get("PATH", "")]),
+        "UV_PYTHON_DOWNLOADS": "never",
         **_isolated_cache(tmp_path),
     }
     assert _PWSH is not None
-    argv = [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(manifest.output_path), _NEVER_INSTALL_UV, "concurrent"]
+    argv = [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), _NEVER_INSTALL_UV, "concurrent"]
     first = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
     second = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
     out_a, err_a = first.communicate(timeout=300)
@@ -1084,15 +1115,25 @@ def _run_with_path(
     path_first: Sequence[Path],
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
+    real_probe: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a runner with exactly ``path_first`` ahead of the inherited PATH (no real uv added).
 
     The interpreter variables a suite run may carry (bmk's VIRTUAL_ENV among them) are dropped
-    unless ``env`` sets them, so uv's interpreter choice is the one the test arranged.
+    unless ``env`` sets them, so uv's interpreter choice is the one the test arranged. Python
+    downloads are off unless ``env`` says otherwise ([92]); a runner forced elevated runs on this
+    host's managed Python (read only), or the test skips when there is none, unless ``env`` names
+    the managed directory itself. ``real_probe`` keeps a plain runner's own elevation probe on an
+    elevated host (see :func:`_as_this_invoker`).
     """
     assert _PWSH is not None
+    if not real_probe:
+        runner = _as_this_invoker(runner, arguments)
     child_env = {k: v for k, v in os.environ.items() if k not in INTERPRETER_VARIABLES}
-    child_env.update({**_isolated_cache(tmp_path), "PYTHONIOENCODING": "utf-8", **(env or {})})
+    child_env.update({**_isolated_cache(tmp_path), "PYTHONIOENCODING": "utf-8", "UV_PYTHON_DOWNLOADS": "never"})
+    if f"{_STAND_IN_PROBE}$true" in runner.read_text(encoding="utf-8") and "UV_PYTHON_INSTALL_DIR" not in (env or {}):
+        child_env.update(managed_python_env(tmp_path, managed=_needs_managed_python()))
+    child_env.update(env or {})
     child_env.pop("PWSHPY_TEST_UV", None)
     child_env["PATH"] = os.pathsep.join([*map(str, path_first), os.environ.get("PATH", "")])
     return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
@@ -1170,8 +1211,9 @@ def test_an_elevated_run_names_why_it_skipped_each_uv(tmp_path: Path) -> None:
         other.mkdir()
         other.chmod(0o755)
         expected_planted = f"its directory {planted.parent} is writable by every account"
-        expected_other = f"its directory {other} is owned by uid {os.getuid()}, not root"
     other_uv = _uv_stand_in(other)
+    if sys.platform != "win32":
+        expected_other = f"its directory {other} is owned by uid {owned_by_another_account(other)}, not root"
     runner = _trust_runner(tmp_path, elevated="$true")
     result = _run_with_path(tmp_path, runner, path_first=[planted.parent, other])
     assert expected_planted in _skip_line(result, planted), result.stderr
@@ -1478,6 +1520,9 @@ def test_an_elevated_posix_run_never_runs_a_planted_ls(tmp_path: Path) -> None:
 @pytest.mark.local_only
 @pytest.mark.os_posix
 @_POSIX_ONLY
+@pytest.mark.skipif(
+    RUNNING_AS_ROOT, reason="as root the real id answers 0, so a planted id answering 0 changes nothing to observe"
+)
 def test_the_posix_root_probe_never_asks_a_planted_id(tmp_path: Path) -> None:
     """The .ps1's euid comes from an id at a fixed path: a planted id answering 1000 would switch the rule off."""
     marker = tmp_path / "ran.txt"
@@ -1487,7 +1532,9 @@ def test_the_posix_root_probe_never_asks_a_planted_id(tmp_path: Path) -> None:
     entry = tmp_path / "which_uv.py"
     entry.write_text(_ENTRY_REPORTING_UV)
     manifest = pack_script(entry)
-    result = _run_with_path(tmp_path, Path(manifest.output_path), path_first=[fake, Path(_UV or "uv").parent])
+    result = _run_with_path(
+        tmp_path, Path(manifest.output_path), path_first=[fake, Path(_UV or "uv").parent], real_probe=True
+    )
     assert not marker.exists(), "the runner asked the planted id"
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -1578,7 +1625,7 @@ def test_an_unanswered_posix_euid_probe_applies_the_root_rule(tmp_path: Path, pr
     assert text.count(_FIXED_IDS) == 1
     replacement = "@(" + ", ".join(f"'{fixed / f'id{n}'}'" for n in range(6)) + ")"
     runner.write_text(text.replace(_FIXED_IDS, replacement), encoding="utf-8")
-    result = _run_with_path(tmp_path, runner, path_first=[planted.parent])
+    result = _run_with_path(tmp_path, runner, path_first=[planted.parent], real_probe=True)
     assert not marker.exists(), "the runner asked an id on PATH"
     assert not _same(_reported_uv(result), planted), result.stdout + result.stderr
     assert "is writable by every account" in _skip_line(result, planted), result.stderr

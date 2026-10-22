@@ -6,6 +6,7 @@ for it. Imported by bare module name (``import elevation_doubles``): ``tests/`` 
 
 Contents:
     * :data:`RUNNING_AS_ROOT` - whether this process is root (the runners then never elevate).
+    * :func:`owned_by_another_account` - a file this suite made, owned by an account other than root.
     * :func:`write_fake_sudo` - write a ``sudo`` double into a directory.
     * :func:`link_tools` - a ``PATH`` directory holding only the named tools.
     * :data:`MANAGED_PYTHON_VARIABLES` - the variables that steer where uv's managed Pythons come from.
@@ -34,6 +35,27 @@ from pathlib import Path
 #: The runners only elevate for a non-root uid, so as root no test reaches the sudo branch.
 #: Guarded by ``sys.platform`` because ``os.geteuid`` does not exist on Windows.
 RUNNING_AS_ROOT: bool = sys.platform != "win32" and os.geteuid() == 0
+
+
+#: The uid a root run of the suite gives a file it must see owned by another account (nobody).
+OTHER_UID = 65534
+
+
+def owned_by_another_account(path: Path) -> int:
+    """Make ``path`` (a link itself, not its target) another account's; return the owner it has now.
+
+    A file the suite creates is the suite's: a non-root uid, unless the suite runs as root, when the
+    runners' root rule would trust it. So as root it goes to nobody; otherwise it is left as it is.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as d:
+        ...     owned_by_another_account(Path(d)) != 0
+        True
+    """
+    if RUNNING_AS_ROOT:
+        os.lchown(path, OTHER_UID, OTHER_UID)
+    return path.lstat().st_uid
 
 
 def write_fake_sudo(bin_dir: Path, *, grant: bool, calls: Path | None = None) -> Path:
@@ -354,11 +376,13 @@ __all__ = [
     "INTERPRETER_VARIABLES",
     "LOCAL_WHEEL_DISTRIBUTION",
     "MANAGED_PYTHON_VARIABLES",
+    "OTHER_UID",
     "RUNNING_AS_ROOT",
     "interpreter_probe_env",
     "link_tools",
     "managed_python_dir",
     "managed_python_env",
+    "owned_by_another_account",
     "write_fake_sudo",
     "write_planted_environment",
     "write_local_wheel",

@@ -7,6 +7,12 @@ local submodule imports, arguments arrive intact, and the script's exit code com
 
 ``local_only``: needs a POSIX shell + uv, and the dependency cases reach PyPI.  Skips cleanly on
 Windows (no POSIX ``sh``) and when uv is absent.
+
+Root-safe ([92]): every run pins ``UV_PYTHON_DOWNLOADS=never``, so no test downloads a Python into
+the real ``~/.local/share/uv/python`` of whoever runs the suite. A test about what a run that is NOT
+root does gets a runner whose root probe answers "not root" when the suite itself runs as root (one
+counted substitution, the mirror of the forced-root stand-in), so it tests the same path on every
+host; a root run that executes the script needs a uv-managed Python and skips without one.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ from elevation_doubles import (
     link_tools,
     managed_python_dir,
     managed_python_env,
+    owned_by_another_account,
     write_fake_sudo,
     write_local_wheel,
     write_planted_environment,
@@ -84,15 +91,38 @@ def _project(root: Path, *, exit_code: int = 0) -> Path:
     return entry
 
 
-def _pack_sh(entry: Path, dest: Path, **opts: object) -> Path:
+#: The runner's root probe, what a forced-root stand-in has in its place, and what a stand-in for a
+#: run that is not root has (used when the suite itself runs as root).
+_ROOT_PROBE = ('if [ "$(pwshpy_euid)" = "0" ]; then\n    PWSHPY_AS_ROOT=1', "if true; then\n    PWSHPY_AS_ROOT=1")
+_NOT_ROOT_PROBE = "if false; then\n    PWSHPY_AS_ROOT=1"
+
+
+def _force_probe(runner: Path, *, as_root: bool | None) -> None:
+    """Make ``runner``'s root probe answer ``as_root`` (one counted substitution); None keeps the real one.
+
+    False only changes anything when the suite runs as root, where the real probe would say root.
+    """
+    if as_root is None or (not as_root and not RUNNING_AS_ROOT):
+        return
+    text = runner.read_text(encoding="utf-8")
+    assert text.count(_ROOT_PROBE[0]) == 1
+    runner.write_text(text.replace(_ROOT_PROBE[0], _ROOT_PROBE[1] if as_root else _NOT_ROOT_PROBE), encoding="utf-8")
+
+
+def _pack_sh(entry: Path, dest: Path, *, as_root: bool | None = False, **opts: object) -> Path:
+    """Pack ``entry`` to a .sh runner whose root probe answers ``as_root`` (see :func:`_force_probe`)."""
     manifest = pack_script(entry, dest, options=PackOptions(format=RunnerFormat.SH, **opts))  # type: ignore[arg-type]
-    return Path(manifest.output_path)
+    runner = Path(manifest.output_path)
+    _force_probe(runner, as_root=as_root)
+    return runner
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
     child = {**os.environ, "PYTHONIOENCODING": "utf-8", "PWSHPY_PACK_CACHE": str(tmp_path / "cache")}
     # Pin the uv the test found so a blank PATH never exercises the network installer.
     child["PATH"] = os.pathsep.join([str(Path(_UV or "uv").parent), child.get("PATH", "")])
+    # Never a Python download into a real user directory ([92]): uv uses what is installed.
+    child["UV_PYTHON_DOWNLOADS"] = "never"
     return child
 
 
@@ -506,30 +536,28 @@ def _planted_uv(tmp_path: Path, name: str = "planted-bin") -> Path:
     return wrapper
 
 
-#: The runner's root probe for the trust rule, and what a forced-root runner has in its place.
-_ROOT_PROBE = ('if [ "$(pwshpy_euid)" = "0" ]; then\n    PWSHPY_AS_ROOT=1', "if true; then\n    PWSHPY_AS_ROOT=1")
 #: The runner's trusted owners (root alone), and the list a test widens it to so its own files can
 #: stand in for root-owned ones: no unprivileged test can create those.
 _TRUSTED_UIDS = "PWSHPY_TRUSTED_UIDS=0\n"
 
 
-def _trust_runner(tmp_path: Path, *, hide_system_uv: bool, as_root: bool = False, trust_my_uid: bool = False) -> Path:
+def _trust_runner(
+    tmp_path: Path, *, hide_system_uv: bool, as_root: bool | None = False, trust_my_uid: bool = False
+) -> Path:
     """A packed which-uv script, its fixed /usr/local/bin/uv probe hidden, its root probe forced.
 
-    ``trust_my_uid`` also counts this test's own uid as root for ownership, so a directory layout
-    the test builds can pass or fail on everything BUT its owner (group, other, sticky, ACL,
+    ``as_root`` as for :func:`_force_probe` (None keeps the real probe, for the tests of the probe
+    itself). ``trust_my_uid`` also counts this test's own uid as root for ownership, so a directory
+    layout the test builds can pass or fail on everything BUT its owner (group, other, sticky, ACL,
     ancestors). All are exact, counted substitutions; the rest is the shipped runner.
     """
     entry = tmp_path / "which_uv.py"
     entry.write_text(_ENTRY_REPORTING_UV)
-    runner = _pack_sh(entry, tmp_path / "which_uv.sh")
+    runner = _pack_sh(entry, tmp_path / "which_uv.sh", as_root=as_root)
     text = runner.read_text(encoding="utf-8")
     if hide_system_uv:
         assert text.count(str(_SYSTEM_WIDE_UV)) == 1
         text = text.replace(str(_SYSTEM_WIDE_UV), str(tmp_path / "no-system-uv"))
-    if as_root:
-        assert text.count(_ROOT_PROBE[0]) == 1
-        text = text.replace(*_ROOT_PROBE)
     if trust_my_uid:
         assert text.count(_TRUSTED_UIDS) == 1
         text = text.replace(_TRUSTED_UIDS, f"PWSHPY_TRUSTED_UIDS='0 {tmp_path.stat().st_uid}'\n")
@@ -592,6 +620,7 @@ def test_as_root_each_skipped_uv_names_its_reason(tmp_path: Path, shell_id: str,
     owned_uv = owned / "uv"
     owned_uv.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8", newline="\n")
     owned_uv.chmod(0o755)
+    owned_by_another_account(owned)
     runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True)
     environment = _trust_env(tmp_path, planted.parent, owned)
     result = _run(shell, runner, "--pwshpy-no-install-uv", env=environment)
@@ -605,6 +634,7 @@ def test_as_root_each_skipped_uv_names_its_reason(tmp_path: Path, shell_id: str,
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
 def test_as_root_a_root_owned_uv_still_runs(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
     """The trusted fallback: after skipping the planted one, the root-owned system uv runs."""
+    _needs_managed_python()
     planted = _planted_uv(tmp_path)
     runner = _trust_runner(tmp_path, hide_system_uv=False, as_root=True)
     environment = _trust_env(tmp_path, planted.parent)
@@ -649,6 +679,7 @@ def test_as_root_an_untrusted_pinned_uv_is_refused(tmp_path: Path, shell_id: str
 @_needs_trusted_system_uv
 def test_as_root_a_trusted_pinned_uv_runs(tmp_path: Path) -> None:
     """As root a root-owned pin is used, even with a planted uv first on PATH."""
+    _needs_managed_python()
     planted = _planted_uv(tmp_path)
     runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True)
     environment = _trust_env(tmp_path, planted.parent)
@@ -734,6 +765,7 @@ def test_as_root_planted_helpers_on_path_never_run(tmp_path: Path, shell_id: str
     (planted.parent / "uv-real").chmod(0o755)
     planted.unlink()
     planted.symlink_to("uv-real")
+    owned_by_another_account(planted)
     marker = tmp_path / "ran.txt"
     _marker_tool(planted.parent, "ls", marker, body="echo 'drwxr-xr-x 2 0 0 4096 Jan  1 00:00 x'")
     for name in ("tar", "base64", "readlink"):
@@ -750,6 +782,9 @@ def test_as_root_planted_helpers_on_path_never_run(tmp_path: Path, shell_id: str
     )
 
 
+@pytest.mark.skipif(
+    RUNNING_AS_ROOT, reason="as root the real id answers 0, so a planted id answering 0 changes nothing to observe"
+)
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
 def test_the_root_probe_never_asks_a_planted_id(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
     """A planted id first on PATH is never asked: answering "not root" would switch the rule off."""
@@ -757,7 +792,7 @@ def test_the_root_probe_never_asks_a_planted_id(tmp_path: Path, shell_id: str, s
     fake = tmp_path / "fake-bin"
     fake.mkdir()
     _marker_tool(fake, "id", marker, body="echo 0")
-    runner = _trust_runner(tmp_path, hide_system_uv=True)
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=None)
     result = _run(shell, runner, env=_trust_env(tmp_path, fake, Path(_UV or "uv").parent))
     assert not marker.exists(), "the runner asked the planted id"
     assert result.returncode == 0, result.stdout + result.stderr
@@ -813,6 +848,7 @@ def test_as_root_a_uv_under_trusted_ancestors_runs(
     tmp_path: Path, shell_id: str, shell: list[str], ancestor_mode: int
 ) -> None:
     """Positive control for the PATH search: a locked leaf under locked or sticky ancestors runs."""
+    _needs_managed_python()
     uv = _own_tree(tmp_path, ancestor_mode=ancestor_mode)
     runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True, trust_my_uid=True)
     result = _run(shell, runner, "--pwshpy-no-install-uv", env=_trust_env(tmp_path, uv.parent))
@@ -824,6 +860,7 @@ def test_as_root_a_uv_under_trusted_ancestors_runs(
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
 def test_as_root_a_symlinked_path_directory_is_resolved(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
     """A PATH entry that is a directory symlink is followed, not judged by the link's own mode."""
+    _needs_managed_python()
     uv = _own_tree(tmp_path, ancestor_mode=0o755)
     link = tmp_path / "linked-bin"
     link.symlink_to(uv.parent)
@@ -940,7 +977,7 @@ def test_an_unanswered_euid_probe_applies_the_root_rule(
     replacement = " ".join(str(fixed / f"id{n}") for n in range(6))
     if probe == "id-answers-garbage":
         _marker_tool(fixed, "id0", tmp_path / "garbage.txt", body="echo not-a-uid")
-    runner = _trust_runner(tmp_path, hide_system_uv=True)
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=None)
     text = runner.read_text(encoding="utf-8")
     assert text.count(_FIXED_IDS) == 1
     runner.write_text(text.replace(_FIXED_IDS, replacement), encoding="utf-8", newline="\n")
@@ -1078,15 +1115,12 @@ def _python_runner(
     test owns that counts as root's. ``source`` replaces the packed script."""
     entry = tmp_path / "which_python.py"
     entry.write_text(source)
-    runner = _pack_sh(entry, tmp_path / "which_python.sh", with_packages=list(with_packages))
+    runner = _pack_sh(entry, tmp_path / "which_python.sh", as_root=as_root, with_packages=list(with_packages))
     text = runner.read_text(encoding="utf-8")
     assert text.count(str(_SYSTEM_WIDE_UV)) == 1
     text = text.replace(str(_SYSTEM_WIDE_UV), str(tmp_path / "no-system-uv"))
     assert text.count(_TRUSTED_UIDS) == 1
     text = text.replace(_TRUSTED_UIDS, f"PWSHPY_TRUSTED_UIDS='0 {tmp_path.stat().st_uid}'\n")
-    if as_root:
-        assert text.count(_ROOT_PROBE[0]) == 1
-        text = text.replace(*_ROOT_PROBE)
     runner.write_text(text, encoding="utf-8", newline="\n")
     return runner, _own_tree(tmp_path, ancestor_mode=0o755)
 

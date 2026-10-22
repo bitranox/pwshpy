@@ -7,15 +7,14 @@ and the relaunch-vs-noop branch of the global ``--elevate`` flag.
 
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Sequence
 from typing import Any
 
 import pytest
 from click.testing import CliRunner
+from fake_services import services_with_ps
 
 from pwshpy.adapters.cli.root import cli
-from pwshpy.composition import build_testing
 from pwshpy.domain.errors import ElevationDeclinedError
 
 
@@ -50,7 +49,7 @@ class _FakePs:
 
 
 def _factory(fake: _FakePs) -> Any:
-    services = dataclasses.replace(build_testing(), ps=fake)  # type: ignore[arg-type]
+    services = services_with_ps(fake)
     return lambda: services
 
 

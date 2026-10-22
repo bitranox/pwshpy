@@ -6,19 +6,19 @@ each command's argument/option parsing and its delegation to the right ps method
 
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 from click.testing import CliRunner
+from fake_services import services_with_ps
 
 from pwshpy.adapters.cli.main import main
 from pwshpy.adapters.cli.root import cli
-from pwshpy.composition import build_testing
 from pwshpy.domain.enums import (
     AceType,
+    RegistryHive,
     RegistryValueType,
     ServiceKind,
     ServiceStartType,
@@ -77,7 +77,7 @@ class _FakePs:
 
     def new_registry_key(self, key: str) -> RegistryKey:
         self._rec("new_registry_key", key)
-        return RegistryKey(hive="HKCU", key=key, name="k")  # type: ignore[arg-type]
+        return RegistryKey(hive=RegistryHive.HKCU, key=key, name="k")
 
     def remove_registry_key(self, key: str, *, recursive: bool = False) -> None:
         self._rec("remove_registry_key", key, recursive)
@@ -161,7 +161,7 @@ class _FakePs:
 
 
 def _factory(fake: _FakePs) -> Any:
-    services = dataclasses.replace(build_testing(), ps=fake)  # type: ignore[arg-type]
+    services = services_with_ps(fake)
     return lambda: services
 
 
@@ -390,10 +390,7 @@ def test_register_scheduled_task_cli_refuses_a_modifier_without_its_trigger(modi
 @pytest.mark.os_agnostic
 def test_register_scheduled_task_cli_reports_an_adapter_refusal_on_one_line(capsys: pytest.CaptureFixture[str]) -> None:
     """A PwshPyError from the adapter leaves through main() as one stderr line and exit 1, no traceback."""
-    services = dataclasses.replace(
-        build_testing(),
-        ps=_FakePs(register_error=PlatformUnsupportedError("logon triggers are Windows-only")),  # type: ignore[arg-type]
-    )
+    services = services_with_ps(_FakePs(register_error=PlatformUnsupportedError("logon triggers are Windows-only")))
     rc = main(["register_scheduled_task", "\\T", "--program", "x", "--at-logon"], services_factory=lambda: services)
     captured = capsys.readouterr()
     assert rc == 1
@@ -414,10 +411,8 @@ def test_stop_service_passes_the_wait_choice(flags: list[str], *, wait: bool) ->
 @pytest.mark.os_agnostic
 def test_a_timed_out_stop_exits_110_through_main(capsys: pytest.CaptureFixture[str]) -> None:
     """A wait that hits its deadline exits ETIMEDOUT (110), apart from a refused stop's 1."""
-    services = dataclasses.replace(
-        build_testing(),
-        ps=_FakePs(stop_error=OperationTimeoutError("service did not reach state 1 within 30.0s", timeout=30.0)),  # type: ignore[arg-type]
-    )
+    timed_out = OperationTimeoutError("service did not reach state 1 within 30.0s", timeout=30.0)
+    services = services_with_ps(_FakePs(stop_error=timed_out))
     rc = main(["stop_service", "S"], services_factory=lambda: services)
     captured = capsys.readouterr()
     assert rc == 110
@@ -428,8 +423,5 @@ def test_a_timed_out_stop_exits_110_through_main(capsys: pytest.CaptureFixture[s
 @pytest.mark.os_agnostic
 def test_a_refused_stop_exits_1_through_main() -> None:
     """Control: a plain NativeCallError (a refused control) keeps exit 1, so 110 above is the timeout's."""
-    services = dataclasses.replace(
-        build_testing(),
-        ps=_FakePs(stop_error=NativeCallError("cannot stop service 'S'")),  # type: ignore[arg-type]
-    )
+    services = services_with_ps(_FakePs(stop_error=NativeCallError("cannot stop service 'S'")))
     assert main(["stop_service", "S"], services_factory=lambda: services) == 1

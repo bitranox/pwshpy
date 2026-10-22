@@ -7,13 +7,13 @@ line and exit 1 without leaving a bare ``[`` on a ``--json`` stdout.
 
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Iterator
 
 import pytest
+from fake_services import services_with_ps
 
 from pwshpy.adapters.cli.main import main
-from pwshpy.composition import AppServices, build_testing
+from pwshpy.composition import AppServices
 from pwshpy.domain.enums import ServiceState
 from pwshpy.domain.errors import NativeCallError
 from pwshpy.domain.pipeline import Pipeline
@@ -45,7 +45,7 @@ class _FakePs:
 
 
 def _services(fake: _FakePs) -> AppServices:
-    return dataclasses.replace(build_testing(), ps=fake)  # type: ignore[arg-type]
+    return services_with_ps(fake)
 
 
 @pytest.mark.os_agnostic

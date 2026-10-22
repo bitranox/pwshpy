@@ -32,8 +32,8 @@ native read commands return typed records through the lazy pipeline (`.where` / 
 | `Restart-Computer` / `Stop-Computer`                                | `ps.restart_computer()` / `ps.stop_computer()`  *(Windows, destructive)*   | `pwshpy restart_computer --yes` / `stop_computer --yes`  |
 
 Filtering: in Python use `.where(predicate)` (or a plain `for`/`if`); on the CLI pipe `--jsonl` to `jq`.
-`Get-EventLog` (the classic API) is covered by `ps.get_win_event` (Get-WinEvent). `restart_computer` /
-`stop_computer` are library-only by design - too destructive for a casual CLI reboot.
+`Get-EventLog` (the classic API) is covered by `ps.get_win_event` (Get-WinEvent). The CLI's
+`restart_computer` / `stop_computer` act only with `--yes`, so a mistyped command never reboots.
 `get_current_identity` reads the process token (the SID, integrity level and elevation flag) on Windows
 and the effective uid on POSIX, never `USERNAME`, which names the computer account inside a SYSTEM task.
 `get_windows_image` with an index the file does not hold raises `NativeCallError` (the CLI exits

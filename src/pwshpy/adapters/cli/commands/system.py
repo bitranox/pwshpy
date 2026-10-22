@@ -4,8 +4,8 @@
 Get-ComputerInfo / Get-WindowsImage;
 ``get_windows_update`` searches Windows Update (read-only, bounded by ``--timeout``);
 ``stop_process`` / ``wait_process`` mirror Stop-Process / Wait-Process.  The destructive
-``restart_computer`` / ``stop_computer`` are intentionally library-only (no CLI) to avoid
-an accidental reboot from a shell.
+``restart_computer`` / ``stop_computer`` act only with an explicit ``--yes``, so a mistyped
+command never reboots the machine.
 
 Contents:
     * the ``cli_*`` system commands, collected in ``SYSTEM_COMMANDS``.

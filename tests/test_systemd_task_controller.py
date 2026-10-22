@@ -132,3 +132,41 @@ def test_register_with_boot_trigger_writes_and_arms_a_timer(ondemand_task: str) 
     facade.unregister_scheduled_task(ondemand_task)
     assert not (_UNIT_DIR / f"{ondemand_task}.timer").exists()
     assert not (_UNIT_DIR / "timers.target.wants" / f"{ondemand_task}.timer").exists()
+
+
+def test_a_unit_pwshpy_did_not_write_is_never_overwritten_or_deleted(ondemand_task: str) -> None:
+    """[C1] on real systemd: an /etc unit without the ownership key survives register and unregister."""
+    controller = SystemdScheduledTaskController()
+    path = _UNIT_DIR / f"{ondemand_task}.service"
+    path.write_text(_TIMER_SERVICE_UNIT)
+    _reload()
+    with pytest.raises(NativeCallError, match="not written by pwshpy"):
+        controller.register(ondemand_task, program="/bin/true")
+    with pytest.raises(NativeCallError, match="not written by pwshpy"):
+        controller.unregister(ondemand_task)
+    assert path.read_text() == _TIMER_SERVICE_UNIT
+
+
+def test_a_unit_systemd_already_has_is_never_shadowed() -> None:
+    """[C1] on real systemd: a vendor unit (here systemd's own) is refused before /etc is written."""
+    controller = SystemdScheduledTaskController()
+    with pytest.raises(NativeCallError, match="not written by pwshpy"):
+        controller.register("systemd-journald", program="/bin/true")
+    assert not (_UNIT_DIR / "systemd-journald.service").exists()
+    with pytest.raises(NativeCallError, match="no such task"):
+        controller.unregister("systemd-journald")
+
+
+def test_systemd_loads_the_ownership_key_without_a_warning(ondemand_task: str) -> None:
+    """[C1] on real systemd: X-PwshPy= in [Unit] is ignored silently (an unknown key without X- warns)."""
+    SystemdScheduledTaskController().register(ondemand_task, program="/bin/true")
+    path = _UNIT_DIR / f"{ondemand_task}.service"
+    verify = subprocess.run(  # noqa: S603 - fixed argv plus the unit pwshpy just wrote
+        ["systemd-analyze", "verify", "--man=no", str(path)],  # noqa: S607
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert "X-PwshPy" not in verify.stdout + verify.stderr, verify.stdout + verify.stderr
+    assert "X-PwshPy=" in path.read_text(encoding="utf-8")

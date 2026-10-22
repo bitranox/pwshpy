@@ -146,7 +146,8 @@ box (like the Windows mutating tests need throwaway VM 24000).
   and `StartUnit` only for a calendar timer. `enable` follows the same order (`EnableUnitFiles`, `Reload`,
   then `StartUnit` unless the timer is boot-relative); `run`/`stop` = `StartUnit`/`StopUnit` of the
   service; `disable` = `StopUnit` + `DisableUnitFiles` of the `.timer`; `unregister` stops + removes the
-  files pwshpy wrote (never a vendor unit under /lib).
+  files pwshpy wrote, recognised by `X-PwshPy=` in `[Unit]` (never a vendor unit under /lib, nor an
+  unmarked file in /etc), and `register` refuses a name another unit already holds.
 - **Read-back fields:** `user_id` is the triggered service's `User=` as a decimal uid (`"0"` for root, `""`
   when it cannot be read or resolved); `last_task_result` is the service's exit status, `128 + signal`
   when killed, None while it runs or if it never ran; `run_level` is always None.

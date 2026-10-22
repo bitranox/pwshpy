@@ -154,15 +154,17 @@ The Linux call writes these two units under `/etc/systemd/system`, enables the t
 # nightly-backup.service
 [Unit]
 Description=Nightly backup
+X-PwshPy=1.6.0
 
 [Service]
 Type=oneshot
 User=1000
-ExecStart=/usr/local/bin/backup --full
+ExecStart="/usr/local/bin/backup" --full
 
 # nightly-backup.timer
 [Unit]
 Description=Nightly backup
+X-PwshPy=1.6.0
 
 [Timer]
 OnCalendar=*-*-* 02:00:00 UTC
@@ -196,9 +198,23 @@ How each input maps, and what each OS refuses before touching the scheduler:
 On Linux every timer pwshpy writes carries `AccuracySec=1s` (systemd's default window would let it
 fire up to a minute late). `program`, `arguments` and `description` go into the unit file, so a line
 break or NUL in any of them is a `ConfigurationError` and `%` is escaped. The `ExecStart=` line is
-`program` followed by `arguments`, and systemd reads it with its own rules, not a shell's: it
-splits and unquotes the arguments itself and expands `$VAR` / `${VAR}` from the unit's environment
-(write `$$` for a literal dollar). `ps.enable_scheduled_task` on a boot timer also only enables it,
+`program`, written as one double-quoted word (so a path with a space stays one path), followed by
+`arguments`, which systemd reads with its own rules, not a shell's: it splits and unquotes them
+itself and expands `$VAR` / `${VAR}` from the unit's environment (write `$$` for a literal dollar).
+A `program` starting with `+`, `!`, `-`, `@` or `:` is a `ConfigurationError`: systemd reads that
+character as an `ExecStart=` prefix even inside quotes, and `+` would run it with full privileges,
+ignoring `User=`.
+
+The task name must be a name systemd accepts for a unit: ASCII letters, digits, `:`, `-`, `_` and
+`.`, at most 247 characters (255 with `.service`), and no `@` (a template or instance unit), or
+`register`, `unregister`, `run`, `stop`, `enable` and `disable` raise `ConfigurationError` before
+anything is written or sent. Every unit pwshpy writes carries `X-PwshPy=<version>` in `[Unit]`,
+which systemd ignores, and pwshpy only replaces or deletes a unit that carries it: `register` raises
+`NativeCallError` when `/etc/systemd/system` holds a unit of that name without the key, or systemd
+already has one from anywhere else (a vendor unit under `/lib`, a runtime or masked one), and
+`unregister` stops, disables and deletes only the marked files, raising `NativeCallError` ("no such
+task") when there are none. A unit registered by pwshpy 1.5 or earlier carries no key and is refused
+the same way. `ps.enable_scheduled_task` on a boot timer also only enables it,
 because systemd runs a started boot timer at once when its offset has already passed.
 
 `register_scheduled_task` returns the task read back as a `ScheduledTaskInfo`, the same record
@@ -317,6 +333,8 @@ except NativeCallError as exc:
   program and every process it started have exited, and `timeout` then covers and kills the whole
   tree. What counts as the tree on each OS is in
   [Power Tools](power-tools.md#waiting-for-the-whole-process-tree-wait_treetrue-like-start-process--wait).
+  On macOS (and any POSIX system other than Linux) `wait_tree=True` starts the program in a new
+  session, so it has no controlling terminal.
 - **Windows Update:** `get_windows_update(criteria=..., timeout=300.0)` runs the search in a child
   process that is killed when the time is up. The search starts on the first iteration and
   returns its whole result before the first record, so `.take(n)` does not shorten it.

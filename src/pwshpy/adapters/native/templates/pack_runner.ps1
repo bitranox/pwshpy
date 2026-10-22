@@ -978,7 +978,7 @@ function Get-PwshPyPasswdAnswer {
 
     # The lines one passwd source prints (getent, id -P), or none when it cannot run: GNU id has no
     # -P, and a source that fails is simply not an answer - the next source is asked, and no answer
-    # at all makes Get-PwshPyAccountDataHome throw.
+    # at all makes Get-PwshPyAccountHome throw.
     try {
         return @(. (ConvertTo-PwshPyNativeCall -FilePath $FilePath -ArgumentList $ArgumentList -StderrPath '/dev/null'))
     } catch {
@@ -986,22 +986,43 @@ function Get-PwshPyPasswdAnswer {
     }
 }
 
+function Get-PwshPyAccountKnownFolder {
+    param([Environment+SpecialFolder] $Folder, [string] $Name)
+
+    # Windows: the known folder $Folder of the running token (Environment.GetFolderPath, which asks the
+    # shell, not the APPDATA or LOCALAPPDATA variable). No answer throws: a guessed directory would be
+    # one the caller could create.
+    $known = [Environment]::GetFolderPath($Folder)
+    if (-not $known -or -not (Test-PwshPyAbsolutePath -Path $known)) {
+        throw "cannot read the $Name known folder of the running account"
+    }
+    return $known
+}
+
 function Get-PwshPyAccountDataHome {
     # The data directory of the account this run is (uv keeps its managed Pythons in
     # <it>/uv/python), asked of the system rather than of the environment: APPDATA, HOME and
     # XDG_DATA_HOME are whatever the caller or the service that started it set. Windows: the
-    # RoamingAppData known folder of the running token (Environment.GetFolderPath, which asks the shell,
-    # not the APPDATA variable). POSIX: <home>/.local/share, the home from the passwd database: getent
-    # asks every name service (Linux), id -P is the BSD and macOS form, and /etc/passwd itself lists
-    # root everywhere; the tools come from the fixed helper directories, never from PATH. No answer
-    # throws: a guessed directory would be one the caller could create.
-    if ($PwshPyOnWindows) {
-        $roaming = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
-        if (-not $roaming -or -not (Test-PwshPyAbsolutePath -Path $roaming)) {
-            throw 'cannot read the RoamingAppData known folder of the running account'
-        }
-        return $roaming
-    }
+    # RoamingAppData known folder of the running token. POSIX: <home>/.local/share, the home from the
+    # passwd database (Get-PwshPyAccountHome).
+    if ($PwshPyOnWindows) { return (Get-PwshPyAccountKnownFolder -Folder ([Environment+SpecialFolder]::ApplicationData) -Name 'RoamingAppData') }
+    return ((Get-PwshPyAccountHome) + '/.local/share')
+}
+
+function Get-PwshPyAccountCacheHome {
+    # The directory below which uv keeps its default cache for the account this run is, asked of the
+    # system for the reason the data directory is: Windows the LocalAppData known folder of the running
+    # token (uv's cache is <it>\uv\cache), POSIX <home>/.cache from the passwd database (uv's cache is
+    # <it>/uv). LOCALAPPDATA, XDG_CACHE_HOME and HOME are the caller's to set.
+    if ($PwshPyOnWindows) { return (Get-PwshPyAccountKnownFolder -Folder ([Environment+SpecialFolder]::LocalApplicationData) -Name 'LocalAppData') }
+    return ((Get-PwshPyAccountHome) + '/.cache')
+}
+
+function Get-PwshPyAccountHome {
+    # POSIX: the home of the account this run is (no trailing slash; '' for /), from the passwd
+    # database: getent asks every name service (Linux), id -P is the BSD and macOS form, and
+    # /etc/passwd itself lists root everywhere; the tools come from the fixed helper directories, never
+    # from PATH. No answer throws: a guessed directory would be one the caller could create.
     $uid = Get-PwshPyEuid
     $answers = New-Object System.Collections.Generic.List[string]
     foreach ($directory in ($PwshPyFixedPath -split ':')) {
@@ -1018,7 +1039,7 @@ function Get-PwshPyAccountDataHome {
     if (Test-Path -LiteralPath '/etc/passwd' -PathType Leaf) { $answers.AddRange([IO.File]::ReadAllLines('/etc/passwd')) }
     foreach ($answer in $answers) {
         $accountHome = Get-PwshPyPasswdHome -Entry $answer -Uid $uid
-        if ($accountHome) { return ($accountHome.TrimEnd('/') + '/.local/share') }
+        if ($accountHome) { return $accountHome.TrimEnd('/') }
     }
     throw "cannot read the home directory of uid $uid from the passwd database"
 }
@@ -1308,6 +1329,13 @@ $PwshPyPrepare = {
         Clear-PwshPyInterpreterVariable
         $PwshPyDataHome = Get-PwshPyAccountDataHome
         Set-Item -LiteralPath 'Env:UV_PYTHON_INSTALL_DIR' -Value (Join-Path (Join-Path $PwshPyDataHome 'uv') 'python')
+        # The cache too, for the same reason: uv's default follows LOCALAPPDATA (Windows) or XDG_CACHE_HOME
+        # and HOME (POSIX, which sudo -E or env_keep can hand over), and cached script environments and
+        # wheels run elevated. uv's own layout below the folder: uv\cache on Windows, uv on POSIX.
+        $PwshPyUvCache = Join-Path (Get-PwshPyAccountCacheHome) 'uv'
+        if ($PwshPyOnWindows) { $PwshPyUvCache = Join-Path $PwshPyUvCache 'cache' }
+        Set-Item -LiteralPath 'Env:UV_CACHE_DIR' -Value $PwshPyUvCache
+        Write-PwshPyNotice "pwshpy: uv caches in ${PwshPyUvCache}: an elevated run uses the running account's own cache directory"
         # The directory before uv searches it: uv runs every Python it finds there.
         $PwshPyPythonDirWhy = Get-PwshPyPythonDirDistrust -Path $env:UV_PYTHON_INSTALL_DIR
         if ($PwshPyPythonDirWhy) {

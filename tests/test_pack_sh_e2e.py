@@ -1377,18 +1377,23 @@ def test_as_root_the_managed_python_dir_is_the_accounts_own(
 ) -> None:
     """[93]: as root uv's managed-Python directory is the passwd home's, whatever HOME and XDG_DATA_HOME
     say, and PYTHONHOME / PYTHONPATH are dropped with a line each; not root (the control) the runner
-    names no directory and both variables reach uv unchanged."""
+    names no directory and both variables reach uv unchanged. [X22 C1]: the cache directory likewise,
+    whatever XDG_CACHE_HOME says."""
     runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root, real_data_home=True)
     library = {"PYTHONHOME": str(tmp_path / "planted-home"), "PYTHONPATH": str(tmp_path / "planted-path")}
-    environment = {**_trust_env(tmp_path), **library, "XDG_DATA_HOME": str(tmp_path / "elsewhere")}
+    elsewhere = str(tmp_path / "elsewhere")
+    environment = {**_trust_env(tmp_path), **library, "XDG_DATA_HOME": elsewhere, "XDG_CACHE_HOME": elsewhere}
     environment.pop("UV_PYTHON_INSTALL_DIR")
     result = _run_in(shell, runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     recorded = _recorded_variables(record)
+    # [X22 C1] the cache as well, named from the same passwd home (the recording uv writes nothing there).
+    account_cache = str(_passwd_data_home().parent.parent / ".cache" / "uv")
     if as_root:
         assert recorded.get("UV_PYTHON_INSTALL_DIR") == str(_passwd_data_home() / "uv" / "python"), recorded
+        assert recorded.get("UV_CACHE_DIR") == account_cache, recorded
     else:
-        assert "UV_PYTHON_INSTALL_DIR" not in recorded, recorded
+        assert "UV_PYTHON_INSTALL_DIR" not in recorded and "UV_CACHE_DIR" not in recorded, recorded
     for name, value in library.items():
         dropped_line = f"pwshpy: ignoring {name}" in result.stderr
         if as_root:
@@ -1438,30 +1443,41 @@ def test_as_root_uv_takes_its_default_package_sources_cache_and_no_env_file(tmp_
     for name, value in given.items():
         dropped_line = f"pwshpy: ignoring {name}" in result.stderr
         if as_root:
-            assert name not in recorded and dropped_line, (name, recorded, result.stderr)
+            # Dropped; UV_CACHE_DIR is then named again, from the account ([X22 C1]), never the caller's.
+            assert recorded.get(name) != value and dropped_line, (name, recorded, result.stderr)
         else:
             assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
     if as_root:
         assert recorded.get("PYTHONNOUSERSITE") == "1" and "--no-env-file" in argv, (recorded, argv)
         found = _recorded_variables(Path(f"{record}.python"))
-        assert not set(given) & set(found), found  # dropped before uv python find
+        assert all(found.get(name) != value for name, value in given.items()), found  # before uv python find
     else:
         assert "PYTHONNOUSERSITE" not in recorded and "--no-env-file" not in argv, (recorded, argv)
 
 
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
-def test_as_root_uv_caches_in_its_default_directory_never_the_callers(tmp_path: Path, as_root: bool) -> None:
-    """[X21 P3]: as root UV_CACHE_DIR is dropped, so uv builds the script environment in its default
-    cache: in a test, the one default_uv_cache_env keeps inside tmp_path, never the real user's ([93]).
-    Not root (the control), the caller's UV_CACHE_DIR is used and the default one is never created."""
+def test_as_root_uv_caches_in_the_accounts_own_cache_never_the_callers(tmp_path: Path, as_root: bool) -> None:
+    """[X21 P3], [X22 C1]: as root UV_CACHE_DIR is dropped and uv's cache is named from the account's
+    passwd home (<home>/.cache/uv), never from XDG_CACHE_HOME or HOME, which sudo -E or env_keep can
+    hand over (cached script environments and wheels run as root), with one line on stderr. In a test
+    the account's cache home is answered inside tmp_path (with_account_cache_home), never the real
+    user's ([93]). Not root (the control), the caller's UV_CACHE_DIR is used, the account's cache is
+    never created and no line is printed."""
     _needs_managed_python()
     runner, uv = _python_runner(tmp_path, as_root=as_root)
-    caller_cache = tmp_path / "caller-cache"
-    environment = {**_trust_env(tmp_path, uv.parent), "UV_CACHE_DIR": str(caller_cache)}
+    caller_cache, caller_xdg = tmp_path / "caller-cache", tmp_path / "caller-xdg-cache"
+    environment = {
+        **_trust_env(tmp_path, uv.parent),
+        "UV_CACHE_DIR": str(caller_cache),
+        "XDG_CACHE_HOME": str(caller_xdg),
+    }
     result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     assert caller_cache.exists() is not as_root, result.stderr
-    assert default_uv_cache_dir(tmp_path).is_dir() is as_root, result.stderr
+    assert not caller_xdg.exists(), result.stderr
+    account_cache = default_uv_cache_dir(tmp_path)
+    assert account_cache.is_dir() is as_root, result.stderr
+    assert (f"pwshpy: uv caches in {account_cache}:" in result.stderr) is as_root, result.stderr
 
 
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])

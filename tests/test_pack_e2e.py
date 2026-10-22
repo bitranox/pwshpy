@@ -47,6 +47,7 @@ from elevation_doubles import (
     planted_managed_python,
     session_uv_cache,
     trusted_managed_python,
+    with_account_cache_home,
     with_data_home,
     without_python_dir_check,
     write_fake_sudo,
@@ -715,9 +716,13 @@ def _whole_runner_stand_in(runner: Path, output: Path, *, elevated: str = "$fals
     a UAC prompt; and the elevation probe answers ``elevated`` (a PowerShell expression, "not
     elevated" by default: the Windows token API does not exist off Windows). The child the relaunch
     starts is this same file, so it unpacks, finds uv and fails exactly where the shipped runner
-    would. ``[bool]$PwshPyRelay`` answers "elevated" in the relaunched child only, as UAC would.
+    would. ``[bool]$PwshPyRelay`` answers "elevated" in the relaunched child only, as UAC would. A
+    stand-in that can answer "elevated" also names a cache of its own ([X22 C1], see
+    :func:`elevation_doubles.with_account_cache_home`), never the real account's.
     """
     text = runner.read_text(encoding="utf-8")
+    if elevated != "$false":
+        text = with_account_cache_home(text, output.parent, powershell=True)
     probe = (
         "function Test-PwshPyElevated {",
         f"function Test-PwshPyElevated {{\n    return {elevated}\n}}\n\nfunction Test-PwshPyElevatedOnHost {{",
@@ -2153,7 +2158,7 @@ def test_an_elevated_run_drops_the_variables_that_steer_the_managed_python(tmp_p
 def test_an_elevated_posix_run_takes_the_managed_python_dir_from_the_account(tmp_path: Path, elevated: str) -> None:
     """[93]: elevated, uv's managed-Python directory is the passwd home's whatever HOME and XDG_DATA_HOME
     say, and PYTHONHOME / PYTHONPATH are dropped with a line each; the control names no directory and
-    passes both on."""
+    passes both on. [X22 C1]: the cache directory likewise, whatever XDG_CACHE_HOME says."""
     runner, uv, record = _recording_runner(tmp_path, elevated=elevated, real_data_home=True)
     library = {"PYTHONHOME": str(tmp_path / "planted-home"), "PYTHONPATH": str(tmp_path / "planted-path")}
     result = _run_with_path(
@@ -2162,15 +2167,22 @@ def test_an_elevated_posix_run_takes_the_managed_python_dir_from_the_account(tmp
         "-PwshPyUv",
         str(uv),
         path_first=[],
-        env={**library, "XDG_DATA_HOME": str(tmp_path / "elsewhere"), "HOME": str(tmp_path / "elsewhere")},
+        env={
+            **library,
+            "XDG_DATA_HOME": str(tmp_path / "elsewhere"),
+            "XDG_CACHE_HOME": str(tmp_path / "elsewhere"),
+            "HOME": str(tmp_path / "elsewhere"),
+        },
         cwd=_clean_cwd(tmp_path),
     )
     assert result.returncode == 0, result.stdout + result.stderr
     recorded = _recorded_variables(record)
     if elevated == "$true":
         assert sys.platform != "win32"
-        expected = Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".local" / "share" / "uv" / "python"
-        assert recorded.get("UV_PYTHON_INSTALL_DIR") == str(expected), recorded
+        home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+        assert recorded.get("UV_PYTHON_INSTALL_DIR") == str(home / ".local" / "share" / "uv" / "python"), recorded
+        # [X22 C1] the cache as well (the recording uv writes nothing there).
+        assert recorded.get("UV_CACHE_DIR") == str(home / ".cache" / "uv"), recorded
     else:
         assert "UV_PYTHON_INSTALL_DIR" not in recorded, recorded
     for name, value in library.items():
@@ -2201,19 +2213,20 @@ def test_an_elevated_run_lets_uv_take_its_default_package_sources_cache_and_no_e
     for name, value in given.items():
         dropped_line = _VARIABLE_DROPPED.format(name=name) in result.stderr
         if elevated == "$true":
-            assert name not in recorded and dropped_line, (name, recorded, result.stderr)
+            # Dropped; UV_CACHE_DIR is then named again, from the account ([X22 C1]), never the caller's.
+            assert recorded.get(name) != value and dropped_line, (name, recorded, result.stderr)
         else:
             assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
     if elevated == "$true":
         assert recorded.get("PYTHONNOUSERSITE") == "1" and "--no-env-file" in argv, (recorded, argv)
         found = _recorded_variables(Path(f"{record}.python"))
-        assert not set(given) & set(found), found  # dropped before uv python find
+        assert all(found.get(name) != value for name, value in given.items()), found  # before uv python find
     else:
         assert "PYTHONNOUSERSITE" not in recorded and "--no-env-file" not in argv, (recorded, argv)
 
 
-#: Loads the runner's functions alone and prints what Get-PwshPyAccountDataHome answers, with APPDATA
-#: pointed somewhere the test chose.
+#: Loads the runner's functions alone and prints what Get-PwshPyAccountDataHome and
+#: Get-PwshPyAccountCacheHome answer, with APPDATA and LOCALAPPDATA pointed somewhere the test chose.
 _DATA_HOME_PROBE = r"""
 param([string] $Artefact, [string] $PlantedAppData)
 $ErrorActionPreference = 'Stop'
@@ -2223,8 +2236,11 @@ $functions = $ast.FindAll({ param($n) $n -is ("$language.FunctionDefinitionAst" 
 foreach ($definition in $functions) { . ([ScriptBlock]::Create($definition.Extent.Text)) }
 $PwshPyOnWindows = $true
 $env:APPDATA = $PlantedAppData
+$env:LOCALAPPDATA = $PlantedAppData
 Write-Output ('known:' + [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData))
 Write-Output ('answer:' + (Get-PwshPyAccountDataHome))
+Write-Output ('knownlocal:' + [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData))
+Write-Output ('cache:' + (Get-PwshPyAccountCacheHome))
 """
 
 
@@ -2232,7 +2248,8 @@ Write-Output ('answer:' + (Get-PwshPyAccountDataHome))
 @pytest.mark.os_windows
 @_WINDOWS_ONLY
 def test_the_windows_data_home_is_the_known_folder_not_appdata(tmp_path: Path) -> None:
-    """[93]: an elevated run's managed-Python directory comes from the RoamingAppData known folder.
+    """[93]: an elevated run's managed-Python directory comes from the RoamingAppData known folder, and
+    [X22 C1] its uv cache from the LocalAppData known folder.
 
     APPDATA is pointed at a directory of the test's own; the answer must be the known folder, which
     the probe also prints, and the control is that the two differ.
@@ -2251,9 +2268,13 @@ def test_the_windows_data_home_is_the_known_folder_not_appdata(tmp_path: Path) -
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    lines = dict(line.split(":", 1) for line in result.stdout.splitlines() if line.startswith(("known:", "answer:")))
+    prefixes = ("known:", "answer:", "knownlocal:", "cache:")
+    lines = dict(line.split(":", 1) for line in result.stdout.splitlines() if line.startswith(prefixes))
     assert lines["known"] and Path(lines["known"]) != planted, lines
     assert lines["answer"] == lines["known"], lines
+    # [X22 C1] the cache: the LocalAppData known folder, not LOCALAPPDATA.
+    assert lines["knownlocal"] and Path(lines["knownlocal"]) != planted, lines
+    assert lines["cache"] == lines["knownlocal"], lines
 
 
 #: A key uv refuses to parse: a uv.toml holding it fails every uv call that reads it (exit 2, naming it).
@@ -2606,18 +2627,24 @@ def test_an_elevated_run_lets_no_library_path_from_the_callers_environment_reach
 
 @pytest.mark.local_only
 @pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
-def test_an_elevated_run_caches_in_uvs_default_directory_never_the_callers(tmp_path: Path, elevated: str) -> None:
-    """[X21 P3]: elevated, UV_CACHE_DIR is dropped, so uv builds the script environment in its default
-    cache: in a test, the one default_uv_cache_env keeps inside tmp_path (_isolated_cache), never the
-    real user's ([93]). The control uses the caller's UV_CACHE_DIR and never creates the default one."""
+def test_an_elevated_run_caches_in_the_accounts_own_cache_never_the_callers(tmp_path: Path, elevated: str) -> None:
+    """[X21 P3], [X22 C1]: elevated, UV_CACHE_DIR is dropped and uv's cache is named from the account
+    (the LocalAppData known folder on Windows, the passwd home on POSIX), never from LOCALAPPDATA,
+    XDG_CACHE_HOME or HOME, with one line on stderr. In a test the account's cache home is answered
+    inside tmp_path (with_account_cache_home), never the real user's ([93]). The control uses the
+    caller's UV_CACHE_DIR, never creates the account's cache and prints no line."""
     managed = _needs_managed_python()
     runner, head = _python_runner(tmp_path, elevated=elevated)
-    caller_cache = tmp_path / "caller-cache"
+    caller_cache, caller_default = tmp_path / "caller-cache", tmp_path / "caller-default-cache"
     environment = {**interpreter_probe_env(tmp_path, managed=managed), "UV_CACHE_DIR": str(caller_cache)}
+    environment.update({name: str(caller_default) for name in default_uv_cache_env(tmp_path)})
     result = _run_with_path(tmp_path, runner, path_first=head, env=environment, cwd=_clean_cwd(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     assert caller_cache.exists() is (elevated == "$false"), result.stderr
-    assert default_uv_cache_dir(tmp_path).is_dir() is (elevated == "$true"), result.stderr
+    assert not (caller_default / "uv").exists(), result.stderr
+    account_cache = default_uv_cache_dir(tmp_path)
+    assert account_cache.is_dir() is (elevated == "$true"), result.stderr
+    assert (f"pwshpy: uv caches in {account_cache}:" in result.stderr) is (elevated == "$true"), result.stderr
 
 
 @pytest.mark.local_only

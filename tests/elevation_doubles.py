@@ -517,9 +517,10 @@ def _plant_user_site(base: Path, marker: Path) -> None:
 def default_uv_cache_env(scratch: Path) -> dict[str, str]:
     """Point uv's default cache directory, the one it uses without UV_CACHE_DIR, into ``scratch``.
 
-    An elevated run drops UV_CACHE_DIR (X21 P3), so its uv falls back to that default: below
-    XDG_CACHE_HOME on POSIX and LOCALAPPDATA on Windows (measured with uv 0.13), which must never be
-    the real user's ([93]).
+    Below XDG_CACHE_HOME on POSIX and LOCALAPPDATA on Windows (measured with uv 0.13), which must never
+    be the real user's ([93]). An elevated run no longer reads either ([X22 C1]: it names its account's
+    own cache, which a test answers with the same directory, see :func:`with_account_cache_home`), so
+    this keeps any other run that names no UV_CACHE_DIR inside the test.
 
     Example:
         >>> sorted(default_uv_cache_env(Path("/s")).values()) == [str(Path("/s") / "default-cache")]
@@ -531,6 +532,8 @@ def default_uv_cache_env(scratch: Path) -> dict[str, str]:
 
 def default_uv_cache_dir(scratch: Path) -> Path:
     """The cache directory uv uses under :func:`default_uv_cache_env` (``uv\\cache`` on Windows).
+
+    Also the one an elevated runner names under :func:`with_account_cache_home`.
 
     Example:
         >>> default_uv_cache_dir(Path("/s")).name in ("uv", "cache")
@@ -673,26 +676,59 @@ SH_DATA_HOME_LOOKUP = "$(pwshpy_account_data_home)"
 PS1_DATA_HOME_LOOKUP = "function Get-PwshPyAccountDataHome {"
 
 
+#: The account cache-home lookup each runner makes when elevated ([X22 C1]), as for the data home.
+SH_CACHE_HOME_LOOKUP = "$(pwshpy_account_cache_home)"
+PS1_CACHE_HOME_LOOKUP = "function Get-PwshPyAccountCacheHome {"
+
+
+def _answering(text: str, directory: Path, *, powershell: bool, lookups: tuple[str, str]) -> str:
+    """``text`` with one account lookup (``lookups`` = (sh, ps1) form) answering ``directory``."""
+    value = str(directory)
+    sh_lookup, ps1_lookup = lookups
+    if powershell:
+        assert text.count(ps1_lookup) == 1
+        answer = "'" + value.replace("'", "''") + "'"
+        renamed = ps1_lookup.replace(" {", "OnHost {")
+        return text.replace(ps1_lookup, f"{ps1_lookup}\n    return {answer}\n}}\n\n{renamed}")
+    assert text.count(sh_lookup) == 1
+    return text.replace(sh_lookup, "'" + value.replace("'", "'\\''") + "'")
+
+
+def with_account_cache_home(text: str, scratch: Path, *, powershell: bool) -> str:
+    """``text`` (a rendered runner) with its account cache-home lookup answering ``scratch/default-cache``.
+
+    An elevated run names ``<its account's cache home>/uv`` (``uv\\cache`` on Windows) as uv's cache
+    ([X22 C1]), and the real answer is the real user's cache, which a test must never write ([93]).
+    The directory is the one :func:`default_uv_cache_env` names, so :func:`default_uv_cache_dir` is the
+    cache an elevated test run uses. One counted substitution.
+
+    Example:
+        >>> with_account_cache_home("C=$(pwshpy_account_cache_home) || exit", Path("/s"), powershell=False)
+        "C='/s/default-cache' || exit"
+    """
+    return _answering(
+        text, scratch / "default-cache", powershell=powershell, lookups=(SH_CACHE_HOME_LOOKUP, PS1_CACHE_HOME_LOOKUP)
+    )
+
+
 def with_data_home(text: str, scratch: Path, *, powershell: bool) -> str:
     """``text`` (a rendered runner) with its account data-home lookup answering :func:`data_home`.
 
     A test cannot make the passwd database or the known-folder API name a directory of its own, and
     the real answer is the real user's data directory, which a test must not read uv's Pythons from
-    or write to. One counted substitution; the rest is the shipped runner. The ``.ps1`` lookup is
-    renamed rather than removed, so the runner keeps a definition of it.
+    or write to. The cache-home lookup is answered too (:func:`with_account_cache_home`). One counted
+    substitution each; the rest is the shipped runner. A ``.ps1`` lookup is renamed rather than
+    removed, so the runner keeps a definition of it.
 
     Example:
-        >>> with_data_home("X=$(pwshpy_account_data_home) || exit", Path("/s"), powershell=False)
-        "X='/s/data-home' || exit"
+        >>> text = "X=$(pwshpy_account_data_home) C=$(pwshpy_account_cache_home)"
+        >>> with_data_home(text, Path("/s"), powershell=False)
+        "X='/s/data-home' C='/s/default-cache'"
     """
-    home = str(data_home(scratch))
-    if powershell:
-        assert text.count(PS1_DATA_HOME_LOOKUP) == 1
-        answer = "'" + home.replace("'", "''") + "'"
-        stand_in = f"{PS1_DATA_HOME_LOOKUP}\n    return {answer}\n}}\n\nfunction Get-PwshPyAccountDataHomeOnHost {{"
-        return text.replace(PS1_DATA_HOME_LOOKUP, stand_in)
-    assert text.count(SH_DATA_HOME_LOOKUP) == 1
-    return text.replace(SH_DATA_HOME_LOOKUP, "'" + home.replace("'", "'\\''") + "'")
+    text = with_account_cache_home(text, scratch, powershell=powershell)
+    return _answering(
+        text, data_home(scratch), powershell=powershell, lookups=(SH_DATA_HOME_LOOKUP, PS1_DATA_HOME_LOOKUP)
+    )
 
 
 #: Where each runner judges uv's managed-Python directory before uv searches it, and what a test that
@@ -728,10 +764,12 @@ __all__ = [
     "LOCAL_WHEEL_DISTRIBUTION",
     "MANAGED_PYTHON_VARIABLES",
     "OTHER_UID",
+    "PS1_CACHE_HOME_LOOKUP",
     "PS1_DATA_HOME_LOOKUP",
     "PS1_PYTHON_DIR_CHECK",
     "RUNNING_AS_ROOT",
     "UV_SOURCE_VARIABLES",
+    "SH_CACHE_HOME_LOOKUP",
     "SH_DATA_HOME_LOOKUP",
     "SH_PYTHON_DIR_CHECK",
     "data_home",
@@ -746,6 +784,7 @@ __all__ = [
     "session_uv_cache",
     "plant_library_path",
     "planted_managed_python",
+    "with_account_cache_home",
     "with_data_home",
     "without_python_dir_check",
     "write_fake_sudo",

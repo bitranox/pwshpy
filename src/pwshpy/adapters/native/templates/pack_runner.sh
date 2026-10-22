@@ -561,15 +561,15 @@ pwshpy_drop_interpreter_variables() {
     done
 }
 
-# Prints the data directory of the account this run is (uv keeps its managed Pythons in
-# <it>/uv/python), from the home the passwd database records: as root $HOME and XDG_DATA_HOME are
-# whatever the caller or the service that started it set (sudo keeps HOME on some systems). getent
-# asks every name service (Linux), id -P is the BSD and macOS form, and /etc/passwd itself lists root
-# everywhere; all three come from the fixed helper PATH, and an entry counts only when its uid field
-# is the euid. The home is the second-to-last field in
-# both the 7-field passwd and the 10-field master.passwd form id -P prints. No absolute answer fails
-# the call: a guessed directory would be one the caller could create.
-pwshpy_account_data_home() {
+# Prints the home directory of the account this run is (no trailing slash; "" for /), from the
+# passwd database: as root $HOME, XDG_DATA_HOME and XDG_CACHE_HOME are whatever the caller or the
+# service that started it set (sudo keeps HOME on some systems, and sudo -E or env_keep the rest).
+# getent asks every name service (Linux), id -P is the BSD and macOS form, and /etc/passwd itself
+# lists root everywhere; all three come from the fixed helper PATH, and an entry counts only when its
+# uid field is the euid. The home is the second-to-last field in both the 7-field passwd and the
+# 10-field master.passwd form id -P prints. No absolute answer fails the call: a guessed directory
+# would be one the caller could create.
+pwshpy_account_home() {
     _ah_uid=$(pwshpy_euid)
     for _ah_source in getent id passwd; do
         _ah_entry=
@@ -584,12 +584,26 @@ pwshpy_account_data_home() {
         _ah_home=${_ah_home##*:}
         case $_ah_home in
             /*)
-                printf '%s' "${_ah_home%/}/.local/share"
+                printf '%s' "${_ah_home%/}"
                 return 0
                 ;;
         esac
     done
     return 1
+}
+
+# Prints the data directory of the account this run is (uv keeps its managed Pythons in
+# <it>/uv/python), below its passwd home (pwshpy_account_home).
+pwshpy_account_data_home() {
+    _adh_home=$(pwshpy_account_home) || return 1
+    printf '%s' "$_adh_home/.local/share"
+}
+
+# Prints the cache directory of the account this run is (uv's default cache is <it>/uv), below its
+# passwd home, for the reason the data directory is (pwshpy_account_home).
+pwshpy_account_cache_home() {
+    _ach_home=$(pwshpy_account_home) || return 1
+    printf '%s' "$_ach_home/.cache"
 }
 
 # What a root run that refused a managed-Python path tells the caller to do about it.
@@ -931,6 +945,8 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # Asked while the helpers still come from the fixed PATH.
     PWSHPY_DATA_HOME=$(pwshpy_account_data_home) \
         || pwshpy_die "cannot read the home directory of uid $(pwshpy_euid) from the passwd database" 70
+    PWSHPY_CACHE_HOME=$(pwshpy_account_cache_home) \
+        || pwshpy_die "cannot read the home directory of uid $(pwshpy_euid) from the passwd database" 70
     pwshpy_caller_cwd
     PWSHPY_CALLER_PREFIX=${PWSHPY_CALLER_CWD%/}/
     case $PWSHPY_CACHE in
@@ -948,6 +964,11 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # data home XDG_DATA_HOME names, which is the caller's to set too.
     UV_PYTHON_INSTALL_DIR=$PWSHPY_DATA_HOME/uv/python
     export UV_PYTHON_INSTALL_DIR
+    # The cache too, for the same reason: uv's default follows XDG_CACHE_HOME or HOME, which sudo -E or
+    # env_keep can hand over from the caller, and cached script environments and wheels run as root.
+    UV_CACHE_DIR=$PWSHPY_CACHE_HOME/uv
+    export UV_CACHE_DIR
+    printf '%s\n' "pwshpy: uv caches in $UV_CACHE_DIR: as root uv uses the running account's own cache directory" >&2
     # While the helpers still come from the fixed PATH: the checks of the directory and of the Python's
     # path run ls. The directory first: uv runs every Python it finds there.
     PWSHPY_PYTHON_DIR_WHY=$(pwshpy_python_dir_distrust "$UV_PYTHON_INSTALL_DIR")

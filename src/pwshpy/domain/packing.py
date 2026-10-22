@@ -393,7 +393,11 @@ def extract_script_metadata(source: str) -> str:
 
 #: A ``requires-python`` line inside a PEP 723 block, the key at the start of a line; the value is a
 #: basic or literal TOML string.
-_REQUIRES_PYTHON_LINE = re.compile(r"""requires-python\s*=\s*(?:"(?P<basic>[^"\\]*)"|'(?P<literal>[^']*)')\s*(?:#.*)?""")
+_REQUIRES_PYTHON_LINE = re.compile(
+    r"""requires-python\s*=\s*"""
+    r"""(?:"(?P<basic>[^"\\]*)"|'(?P<literal>[^']*)')"""
+    r"""\s*(?:#.*)?"""
+)
 
 #: The characters a PEP 440 version specifier set is written with. The value travels into both runners
 #: and onto uv's command line, so anything else is refused rather than quoted.
@@ -414,9 +418,9 @@ def extract_requires_python(metadata: str) -> str:
         PackError: When the key is there but is not such a string.
 
     Example:
-        >>> extract_requires_python('# /// script\n# requires-python = ">=3.11,<3.14"\n# ///\n')
+        >>> extract_requires_python('# /// script\\n# requires-python = ">=3.11,<3.14"\\n# ///\\n')
         '>=3.11,<3.14'
-        >>> extract_requires_python('# /// script\n# dependencies = []\n# ///\n')
+        >>> extract_requires_python('# /// script\\n# dependencies = []\\n# ///\\n')
         ''
         >>> extract_requires_python("")
         ''

@@ -8,12 +8,14 @@ Contents:
     * :data:`RUNNING_AS_ROOT` - whether this process is root (the runners then never elevate).
     * :func:`write_fake_sudo` - write a ``sudo`` double into a directory.
     * :func:`link_tools` - a ``PATH`` directory holding only the named tools.
+    * :data:`MANAGED_PYTHON_VARIABLES` - the variables that steer where uv's managed Pythons come from.
     * :data:`INTERPRETER_VARIABLES` - the variables an elevated run drops before uv picks a Python.
     * :func:`write_planted_python` - ``python`` / ``python3`` doubles that record being run.
     * :func:`write_planted_environment` - a virtual or conda environment whose python is such a double.
     * :func:`write_recording_uv` - a ``uv`` double that records its argv and the variables it got.
     * :func:`managed_python_dir` - the host's uv-managed Python directory, when one holds an install.
     * :func:`interpreter_probe_env` - a uv search confined to one test (fresh cache, no downloads).
+    * :func:`managed_python_env` - name uv's managed-Python directory so an elevated run finds it too.
 """
 
 from __future__ import annotations
@@ -86,10 +88,27 @@ def link_tools(bin_dir: Path, names: tuple[str, ...]) -> Path:
     return bin_dir
 
 
-#: The variables through which a caller picks the interpreter past ``--python-preference only-managed``
-#: (an explicit UV_PYTHON path, an active virtual or conda environment), or that uv refuses beside that
-#: flag; an elevated run drops each one. Mirrors the runners' own lists.
-INTERPRETER_VARIABLES = ("UV_PYTHON", "VIRTUAL_ENV", "CONDA_PREFIX", "UV_MANAGED_PYTHON", "UV_NO_MANAGED_PYTHON")
+#: The variables that decide where uv looks for, or fetches, the Pythons it manages: another install
+#: directory, another config file, another download mirror or download list ([59]).
+MANAGED_PYTHON_VARIABLES = (
+    "UV_PYTHON_INSTALL_DIR",
+    "UV_CONFIG_FILE",
+    "UV_PYTHON_INSTALL_MIRROR",
+    "UV_PYTHON_DOWNLOADS_JSON_URL",
+)
+
+#: Every variable an elevated run drops: those through which a caller picks the interpreter past
+#: ``--python-preference only-managed`` (an explicit UV_PYTHON path, an active virtual or conda
+#: environment), those uv refuses beside that flag, and :data:`MANAGED_PYTHON_VARIABLES`. Mirrors the
+#: runners' own lists, in their order.
+INTERPRETER_VARIABLES = (
+    "UV_PYTHON",
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
+    "UV_MANAGED_PYTHON",
+    "UV_NO_MANAGED_PYTHON",
+    *MANAGED_PYTHON_VARIABLES,
+)
 
 
 def _real_python() -> str:
@@ -221,7 +240,8 @@ def interpreter_probe_env(scratch: Path, *, managed: Path | None) -> dict[str, s
 
     A fresh cache because uv remembers what it learned about an interpreter and would not run a
     planted one again; ``managed`` is the managed-install directory to use (an empty one under
-    ``scratch`` when None).
+    ``scratch`` when None). It is named twice, because an elevated run drops UV_PYTHON_INSTALL_DIR
+    ([59]) and then takes uv's default, ``<data home>/uv/python``: see :func:`managed_python_env`.
 
     Example:
         >>> import tempfile
@@ -229,23 +249,51 @@ def interpreter_probe_env(scratch: Path, *, managed: Path | None) -> dict[str, s
         ...     interpreter_probe_env(Path(d), managed=None)["UV_PYTHON_DOWNLOADS"]
         'never'
     """
-    install = managed
-    if install is None:
-        install = scratch / "no-managed-python"
-        install.mkdir(parents=True, exist_ok=True)
     return {
         "UV_CACHE_DIR": str(scratch / "uv-cache"),
         "UV_PYTHON_DOWNLOADS": "never",
-        "UV_PYTHON_INSTALL_DIR": str(install),
+        **managed_python_env(scratch, managed=managed),
     }
+
+
+def managed_python_env(scratch: Path, *, managed: Path | None) -> dict[str, str]:
+    """Point uv at ``managed`` as its managed-Python directory, both with and without UV_PYTHON_INSTALL_DIR.
+
+    UV_PYTHON_INSTALL_DIR names it outright; an elevated run drops that variable, and uv then uses
+    ``<data home>/uv/python``, where the data home is XDG_DATA_HOME on POSIX and APPDATA on Windows
+    (measured with uv 0.13: XDG_DATA_HOME changes nothing on Windows). So the data home is set too:
+    to the directory two above ``managed`` when that already ends in ``uv/python`` (uv's own default
+    layout), else to a scratch directory whose ``uv/python`` links to it. With ``managed`` None both
+    name an empty directory, so uv finds no managed Python either way.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as d:
+        ...     env = managed_python_env(Path(d), managed=None)
+        ...     Path(env["UV_PYTHON_INSTALL_DIR"]).is_dir(), len(env)
+        (True, 2)
+    """
+    data_home = scratch / "data-home"
+    install = data_home / "uv" / "python"
+    if managed is None:
+        install.mkdir(parents=True, exist_ok=True)
+    elif managed.name == "python" and managed.parent.name == "uv":
+        data_home, install = managed.parent.parent, managed
+    elif not install.is_symlink():
+        install.parent.mkdir(parents=True, exist_ok=True)
+        install.symlink_to(managed, target_is_directory=True)
+    home_variable = "APPDATA" if sys.platform == "win32" else "XDG_DATA_HOME"
+    return {"UV_PYTHON_INSTALL_DIR": str(install), home_variable: str(data_home)}
 
 
 __all__ = [
     "INTERPRETER_VARIABLES",
+    "MANAGED_PYTHON_VARIABLES",
     "RUNNING_AS_ROOT",
     "interpreter_probe_env",
     "link_tools",
     "managed_python_dir",
+    "managed_python_env",
     "write_fake_sudo",
     "write_planted_environment",
     "write_planted_python",

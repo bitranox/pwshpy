@@ -30,6 +30,7 @@ from typing import cast
 import pytest
 from elevation_doubles import (
     INTERPRETER_VARIABLES,
+    MANAGED_PYTHON_VARIABLES,
     RUNNING_AS_ROOT,
     interpreter_probe_env,
     link_tools,
@@ -1959,6 +1960,36 @@ def test_the_uv_command_line_carries_only_managed_exactly_when_elevated(tmp_path
     else:
         assert argv[:2] == ["run", "--no-project"], argv
         assert "--python-preference" not in argv and "--project" not in argv, argv
+
+
+def _recorded_variables(record: Path) -> dict[str, str]:
+    """The ``env:NAME=value`` lines a recording uv double wrote, as a mapping."""
+    lines = record.read_text(encoding="utf-8").splitlines()
+    return dict(line[4:].split("=", 1) for line in lines if line.startswith("env:"))
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_run_drops_the_variables_that_steer_the_managed_python(tmp_path: Path, elevated: str) -> None:
+    """[59]: another install dir, config file, mirror or download list never reaches an elevated uv.
+
+    Elevated, each is dropped with a line naming it; the control shows each reaching uv unchanged.
+    """
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
+    steering = {name: str(tmp_path / f"steer-{name.lower()}") for name in MANAGED_PYTHON_VARIABLES}
+    result = _run_with_path(
+        tmp_path, runner, "-PwshPyUv", str(uv), path_first=[], env=steering, cwd=_clean_cwd(tmp_path)
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = _recorded_variables(record)
+    for name, value in steering.items():
+        dropped_line = _VARIABLE_DROPPED.format(name=name) in result.stderr
+        if elevated == "$true":
+            assert name not in recorded and dropped_line, (name, recorded, result.stderr)
+        else:
+            assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
 
 
 # --- [61] [62] values the generated .ps1 carries as literals ----------------------------------------

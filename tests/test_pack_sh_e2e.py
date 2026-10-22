@@ -19,9 +19,11 @@ from pathlib import Path
 
 import pytest
 from elevation_doubles import (
+    MANAGED_PYTHON_VARIABLES,
     RUNNING_AS_ROOT,
     link_tools,
     managed_python_dir,
+    managed_python_env,
     write_fake_sudo,
     write_planted_environment,
     write_planted_python,
@@ -531,11 +533,12 @@ def _trust_runner(tmp_path: Path, *, hide_system_uv: bool, as_root: bool = False
     return runner
 
 
-def _trust_env(tmp_path: Path, *path_first: Path) -> dict[str, str]:
+def _trust_env(tmp_path: Path, *path_first: Path, no_managed: bool = False) -> dict[str, str]:
     """An environment whose PATH is ``path_first`` plus the system dirs, with a barren HOME.
 
     Python downloads are off, so a root run (which takes only a uv-managed Python) never reaches
-    the network: it uses the host's managed Pythons, read only, or fails when there are none.
+    the network: it uses the host's managed Pythons, read only, or fails when there are none (or
+    when ``no_managed`` hides them).
     """
     barren = tmp_path / "home"
     barren.mkdir(exist_ok=True)
@@ -548,9 +551,8 @@ def _trust_env(tmp_path: Path, *path_first: Path) -> dict[str, str]:
         "PYTHONIOENCODING": "utf-8",
         "UV_PYTHON_DOWNLOADS": "never",
     }
-    managed = managed_python_dir()
-    if managed is not None:
-        environment["UV_PYTHON_INSTALL_DIR"] = str(managed)
+    managed = None if no_managed else managed_python_dir()
+    environment.update(managed_python_env(tmp_path, managed=managed))
     return environment
 
 
@@ -1107,10 +1109,7 @@ def test_as_root_a_python_planted_first_on_path_never_runs(
     runner, uv = _python_runner(tmp_path, as_root=as_root)
     marker = tmp_path / "planted-ran.txt"
     planted = write_planted_python(tmp_path / "planted-bin", marker)
-    environment = _trust_env(tmp_path, uv.parent, planted.parent)
-    empty = tmp_path / "no-managed-python"
-    empty.mkdir()
-    environment["UV_PYTHON_INSTALL_DIR"] = str(empty)
+    environment = _trust_env(tmp_path, uv.parent, planted.parent, no_managed=True)
     result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
     if planted_runs:
         assert result.returncode == 0, result.stdout + result.stderr
@@ -1201,6 +1200,34 @@ def test_the_uv_command_line_carries_only_managed_exactly_as_root(
     else:
         assert argv[:2] == ["run", "--no-project"], argv
         assert "--python-preference" not in argv and "--project" not in argv, argv
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_the_variables_that_steer_the_managed_python_are_dropped(
+    tmp_path: Path, shell_id: str, shell: list[str], as_root: bool
+) -> None:
+    """[59]: another install dir, config file, mirror or download list never reaches uv as root;
+    not root (the control) each reaches it unchanged."""
+    runner, _ = _python_runner(tmp_path, as_root=as_root)
+    leaf = tmp_path / "rec" / "bin"
+    leaf.mkdir(parents=True)
+    record = tmp_path / "argv.txt"
+    uv = write_recording_uv(leaf, record)
+    leaf.chmod(0o755)
+    (tmp_path / "rec").chmod(0o755)
+    steering = {name: str(tmp_path / f"steer-{name.lower()}") for name in MANAGED_PYTHON_VARIABLES}
+    environment = {**_trust_env(tmp_path), **steering}
+    result = _run_in(shell, runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = record.read_text(encoding="utf-8").splitlines()
+    recorded = dict(line[4:].split("=", 1) for line in lines if line.startswith("env:"))
+    for name, value in steering.items():
+        dropped_line = f"pwshpy: ignoring {name}" in result.stderr
+        if as_root:
+            assert name not in recorded and dropped_line, (name, recorded, result.stderr)
+        else:
+            assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
 
 
 # --- [62] names the .sh carries as literals ----------------------------------------------------------

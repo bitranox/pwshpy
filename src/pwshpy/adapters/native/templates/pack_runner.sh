@@ -496,12 +496,16 @@ pwshpy_find_uv() {
 
 # The variables through which a caller names the interpreter itself, past --python-preference
 # only-managed (measured with uv 0.13: an explicit UV_PYTHON path and an active virtual or conda
-# environment each run their own python), or that uv refuses beside that flag. A root run drops each
-# one that is set, naming it on stderr; identical to the .ps1 runner.
+# environment each run their own python), or that uv refuses beside that flag; then the ones that
+# move where uv's managed Pythons live or come from (another install directory, config file, download
+# mirror or download list), which would let the caller's environment supply the interpreter after all
+# (user decision on [59]). A root run drops each one that is set, naming it on stderr; identical to
+# the .ps1 runner.
 pwshpy_drop_interpreter_variables() {
-    for _iv in UV_PYTHON VIRTUAL_ENV CONDA_PREFIX UV_MANAGED_PYTHON UV_NO_MANAGED_PYTHON; do
+    for _iv in UV_PYTHON VIRTUAL_ENV CONDA_PREFIX UV_MANAGED_PYTHON UV_NO_MANAGED_PYTHON \
+        UV_PYTHON_INSTALL_DIR UV_CONFIG_FILE UV_PYTHON_INSTALL_MIRROR UV_PYTHON_DOWNLOADS_JSON_URL; do
         if eval "[ -n \"\${$_iv+set}\" ]"; then
-            printf '%s\n' "pwshpy: ignoring $_iv: as root only a uv-managed Python is run" >&2
+            printf '%s\n' "pwshpy: ignoring $_iv: as root no environment variable chooses the Python" >&2
             unset "$_iv"
         fi
     done

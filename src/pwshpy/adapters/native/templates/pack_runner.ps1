@@ -212,9 +212,14 @@ $PwshPyTrustedUids = @('0')
 $PwshPyFixedPath = '/usr/bin:/bin:/usr/sbin:/sbin:/run/current-system/sw/bin:/run/current-system/profile/bin'
 # The variables through which a caller names the interpreter itself, past --python-preference
 # only-managed (measured with uv 0.13: an explicit UV_PYTHON path and an active virtual or conda
-# environment each run their own python), or that uv refuses beside that flag. An elevated run drops
-# them; identical to the .sh runner.
-$PwshPyInterpreterVariables = @('UV_PYTHON', 'VIRTUAL_ENV', 'CONDA_PREFIX', 'UV_MANAGED_PYTHON', 'UV_NO_MANAGED_PYTHON')
+# environment each run their own python), or that uv refuses beside that flag; then the ones that
+# move where uv's managed Pythons live or come from (another install directory, config file, download
+# mirror or download list), which would let the caller's environment supply the interpreter after
+# all (user decision on [59]). An elevated run drops them all; identical to the .sh runner.
+$PwshPyInterpreterVariables = @(
+    'UV_PYTHON', 'VIRTUAL_ENV', 'CONDA_PREFIX', 'UV_MANAGED_PYTHON', 'UV_NO_MANAGED_PYTHON',
+    'UV_PYTHON_INSTALL_DIR', 'UV_CONFIG_FILE', 'UV_PYTHON_INSTALL_MIRROR', 'UV_PYTHON_DOWNLOADS_JSON_URL'
+)
 
 function Get-PwshPyRunningUserSid {
     # The account this process runs as, from its token: USERNAME can be set by anyone, and under
@@ -643,10 +648,13 @@ function Get-PwshPyManagedPythonOption {
 
 function Clear-PwshPyInterpreterVariable {
     # Drops each interpreter variable that is set, naming it on stderr, so a run that ignored it says why.
+    # Removed through the Env: drive, not [Environment]::SetEnvironmentVariable($name, $null): on pwsh
+    # 7.6 for Linux that leaves the variable in a child's environment as an empty string (measured),
+    # which uv does not read as unset for every variable.
     foreach ($name in $PwshPyInterpreterVariables) {
         if ($null -eq [Environment]::GetEnvironmentVariable($name)) { continue }
-        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run only runs a uv-managed Python"
-        [Environment]::SetEnvironmentVariable($name, $null)
+        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run lets no environment variable choose its Python"
+        Remove-Item -LiteralPath "Env:$name"
     }
 }
 

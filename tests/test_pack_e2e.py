@@ -1518,3 +1518,88 @@ def test_an_elevated_posix_pin_through_merged_usr_is_accepted(tmp_path: Path) ->
     assert _PIN_REFUSED not in result.stderr, result.stderr
     assert result.returncode == 2, result.stdout + result.stderr
     assert "can't open file" in result.stderr, result.stderr
+
+
+# --- round 3: the POSIX euid probe fails closed; PATH entries are literal --------------------------
+
+#: The .ps1's fixed id locations (one counted substitution simulates a system with id at none).
+_FIXED_IDS = "@('/usr/bin/id', '/bin/id', '/run/current-system/sw/bin/id', '/run/current-system/profile/bin/id')"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("probe", ["planted-id-on-path", "id-answers-garbage"])
+def test_an_unanswered_posix_euid_probe_applies_the_root_rule(tmp_path: Path, probe: str) -> None:
+    """With no fixed-path id answering a decimal uid the .ps1 treats the run as root, never asks PATH.
+
+    A planted id answering 1000 would switch the rule off; treated as root, the planted uv first on
+    PATH is skipped and the planted id never runs.
+    """
+    planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
+    marker = tmp_path / "ran.txt"
+    _marker_double(planted.parent, "id", marker, "echo 1000")
+    fixed = tmp_path / "fixed"
+    fixed.mkdir()
+    if probe == "id-answers-garbage":
+        _marker_double(fixed, "id0", tmp_path / "garbage.txt", "echo not-a-uid")
+    entry = tmp_path / "which_uv.py"
+    entry.write_text(_ENTRY_REPORTING_UV)
+    runner = Path(pack_script(entry).output_path)
+    text = runner.read_text(encoding="utf-8")
+    assert text.count(_FIXED_IDS) == 1
+    replacement = "@(" + ", ".join(f"'{fixed / f'id{n}'}'" for n in range(4)) + ")"
+    runner.write_text(text.replace(_FIXED_IDS, replacement), encoding="utf-8")
+    result = _run_with_path(tmp_path, runner, path_first=[planted.parent])
+    assert not marker.exists(), "the runner asked an id on PATH"
+    assert not _same(_reported_uv(result), planted), result.stdout + result.stderr
+    assert "is writable by every account" in _skip_line(result, planted), result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_an_elevated_posix_run_takes_path_entries_literally(tmp_path: Path) -> None:
+    """A PATH entry holding '[', '*' or '?' names that directory, not a wildcard pattern."""
+    base = tmp_path / "br[a]ck*ts?"
+    base.mkdir()
+    base.chmod(0o755)  # not the umask's mode: a group-writable ancestor is refused, as it should be
+    uv = _own_posix_tree(base, ancestor_mode=0o755)
+    # A pattern-looking entry that names no directory, beside one the pattern would match.
+    decoy = tmp_path / "decoyX"
+    decoy.mkdir()
+    _uv_stand_in(decoy)
+    pattern = tmp_path / "decoy?"
+    runner = _trust_runner(tmp_path, elevated="$true", trust_my_uid=True)
+    result = _run_with_path(tmp_path, runner, path_first=[pattern, uv.parent])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _same(_reported_uv(result), uv), result.stdout + result.stderr
+    # decoy? does not exist, so it is no candidate at all - not one read as matching decoyX.
+    assert str(pattern) not in result.stderr, result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_an_elevated_posix_listing_is_never_globbed(tmp_path: Path) -> None:
+    """pwsh on POSIX globs an unquoted argument to a native command, even a variable's value.
+
+    An ancestor literally named ``d?r`` (world-writable) beside a locked ``d0r`` that the pattern
+    also matches and that sorts first: listing the pattern would judge ``d0r`` and accept the uv.
+    """
+    sibling = tmp_path / "d0r"
+    sibling.mkdir()
+    sibling.chmod(0o755)
+    literal = tmp_path / "d?r"
+    literal.mkdir()
+    leaf = literal / "bin"
+    leaf.mkdir()
+    uv = _uv_stand_in(leaf)
+    leaf.chmod(0o755)
+    literal.chmod(0o777)
+    runner = _trust_runner(tmp_path, elevated="$true", trust_my_uid=True)
+    result = _run_with_path(tmp_path, runner, path_first=[leaf])
+    assert f"its ancestor {literal} is writable by every account and not sticky" in _skip_line(result, uv), (
+        result.stderr
+    )
+    assert not _same(_reported_uv(result), uv), result.stdout + result.stderr

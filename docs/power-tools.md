@@ -310,7 +310,10 @@ Details worth knowing:
   judged and the directories it leads through judged like the rest. As root on POSIX the runner
   also runs its own helpers (`ls`, `id`, `tar`, `base64`, `sha256sum`, the installer's `curl` and
   `sh`, ...) only from `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, never from
-  the `PATH` it was given, and asks the euid of an `id` at a fixed path; the caller's `PATH` is
+  the `PATH` it was given, and asks the euid of an `id` at a fixed path (`/usr/bin`, `/bin`, the
+  NixOS and Guix system profiles), never one on `PATH`; when none answers with a uid, the run is
+  treated as root (it fails closed: such a system's non-root caller loses only the per-user `uv`
+  lookup, a root run never loses the rule). The caller's `PATH` is
   still searched for `uv` (each hit judged) and handed back to the packed script. A refused `uv`
   is skipped with a `pwshpy: skipping uv at <path>: <reason>` line on stderr and the next one is
   tried; an elevated `.ps1` child relays those lines to the parent. A `-PwshPyUv` / `--pwshpy-uv`

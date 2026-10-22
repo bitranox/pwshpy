@@ -885,3 +885,48 @@ def test_as_root_a_pin_through_merged_usr_is_accepted(tmp_path: Path, shell_id: 
     assert _PIN_REFUSED not in result.stderr, result.stderr
     assert result.returncode == 2, result.stdout + result.stderr
     assert "can't open file" in result.stderr, result.stderr
+
+
+# --- the euid probe fails closed (fix round 3) ----------------------------------------------------
+
+#: The runner's fixed id locations, and what a test puts in their place to simulate a system with
+#: id at none of them (one counted substitution).
+_FIXED_IDS = "/usr/bin/id /bin/id /run/current-system/sw/bin/id /run/current-system/profile/bin/id"
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize("probe", ["planted-id-on-path", "no-id", "id-answers-garbage"])
+def test_an_unanswered_euid_probe_applies_the_root_rule(
+    tmp_path: Path, shell_id: str, shell: list[str], probe: str
+) -> None:
+    """With no id at a fixed path that answers a decimal uid, the run is treated as root.
+
+    Never a PATH lookup: a planted id answering 1000 would turn a root run into "not root" and
+    switch the trust rule (and the fixed helper PATH) off. Treated as root, the planted uv first on
+    PATH is skipped - the strict rule applies - and the planted id never runs.
+    """
+    planted = _planted_uv(tmp_path)
+    marker = tmp_path / "ran.txt"
+    _marker_tool(planted.parent, "id", marker, body="echo 1000")
+    fixed = tmp_path / "fixed"
+    fixed.mkdir()
+    replacement = " ".join(str(fixed / f"id{n}") for n in range(4))
+    if probe == "id-answers-garbage":
+        _marker_tool(fixed, "id0", tmp_path / "garbage.txt", body="echo not-a-uid")
+    runner = _trust_runner(tmp_path, hide_system_uv=True)
+    text = runner.read_text(encoding="utf-8")
+    assert text.count(_FIXED_IDS) == 1
+    runner.write_text(text.replace(_FIXED_IDS, replacement), encoding="utf-8", newline="\n")
+    environment = _trust_env(tmp_path, planted.parent)
+    if probe == "no-id":
+        # No id anywhere the runner could reach: the planted one goes, and PATH holds only the
+        # planted directory plus the helpers the runner needs before it resets PATH.
+        (planted.parent / "id").unlink()
+        helpers = link_tools(tmp_path / "no-id-bin", ("base64", "sha256sum", "cut", "tr", "sed", "cat"))
+        environment["PATH"] = os.pathsep.join([str(planted.parent), str(helpers)])
+    # The shell by full path: the test's own PATH may no longer hold it.
+    shell = [shutil.which(shell[0]) or shell[0], *shell[1:]]
+    result = _run(shell, runner, "--pwshpy-no-install-uv", env=environment)
+    assert not marker.exists(), "the runner asked an id on PATH"
+    assert _reported_uv(result) is None, result.stdout + result.stderr
+    assert f"{_UV_SKIPPED} {planted}: its directory {planted.parent} is writable by every account" in result.stderr

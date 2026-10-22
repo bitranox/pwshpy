@@ -268,8 +268,10 @@ function Get-PwshPyListing {
     # resolves ls from its fixed PATH, so the listing cannot come from a planted ls.
     $ls = Get-Command ls -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $ls) { return $null }
+    # Quoted, always: pwsh on POSIX globs an unquoted argument to a native command, a variable's
+    # value included, so 'd?r' would list whichever d0r sorts first instead of d?r itself.
     try {
-        $listing = & $ls.Source -ldn $Path 2>$null
+        $listing = & $ls.Source -ldn "$Path" 2>$null
     } catch {
         $listing = $null
     }
@@ -280,7 +282,7 @@ function Get-PwshPyListing {
     if ($fields[0].Length -gt 10 -and $fields[0][10] -eq [char]'@') {
         # macOS puts '@' (extended attributes) where '+' would mark an ACL, hiding it, so ask for the
         # ACL itself: ls -e prints one line per entry below the file's own line.
-        $acl = @(& $ls.Source -lde $Path 2>$null).Count -gt 1
+        $acl = @(& $ls.Source -lde "$Path" 2>$null).Count -gt 1
     }
     return @{ Mode = $fields[0]; Uid = $fields[2]; Gid = $fields[3]; Acl = $acl }
 }
@@ -336,6 +338,18 @@ function Get-PwshPyLinkDistrust {
     if (-not $entry) { return "the symlink $Path cannot be inspected" }
     if ($PwshPyTrustedUids -notcontains $entry.Uid) { return "the symlink $Path is owned by uid $($entry.Uid), not root" }
     return ''
+}
+
+function Test-PwshPyExecutable {
+    param([string] $Path)
+
+    # POSIX: whether any execute bit is set on $Path (a symlink lists as executable; its target is
+    # judged by the walk). From the same ls -ldn listing the trust rule reads.
+    $entry = Get-PwshPyListing -Path $Path
+    if (-not $entry -or $entry.Mode.Length -lt 10) { return $false }
+    # Case-sensitive: an upper-case S or T marks the special bit WITHOUT execute.
+    $mode = $entry.Mode
+    return (([string]$mode[3] -cin @('x', 's')) -or ([string]$mode[6] -cin @('x', 's')) -or ([string]$mode[9] -cin @('x', 't')))
 }
 
 function Split-PwshPyPath {
@@ -463,7 +477,9 @@ function Get-PwshPyUvPath {
         foreach ($directory in ($PwshPyCallerPath -split [IO.Path]::PathSeparator)) {
             # An empty entry means the working directory; spelled 'uv' it is refused as relative.
             $candidate = if ($directory) { Join-Path $directory 'uv' } else { 'uv' }
-            if (-not (Get-Command -Name $candidate -CommandType Application -ErrorAction SilentlyContinue)) { continue }
+            # Exact lookups only: Get-Command would read '[', '*' and '?' in a PATH entry as wildcards.
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+            if (-not (Test-PwshPyExecutable -Path $candidate)) { continue }
             if (Test-PwshPyUvAcceptable -Candidate $candidate) { return $candidate }
         }
         $found = @()
@@ -519,13 +535,22 @@ function Test-PwshPyElevated {
 }
 
 function Get-PwshPyEuid {
-    # POSIX: the effective uid from an id at a fixed path. Not through PATH: a planted id first on
-    # it could answer "not root" for a root run and switch the uv trust rule off. Only a system with
-    # id in none of these (none known) falls back to the PATH lookup.
-    foreach ($id in @('/usr/bin/id', '/bin/id', '/run/current-system/sw/bin/id')) {
-        if (Test-Path -LiteralPath $id -PathType Leaf) { return ([string](& $id -u)).Trim() }
+    # POSIX: the effective uid from an id at a fixed path (/usr/bin, /bin, NixOS's and Guix's system
+    # profiles), never through PATH: a planted id first on it could answer "not root" for a root run
+    # and switch the uv trust rule and the fixed helper PATH off. When none of them answers with a
+    # decimal uid the run is treated as root - it fails closed. That costs a non-root caller on such
+    # a system the per-user uv lookup (the root rule refuses a uv its own account owns), never
+    # safety; dying instead would cost the same caller the whole run. Identical to the .sh runner.
+    foreach ($id in @('/usr/bin/id', '/bin/id', '/run/current-system/sw/bin/id', '/run/current-system/profile/bin/id')) {
+        if (-not (Test-Path -LiteralPath $id -PathType Leaf)) { continue }
+        try {
+            $uid = ([string](& $id -u 2>$null)).Trim()
+        } catch {
+            continue
+        }
+        if ($uid -match '^[0-9]+$') { return $uid }
     }
-    return ([string](& id -u)).Trim()
+    return '0'
 }
 
 function Get-PwshPyHostPath {
@@ -798,9 +823,9 @@ $PwshPyPrepare = {
     # --- uv ---------------------------------------------------------------------------------
 
     if ($PwshPyOnWindows) {
-        $PwshPyUvHint = 'An elevated run only runs a uv no account but this one, SYSTEM, Administrators, LOCAL SERVICE, NETWORK SERVICE and TrustedInstaller can modify, in its own directory or any directory above: install one in this account''s profile or where only administrators can write (for example under C:\Program Files), or pass -PwshPyUv <path>.'
+        $PwshPyUvHint = 'An elevated run only runs a uv no account but this one, SYSTEM, Administrators, LOCAL SERVICE, NETWORK SERVICE and TrustedInstaller can modify, in its own directory or any directory above: install uv in this account''s own profile (the installer''s default) or where only administrators can write, or remove the other account''s access from the directory named above; a -PwshPyUv pin must pass the same check.'
     } else {
-        $PwshPyUvHint = 'As root only a uv no other account can modify is run: install one where only root can write (root owns it and every directory above it, none writable by a group or other accounts) or pass -PwshPyUv <path>.'
+        $PwshPyUvHint = 'As root only a uv no other account can modify is run: install uv where only root can write (root''s own ~/.local/bin, the installer''s default), or take group and other write off the directory named above (chmod go-w); a -PwshPyUv pin must pass the same check.'
     }
 
     if ($PwshPyUvPin) {

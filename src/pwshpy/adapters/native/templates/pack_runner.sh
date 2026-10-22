@@ -36,17 +36,27 @@ set -eu
 # As root every helper this runner calls (ls, readlink, tar, base64, sha256sum, rm, mkdir, cut,
 # openssl, ...) runs with full rights, so none may come from the PATH the caller handed over: a
 # directory on it that another account can write would decide what they are, before the uv check
-# below could say anything. The euid is asked of an id at a fixed path for the same reason; only a
-# system with id in none of them (none known) falls back to the PATH lookup. The caller's PATH is
-# kept: the uv search still walks it, judging each candidate, and the packed script gets it back.
+# below could say anything. The caller's PATH is kept: the uv search still walks it, judging each
+# candidate, and the packed script gets it back.
+#
+# The euid is asked of an id at a fixed path for the same reason (/usr/bin, /bin, NixOS's and Guix's
+# system profiles), and never of one on PATH: a planted id answering "not root" would switch all of
+# this off. When none of them answers with a decimal uid, the run is treated as root - it fails
+# closed. That costs a non-root caller on such a system the per-user uv lookup (the root rule
+# refuses a uv its own account owns), never safety; dying instead would cost the same caller the
+# whole run.
 pwshpy_euid() {
-    for _e in /usr/bin/id /bin/id /run/current-system/sw/bin/id; do
+    for _e in /usr/bin/id /bin/id /run/current-system/sw/bin/id /run/current-system/profile/bin/id; do
         if [ -x "$_e" ]; then
-            "$_e" -u
+            _uid=$("$_e" -u 2>/dev/null) || continue
+            case $_uid in
+                '' | *[!0-9]*) continue ;;
+            esac
+            printf '%s' "$_uid"
             return 0
         fi
     done
-    id -u
+    printf '0'
 }
 
 PWSHPY_CALLER_PATH=${PATH:-}
@@ -614,7 +624,7 @@ fi
 # What to say when no usable uv is left: as root, also how to provide one the trust rule accepts.
 PWSHPY_UV_HINT="Install it from https://astral.sh/uv"
 if [ "$PWSHPY_AS_ROOT" = "1" ]; then
-    PWSHPY_UV_HINT="As root only a uv no other account can modify is run: install one where only root can write (root owns it and every directory above it, none writable by a group or other accounts) or pass --pwshpy-uv PATH"
+    PWSHPY_UV_HINT="As root only a uv no other account can modify is run: install uv where only root can write (root's own ~/.local/bin, the installer's default), or take group and other write off the directory named above (chmod go-w); a --pwshpy-uv pin must pass the same check"
 fi
 
 if [ -n "$PWSHPY_UV_PIN" ]; then

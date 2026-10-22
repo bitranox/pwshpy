@@ -50,10 +50,12 @@ def owned_by_another_account(path: Path) -> int:
     Example:
         >>> import tempfile
         >>> with tempfile.TemporaryDirectory() as d:
-        ...     owned_by_another_account(Path(d)) != 0
+        ...     owned = owned_by_another_account(Path(d))
+        >>> RUNNING_AS_ROOT is False or owned == OTHER_UID
         True
     """
-    if RUNNING_AS_ROOT:
+    # sys.platform first: os.lchown does not exist on Windows, where nothing runs as root anyway.
+    if sys.platform != "win32" and RUNNING_AS_ROOT:
         os.lchown(path, OTHER_UID, OTHER_UID)
     return path.lstat().st_uid
 

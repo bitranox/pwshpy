@@ -80,9 +80,23 @@ def _identity(value: object) -> str | None:
 class TaskPrincipal(BaseModel):
     """Who a scheduled task runs as.
 
-    ``user_id`` None means the interactive caller.  A service SID
-    (SYSTEM, LOCAL SERVICE, NETWORK SERVICE) logs on as a service account; any other SID
-    defaults to S4U (runs whether or not the user is logged on, no stored password).
+    ``user_id`` None means the interactive caller on Windows and root on Linux.  On Windows a
+    service SID (SYSTEM, LOCAL SERVICE, NETWORK SERVICE) logs on as a service account; any other
+    SID defaults to S4U (runs whether or not the user is logged on, no stored password).
+
+    Attributes:
+        user_id: Who runs the task, or None (see above).  On Windows: a SID string
+            (``S-1-...``) or a :class:`~pwshpy.domain.enums.WellKnownSid` member, stored as its
+            SID string; a decimal uid is refused.  On Linux: a decimal uid string (``"0"`` is
+            root); the SYSTEM SID ``S-1-5-18`` is also accepted and means root, any other SID
+            is refused.  Account names are refused on both systems.
+        logon_type: Windows-only Task Scheduler logon type
+            (:class:`~pwshpy.domain.enums.TaskLogonType`).  None derives it from ``user_id``.
+            Linux refuses any value other than None.
+        run_level: Privilege the task runs with
+            (:class:`~pwshpy.domain.enums.TaskRunLevel`, default ``LIMITED``).  On Windows it
+            sets the token's run level.  On Linux ``HIGHEST`` is accepted only where the task
+            runs as root (None, SYSTEM or uid ``0``); for any other uid it is refused.
 
     Example:
         >>> TaskPrincipal.system().user_id

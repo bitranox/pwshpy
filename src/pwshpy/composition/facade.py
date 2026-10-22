@@ -180,6 +180,23 @@ _DEFAULT_WU_CRITERIA = "IsInstalled=0 and Type='Software'"
 _MAX_WAIT_SECONDS = 2147483
 
 
+def _check_wait_limit(timeout: float) -> None:
+    """Refuse a timeout outside ``(0, _MAX_WAIT_SECONDS]``; NaN fails both comparisons, so it is refused too.
+
+    Raises:
+        ValueError: ``timeout`` is not a positive number of seconds within the waitable range.
+
+    Example:
+        >>> _check_wait_limit(1.5)
+        >>> _check_wait_limit(-1)
+        Traceback (most recent call last):
+        ...
+        ValueError: timeout must be in (0, 2147483] seconds, got -1
+    """
+    if not 0 < timeout <= _MAX_WAIT_SECONDS:
+        raise ValueError(f"timeout must be in (0, {_MAX_WAIT_SECONDS}] seconds, got {timeout!r}")
+
+
 def _only_image(images: Iterable[WindowsImage], index: int, path: Path) -> Iterator[WindowsImage]:
     """Yield the image numbered ``index``, then stop; raise when the file holds none.
 
@@ -1054,8 +1071,8 @@ class Ps:
         Args:
             argv: The program and its arguments as a list, passed verbatim, never through a shell.
             cwd: The working directory for the program; None keeps the caller's.
-            timeout: Seconds before the program (with ``wait_tree`` its whole tree) is killed;
-                None waits without a limit.
+            timeout: Seconds before the program (with ``wait_tree`` its whole tree) is killed, in
+                ``(0, 2147483]``; None waits without a limit.
             env: The program's whole environment (replaces the caller's, never merged);
                 None inherits the caller's.
             input_text: Text written to the program's stdin; None gives it no input.
@@ -1070,12 +1087,16 @@ class Ps:
                 whole process tree) was killed and the output it wrote is not returned. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
             NativeCallError: The executable was not found or could not be started.
+            ValueError: ``timeout`` is outside ``(0, 2147483]`` (raised at the call, before the
+                program starts).
 
         Example:
             >>> import sys
             >>> build_ps().exec([sys.executable, "-c", "print(1)"]).stdout.strip()
             '1'
         """
+        if timeout is not None:
+            _check_wait_limit(timeout)
         return self._process_runner(argv, cwd=cwd, timeout=timeout, env=env, input_text=input_text, wait_tree=wait_tree)
 
     def pack_script(
@@ -1433,9 +1454,7 @@ class Ps:
             >>> isinstance(build_ps().get_windows_update(), Pipeline)
             True
         """
-        # NaN fails both comparisons, so it is refused here too.
-        if not 0 < timeout <= _MAX_WAIT_SECONDS:
-            raise ValueError(f"timeout must be in (0, {_MAX_WAIT_SECONDS}] seconds, got {timeout!r}")
+        _check_wait_limit(timeout)
         return Pipeline(self._windows_update_source(criteria, timeout=timeout))
 
     def get_computer_info(self) -> ComputerInfo:

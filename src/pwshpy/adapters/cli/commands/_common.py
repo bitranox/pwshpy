@@ -3,6 +3,7 @@
 Contents:
     * :func:`resolve_format` — map the mutually-exclusive output flags to a format.
     * :func:`parse_pairs` — parse repeatable ``KEY=VALUE`` / ``Name: value`` options.
+    * :data:`TIMEOUT_RANGE` — the ``--timeout`` range the facade accepts.
 """
 
 from __future__ import annotations
@@ -12,6 +13,10 @@ from collections.abc import Iterable
 import rich_click as click
 
 from ..output import RecordFormat
+
+#: Mirrors the facade's accepted timeout range, ``(0, 2147483]`` seconds, so a bad value is a usage
+#: error (exit 2) before any child starts; NaN slips past a range check, and the facade refuses it.
+TIMEOUT_RANGE = click.FloatRange(min=0, min_open=True, max=2147483)
 
 
 def parse_pairs(pairs: Iterable[str], separator: str, label: str, *, strip: bool = False) -> dict[str, str]:

@@ -1066,3 +1066,12 @@ def test_get_windows_update_refuses_a_timeout_outside_the_waitable_range(injecte
     with pytest.raises(ValueError, match="timeout"):
         injected.facade.get_windows_update(timeout=bad)
     assert injected.windows_updates.calls == []
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("bad", [-1.0, 0.0, float("nan"), 1e12])
+def test_exec_refuses_a_timeout_outside_the_waitable_range(injected: _InjectedPs, bad: float) -> None:
+    """[D3]: exec takes (0, 2147483] like get_windows_update and refuses anything else at the call,
+    before a child starts (it was: -1 a timeout at once, NaN an internal error, 1e12 an OverflowError)."""
+    with pytest.raises(ValueError, match="timeout must be in"):
+        injected.facade.exec(["prog"], timeout=bad)

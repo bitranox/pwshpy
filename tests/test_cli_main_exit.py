@@ -173,3 +173,14 @@ def test_a_timed_out_resolve_dns_name_exits_110_through_main(
     argv = ["resolve_dns_name", "--timeout", "0.05", "slow.example."]
     assert main(argv, services_factory=_services({})) == 110
     assert "OperationTimeoutError" in capsys.readouterr().err
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("value", "code"), [("-1", 2), ("0", 2), ("1e12", 2), ("nan", 22)])
+def test_an_exec_timeout_outside_the_accepted_range_is_refused(value: str, code: int) -> None:
+    """[D3]: exec --timeout takes (0, 2147483] like get_windows_update: out of range is a usage error
+    (2) before any child starts, NaN (which passes a range check) the facade's ValueError (22). It
+    was: -1 a timeout at once (110), NaN an internal message (22), 1e12 a raw OverflowError."""
+    argv = ["exec", "--timeout", value, "--", sys.executable, "-c", "pass"]
+    assert main(argv, services_factory=_services({})) == code
+

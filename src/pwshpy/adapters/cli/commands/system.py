@@ -21,7 +21,7 @@ from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..output import emit
 from ..typed_click import argument, option
-from ._common import resolve_format
+from ._common import TIMEOUT_RANGE, resolve_format
 
 
 @click.command("get_hotfix", context_settings=CLICK_CONTEXT_SETTINGS)
@@ -41,11 +41,6 @@ def cli_get_hotfix(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
     emit(ps.get_hotfix(), resolve_format(as_json, as_jsonl))
 
 
-# Mirrors the facade's accepted range, so a bad value is a usage error (exit 2) before any
-# child starts; NaN slips past a range check, and the facade refuses it.
-_TIMEOUT_RANGE = click.FloatRange(min=0, min_open=True, max=2147483)
-
-
 @click.command("get_windows_update", context_settings=CLICK_CONTEXT_SETTINGS)
 @option(
     "--criteria",
@@ -54,7 +49,7 @@ _TIMEOUT_RANGE = click.FloatRange(min=0, min_open=True, max=2147483)
 )
 @option(
     "--timeout",
-    type=_TIMEOUT_RANGE,
+    type=TIMEOUT_RANGE,
     default=None,
     help="Seconds before the search is abandoned and exits 110 (default 300).",
 )

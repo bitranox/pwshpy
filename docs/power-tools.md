@@ -77,15 +77,17 @@ r.stdout, r.stderr  # captured text
 r.check()  # raises NativeCallError on a nonzero exit (opt-in "stop on error")
 ```
 
-A run that outlives `timeout=` is killed and raises `OperationTimeoutError` (its `.timeout` holds
-the limit), a subclass of the `NativeCallError` a missing or unstartable program raises: catch
+`timeout=` takes seconds in `(0, 2147483]` (the longest wait every OS can honour); anything else,
+NaN included, raises `ValueError` before the program starts. A run that outlives `timeout=` is
+killed and raises `OperationTimeoutError` (its `.timeout` holds the limit), a subclass of the `NativeCallError` a missing or unstartable program raises: catch
 `OperationTimeoutError` first to tell the two apart. The output the program wrote before it was
 killed is not returned; the error carries the message and `.timeout` only. A program that runs and
 exits nonzero is no error: the result holds its `exit_code` until you call `.check()`.
 
 CLI: `pwshpy exec -- git status` (put the program after `--` so its flags are not parsed by pwshpy).
 A run that hits `--timeout` exits 110 (ETIMEDOUT) with an `OperationTimeoutError` line on stderr; a
-program that cannot start exits 1.
+program that cannot start exits 1. A `--timeout` outside `(0, 2147483]` is a usage error (exit 2), and
+`nan` exits 22.
 
 ### Waiting for the whole process tree (`wait_tree=True`, like `Start-Process -Wait`)
 

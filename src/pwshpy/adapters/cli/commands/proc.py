@@ -18,13 +18,18 @@ from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..output import emit
 from ..typed_click import argument, option
-from ._common import resolve_format
+from ._common import TIMEOUT_RANGE, resolve_format
 
 
 @click.command("exec", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("argv", nargs=-1, required=True)
 @option("--cwd", default=None, help="Working directory to run in.")
-@option("--timeout", type=float, default=None, help="Seconds before the process (or its tree) is killed.")
+@option(
+    "--timeout",
+    type=TIMEOUT_RANGE,
+    default=None,
+    help="Seconds before the process (or its tree) is killed, in (0, 2147483].",
+)
 @option(
     "--wait-tree",
     is_flag=True,

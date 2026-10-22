@@ -14,8 +14,8 @@ entity declarations are the expansion-attack vector.
 
 Scope: a split part (``.swm``) carries the full XML for every image, so each part lists
 the images like a ``.wim`` does; the part number in header bytes 40-43 is not needed for
-that and is not read. A compressed XML resource (resource flag 0x04, as in an ESD) needs
-an LZMS decoder and is refused rather than guessed at.
+that and is not read. A compressed XML resource (resource flag 0x04) would need a
+decompressor and is refused rather than guessed at.
 
 Contents:
     * :func:`iter_wim_images` - yield one :class:`WindowsImage` per ``<IMAGE>``.
@@ -90,7 +90,9 @@ def _xml_location(header: bytes, path: Path) -> tuple[int, int]:
     if header[:8] != _MAGIC:
         raise NativeCallError(f"{path}: not a WIM file (bad header magic)")
     if header[_RESHDR_FLAGS_AT] & _RESHDR_COMPRESSED:
-        raise NativeCallError(f"{path}: compressed XML resource (LZMS/ESD) is not supported; use DISM on Windows")
+        raise NativeCallError(
+            f"{path}: compressed XML resource (resource flag 0x04) is not supported; use DISM on Windows"
+        )
     size = int.from_bytes(header[_RESHDR_SIZE_SLICE], "little")
     (offset,) = struct.unpack_from("<Q", header, _RESHDR_OFFSET_AT)
     if size == 0:
@@ -229,7 +231,7 @@ def iter_wim_images(path: Path) -> Iterator[WindowsImage]:
 
     Raises:
         NativeCallError: The file is unreadable, not a WIM, truncated, holds a compressed
-            (ESD) or oversize XML resource, a DTD, malformed XML, or an image without a
+            (resource flag 0x04) or oversize XML resource, a DTD, malformed XML, or an image without a
             numeric ``INDEX``.
 
     Example:

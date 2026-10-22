@@ -246,7 +246,7 @@ class HotfixSource(Protocol):
 
 
 class WindowsImageSource(Protocol):
-    """Yield the images of a WIM/ESD file as typed :class:`WindowsImage` records (native, portable)."""
+    """Yield the images of a WIM file or ``.swm`` part as :class:`WindowsImage` records (native, portable)."""
 
     def __call__(self, path: Path) -> Iterator[WindowsImage]: ...
 

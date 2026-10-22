@@ -2,7 +2,9 @@
 
 One place converts foreign native representations into the domain object model,
 so native adapters stay thin and the mapping is tested once.  .NET has its own
-PSObject marshaling; both feed the same records.
+PSObject marshaling; both feed the same records.  The conversions are pure; the one
+exception is :func:`skip_or_raise`, the shared skip-or-raise rule for an item a
+listing cannot read, which logs a WARNING in its lenient mode.
 
 Contents:
     * :func:`epoch_to_datetime` - POSIX timestamp -> aware UTC ``datetime``.

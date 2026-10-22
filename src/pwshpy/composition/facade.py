@@ -319,7 +319,15 @@ class Ps:
         self._elevator = elevator
 
     def get_process(self) -> Pipeline[ProcessInfo]:
-        """Return a lazy pipeline over the running processes (native).
+        """Return a lazy pipeline over the running processes (native, portable; like Get-Process).
+
+        psutil on every OS. A name is the one psutil reports, which differs from
+        ``Get-Process`` for two Windows pseudo-processes: ``MemCompression`` (``Get-Process``:
+        ``Memory Compression``) and PID 0, ``System Idle Process`` (``Get-Process``: ``Idle``).
+        Match a process by ``pid`` when it matters.
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`ProcessInfo` records.
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
@@ -511,8 +519,17 @@ class Ps:
 
         Idempotent - starting an already-running service is a no-op.
 
+        Args:
+            name: The service name (on Linux the unit name, ``"sshd.service"``).
+            timeout: Seconds to wait for the service to settle after the start.
+
+        Returns:
+            The service's :class:`ServiceInfo` once it settled (``Running``; on Linux a
+            ``Type=oneshot`` unit without ``RemainAfterExit`` reads ``Stopped`` once its job ran).
+
         Raises:
-            OperationTimeoutError: The service was still not Running after ``timeout`` seconds.
+            OperationTimeoutError: The service was still not Running after ``timeout`` seconds -
+                the start WAS issued; ``.timeout`` holds the limit (CLI exit 110).
             NativeCallError: The start was refused or the service could not be opened.
 
         Example:
@@ -551,8 +568,18 @@ class Ps:
     def restart_service(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
         """Restart a service; return its post-restart state (native, portable, **mutating**; systemd on Linux).
 
+        win32service on Windows (a stop, then a start), systemd ``RestartUnit`` on Linux.
+
+        Args:
+            name: The service name (on Linux the unit name, ``"sshd.service"``).
+            timeout: Seconds to wait for the service to settle.
+
+        Returns:
+            The service's :class:`ServiceInfo` once it settled.
+
         Raises:
-            OperationTimeoutError: The service did not settle within ``timeout`` seconds.
+            OperationTimeoutError: The service did not settle within ``timeout`` seconds - the
+                restart WAS issued; ``.timeout`` holds the limit (CLI exit 110).
             NativeCallError: The restart was refused or the service could not be opened.
 
         Example:
@@ -661,7 +688,12 @@ class Ps:
             description: Task description.
             principal: Who the task runs as (a SID on Windows, a decimal uid on Linux);
                 None runs it as the interactive caller on Windows and as root on Linux.
-            triggers: When it runs; empty means on demand only.
+            triggers: When it runs (:class:`OnceTrigger`, :class:`DailyTrigger`,
+                :class:`BootTrigger`, :class:`LogonTrigger`); empty means on demand only.
+
+        Returns:
+            The task as the scheduler reads it back (:class:`ScheduledTaskInfo`): its
+            ``user_id``, ``run_level``, state and run times.
 
         Raises:
             PlatformUnsupportedError: The OS cannot honour the principal or a trigger (a uid on
@@ -1019,9 +1051,23 @@ class Ps:
         Linux, the process group on macOS - where a ``setsid`` grandchild is not covered),
         and ``timeout`` then covers the whole tree and kills it on expiry.
 
+        Args:
+            argv: The program and its arguments as a list, passed verbatim, never through a shell.
+            cwd: The working directory for the program; None keeps the caller's.
+            timeout: Seconds before the program (with ``wait_tree`` its whole tree) is killed;
+                None waits without a limit.
+            env: The program's whole environment (replaces the caller's, never merged);
+                None inherits the caller's.
+            input_text: Text written to the program's stdin; None gives it no input.
+            wait_tree: Also wait for every process the program started.
+
+        Returns:
+            A :class:`ProcessResult` with ``exit_code`` (the started program's own), ``stdout``,
+            ``stderr`` and ``duration_s``; a nonzero exit is returned, not raised.
+
         Raises:
             OperationTimeoutError: ``timeout`` elapsed; the child (with ``wait_tree`` its
-                whole process tree) was killed. A
+                whole process tree) was killed and the output it wrote is not returned. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
             NativeCallError: The executable was not found or could not be started.
 
@@ -1035,12 +1081,28 @@ class Ps:
     def pack_script(
         self, entry: str | Path, dest: str | Path | None = None, *, options: PackOptions = DEFAULT_PACK_OPTIONS
     ) -> PackedScript:
-        """Pack a Python script and its local modules into a self-extracting ``.ps1`` (portable).
+        """Pack a Python script and its local modules into a self-extracting ``.ps1`` or ``.sh`` (portable).
 
         The artefact is one file: it unpacks itself into a per-user cache, provisions ``uv``
         if the machine has none, runs the script, and exits with the script's own exit code.
         Third-party dependencies come from the entry's PEP 723 block or ``options.with_packages`` -
-        never guessed from an import name.  Runs on Windows PowerShell 5.1 and pwsh 7 alike.
+        never guessed from an import name.  A ``.ps1`` runs on Windows PowerShell 5.1 and pwsh 7
+        alike, a ``.sh`` under any POSIX ``/bin/sh``; ``options.format`` picks one
+        (:class:`RunnerFormat`, by default from ``dest``'s suffix).
+
+        Args:
+            entry: The script to pack.
+            dest: The runner to write; None writes ``<entry>.ps1`` beside the entry.
+            options: How to pack (:class:`PackOptions`: ``include``, ``with_packages``,
+                ``root``, ``force``, ``format``).
+
+        Returns:
+            The :class:`PackedScript` manifest of what was written.
+
+        Raises:
+            PackError: The entry is missing or unreadable, a module does not parse, a local
+                import resolves outside the root, a file name cannot be packed, or ``dest``
+                exists without ``force``.
 
         Example:
             >>> callable(build_ps().pack_script)
@@ -1049,10 +1111,23 @@ class Ps:
         return self._script_packer(entry, dest, options=options)
 
     def unpack_script(self, source: str | Path, dest: str | Path, *, force: bool = False) -> PackedScript:
-        """Restore the sources a packed ``.ps1`` carries, ready to edit and pack again (portable).
+        """Restore the sources a packed ``.ps1`` or ``.sh`` carries, ready to edit and pack again (portable).
 
-        The inverse of :meth:`pack_script`.  The generated ``__main__`` shim is machinery, not
-        source, so it is left out of the restored tree.
+        The inverse of :meth:`pack_script`; the format is sniffed from the payload (zip or
+        tar), never told.  The generated ``__main__`` shim is machinery, not source, so it is
+        left out of the restored tree.
+
+        Args:
+            source: The packed runner to read.
+            dest: The directory to restore into.
+            force: Overwrite files that already exist in ``dest``.
+
+        Returns:
+            The :class:`PackedScript` manifest of the restored files.
+
+        Raises:
+            PackError: ``source`` is not a pwshpy runner, its payload is damaged, or a file
+                exists in ``dest`` without ``force``.
 
         Example:
             >>> callable(build_ps().unpack_script)
@@ -1300,6 +1375,11 @@ class Ps:
             index: Return only the image with this 1-based index, like ``-Index``; reading
                 stops right after it. ``None`` lists every image.
 
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`WindowsImage` records,
+            in file order. A file whose XML resource is compressed (resource flag 0x04) is
+            refused, not decoded.
+
         Raises:
             ValueError: ``index`` is below 1 (raised by this call).
             NativeCallError: On consumption: the file holds no image ``index``, or it is
@@ -1323,7 +1403,9 @@ class Ps:
 
         The search (``Microsoft.Update.Session``) runs in a child process that is killed once
         ``timeout`` seconds pass, because the COM call cannot be interrupted and can sit for
-        25+ minutes.  Lazy: the search starts when the pipeline is first iterated.
+        25+ minutes.  Lazy only in when it starts: the search starts when the pipeline is
+        first iterated, and it returns its whole result before the first record is yielded,
+        so ``.take(n)`` does not shorten it.
 
         The child is started with the ``spawn`` method, which re-imports the calling script,
         so a script using this must guard its top level with ``if __name__ == "__main__":``;
@@ -1331,8 +1413,13 @@ class Ps:
         without a result").
 
         Args:
-            criteria: A WUA search criteria string (default: software updates not installed).
+            criteria: A WUA search criteria string, passed verbatim to
+                ``IUpdateSearcher.Search`` (default ``"IsInstalled=0 and Type='Software'"``, the
+                software updates not installed; ``"IsInstalled=1"`` lists the installed ones).
             timeout: Seconds before the search is abandoned, in ``(0, 2147483]``.
+
+        Returns:
+            A :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`WindowsUpdate` records.
 
         Raises:
             ValueError: ``timeout`` is outside ``(0, 2147483]`` (raised at the call).
@@ -1368,6 +1455,10 @@ class Ps:
         effective uid on POSIX - never from ``USERNAME``/``USERDOMAIN``, which name the computer
         account inside a SYSTEM scheduled task.  Match on ``sid`` (a SID, or the uid as a
         string); the names are display only and localized for built-in accounts.
+
+        Returns:
+            A :class:`CurrentIdentity`: ``sid``, ``account``, ``is_system``, ``elevated`` and,
+            on Windows, ``integrity_level``.
 
         Raises:
             NativeCallError: The process token (or the user database) could not be read.

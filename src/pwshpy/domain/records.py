@@ -4,7 +4,7 @@ Both backends marshal into the **same** records so the :mod:`~pwshpy.domain.pipe
 composes over either source.  :class:`PSRecord` is the Pydantic base; concrete
 records (e.g. :class:`ProcessInfo`) add typed fields.
 
-Records produced by trusted native native APIs are built with
+Records produced by trusted native APIs are built with
 :meth:`pydantic.BaseModel.model_construct` (validation skipped) on the hot path;
 full validation is reserved for genuine external boundaries (.NET PSObject
 marshaling and user-supplied data), per the strict-data rule.
@@ -73,6 +73,11 @@ class PSRecord(BaseModel):
 
 class ProcessInfo(PSRecord):
     """A single operating-system process (the native ``Get-Process`` record).
+
+    ``name`` is the name psutil reports, which differs from ``Get-Process``'s
+    ``ProcessName`` for two Windows pseudo-processes: the kernel's memory
+    compression store is ``MemCompression`` (``Get-Process``: ``Memory Compression``)
+    and PID 0 is ``System Idle Process`` (``Get-Process``: ``Idle``).
 
     Example:
         >>> proc = ProcessInfo(pid=1, ppid=0, name="init", status=ProcessStatus.SLEEPING)
@@ -443,7 +448,9 @@ class EventLogEntry(PSRecord):
     win32evtlog on Windows, journald on Linux. ``level`` is the canonical English
     severity (``Get-WinEvent``'s ``LevelDisplayName`` and journald priorities are both
     normalized to it). ``message`` is the rendered text (on Windows the provider's
-    message, identical to ``Get-WinEvent``'s ``Message``), else ``None`` - never an error text.
+    message, as ``Get-WinEvent``'s ``Message`` renders it), else ``None`` - never an error
+    text. A message whose inserts the provider cannot resolve (errors 15029 / 15030) is
+    ``None``, where ``Get-WinEvent`` shows the partial text.
     On journald ``record_id`` / ``event_id`` are 0 (journald has no numeric event id;
     its identity is the string cursor) and ``user_id`` is the ``_UID``.
 
@@ -717,12 +724,14 @@ class AclEntry(PSRecord):
 
 
 class PackedScript(PSRecord):
-    """The manifest of a packed (or unpacked) self-extracting PowerShell runner.
+    """The manifest of a packed (or unpacked) self-extracting runner (``.ps1`` or ``.sh``).
 
     ``files`` lists the archive members as POSIX-style relative paths, sorted, so two
-    packs of the same sources compare equal.  ``payload_sha256`` is the digest of the
-    embedded zip: it keys the runner's extraction cache and anchors the integrity check
-    the runner performs before executing anything.
+    packs of the same sources compare equal; a ``.sh`` lists its generated
+    ``__pwshpy_pack_main__.py`` shim too.  ``payload_sha256`` is the digest of the
+    embedded archive (a zip in a ``.ps1``, a tar in a ``.sh``): it keys the runner's
+    extraction cache and anchors the integrity check the runner performs before executing
+    anything.  ``uv_args`` are the arguments the runner hands ``uv run`` (``--with`` pairs).
 
     ``external_imports`` names the top-level imports that are neither standard library nor
     local, so a dependency missing from the entry's PEP 723 block surfaces at pack time
@@ -760,11 +769,24 @@ class PackedScript(PSRecord):
 
 
 class WindowsImage(PSRecord):
-    """One image inside a WIM/ESD file (the native ``Get-WindowsImage`` record; portable).
+    """One image inside a WIM file or split ``.swm`` part (the native ``Get-WindowsImage`` record; portable).
 
     Read from the file's XML resource, so every field the XML may omit has an empty
-    default rather than a guess. ``version`` is ``MAJOR.MINOR.BUILD.SPBUILD`` like
-    ``Get-WindowsImage``'s ``Version``; ``languages`` keeps the XML order.
+    default rather than a guess.
+
+    Attributes:
+        index: The 1-based image index (``-Index``).
+        name: The image name (``ImageName``).
+        description: The image description (``ImageDescription``).
+        edition_id: ``WINDOWS/EDITIONID``, e.g. ``Professional``.
+        installation_type: ``WINDOWS/INSTALLATIONTYPE``, e.g. ``Client`` or ``Server``.
+        architecture: The CPU architecture, :class:`~pwshpy.domain.enums.ImageArchitecture`.
+        version: ``MAJOR.MINOR.BUILD.SPBUILD`` like ``Get-WindowsImage``'s ``Version``.
+        build: The build number (``WINDOWS/VERSION/BUILD``).
+        sp_build: The servicing build (``WINDOWS/VERSION/SPBUILD``).
+        languages: The installed languages, in XML order.
+        default_language: The default language tag.
+        size_bytes: The image's total size in bytes (``TOTALBYTES``).
 
     Example:
         >>> WindowsImage(index=1, name="Pro", architecture=ImageArchitecture.X64, build=26200).build
@@ -791,6 +813,19 @@ class WindowsUpdate(PSRecord):
     ``update_id`` plus ``revision_number`` is the update's stable identity.  ``title`` and
     ``categories`` are display text, localized by the Windows Update agent to the machine's
     language, so match on ``update_id`` or ``kb_article_ids``, never on them.
+
+    Attributes:
+        update_id: The update's GUID (``Identity.UpdateID``).
+        revision_number: The update's revision (``Identity.RevisionNumber``).
+        title: The localized title.
+        kb_article_ids: The KB numbers without the ``KB`` prefix, e.g. ``("5034441",)``.
+        is_installed: Whether the update is installed.
+        is_downloaded: Whether its files are already downloaded.
+        is_hidden: Whether a user hid the update.
+        is_mandatory: Whether the agent marks it mandatory.
+        msrc_severity: The MSRC rating (``Critical``, ``Important``, ...), ``""`` when unrated.
+        max_download_size: The largest download it may need, in bytes.
+        categories: The localized category names.
 
     Example:
         >>> WindowsUpdate(update_id="u", title="t").kb_article_ids

@@ -119,7 +119,20 @@ def call(bus: Bus, method: str, signature: str = "", body: tuple[Any, ...] = ())
 
 
 def unit_path(bus: Bus, name: str) -> str | None:
-    """The object path of a loaded unit, or None when it is not loaded."""
+    """The object path of a loaded unit, or None when it is not loaded.
+
+    Args:
+        bus: The open system-bus connection.
+        name: The unit name, e.g. ``"sshd.service"``.
+
+    Returns:
+        The unit's D-Bus object path, or None when systemd has not loaded it (a stopped
+        unit is unloaded, so ``GetUnit`` answers "not loaded" for it).
+
+    Example:
+        >>> callable(unit_path)
+        True
+    """
     try:
         (path,) = call(bus, "GetUnit", "s", (name,))
     except NativeCallError:
@@ -190,7 +203,22 @@ def unit_property(bus: Bus, name: str, prop: str, default: Any, *, interface: st
 
 
 def path_property(bus: Bus, path: str | None, prop: str, default: Any, *, interface: str = UNIT_IFACE) -> Any:
-    """Read one property from a unit object ``path``; ``default`` for a None path or a missing property."""
+    """Read one property from a unit object ``path``; ``default`` for a None path or a missing property.
+
+    Args:
+        bus: The open system-bus connection.
+        path: The unit's object path (from :func:`unit_path` / :func:`load_unit`), or None.
+        prop: The property name, e.g. ``"ActiveState"``.
+        default: Returned for a None ``path`` or when systemd answers the read with an error.
+        interface: The D-Bus interface that holds ``prop`` (the unit interface by default).
+
+    Returns:
+        The property's value, unwrapped from its D-Bus variant, or ``default``.
+
+    Example:
+        >>> path_property(None, None, "ActiveState", "unknown")
+        'unknown'
+    """
     if path is None:
         return default
     props = bus.core.DBusAddress(path, bus_name=MANAGER_BUS, interface=_PROPERTIES_IFACE)

@@ -66,10 +66,12 @@ def _rebuild_without_init(cls: type[BaseException], args: tuple[object, ...]) ->
 
 
 class NativeCallError(PwshPyError):
-    """A native native binding call (win32 / wmi / psutil / winreg) failed.
+    """A native binding call (win32 / wmi / psutil / winreg / systemd D-Bus / ...) failed.
 
-    Wraps the foreign error (``pywintypes.error`` / HRESULT) surfaced by a
-    native Windows binding, re-raised as a typed pwshpy error at the boundary.
+    Wraps the foreign error (``pywintypes.error`` / HRESULT, a D-Bus error, an
+    ``OSError``) surfaced by a native binding, re-raised as a typed pwshpy error at
+    the boundary. Also raised by a ``strict=True`` listing for an item it cannot read,
+    and by :meth:`~pwshpy.domain.records.ProcessResult.check` for a nonzero exit.
 
     Example:
         >>> raise NativeCallError("OpenSCManager failed")
@@ -87,7 +89,8 @@ class ElevationDeclinedError(NativeCallError):
     a fault: a caller typically carries on unelevated and says so, where a
     failure is reported as one. Windows reports it as ``ERROR_CANCELLED`` (1223);
     on POSIX it is a non-zero ``sudo -v``, which a wrong password, an interrupted
-    prompt and a user sudo does not allow all give alike.
+    prompt and a user sudo does not allow all give alike. The ``pwshpy`` CLI
+    (``--elevate``) and the packed runners exit 77 (``EX_NOPERM``) for it.
 
     Example:
         >>> issubclass(ElevationDeclinedError, NativeCallError)
@@ -100,7 +103,18 @@ class OperationTimeoutError(NativeCallError):
 
     A subclass of :class:`NativeCallError`, so existing ``except NativeCallError``
     callers keep working, and its own type, so a caller can tell a call that ran
-    out of time from one that could not start at all.
+    out of time from one that could not start at all: catch it before
+    ``NativeCallError``. Raised by ``ps.exec(timeout=...)`` (the child, or with
+    ``wait_tree`` its whole tree, is killed), ``ps.get_windows_update`` (the search
+    child is killed) and a service start/stop/restart that has not settled (the
+    control WAS issued). The ``pwshpy`` CLI exits 110 (``ETIMEDOUT``) for it.
+
+    Args:
+        message: The human-readable description.
+        timeout: The limit, in seconds, that ran out.
+
+    Attributes:
+        timeout: The limit, in seconds, that ran out.
 
     Example:
         >>> OperationTimeoutError("slow", timeout=5.0).timeout
@@ -139,7 +153,11 @@ class FeatureUnavailableError(PwshPyError):
 
 
 class PlatformUnsupportedError(PwshPyError):
-    """A Windows-only adapter was used on a non-Windows platform.
+    """The running OS has no honest analog for the call or one of its inputs.
+
+    A Windows-only subsystem (registry, CIM/WMI, Windows Update, hotfixes) called off
+    Windows, or an input the running OS cannot honour, such as a decimal uid as a
+    scheduled-task principal on Windows, or a SID or a logon trigger on Linux.
 
     Example:
         >>> issubclass(PlatformUnsupportedError, PwshPyError)
@@ -165,8 +183,10 @@ class ConfigurationError(PwshPyError):
     """Missing, invalid, or incomplete configuration.
 
     Raised when required configuration values are absent, malformed, or
-    logically inconsistent. Typically caught at CLI boundaries to provide
-    user-friendly error messages.
+    logically inconsistent, and for scheduled-task inputs that contradict each
+    other (a logon type that does not fit the principal, a group SID as the
+    principal, a line break in the program text). Typically caught at CLI
+    boundaries to provide user-friendly error messages.
 
     Example:
         >>> str(ConfigurationError("No output format configured"))

@@ -1,4 +1,4 @@
-"""Windows image (WIM/ESD): the ``WindowsImage`` record, its enum, and the pure-Python WIM reader.
+"""Windows image (WIM, split .swm): the ``WindowsImage`` record, its enum, and the pure-Python WIM reader.
 
 The reader tests run against synthesised WIM files under tmp_path (see ``wim_builder``), so
 they are hermetic and portable.
@@ -219,9 +219,9 @@ def test_a_short_header_is_refused(tmp_path: Path) -> None:
 
 @pytest.mark.os_agnostic
 def test_a_compressed_xml_resource_names_the_unsupported_format(tmp_path: Path) -> None:
-    """An ESD-style compressed XML is refused with a message naming LZMS/ESD."""
+    """A compressed XML resource (flag 0x04) is refused with a message naming the flag."""
     path = _write(tmp_path, wim_bytes(image_xml(image()), xml_flags=COMPRESSED_FLAG), "install.esd")
-    with pytest.raises(NativeCallError, match=r"compressed XML resource \(LZMS/ESD\) is not supported"):
+    with pytest.raises(NativeCallError, match=r"compressed XML resource \(resource flag 0x04\) is not supported"):
         list(iter_wim_images(path))
 
 

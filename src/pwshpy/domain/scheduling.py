@@ -206,7 +206,11 @@ class BootTrigger(BaseModel):
 
 
 class LogonTrigger(BaseModel):
-    """Run when ``user_id`` (a SID) logs on; None means any user (Windows-only).
+    """Run when ``user_id`` logs on; None means any user (Windows-only).
+
+    ``user_id`` is validated like every principal field (a SID or a decimal uid, never an
+    account name), but only Windows honours a logon trigger, and there it must be a user
+    SID: a uid or a group SID is refused at registration.
 
     Example:
         >>> LogonTrigger().user_id is None

@@ -14,7 +14,7 @@ from ..adapters.config.loader import get_config, get_default_config_path
 # Logging services
 from ..adapters.logging.setup import init_logging
 
-# The ps facade (native native + hosted .NET, over the shared pipeline)
+# The ps facade (native + hosted .NET, over the shared pipeline)
 from .facade import Ps, build_ps, ps
 
 # Static conformance assertions — pyright verifies that each adapter function
@@ -44,7 +44,7 @@ class AppServices:
     deploy_configuration: DeployConfiguration
     display_config: DisplayConfig
     init_logging: InitLogging
-    # The ps facade (native native + .NET hosted, over the shared pipeline).
+    # The ps facade (native + .NET hosted, over the shared pipeline).
     # Defaults so the many test construction sites need not supply it.
     ps: Ps = field(default_factory=build_ps)
 

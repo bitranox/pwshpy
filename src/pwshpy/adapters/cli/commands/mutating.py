@@ -503,6 +503,12 @@ def cli_register_scheduled_task(
     Times are ISO 8601 with a UTC offset (2026-10-21T03:00:00+02:00, or Z for UTC); a time
     without one is refused. On Linux a task becomes a systemd .service plus, with triggers,
     a .timer; logon triggers and --every-days above 1 are Windows-only.
+
+    \f
+    Example:
+        >>> from click.testing import CliRunner
+        >>> CliRunner().invoke(cli_register_scheduled_task, ["--help"]).exit_code
+        0
     """
     _check_modifiers(
         daily=bool(daily_times),

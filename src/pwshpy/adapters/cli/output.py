@@ -18,8 +18,10 @@ field into mojibake for a consumer reading the pipe.  Lines end in LF on every O
 human table and :func:`emit_lines` stay on the console's own encoding: they are text for
 a person or a text tool, not JSON.
 
-The human table fits a terminal's width; piped or redirected it is sized to its content, so
-no cell is cut (an explicit ``COLUMNS`` still sets the width either way).
+The human table fits a terminal's width. Piped or redirected it is sized to its content up to
+``_MAX_PIPED_WIDTH`` columns, so no cell is cut: every value is whole, a value without line
+breaks stays on one line, and content wider than the ceiling folds onto further lines rather than
+losing characters. An explicit ``COLUMNS`` still sets the width either way.
 
 Contents:
     * :class:`RecordFormat` - human / json / jsonl selector.
@@ -53,6 +55,11 @@ _WINDOWS_PIPE_CLOSED = frozenset({109, 232})
 #: the table is truncated and the user is pointed at --jsonl / --limit. Streaming
 #: --json / --jsonl output is unaffected and stays fully lazy.
 _MAX_TABLE_ROWS = 1000
+
+#: Ceiling on the width of a piped (non-terminal) human table. rich pads every row to the widest
+#: cell, so without it one 128 KB value was copied into all 1000 rows (132 MB of output). 8192 keeps
+#: a POSIX PATH_MAX (4096) value plus its row's other columns on one line; wider content folds.
+_MAX_PIPED_WIDTH = 8192
 
 
 class RecordFormat(enum.Enum):
@@ -211,15 +218,19 @@ def _columns_is_explicit() -> bool:
 
 
 def _table_console(table: Table) -> Console:
-    """Build the console that prints ``table``: as wide as its content when stdout is piped.
+    """Build the console that prints ``table``: as wide as its content (up to a ceiling) when piped.
 
     Off a terminal rich has no width to read and falls back to 80 columns, so every wider cell was
     cut with an ellipsis and ``pwshpy env | grep`` found half a value. Sizing the console to the
-    table's natural width keeps each value whole AND on one line; folding long values inside the
-    cell was rejected because it splits a SID or a path across lines, which a grep cannot match.
-    A terminal keeps its own width, and an explicit COLUMNS still wins, so neither a person at a
-    terminal nor a user who chose a width sees a change. The floor is the default width, so a
-    narrow table never wraps the truncation hint printed after it.
+    table's natural width keeps each value whole, and a value without line breaks on one line;
+    folding every long value was rejected because it splits a SID or a path across lines, which a
+    grep cannot match. The width stops at ``_MAX_PIPED_WIDTH`` because rich pads every row to the
+    widest cell: one huge value would otherwise be copied into all rows. Content wider than that
+    folds: every column of ``table`` is set to fold, because rich narrows the widest column to fit
+    and a shorter neighbour in it would otherwise get an ellipsis. A terminal keeps its own width,
+    and an explicit COLUMNS still wins, so neither a person at a terminal nor a user who chose a
+    width sees a change. The floor is the default width, so a narrow table never wraps the
+    truncation hint printed after it.
 
     Example:
         >>> table = Table("name")
@@ -233,7 +244,10 @@ def _table_console(table: Table) -> Console:
     # Measure without a ceiling: rich clamps a measurement to the width it is offered, and the
     # point is to learn the width the content needs rather than the one rich guessed.
     natural = Measurement.get(console, console.options.update_width(sys.maxsize), table).maximum
-    return Console(width=max(console.width, natural))
+    if natural > _MAX_PIPED_WIDTH:
+        for column in table.columns:
+            column.overflow = "fold"
+    return Console(width=max(console.width, min(natural, _MAX_PIPED_WIDTH)))
 
 
 def _render_table(records: Iterable[PSRecord]) -> None:

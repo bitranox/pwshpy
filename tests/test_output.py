@@ -10,7 +10,12 @@ import pytest
 from click.testing import CliRunner
 
 from pwshpy.adapters import cli as cli_mod
-from pwshpy.adapters.cli.output import RecordFormat, emit
+from pwshpy.adapters.cli import output as output_mod
+from pwshpy.adapters.cli.output import (
+    _MAX_PIPED_WIDTH,  # pyright: ignore[reportPrivateUsage] - the ceiling these tests measure against
+    RecordFormat,
+    emit,
+)
 from pwshpy.domain.enums import ProcessStatus
 from pwshpy.domain.records import EnvVar, ProcessInfo
 
@@ -63,8 +68,6 @@ def test_human_table_soft_caps_and_hints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Beyond the row cap the table truncates and points at the streaming path."""
-    import pwshpy.adapters.cli.output as output_mod
-
     monkeypatch.setattr(output_mod, "_MAX_TABLE_ROWS", 2)
     records = [ProcessInfo(pid=n, name=f"p{n}") for n in range(5)]
     emit(records, RecordFormat.HUMAN)
@@ -79,8 +82,6 @@ def test_human_table_no_hint_when_within_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """At or below the cap, no truncation hint is printed."""
-    import pwshpy.adapters.cli.output as output_mod
-
     monkeypatch.setattr(output_mod, "_MAX_TABLE_ROWS", 5)
     records = [ProcessInfo(pid=n, name=f"p{n}") for n in range(3)]
     emit(records, RecordFormat.HUMAN)
@@ -195,9 +196,71 @@ def test_piped_table_hint_stays_on_one_line_for_a_narrow_table(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Sizing to the content never narrows the console below its default, so the hint does not wrap."""
-    import pwshpy.adapters.cli.output as output_mod
-
     monkeypatch.delenv("COLUMNS", raising=False)
     monkeypatch.setattr(output_mod, "_MAX_TABLE_ROWS", 1)
     emit([EnvVar(name="A", value="1"), EnvVar(name="B", value="2")], RecordFormat.HUMAN)
     assert "use --jsonl for the full stream, or --limit N." in capsys.readouterr().out
+
+
+#: Distinct, space-free and longer than the piped-width ceiling, so it must fold; the dashes keep a
+#: lost or doubled character visible in the substring check.
+_BEYOND_CEILING_VALUE = "".join(f"{n:07d}-" for n in range(2 * _MAX_PIPED_WIDTH // 8))
+
+
+def _emit_piped_table(capsys: pytest.CaptureFixture[str], records: list[EnvVar]) -> list[str]:
+    emit(records, RecordFormat.HUMAN)
+    return capsys.readouterr().out.splitlines()
+
+
+@pytest.mark.os_agnostic
+def test_piped_table_is_never_wider_than_the_ceiling(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One value beyond the ceiling no longer widens every row: no line exceeds it."""
+    monkeypatch.delenv("COLUMNS", raising=False)
+    lines = _emit_piped_table(capsys, [EnvVar(name="BIG", value=_BEYOND_CEILING_VALUE), EnvVar(name="A", value="1")])
+    assert max(len(line) for line in lines) <= _MAX_PIPED_WIDTH
+
+
+@pytest.mark.os_agnostic
+def test_piped_table_folds_a_value_beyond_the_ceiling_without_losing_a_character(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Beyond the ceiling the value folds over several lines but keeps every character, never an ellipsis."""
+    monkeypatch.delenv("COLUMNS", raising=False)
+    lines = _emit_piped_table(capsys, [EnvVar(name="BIG", value=_BEYOND_CEILING_VALUE)])
+    joined = "".join("".join(line.split()).replace("\u2502", "") for line in lines)
+    assert _BEYOND_CEILING_VALUE in joined
+    assert "\u2026" not in joined
+
+
+@pytest.mark.os_agnostic
+def test_piped_table_keeps_a_path_max_value_on_one_line(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A POSIX PATH_MAX (4096) value is below the ceiling with its row, so it stays whole on one line."""
+    monkeypatch.delenv("COLUMNS", raising=False)
+    path = "/" + "/".join(f"d{n:05d}" for n in range(4095 // 7))
+    path += "x" * (4096 - len(path))
+    lines = _emit_piped_table(capsys, [EnvVar(name="LONG_PATH", value=path), EnvVar(name="A", value="1")])
+    assert sum(path in line for line in lines) == 1
+
+
+@pytest.mark.os_agnostic
+def test_piped_table_never_cuts_a_neighbour_of_a_folded_value(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A value under the ceiling but wider than its narrowed column folds too, never an ellipsis."""
+    monkeypatch.delenv("COLUMNS", raising=False)
+    # Shorter than the ceiling, longer than the value column left once the table is clamped to it.
+    neighbour = "".join(f"{n:07d}+" for n in range(_MAX_PIPED_WIDTH // 8))[: _MAX_PIPED_WIDTH - 4]
+    lines = _emit_piped_table(
+        capsys, [EnvVar(name="BIG", value=_BEYOND_CEILING_VALUE), EnvVar(name="NEAR", value=neighbour)]
+    )
+    joined = "".join("".join(line.split()).replace("\u2502", "") for line in lines)
+    assert neighbour in joined
+    assert "\u2026" not in joined

@@ -25,9 +25,11 @@ the pipe decodes it as UTF-8 even from a cp1252 Windows console. The JSON that `
 `get_content` stay on the console's own encoding.
 
 At a terminal the human table fits the terminal's width and may shorten long cells. Piped or
-redirected (`pwshpy env | grep PATH`, `> out.txt`), it is as wide as its content instead, so no
-cell is cut or wrapped and every value is on one line, whole. An explicit `COLUMNS` in the
-environment still sets the width in both cases.
+redirected (`pwshpy env | grep PATH`, `> out.txt`), it is as wide as its content instead, up to
+8192 columns, so no cell is cut: every value is whole, and a value without line breaks stays on
+one line. A table wider than 8192 columns folds its long values onto further lines rather than
+dropping characters (use `--jsonl` to keep such a value on one line). An explicit `COLUMNS` in
+the environment still sets the width in both cases.
 
 **Everywhere** - one binding on Windows, macOS and Linux:
 

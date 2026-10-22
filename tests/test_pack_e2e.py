@@ -31,8 +31,12 @@ import pytest
 from elevation_doubles import (
     INTERPRETER_VARIABLES,
     RUNNING_AS_ROOT,
+    interpreter_probe_env,
     link_tools,
+    managed_python_dir,
     write_fake_sudo,
+    write_planted_environment,
+    write_planted_python,
     write_recording_uv,
 )
 
@@ -1764,3 +1768,194 @@ def test_the_uv_arguments_and_target_reach_uv_literally(tmp_path: Path) -> None:
     assert argv[2:4] == ["--with", "pkg[ab]"], argv
     assert argv[4].startswith(str(cache) + os.sep), argv
     assert argv[4].endswith("__pwshpy_pack_main__.py"), argv
+
+
+# --- [89] an elevated run only runs a uv-managed Python --------------------------------------------
+# uv picks the interpreter the packed script runs on, and uv EXECUTES every candidate it considers (it
+# asks each for its version), so a python planted in a PATH directory another account can write would
+# run with the elevated run's rights. Elevated, the runner passes --python-preference only-managed and
+# moves uv's project discovery (.python-version, uv.toml) to a directory only administrators can write,
+# and drops the variables that name an interpreter outright. Every run here has downloads off and a
+# fresh uv cache, so nothing reaches the network and no remembered interpreter hides a planted one.
+
+#: The packed script under test: prints the interpreter it runs on.
+_ENTRY_REPORTING_PYTHON = """import sys
+
+print("python:" + sys.executable)
+"""
+#: uv's refusal when only-managed finds nothing (measured with uv 0.13.0 and 0.13.3).
+_NO_MANAGED_PYTHON = "No interpreter found in virtual environments or managed installations"
+#: The line the runner prints for each interpreter variable an elevated run drops.
+_VARIABLE_DROPPED = "pwshpy: ignoring {name}"
+
+
+def _reported_python(result: subprocess.CompletedProcess[str]) -> Path | None:
+    for line in result.stdout.splitlines():
+        if line.startswith("python:") and line[7:]:
+            return Path(line[7:].strip())
+    return None
+
+
+def _python_runner(tmp_path: Path, *, elevated: str) -> tuple[Path, list[Path]]:
+    """A which-python runner with its elevation probe forced, plus the PATH head holding a uv it trusts.
+
+    POSIX: a stand-in uv in a tree this test owns, counted as root's. Windows: the module's uv,
+    which an elevated host already trusts.
+    """
+    entry = tmp_path / "which_python.py"
+    entry.write_text(_ENTRY_REPORTING_PYTHON)
+    runner = _elevation_stand_in(
+        Path(pack_script(entry).output_path),
+        tmp_path / "python_stand_in.ps1",
+        elevated=elevated,
+        trust_my_uid=True,
+    )
+    if sys.platform == "win32":
+        return runner, [_UvLocation.directory]
+    return runner, [_own_posix_tree(tmp_path, ancestor_mode=0o755).parent]
+
+
+def _clean_cwd(tmp_path: Path) -> Path:
+    """An empty working directory: uv queries a ``.venv`` in the cwd or above it (the suite's own,
+    under the repository), which would answer before the PATH python these tests plant."""
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    return work
+
+
+def _needs_managed_python() -> Path:
+    managed = managed_python_dir()
+    if managed is None:
+        pytest.skip("this host has no uv-managed Python (and the test must not download one)")
+    return managed
+
+
+@pytest.mark.local_only
+@pytest.mark.parametrize(
+    ("elevated", "planted_runs"),
+    [pytest.param("$true", False, id="elevated"), pytest.param("$false", True, id="not-elevated-control")],
+)
+def test_an_elevated_run_never_executes_a_python_planted_first_on_path(
+    tmp_path: Path, elevated: str, planted_runs: bool
+) -> None:
+    """[89]: with no managed Python, an elevated run refuses rather than run the PATH python.
+
+    The control proves the arrangement: unelevated, uv runs the planted python (POSIX) or the
+    system one (Windows, where no test can write a python.exe double).
+    """
+    runner, head = _python_runner(tmp_path, elevated=elevated)
+    marker = tmp_path / "planted-ran.txt"
+    if sys.platform != "win32":
+        head = [*head, write_planted_python(tmp_path / "planted-bin", marker).parent]
+    probe = interpreter_probe_env(tmp_path, managed=None)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))
+    if planted_runs:
+        assert result.returncode == 0, result.stdout + result.stderr
+        reported = _reported_python(result)
+        assert reported is not None, result.stdout
+        assert Path(probe["UV_PYTHON_INSTALL_DIR"]) not in reported.parents, reported
+        assert sys.platform == "win32" or marker.is_file(), "the control never ran the planted python"
+        return
+    assert not marker.exists(), "the elevated run executed the planted python: " + marker.read_text()
+    assert _reported_python(result) is None, result.stdout
+    assert _NO_MANAGED_PYTHON in result.stderr, result.stderr
+
+
+@pytest.mark.local_only
+def test_an_elevated_run_uses_an_installed_managed_python(tmp_path: Path) -> None:
+    """[89]: the positive control - with a managed Python installed, the elevated run runs on it."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated="$true")
+    marker = tmp_path / "planted-ran.txt"
+    if sys.platform != "win32":
+        head = [*head, write_planted_python(tmp_path / "planted-bin", marker).parent]
+    result = _run_with_path(
+        tmp_path,
+        runner,
+        path_first=head,
+        env=interpreter_probe_env(tmp_path, managed=managed),
+        cwd=_clean_cwd(tmp_path),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    reported = _reported_python(result)
+    assert reported is not None and managed.resolve() in reported.resolve().parents, result.stdout
+    assert not marker.exists(), "the planted python ran"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize(
+    ("elevated", "planted_runs"),
+    [pytest.param("$true", False, id="elevated"), pytest.param("$false", True, id="not-elevated-control")],
+)
+def test_an_elevated_run_ignores_a_python_version_file_above_the_cache(
+    tmp_path: Path, elevated: str, planted_runs: bool
+) -> None:
+    """[89]: uv reads .python-version from the script's directory up, and a path there beats only-managed.
+
+    The cache is the script's directory, so whoever can write a directory above it would otherwise
+    choose the interpreter.
+    """
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated=elevated)
+    marker = tmp_path / "planted-ran.txt"
+    planted = write_planted_python(tmp_path / "planted-bin", marker)
+    (tmp_path / "cache").mkdir()
+    (tmp_path / "cache" / ".python-version").write_text(f"{planted}\n", encoding="utf-8")
+    result = _run_with_path(
+        tmp_path,
+        runner,
+        path_first=head,
+        env=interpreter_probe_env(tmp_path, managed=managed),
+        cwd=_clean_cwd(tmp_path),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.is_file() is planted_runs, result.stdout + result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("variable", ["UV_PYTHON", "VIRTUAL_ENV", "CONDA_PREFIX"])
+@pytest.mark.parametrize(
+    ("elevated", "planted_runs"),
+    [pytest.param("$true", False, id="elevated"), pytest.param("$false", True, id="not-elevated-control")],
+)
+def test_an_elevated_run_drops_a_variable_that_names_an_interpreter(
+    tmp_path: Path, variable: str, elevated: str, planted_runs: bool
+) -> None:
+    """[89]: UV_PYTHON naming a path, or an active virtual or conda environment, each beats only-managed.
+
+    Elevated, the runner drops the variable (and says so); unelevated, it reaches uv untouched.
+    """
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated=elevated)
+    marker = tmp_path / "planted-ran.txt"
+    if variable == "UV_PYTHON":
+        value = str(write_planted_python(tmp_path / "planted-bin", marker))
+    else:
+        value = str(write_planted_environment(tmp_path / "planted-env", marker))
+    probe = {**interpreter_probe_env(tmp_path, managed=managed), variable: value}
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.is_file() is planted_runs, result.stdout + result.stderr
+    assert (_VARIABLE_DROPPED.format(name=variable) in result.stderr) is not planted_runs, result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated"])
+def test_the_uv_command_line_carries_only_managed_exactly_when_elevated(tmp_path: Path, elevated: str) -> None:
+    """[89]: the argv uv receives - only-managed and the root-owned project anchor when elevated, else neither."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
+    result = _run_with_path(tmp_path, runner, "-PwshPyUv", str(uv), path_first=[], cwd=_clean_cwd(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    argv = record.read_text(encoding="utf-8").splitlines()
+    managed = ["--python-preference", "only-managed", "--project", "/"]
+    if elevated == "$true":
+        assert argv[:6] == ["run", "--no-project", *managed], argv
+    else:
+        assert argv[:2] == ["run", "--no-project"], argv
+        assert "--python-preference" not in argv and "--project" not in argv, argv

@@ -332,6 +332,24 @@ Details worth knowing:
   `uv` on `PATH` runs. Accepted residual risk: a process already running as the same account could
   swap that account's `uv`, before the elevated run starts or between its check and its exec; no
   other account can.
+- **An elevated run only runs a Python uv manages.** uv picks the interpreter the script runs on,
+  and it executes every interpreter it considers to ask its version, so a `python` planted in a
+  `PATH` directory another account can write would run with the elevated rights. Elevated (an
+  administrator token, SYSTEM, or root, decided exactly as for the `uv` check above), the runner
+  calls `uv run --python-preference only-managed`, so uv looks only at the Pythons it installed
+  itself (under the running account's own profile: `%APPDATA%\uv\python`, `~/.local/share/uv/python`).
+  A machine with none gets one on the first elevated run: uv downloads a CPython build (a few tens
+  of megabytes) by itself, unless uv's Python downloads are switched off
+  (`UV_PYTHON_DOWNLOADS=never`, `python-downloads = "never"`), in which case uv stops with `No
+  interpreter found in virtual environments or managed installations` and a hint naming the
+  setting; `uv python install` as the elevated account provides one ahead of time. Three more
+  ways to name an interpreter outright would beat that flag, and an elevated run closes each:
+  the `.python-version` and `uv.toml` uv reads from the script's directory upwards (the cache, which
+  `PWSHPY_PACK_CACHE` can put anywhere) are looked up from `/` on POSIX or `System32` on Windows
+  instead (`--project`), directories only administrators can write; and `UV_PYTHON`, `VIRTUAL_ENV`,
+  `CONDA_PREFIX`, `UV_MANAGED_PYTHON` and `UV_NO_MANAGED_PYTHON` are dropped from uv's environment,
+  each with a `pwshpy: ignoring <NAME>` line on stderr. Not elevated, nothing changes. The
+  `-PwshPyUv` / `--pwshpy-uv` pin is unaffected: it chooses the `uv`, not the Python.
 - **Self-elevation keeps working.** A packed script calling `ps.elevate()` re-execs the extracted
   entry with the environment uv already built, so it elevates exactly as it would unpacked.
 - **The cache is verified before every run** against per-file hashes embedded in the artefact, and

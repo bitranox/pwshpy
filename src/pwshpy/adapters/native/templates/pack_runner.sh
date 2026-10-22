@@ -26,7 +26,9 @@
 # directory holding it, and every directory above that); any other uv it finds is skipped with a
 # line on stderr, and a --pwshpy-uv path that fails the check is refused with exit code 127. As root
 # it also runs its own helpers (ls, tar, base64, ...) only from the fixed system directories, never
-# from the PATH it was given.
+# from the PATH it was given, and runs the script only on a Python uv manages (downloaded on first
+# use unless uv's Python downloads are switched off); UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX,
+# UV_MANAGED_PYTHON and UV_NO_MANAGED_PYTHON are ignored, each with a line on stderr.
 #
 # Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -492,6 +494,19 @@ pwshpy_find_uv() {
     return 1
 }
 
+# The variables through which a caller names the interpreter itself, past --python-preference
+# only-managed (measured with uv 0.13: an explicit UV_PYTHON path and an active virtual or conda
+# environment each run their own python), or that uv refuses beside that flag. A root run drops each
+# one that is set, naming it on stderr; identical to the .ps1 runner.
+pwshpy_drop_interpreter_variables() {
+    for _iv in UV_PYTHON VIRTUAL_ENV CONDA_PREFIX UV_MANAGED_PYTHON UV_NO_MANAGED_PYTHON; do
+        if eval "[ -n \"\${$_iv+set}\" ]"; then
+            printf '%s\n' "pwshpy: ignoring $_iv: as root only a uv-managed Python is run" >&2
+            unset "$_iv"
+        fi
+    done
+}
+
 pwshpy_install_uv() {
     printf '%s\n' "uv was not found; installing it for the current user from https://astral.sh/uv ..." >&2
     if command -v curl >/dev/null 2>&1; then
@@ -671,9 +686,16 @@ fi
 set -- "$PWSHPY_CACHE/$PWSHPY_ENTRY" "$@"
 eval "set -- $PWSHPY_UV_ARGS_RAW \"\$@\""
 # The packed script runs with the PATH its caller gave, root or not: the fixed one was only for this
-# runner's own helpers. (Which interpreter uv picks from that PATH is uv's own lookup.)
+# runner's own helpers.
 if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     PATH=$PWSHPY_CALLER_PATH
     export PATH
+    # uv picks the interpreter, and runs every one it considers to ask its version, so a python
+    # planted in a PATH directory another account can write would run as root. As root uv considers
+    # only the Pythons it manages (user decision), downloading one on first use unless downloads are
+    # switched off; project discovery (the .python-version and uv.toml uv would read from the cache
+    # and every directory above it) moves to /, which only root can write.
+    pwshpy_drop_interpreter_variables
+    set -- --python-preference only-managed --project / "$@"
 fi
 exec "$PWSHPY_UV" run --no-project "$@"

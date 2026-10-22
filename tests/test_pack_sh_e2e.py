@@ -23,6 +23,8 @@ from elevation_doubles import (
     link_tools,
     managed_python_dir,
     write_fake_sudo,
+    write_planted_environment,
+    write_planted_python,
     write_recording_uv,
 )
 
@@ -1046,3 +1048,156 @@ def test_a_packed_file_name_with_wildcards_is_verified_literally(
     result = _run_in(shell, runner, env=_env(tmp_path), cwd=work)
     assert result.returncode == 3, result.stdout + result.stderr
     assert "greeting:hello from the submodule" in result.stdout
+
+
+# --- [89] as root only a uv-managed Python runs ------------------------------------------------------
+# uv picks the interpreter, and EXECUTES every candidate it considers (it asks each for its version),
+# so a python planted in a PATH directory another account can write would run as root. As root the
+# runner passes --python-preference only-managed, moves uv's project discovery to /, and drops the
+# variables that name an interpreter outright. Downloads are off in every run (_trust_env), so nothing
+# reaches the network.
+
+_ENTRY_REPORTING_PYTHON = """import sys
+
+print("python:" + sys.executable)
+"""
+#: uv's refusal when only-managed finds nothing (measured with uv 0.13.0 and 0.13.3).
+_NO_MANAGED_PYTHON = "No interpreter found in virtual environments or managed installations"
+
+
+def _python_runner(tmp_path: Path, *, as_root: bool) -> tuple[Path, Path]:
+    """A which-python .sh runner (root probe forced when ``as_root``) and a uv it trusts, in a tree this
+    test owns that counts as root's."""
+    entry = tmp_path / "which_python.py"
+    entry.write_text(_ENTRY_REPORTING_PYTHON)
+    runner = _pack_sh(entry, tmp_path / "which_python.sh")
+    text = runner.read_text(encoding="utf-8")
+    assert text.count(str(_SYSTEM_WIDE_UV)) == 1
+    text = text.replace(str(_SYSTEM_WIDE_UV), str(tmp_path / "no-system-uv"))
+    assert text.count(_TRUSTED_UIDS) == 1
+    text = text.replace(_TRUSTED_UIDS, f"PWSHPY_TRUSTED_UIDS='0 {tmp_path.stat().st_uid}'\n")
+    if as_root:
+        assert text.count(_ROOT_PROBE[0]) == 1
+        text = text.replace(*_ROOT_PROBE)
+    runner.write_text(text, encoding="utf-8", newline="\n")
+    return runner, _own_tree(tmp_path, ancestor_mode=0o755)
+
+
+def _reported_python(result: subprocess.CompletedProcess[str]) -> str | None:
+    for line in result.stdout.splitlines():
+        if line.startswith("python:") and line[7:]:
+            return line[7:].strip()
+    return None
+
+
+def _needs_managed_python() -> Path:
+    managed = managed_python_dir()
+    if managed is None:
+        pytest.skip("this host has no uv-managed Python (and the test must not download one)")
+    return managed
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize(("as_root", "planted_runs"), [(True, False), (False, True)], ids=["root", "not-root"])
+def test_as_root_a_python_planted_first_on_path_never_runs(
+    tmp_path: Path, shell_id: str, shell: list[str], as_root: bool, planted_runs: bool
+) -> None:
+    """[89]: with no managed Python, a root run refuses rather than run the PATH python; not root
+    (the control), uv runs the planted one."""
+    runner, uv = _python_runner(tmp_path, as_root=as_root)
+    marker = tmp_path / "planted-ran.txt"
+    planted = write_planted_python(tmp_path / "planted-bin", marker)
+    environment = _trust_env(tmp_path, uv.parent, planted.parent)
+    empty = tmp_path / "no-managed-python"
+    empty.mkdir()
+    environment["UV_PYTHON_INSTALL_DIR"] = str(empty)
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    if planted_runs:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert marker.is_file(), "the control never ran the planted python"
+        return
+    assert not marker.exists(), "the root run executed the planted python: " + marker.read_text()
+    assert _reported_python(result) is None, result.stdout
+    assert _NO_MANAGED_PYTHON in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_an_installed_managed_python_runs(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """[89]: the positive control - with a managed Python installed, the root run runs on it."""
+    managed = _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=True)
+    marker = tmp_path / "planted-ran.txt"
+    planted = write_planted_python(tmp_path / "planted-bin", marker)
+    result = _run_in(
+        shell,
+        runner,
+        "--pwshpy-no-install-uv",
+        env=_trust_env(tmp_path, uv.parent, planted.parent),
+        cwd=_work_dir(tmp_path),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    reported = _reported_python(result)
+    assert reported is not None and managed.resolve() in Path(reported).resolve().parents, result.stdout
+    assert not marker.exists(), "the planted python ran"
+
+
+@pytest.mark.parametrize(("as_root", "planted_runs"), [(True, False), (False, True)], ids=["root", "not-root"])
+def test_as_root_a_python_version_file_above_the_cache_is_ignored(
+    tmp_path: Path, as_root: bool, planted_runs: bool
+) -> None:
+    """[89]: uv reads .python-version from the script's directory up, and a path there beats only-managed."""
+    _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=as_root)
+    marker = tmp_path / "planted-ran.txt"
+    planted = write_planted_python(tmp_path / "planted-bin", marker)
+    (tmp_path / "cache").mkdir()
+    (tmp_path / "cache" / ".python-version").write_text(f"{planted}\n", encoding="utf-8")
+    result = _run_in(
+        ["sh"], runner, "--pwshpy-no-install-uv", env=_trust_env(tmp_path, uv.parent), cwd=_work_dir(tmp_path)
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.is_file() is planted_runs, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("variable", ["UV_PYTHON", "VIRTUAL_ENV", "CONDA_PREFIX"])
+@pytest.mark.parametrize(("as_root", "planted_runs"), [(True, False), (False, True)], ids=["root", "not-root"])
+def test_as_root_a_variable_that_names_an_interpreter_is_dropped(
+    tmp_path: Path, variable: str, as_root: bool, planted_runs: bool
+) -> None:
+    """[89]: UV_PYTHON naming a path, or an active virtual or conda environment, each beats
+    only-managed; as root the runner drops the variable and says so, not root it reaches uv."""
+    _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=as_root)
+    marker = tmp_path / "planted-ran.txt"
+    if variable == "UV_PYTHON":
+        value = str(write_planted_python(tmp_path / "planted-bin", marker))
+    else:
+        value = str(write_planted_environment(tmp_path / "planted-env", marker))
+    environment = {**_trust_env(tmp_path, uv.parent), variable: value}
+    result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.is_file() is planted_runs, result.stdout + result.stderr
+    assert (f"pwshpy: ignoring {variable}" in result.stderr) is not planted_runs, result.stderr
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root"])
+def test_the_uv_command_line_carries_only_managed_exactly_as_root(
+    tmp_path: Path, shell_id: str, shell: list[str], as_root: bool
+) -> None:
+    """[89]: the argv uv receives - only-managed and the / project anchor as root, else neither."""
+    runner, _ = _python_runner(tmp_path, as_root=as_root)
+    leaf = tmp_path / "rec" / "bin"
+    leaf.mkdir(parents=True)
+    record = tmp_path / "argv.txt"
+    uv = write_recording_uv(leaf, record)
+    leaf.chmod(0o755)
+    (tmp_path / "rec").chmod(0o755)
+    result = _run_in(shell, runner, "--pwshpy-uv", str(uv), env=_trust_env(tmp_path), cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    argv = record.read_text(encoding="utf-8").splitlines()
+    if as_root:
+        assert argv[:6] == ["run", "--no-project", "--python-preference", "only-managed", "--project", "/"], argv
+    else:
+        assert argv[:2] == ["run", "--no-project"], argv
+        assert "--python-preference" not in argv and "--project" not in argv, argv

@@ -40,6 +40,9 @@
     them; a directory above may be writable only with the sticky bit). Any other uv it finds is
     skipped with a line on stderr, and a -PwshPyUv path that fails the check is refused with exit
     code 127. As root on POSIX it runs its own helpers only from the fixed system directories.
+    Elevated, the script runs only on a Python uv manages (downloaded on first use unless uv's
+    Python downloads are switched off); UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX, UV_MANAGED_PYTHON
+    and UV_NO_MANAGED_PYTHON are ignored, each with a line on stderr.
 
     Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -207,6 +210,11 @@ $PwshPyTrustedUids = @('0')
 # the caller's PATH may hold a directory another account can write. System directories alone (user
 # decision), identical to the .sh runner: not /usr/local, which local installs populate.
 $PwshPyFixedPath = '/usr/bin:/bin:/usr/sbin:/sbin:/run/current-system/sw/bin:/run/current-system/profile/bin'
+# The variables through which a caller names the interpreter itself, past --python-preference
+# only-managed (measured with uv 0.13: an explicit UV_PYTHON path and an active virtual or conda
+# environment each run their own python), or that uv refuses beside that flag. An elevated run drops
+# them; identical to the .sh runner.
+$PwshPyInterpreterVariables = @('UV_PYTHON', 'VIRTUAL_ENV', 'CONDA_PREFIX', 'UV_MANAGED_PYTHON', 'UV_NO_MANAGED_PYTHON')
 
 function Get-PwshPyRunningUserSid {
     # The account this process runs as, from its token: USERNAME can be set by anyone, and under
@@ -623,6 +631,25 @@ function ConvertTo-PwshPyNativeCall {
     return [scriptblock]::Create($text)
 }
 
+function Get-PwshPyManagedPythonOption {
+    # The uv options an elevated run adds: only a uv-managed Python, and project discovery (the
+    # .python-version and uv.toml uv would otherwise read from the packed script's directory and
+    # every directory above it, the cache, which a non-administrator may be able to write) moved to
+    # a directory only administrators can write: / on POSIX, System32 on Windows, asked of the
+    # system rather than of the environment.
+    $anchor = if ($PwshPyOnWindows) { [Environment]::SystemDirectory } else { '/' }
+    return @('--python-preference', 'only-managed', '--project', $anchor)
+}
+
+function Clear-PwshPyInterpreterVariable {
+    # Drops each interpreter variable that is set, naming it on stderr, so a run that ignored it says why.
+    foreach ($name in $PwshPyInterpreterVariables) {
+        if ($null -eq [Environment]::GetEnvironmentVariable($name)) { continue }
+        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run only runs a uv-managed Python"
+        [Environment]::SetEnvironmentVariable($name, $null)
+    }
+}
+
 function Invoke-PwshPyElevated {
     param([string[]] $ForwardArgs)
 
@@ -931,10 +958,17 @@ Set-Item -Path ('Env:' + $PwshPyArgvEnv) -Value ($PwshPyEncoded -join '|')
 
 $PwshPyTarget = Join-Path $PwshPyCacheDir $PwshPyShim
 # The packed script runs with the PATH its caller gave; the fixed one was only for the runner's own
-# helpers. (Which interpreter uv picks from that PATH is uv's own lookup.)
+# helpers.
 if ($PwshPyRootPath) { $env:PATH = $PwshPyCallerPath }
 
+# uv picks the interpreter, and runs every one it considers to ask its version, so a python planted
+# in a PATH directory another account can write would run elevated. Elevated, uv considers only the
+# Pythons it manages (user decision), downloading one on first use unless downloads are switched off.
 $PwshPyRunArgs = @('run', '--no-project')
+if ($PwshPyElevatedRun) {
+    $PwshPyRunArgs += Get-PwshPyManagedPythonOption
+    Clear-PwshPyInterpreterVariable
+}
 $PwshPyRunArgs += $PwshPyUvArgs
 $PwshPyRunArgs += $PwshPyTarget
 

@@ -99,7 +99,8 @@ box (like the Windows mutating tests need throwaway VM 24000).
   stop->Stopped, enable->Automatic, disable->Disabled over real D-Bus).
 - **D-Bus:** object `/org/freedesktop/systemd1`, interface `org.freedesktop.systemd1.Manager`.
 - **Read** (`iter_services`): two passes, as for timers. First the loaded services from `ListUnits()`
-  (filter to `.service`, skipping LoadState `not-found` / `masked`), with `GetUnitFileState(name)` for
+  (filter to `.service`, skipping LoadState `not-found` / `masked` unless the unit still runs), with
+  `GetUnitFileState(name)` for
   the start type; then the service unit files `ListUnits` did not report (`ListUnitFilesByPatterns`, or
   `ListUnitFiles` on systemd < 230), because a stopped, disabled service is unloaded and `ListUnits`
   omits it - Get-Service lists a stopped service. Each is read through `LoadUnit`, its start type from
@@ -127,7 +128,8 @@ box (like the Windows mutating tests need throwaway VM 24000).
   `tests/test_systemd_task_controller.py`).
 - **Model:** a scheduled task = a `.timer` unit (the schedule) triggering a `.service` unit (the work).
 - **Read** (`iter_timers`): two passes. First the loaded timers from `ListUnits()` (filter to `.timer`,
-  skipping LoadState `not-found` / `masked`); then the timer unit files `ListUnits` did not report
+  skipping LoadState `not-found` / `masked` unless the unit still runs); then the timer unit files
+  `ListUnits` did not report
   (`ListUnitFilesByPatterns`, or `ListUnitFiles` on systemd < 230), because a disabled or
   not-yet-started timer is unloaded and `ListUnits` omits it - Get-ScheduledTask lists a disabled task.
   Masked files, aliases and templates are skipped; vendor timers under `/usr/lib` are listed. State from

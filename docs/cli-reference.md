@@ -86,7 +86,8 @@ Use it when "not listed" has to mean "does not exist", for example to check that
 deleted. The listing streams, so the records before the unreadable item are already written: with
 `--jsonl` they stay valid lines, with `--json` a failure on the first item leaves stdout empty and a
 later one leaves an unterminated array (see [Portable record commands](#portable-record-commands)).
-Timers systemd reports as not-found or masked, aliases and templates are no tasks in either mode.
+Timers systemd reports as not-found or masked (and stopped), aliases and templates are no tasks in
+either mode; a running one is still listed.
 
 `get_service [--strict]` follows the same contract. On Linux it skips, with a warning naming it, a
 refused unit-file listing (then no stopped, unloaded service is listed) or a service unit systemd

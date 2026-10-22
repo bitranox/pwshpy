@@ -254,8 +254,8 @@ else:
 ```
 
 The pipeline is lazy, so the error is raised when iteration reaches the unreadable item: records
-before it have already been yielded. Systemd timers that are not-found or masked, aliases and
-templates are no tasks in either mode; a single field that cannot be read (a run time, a principal)
+before it have already been yielded. Systemd timers that are not-found or masked (and stopped),
+aliases and templates are no tasks in either mode, while a running one is still listed; a single field that cannot be read (a run time, a principal)
 falls back to its documented default and the task stays listed.
 
 ## Listing services: skipped versus strict

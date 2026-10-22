@@ -1,10 +1,10 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Packed with pwshpy: the Python script '@@PWSHPY_ENTRY@@' and its local modules, in one file.
+    Packed with pwshpy: the Python script '@@PWSHPY_ENTRY_NAME@@' and its local modules, in one file.
 
 .DESCRIPTION
-    This file carries '@@PWSHPY_ENTRY@@' and every local module it imports as a base64 zip.
+    This file carries '@@PWSHPY_ENTRY_NAME@@' and every local module it imports as a base64 zip.
     Running it unpacks them into a per-user cache, installs `uv` if this machine has none,
     runs the script, and exits with the script's own exit code. Nothing needs to be
     installed first, not even Python.
@@ -19,7 +19,7 @@
 
     Re-pack after editing, replacing this file:
 
-        uvx pwshpy pack src/@@PWSHPY_ENTRY@@ -o <this file> --force
+        uvx pwshpy pack src/@@PWSHPY_ENTRY_NAME@@ -o <this file> --force
 
     Switches this wrapper understands. Every other argument is passed to the packed script
     exactly as you typed it, so a script taking -v or --path still works:
@@ -56,7 +56,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$PwshPyEntry = '@@PWSHPY_ENTRY@@'
+$PwshPyEntry = @@PWSHPY_ENTRY@@
 $PwshPyShim = '@@PWSHPY_SHIM@@'
 $PwshPySha = '@@PWSHPY_PAYLOAD_SHA256@@'
 $PwshPyArgvEnv = '@@PWSHPY_ARGV_ENV@@'

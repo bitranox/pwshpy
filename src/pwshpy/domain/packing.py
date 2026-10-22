@@ -26,11 +26,13 @@ Contents:
     * :func:`render_shim` - the generated ``__main__`` shim for one entry.
     * :func:`render_runner` - substitute a payload into the runner template.
     * :func:`chunk_base64` - wrap a base64 blob to a fixed line width.
+    * :func:`unquote_powershell_literal` - read back a name the PowerShell runner holds quoted.
 """
 
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -137,6 +139,15 @@ _PLACEHOLDERS = (
     "@@PWSHPY_SHIM@@",
     "@@PWSHPY_ARGV_ENV@@",
 )
+
+#: The entry name as plain text, for the runners' help comments. Optional (a template may or may not
+#: name the entry in prose); safe there because a name with a line break, or ``#>`` in a ``.ps1``,
+#: is refused before rendering.
+_ENTRY_NAME_PLACEHOLDER = "@@PWSHPY_ENTRY_NAME@@"
+
+#: What ends the PowerShell runner's ``<# ... #>`` help block, which names the entry. A block
+#: comment has no escape, so an entry name holding it cannot be packed to a ``.ps1``.
+_POWERSHELL_COMMENT_END = "#>"
 
 #: Placeholders the POSIX ``.sh`` runner exposes.  It has no shim and no out-of-band argv channel
 #: (POSIX ``sh`` forwards ``"$@"`` intact and uv reads the entry's PEP 723 block directly), so its
@@ -370,13 +381,18 @@ def chunk_base64(blob: str, width: int = 120) -> str:
 def render_runner(template: str, content: RunnerContent) -> str:
     """Substitute a payload into the runner template, returning the finished ``.ps1`` text.
 
+    The entry name and every uv argument land as PowerShell single-quoted literals (see
+    :func:`_powershell_literal`); the file list sits in a single-quoted here-string, which no
+    ``<digest> *<path>`` line can end.
+
     Args:
         template: The runner template text, carrying every ``@@PWSHPY_*@@`` placeholder.
         content: The rendered payload inputs (see :class:`RunnerContent`).
 
     Raises:
         PackError: If the template is missing a placeholder, which would ship a runner with
-            a literal ``@@PWSHPY_...@@`` in it.
+            a literal ``@@PWSHPY_...@@`` in it, or a packed name cannot be written into the
+            runner (a line break in any name, ``#>`` in the entry name).
 
     Example:
         >>> tpl = "P=@@PWSHPY_PAYLOAD_B64@@ S=@@PWSHPY_PAYLOAD_SHA256@@ E=@@PWSHPY_ENTRY@@ " \\
@@ -384,24 +400,63 @@ def render_runner(template: str, content: RunnerContent) -> str:
         >>> content = RunnerContent(payload_b64="Ym9keQ==", payload_sha256="ab12", entry="t.py",
         ...                         uv_args=["--with", "rich"], file_hashes=[FileDigest("ff", "t.py")])
         >>> render_runner(tpl, content)
-        "P=Ym9keQ== S=ab12 E=t.py U='--with','rich' H=ff *t.py M=__pwshpy_pack_main__.py V=PWSHPY_PACK_ARGV"
+        "P=Ym9keQ== S=ab12 E='t.py' U='--with','rich' H=ff *t.py M=__pwshpy_pack_main__.py V=PWSHPY_PACK_ARGV"
     """
     missing = [token for token in _PLACEHOLDERS if token not in template]
     if missing:
         raise PackError(f"runner template is missing placeholder(s): {', '.join(missing)}")
-    replacements = {
-        "@@PWSHPY_PAYLOAD_B64@@": content.payload_b64,
-        "@@PWSHPY_PAYLOAD_SHA256@@": content.payload_sha256,
-        "@@PWSHPY_ENTRY@@": content.entry,
-        "@@PWSHPY_UV_ARGS@@": _powershell_string_array(content.uv_args),
-        "@@PWSHPY_FILE_HASHES@@": "\n".join(f"{fh.digest} *{fh.path}" for fh in content.file_hashes),
-        "@@PWSHPY_SHIM@@": SHIM_MODULE,
-        "@@PWSHPY_ARGV_ENV@@": ARGV_ENV_VAR,
-    }
-    rendered = template
-    for token, value in replacements.items():
-        rendered = rendered.replace(token, value)
-    return rendered
+    _refuse_unrepresentable_names(content)
+    if _POWERSHELL_COMMENT_END in content.entry:
+        raise PackError(
+            f"cannot pack {content.entry!r} to a .ps1: {_POWERSHELL_COMMENT_END!r} in the entry name would "
+            "end the runner's help block early; rename the script"
+        )
+    return _substitute(
+        template,
+        {
+            "@@PWSHPY_PAYLOAD_B64@@": content.payload_b64,
+            "@@PWSHPY_PAYLOAD_SHA256@@": content.payload_sha256,
+            "@@PWSHPY_ENTRY@@": _powershell_literal(content.entry),
+            _ENTRY_NAME_PLACEHOLDER: content.entry,
+            "@@PWSHPY_UV_ARGS@@": _powershell_string_array(content.uv_args),
+            "@@PWSHPY_FILE_HASHES@@": "\n".join(f"{fh.digest} *{fh.path}" for fh in content.file_hashes),
+            "@@PWSHPY_SHIM@@": SHIM_MODULE,
+            "@@PWSHPY_ARGV_ENV@@": ARGV_ENV_VAR,
+        },
+    )
+
+
+def _refuse_unrepresentable_names(content: RunnerContent) -> None:
+    """Refuse a packed name holding a line break, which neither runner can carry.
+
+    Both keep the file list one ``<digest> <path>`` per line and name the entry in comment lines,
+    so a line break would split a name in two or start a line of code. No real script or data
+    file needs one, so the pack is refused rather than the name encoded.
+
+    Raises:
+        PackError: Naming the first such name.
+
+    Example:
+        >>> _refuse_unrepresentable_names(RunnerContent(payload_b64="", payload_sha256="", entry="it's.py"))
+    """
+    for name in (content.entry, *(fh.path for fh in content.file_hashes)):
+        if "\n" in name or "\r" in name:
+            raise PackError(f"cannot pack {name!r}: a name holding a line break cannot be written into a runner")
+
+
+def _substitute(template: str, replacements: dict[str, str]) -> str:
+    """Replace every placeholder in ONE pass, so a value spelling a placeholder is left as it is.
+
+    Replacing one placeholder after another would substitute again inside a value already written
+    (an entry named ``@@PWSHPY_SHIM@@.py``). The replacement is a function, never a template
+    string, so a backslash in a value is not read as a group reference.
+
+    Example:
+        >>> _substitute("@@A@@ @@B@@", {"@@A@@": "@@B@@", "@@B@@": "b"})
+        '@@B@@ b'
+    """
+    pattern = re.compile("|".join(re.escape(token) for token in replacements))
+    return pattern.sub(lambda match: replacements[match.group(0)], template)
 
 
 def _powershell_string_array(values: Sequence[str]) -> str:
@@ -435,17 +490,40 @@ def _powershell_literal(value: str) -> str:
     return "'" + "".join(char * 2 if char in _POWERSHELL_QUOTES else char for char in value) + "'"
 
 
+def unquote_powershell_literal(body: str) -> str:
+    """Undo :func:`_powershell_literal` on the text between a literal's outer quotes.
+
+    Each quote character the packer doubled is read back as one, the way PowerShell reads it.
+
+    Example:
+        >>> unquote_powershell_literal("it''s.py")
+        "it's.py"
+        >>> unquote_powershell_literal(_powershell_literal("a" + chr(0x201A) + "b")[1:-1]) == "a" + chr(0x201A) + "b"
+        True
+    """
+    value: list[str] = []
+    index = 0
+    while index < len(body):
+        char = body[index]
+        value.append(char)
+        doubled = char in _POWERSHELL_QUOTES and body[index + 1 : index + 2] == char
+        index += 2 if doubled else 1
+    return "".join(value)
+
+
 def render_posix_runner(template: str, content: RunnerContent) -> str:
     """Substitute a payload into the POSIX ``.sh`` runner template.
 
     Like :func:`render_runner` but for ``/bin/sh``: the shim/argv placeholders do not apply
-    (POSIX ``sh`` forwards ``"$@"`` and uv reads the entry's PEP 723 block directly), ``uv_args``
-    become ONE single-quoted ``sh`` word holding the single-quoted list (the runner assigns it as
-    is and ``eval``-expands it at the run, so a ``$``, backtick or ``"`` in a value is never
-    expanded on the way), and file hashes are emitted as ``<digest>  <path>`` lines.
+    (POSIX ``sh`` forwards ``"$@"`` and uv reads the entry's PEP 723 block directly). The entry
+    name and the ``<digest>  <path>`` file list each land as one single-quoted ``sh`` word, and
+    ``uv_args`` as ONE single-quoted word holding the single-quoted list (the runner assigns it as
+    is and ``eval``-expands it at the run), so a ``'``, ``$``, backtick or ``"`` in any of them is
+    taken literally, never parsed as shell.
 
     Raises:
-        PackError: If the template is missing a ``@@PWSHPY_*@@`` placeholder.
+        PackError: If the template is missing a ``@@PWSHPY_*@@`` placeholder, or a packed name
+            holds a line break.
 
     Example:
         >>> tpl = "B=@@PWSHPY_PAYLOAD_B64@@ S=@@PWSHPY_PAYLOAD_SHA256@@ E=@@PWSHPY_ENTRY@@ " \\
@@ -453,22 +531,24 @@ def render_posix_runner(template: str, content: RunnerContent) -> str:
         >>> content = RunnerContent(payload_b64="Ym9keQ==", payload_sha256="ab12", entry="t.py",
         ...                         uv_args=["--with", "httpx>=2"], file_hashes=[FileDigest("ff", "t.py")])
         >>> print(render_posix_runner(tpl, content))
-        B=Ym9keQ== S=ab12 E=t.py U=''\\''--with'\\'' '\\''httpx>=2'\\''' H=ff  t.py
+        B=Ym9keQ== S=ab12 E='t.py' U=''\\''--with'\\'' '\\''httpx>=2'\\''' H='ff  t.py'
     """
     missing = [token for token in _SH_PLACEHOLDERS if token not in template]
     if missing:
         raise PackError(f"POSIX runner template is missing placeholder(s): {', '.join(missing)}")
-    replacements = {
-        "@@PWSHPY_PAYLOAD_B64@@": content.payload_b64,
-        "@@PWSHPY_PAYLOAD_SHA256@@": content.payload_sha256,
-        "@@PWSHPY_ENTRY@@": content.entry,
-        "@@PWSHPY_UV_ARGS@@": _posix_shell_word(_posix_shell_args(content.uv_args)),
-        "@@PWSHPY_FILE_HASHES@@": "\n".join(f"{fh.digest}  {fh.path}" for fh in content.file_hashes),
-    }
-    rendered = template
-    for token, value in replacements.items():
-        rendered = rendered.replace(token, value)
-    return rendered
+    _refuse_unrepresentable_names(content)
+    hashes = "\n".join(f"{fh.digest}  {fh.path}" for fh in content.file_hashes)
+    return _substitute(
+        template,
+        {
+            "@@PWSHPY_PAYLOAD_B64@@": content.payload_b64,
+            "@@PWSHPY_PAYLOAD_SHA256@@": content.payload_sha256,
+            "@@PWSHPY_ENTRY@@": _posix_shell_word(content.entry),
+            _ENTRY_NAME_PLACEHOLDER: content.entry,
+            "@@PWSHPY_UV_ARGS@@": _posix_shell_word(_posix_shell_args(content.uv_args)),
+            "@@PWSHPY_FILE_HASHES@@": _posix_shell_word(hashes),
+        },
+    )
 
 
 def _posix_shell_args(values: Sequence[str]) -> str:
@@ -516,4 +596,5 @@ __all__ = [
     "render_posix_runner",
     "render_runner",
     "render_shim",
+    "unquote_powershell_literal",
 ]

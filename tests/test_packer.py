@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import io
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -430,3 +431,28 @@ def _replace_payload(runner: Path, members: dict[str, bytes]) -> None:
     start = next(i for i, line in enumerate(lines) if line.strip() == "$PwshPyPayload = @'")
     end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "'@")
     runner.write_text("\n".join([*lines[: start + 1], encoded, *lines[end:]]) + "\n")
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("fmt", [RunnerFormat.PS1, RunnerFormat.SH], ids=["ps1", "sh"])
+@pytest.mark.parametrize("name", ["it's.py", f"it{chr(0x2019)}s.py"], ids=["ascii-quote", "typographic-quote"])
+def test_unpack_reads_back_an_entry_name_holding_a_quote(tmp_path: Path, fmt: RunnerFormat, name: str) -> None:
+    """[62]: the runner holds the entry name quoted; unpack reports the name, not its quoting."""
+    entry = tmp_path / name
+    entry.write_text("print('hi')\n", encoding="utf-8")
+    suffix = ".sh" if fmt is RunnerFormat.SH else ".ps1"
+    manifest = pack_script(entry, tmp_path / f"quoted{suffix}", options=PackOptions(format=fmt))
+    assert manifest.entry == name
+    assert unpack_script(manifest.output_path, tmp_path / "out").entry == name
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="a file name with a line break needs a POSIX file system")
+def test_a_data_file_named_with_a_line_break_is_refused(tmp_path: Path) -> None:
+    """[62]: the runners keep one packed name per line, so such a name is refused at pack time."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('hi')\n")
+    data = tmp_path / "a\nb.json"
+    data.write_text("{}\n")
+    with pytest.raises(PackError, match="line break"):
+        pack_script(entry, options=PackOptions(include=[data]))

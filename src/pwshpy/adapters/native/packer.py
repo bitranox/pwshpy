@@ -28,6 +28,7 @@ import base64
 import binascii
 import hashlib
 import io
+import shlex
 import sys
 import tarfile
 import zipfile
@@ -50,6 +51,7 @@ from ...domain.packing import (
     render_posix_runner,
     render_runner,
     render_shim,
+    unquote_powershell_literal,
 )
 from ...domain.records import PackedScript
 from .fileio import write_text
@@ -414,12 +416,21 @@ def _decode_payload(payload_lines: list[str], source: Path) -> bytes:
 
 
 def _extract_entry_name(text: str) -> str:
-    """Read the entry name a generated runner records, or ``""`` when absent (either format)."""
+    """Read the entry name a generated runner records, or ``""`` when absent (either format).
+
+    The runner holds it as a quoted literal, so the quoting is undone: a doubled quote character
+    in the PowerShell literal, sh quoting (``it'\\''s.py``) in the POSIX one.
+    """
     for line in text.splitlines():
         stripped = line.strip()
-        for prefix in (_ENTRY_PREFIX, _SH_ENTRY_PREFIX):
-            if stripped.startswith(prefix) and stripped.endswith("'"):
-                return stripped[len(prefix) : -1]
+        if stripped.startswith(_ENTRY_PREFIX) and stripped.endswith("'"):
+            return unquote_powershell_literal(stripped[len(_ENTRY_PREFIX) : -1])
+        if stripped.startswith(_SH_ENTRY_PREFIX) and stripped.endswith("'"):
+            try:
+                words = shlex.split(stripped[len(_SH_ENTRY_PREFIX) - 1 :])
+            except ValueError:
+                return ""
+            return words[0] if len(words) == 1 else ""
     return ""
 
 

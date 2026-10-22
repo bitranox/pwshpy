@@ -2019,3 +2019,21 @@ def test_a_with_value_holding_typographic_quotes_parses_and_survives(tmp_path: P
     spec = f"pkg{_QUOTES_AND_A_PRIME}x"
     runner = Path(pack_script(entry, options=PackOptions(with_packages=[spec])).output_path)
     assert _literal_values(tmp_path, runner, "PwshPyUvArgs") == ["--with", spec]
+
+
+#: Entry names that end a quoted literal unless escaped: the ASCII quote, and a typographic one.
+_QUOTED_ENTRY_NAMES = ("it's.py", f"it{chr(0x2019)}s.py")
+
+
+@pytest.mark.parametrize("name", _QUOTED_ENTRY_NAMES, ids=["ascii-quote", "typographic-quote"])
+def test_an_entry_named_with_a_quote_runs_and_round_trips(tmp_path: Path, name: str) -> None:
+    """[62]: the runner parses, records the name exactly, runs the script, and unpack reads the name back."""
+    entry = tmp_path / name
+    entry.write_text("import sys\nprint('ran:' + str(len(sys.argv)))\n", encoding="utf-8")
+    manifest = pack_script(entry, tmp_path / "quoted.ps1")
+    runner = Path(manifest.output_path)
+    assert _literal_values(tmp_path, runner, "PwshPyEntry") == [name]
+    result = _run(runner, env=_isolated_cache(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ran:1" in result.stdout, result.stdout
+    assert unpack_script(runner, tmp_path / "out").entry == name

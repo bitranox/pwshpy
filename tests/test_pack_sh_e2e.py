@@ -1201,3 +1201,24 @@ def test_the_uv_command_line_carries_only_managed_exactly_as_root(
     else:
         assert argv[:2] == ["run", "--no-project"], argv
         assert "--python-preference" not in argv and "--project" not in argv, argv
+
+
+# --- [62] names the .sh carries as literals ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_an_entry_and_a_data_file_named_with_a_quote_run_and_round_trip(
+    tmp_path: Path, shell_id: str, shell: list[str]
+) -> None:
+    """[62]: it's.py as the entry and d'x.json as an included file: the runner parses, verifies, runs."""
+    entry = tmp_path / "it's.py"
+    entry.write_text("import sys\nprint('ran:' + str(len(sys.argv)))\n", encoding="utf-8")
+    data = tmp_path / "d'x.json"
+    data.write_text("{}\n", encoding="utf-8")
+    runner = _pack_sh(entry, tmp_path / "quoted.sh", include=[str(data)])
+    result = _run(shell, runner, env=_env(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ran:1" in result.stdout, result.stdout
+    info = _run(shell, runner, "--pwshpy-info", env=_env(tmp_path))
+    assert "entry      : it's.py" in info.stdout, info.stdout
+    assert unpack_script(runner, tmp_path / "out").entry == "it's.py"

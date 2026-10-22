@@ -172,7 +172,7 @@ def test_render_runner_substitutes_every_placeholder() -> None:
     assert rendered.split("|") == [
         "Ym9keQ==",
         "ab12",
-        "tool.py",
+        "'tool.py'",
         "'--with','rich'",
         "ff *tool.py",
         SHIM_MODULE,
@@ -215,7 +215,8 @@ def test_render_posix_runner_substitutes_its_placeholders() -> None:
     )
     assert "@@PWSHPY" not in rendered
     payload, sha, entry, uv_args, hashes = rendered.split("|")
-    assert [payload, sha, entry, hashes] == ["Ym9keQ==", "ab12", "tool.py", "ff  tool.py"]
+    assert [payload, sha] == ["Ym9keQ==", "ab12"]
+    assert [*shlex.split(entry), *shlex.split(hashes)] == ["tool.py", "ff  tool.py"]
     assert _sh_uv_args(uv_args) == ["--with", "rich"]
 
 
@@ -280,3 +281,53 @@ def test_a_prime_is_not_a_powershell_quote() -> None:
         RunnerContent(payload_b64="x", payload_sha256="y", entry="e", uv_args=[f"a{prime}b"]),
     )
     assert rendered.split("|")[3] == f"'a{prime}b'"
+
+
+@pytest.mark.os_agnostic
+def test_the_entry_name_is_a_quoted_literal_in_the_powershell_runner() -> None:
+    """[62]: the entry name lands as a PowerShell literal, so it's.py keeps the runner parseable."""
+    template = "$PwshPyEntry = @@PWSHPY_ENTRY@@|" + _FULL_TEMPLATE.replace("@@PWSHPY_ENTRY@@|", "")
+    rendered = render_runner(template, RunnerContent(payload_b64="x", payload_sha256="y", entry="it's.py"))
+    assert rendered.startswith("$PwshPyEntry = 'it''s.py'|")
+
+
+@pytest.mark.os_agnostic
+def test_the_entry_name_and_file_list_are_quoted_words_in_the_posix_runner() -> None:
+    """[62]: the entry name and the hash list each land as one sh word holding the value as given."""
+    rendered = render_posix_runner(
+        _SH_TEMPLATE,
+        RunnerContent(payload_b64="x", payload_sha256="y", entry="it's.py", file_hashes=[FileDigest("ff", "it's.py")]),
+    )
+    _, _, entry, _, hashes = rendered.split("|")
+    assert shlex.split(entry) == ["it's.py"]
+    assert shlex.split(hashes) == ["ff  it's.py"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("name", ["a\nb.py", "a\rb.py"], ids=["newline", "carriage-return"])
+@pytest.mark.parametrize("render", [render_runner, render_posix_runner], ids=["ps1", "sh"])
+def test_a_line_break_in_a_packed_name_is_refused(name: str, render: object) -> None:
+    """[62]: both runners keep the entry and the file list one name per line, so a line break cannot be packed."""
+    template = _FULL_TEMPLATE if render is render_runner else _SH_TEMPLATE
+    content = RunnerContent(payload_b64="x", payload_sha256="y", entry="e.py", file_hashes=[FileDigest("ff", name)])
+    with pytest.raises(PackError, match="line break"):
+        render(template, content)  # type: ignore[operator]
+
+
+@pytest.mark.os_agnostic
+def test_a_comment_terminator_in_the_entry_name_is_refused_for_powershell() -> None:
+    """[62]: the .ps1 names its entry inside its <# #> help block, which a '#>' in the name would end."""
+    with pytest.raises(PackError, match="#>"):
+        render_runner(_FULL_TEMPLATE, RunnerContent(payload_b64="x", payload_sha256="y", entry="a#>b.py"))
+    rendered = render_posix_runner(_SH_TEMPLATE, RunnerContent(payload_b64="x", payload_sha256="y", entry="a#>b.py"))
+    assert shlex.split(rendered.split("|")[2]) == ["a#>b.py"]
+
+
+@pytest.mark.os_agnostic
+def test_a_placeholder_spelled_in_a_value_is_not_substituted_again() -> None:
+    """A value is substituted once: an entry named like a later placeholder keeps its own name."""
+    rendered = render_runner(
+        _FULL_TEMPLATE,
+        RunnerContent(payload_b64="x", payload_sha256="y", entry="@@PWSHPY_SHIM@@.py", uv_args=["--with", "z"]),
+    )
+    assert rendered.split("|")[2] == "'@@PWSHPY_SHIM@@.py'"

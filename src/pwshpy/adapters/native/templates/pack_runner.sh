@@ -1,7 +1,7 @@
 #!/bin/sh
 # Packed with pwshpy - https://github.com/bitranox/pwshpy
 #
-# This file carries the Python script '@@PWSHPY_ENTRY@@' and its local modules as a base64 tar.
+# This file carries the Python script '@@PWSHPY_ENTRY_NAME@@' and its local modules as a base64 tar.
 # Running it unpacks them into a per-user cache, installs `uv` if this machine has none, runs the
 # script, and exits with the script's own exit code. Nothing needs to be installed first, not even
 # Python.
@@ -11,7 +11,7 @@
 #
 # See what is inside, without running any of it:   sh <this file> --pwshpy-info
 # Unpack the sources to read or edit them:          uvx pwshpy unpack <this file> -o src
-# Re-pack after editing, replacing this file:       uvx pwshpy pack src/@@PWSHPY_ENTRY@@ -o <this file> --force
+# Re-pack after editing, replacing this file:       uvx pwshpy pack src/@@PWSHPY_ENTRY_NAME@@ -o <this file> --force
 #
 # Switches this wrapper understands; every other argument is passed to the packed script exactly as
 # you typed it (empty strings, spaces, quotes and unicode all survive):
@@ -75,12 +75,12 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     export PATH
 fi
 
-PWSHPY_ENTRY='@@PWSHPY_ENTRY@@'
+PWSHPY_ENTRY=@@PWSHPY_ENTRY@@
 PWSHPY_SHA='@@PWSHPY_PAYLOAD_SHA256@@'
 # The fixed uv args as one single-quoted word holding a list of single-quoted words, expanded by the
 # eval at the run: a dependency spec carrying $, ` or " is taken literally, never expanded here.
 PWSHPY_UV_ARGS_RAW=@@PWSHPY_UV_ARGS@@
-PWSHPY_FILE_HASHES='@@PWSHPY_FILE_HASHES@@'
+PWSHPY_FILE_HASHES=@@PWSHPY_FILE_HASHES@@
 
 # The base64 payload, as a heredoc so a very long blob needs no shell quoting.
 pwshpy_payload_b64() {

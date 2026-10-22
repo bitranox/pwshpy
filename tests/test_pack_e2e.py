@@ -28,7 +28,13 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from elevation_doubles import RUNNING_AS_ROOT, link_tools, write_fake_sudo
+from elevation_doubles import (
+    INTERPRETER_VARIABLES,
+    RUNNING_AS_ROOT,
+    link_tools,
+    write_fake_sudo,
+    write_recording_uv,
+)
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.packing import PackOptions
@@ -1064,11 +1070,21 @@ def _elevation_stand_in(
 
 
 def _run_with_path(
-    tmp_path: Path, runner: Path, *arguments: str, path_first: Sequence[Path], env: dict[str, str] | None = None
+    tmp_path: Path,
+    runner: Path,
+    *arguments: str,
+    path_first: Sequence[Path],
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a runner with exactly ``path_first`` ahead of the inherited PATH (no real uv added)."""
+    """Run a runner with exactly ``path_first`` ahead of the inherited PATH (no real uv added).
+
+    The interpreter variables a suite run may carry (bmk's VIRTUAL_ENV among them) are dropped
+    unless ``env`` sets them, so uv's interpreter choice is the one the test arranged.
+    """
     assert _PWSH is not None
-    child_env = {**os.environ, **_isolated_cache(tmp_path), "PYTHONIOENCODING": "utf-8", **(env or {})}
+    child_env = {k: v for k, v in os.environ.items() if k not in INTERPRETER_VARIABLES}
+    child_env.update({**_isolated_cache(tmp_path), "PYTHONIOENCODING": "utf-8", **(env or {})})
     child_env.pop("PWSHPY_TEST_UV", None)
     child_env["PATH"] = os.pathsep.join([*map(str, path_first), os.environ.get("PATH", "")])
     return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
@@ -1079,6 +1095,7 @@ def _run_with_path(
         timeout=300,
         check=False,
         env=child_env,
+        cwd=cwd,
     )
 
 
@@ -1633,3 +1650,117 @@ def test_an_elevated_posix_run_never_uses_ls_from_usr_local_bin(tmp_path: Path) 
     result = _run_with_path(tmp_path, runner, path_first=[usr_local_bin, planted.parent])
     assert not marker.exists(), "the ls from the /usr/local/bin stand-in ran"
     assert "is writable by every account" in _skip_line(result, planted), result.stderr
+
+
+# --- [90] native-call arguments reach the program literally on POSIX pwsh ---------------------------
+# pwsh on Linux and macOS globs and tilde-expands every argument to a native program that is not a
+# quoted literal in the source - a variable, a splat and a subexpression alike - so '*.log' became the
+# matching file names and a cache path holding '?' could name a sibling directory.
+
+#: Files the globs in these tests would match, put in the runner's working directory.
+_GLOB_BAIT = ("a.log", "b.log", "pkga")
+
+
+def _recording_runner(tmp_path: Path, *, elevated: str, with_packages: Sequence[str] = ()) -> tuple[Path, Path, Path]:
+    """A runner whose uv is a recording double pinned with -PwshPyUv (POSIX), in a tree counted as root's.
+
+    Returns the runner, the double, and the file it records into.
+    """
+    entry = tmp_path / "app.py"
+    entry.write_text("print('never run: uv is a recording double')\n")
+    runner = _elevation_stand_in(
+        Path(pack_script(entry, options=PackOptions(with_packages=list(with_packages))).output_path),
+        tmp_path / "recording_stand_in.ps1",
+        elevated=elevated,
+        trust_my_uid=True,
+    )
+    leaf = tmp_path / "rec" / "bin"
+    leaf.mkdir(parents=True)
+    record = tmp_path / "argv.txt"
+    uv = write_recording_uv(leaf, record)
+    leaf.chmod(0o755)
+    (tmp_path / "rec").chmod(0o755)
+    return runner, uv, record
+
+
+def _glob_bait(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in _GLOB_BAIT:
+        (directory / name).write_text("bait\n", encoding="utf-8")
+    return directory
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+def test_the_sudo_relaunch_forwards_wildcards_and_tildes_literally(tmp_path: Path) -> None:
+    """[90]: '*', '*.log' and '~' reach the packed script as typed through the -PwshPyElevate relaunch."""
+    manifest = pack_script(_project(tmp_path))
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    write_fake_sudo(bin_dir, grant=True)
+    arguments = ["*", "*.log", "~", "~/x", "[ab].log"]
+    result = _run_with_path(
+        tmp_path,
+        Path(manifest.output_path),
+        "-PwshPyElevate",
+        *arguments,
+        path_first=[bin_dir, _UvLocation.directory],
+        cwd=_glob_bait(tmp_path / "work"),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"argv:{arguments!r}" in result.stdout, result.stdout
+
+
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_a_cache_path_with_wildcards_runs_the_verified_entry(tmp_path: Path) -> None:
+    """[90]: the verified entry under a cache root named 'c?che' runs, not a sibling the pattern matches.
+
+    The decoys are full copies of the extracted tree whose shim prints 'decoy'; '!' and '#' sort
+    before '?' under both ordinal and culture-aware ordering, so a globbed target would pick one.
+    """
+    entry = _project(tmp_path, exit_code=0)
+    runner = Path(pack_script(entry).output_path)
+    cache = tmp_path / "c?che"
+    environment = {"PWSHPY_PACK_CACHE": str(cache)}
+    assert _run(runner, env=environment).returncode == 0
+    (extracted,) = [path for path in cache.iterdir() if path.is_dir()]
+    for decoy_root in (tmp_path / "c!che", tmp_path / "c#che"):
+        decoy = decoy_root / extracted.name
+        shutil.copytree(extracted, decoy)
+        (decoy / "__pwshpy_pack_main__.py").write_text("print('decoy')\n", encoding="utf-8")
+    result = _run(runner, env=environment)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "greeting:hello from the submodule" in result.stdout, result.stdout
+    assert "decoy" not in result.stdout, result.stdout
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_the_uv_arguments_and_target_reach_uv_literally(tmp_path: Path) -> None:
+    """[90]: a --with spec with brackets and a target under a '?' cache reach uv unglobbed."""
+    runner, uv, record = _recording_runner(tmp_path, elevated="$false", with_packages=["pkg[ab]"])
+    cache = tmp_path / "c?che"
+    # A decoy target the pattern also matches, sorting before the literal one.
+    sha = re.search(r"\$PwshPySha = '([0-9a-f]{64})'", runner.read_text(encoding="utf-8"))
+    assert sha is not None
+    decoy = tmp_path / "c!che" / sha.group(1)[:16]
+    decoy.mkdir(parents=True)
+    (decoy / "__pwshpy_pack_main__.py").write_text("print('decoy')\n", encoding="utf-8")
+    result = _run_with_path(
+        tmp_path,
+        runner,
+        "-PwshPyUv",
+        str(uv),
+        path_first=[],
+        env={"PWSHPY_PACK_CACHE": str(cache)},
+        cwd=_glob_bait(tmp_path / "work"),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    argv = record.read_text(encoding="utf-8").splitlines()
+    assert argv[2:4] == ["--with", "pkg[ab]"], argv
+    assert argv[4].startswith(str(cache) + os.sep), argv
+    assert argv[4].endswith("__pwshpy_pack_main__.py"), argv

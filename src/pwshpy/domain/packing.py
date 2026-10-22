@@ -418,7 +418,9 @@ def render_posix_runner(template: str, content: RunnerContent) -> str:
 
     Like :func:`render_runner` but for ``/bin/sh``: the shim/argv placeholders do not apply
     (POSIX ``sh`` forwards ``"$@"`` and uv reads the entry's PEP 723 block directly), ``uv_args``
-    are single-quoted for ``sh``, and file hashes are emitted as ``<digest>  <path>`` lines.
+    become ONE single-quoted ``sh`` word holding the single-quoted list (the runner assigns it as
+    is and ``eval``-expands it at the run, so a ``$``, backtick or ``"`` in a value is never
+    expanded on the way), and file hashes are emitted as ``<digest>  <path>`` lines.
 
     Raises:
         PackError: If the template is missing a ``@@PWSHPY_*@@`` placeholder.
@@ -428,8 +430,8 @@ def render_posix_runner(template: str, content: RunnerContent) -> str:
         ...       "U=@@PWSHPY_UV_ARGS@@ H=@@PWSHPY_FILE_HASHES@@"
         >>> content = RunnerContent(payload_b64="Ym9keQ==", payload_sha256="ab12", entry="t.py",
         ...                         uv_args=["--with", "httpx>=2"], file_hashes=[FileDigest("ff", "t.py")])
-        >>> render_posix_runner(tpl, content)
-        "B=Ym9keQ== S=ab12 E=t.py U='--with' 'httpx>=2' H=ff  t.py"
+        >>> print(render_posix_runner(tpl, content))
+        B=Ym9keQ== S=ab12 E=t.py U=''\\''--with'\\'' '\\''httpx>=2'\\''' H=ff  t.py
     """
     missing = [token for token in _SH_PLACEHOLDERS if token not in template]
     if missing:
@@ -438,7 +440,7 @@ def render_posix_runner(template: str, content: RunnerContent) -> str:
         "@@PWSHPY_PAYLOAD_B64@@": content.payload_b64,
         "@@PWSHPY_PAYLOAD_SHA256@@": content.payload_sha256,
         "@@PWSHPY_ENTRY@@": content.entry,
-        "@@PWSHPY_UV_ARGS@@": _posix_shell_args(content.uv_args),
+        "@@PWSHPY_UV_ARGS@@": _posix_shell_word(_posix_shell_args(content.uv_args)),
         "@@PWSHPY_FILE_HASHES@@": "\n".join(f"{fh.digest}  {fh.path}" for fh in content.file_hashes),
     }
     rendered = template
@@ -460,7 +462,19 @@ def _posix_shell_args(values: Sequence[str]) -> str:
         >>> _posix_shell_args([])
         ''
     """
-    return " ".join("'" + value.replace("'", "'\\''") + "'" for value in values)
+    return " ".join(_posix_shell_word(value) for value in values)
+
+
+def _posix_shell_word(value: str) -> str:
+    """Quote ``value`` as one single-quoted POSIX ``sh`` word, literal whatever it holds.
+
+    Example:
+        >>> print(_posix_shell_word("a$b`c"))
+        'a$b`c'
+        >>> print(_posix_shell_word("it's"))
+        'it'\\''s'
+    """
+    return "'" + value.replace("'", "'\\''") + "'"
 
 
 __all__ = [

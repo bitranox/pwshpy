@@ -272,6 +272,15 @@ Details worth knowing:
   outside pwshpy's reach: `pwsh -File tool.ps1 --path=C:\dir` is split by PowerShell's own
   `-Name:Value` parsing before the script sees it - use `--path C:\dir`, or call `.\tool.ps1` from a
   PowerShell prompt, where it arrives intact.
+- **Nothing the `.ps1` hands a program is globbed, on any OS.** pwsh on Linux and macOS expands
+  wildcards and a leading `~` in every argument to a native program that is not a quoted literal
+  in the source, a variable's value included, so the runner writes each call (`sudo` for
+  `-PwshPyElevate`, `uv run`) out as single-quoted literals: a `'*.log'` argument reaches the
+  script through the sudo relaunch as `*.log`, a `--with 'pkg[extra]'` reaches uv as given, and a
+  cache path holding `?` runs the verified entry, never a sibling directory the pattern matches.
+  The `.sh` quotes every expansion (`"$@"`), keeps its list of `--with` arguments in one
+  single-quoted word (a `$` or a backtick in a dependency spec is not expanded), and never globs
+  its list of packed file names.
 - **The `.ps1`'s `-PwshPyElevate` child on Windows is a fresh process.** UAC builds its environment
   from your profile, so variables set only in the calling shell (`PWSHPY_PACK_CACHE` among them) do
   not reach it. It is started as `powershell.exe -ExecutionPolicy Bypass -File runner.ps1 ...`, so

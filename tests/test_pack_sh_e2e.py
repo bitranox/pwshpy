@@ -11,13 +11,20 @@ Windows (no POSIX ``sh``) and when uv is absent.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
-from elevation_doubles import RUNNING_AS_ROOT, link_tools, write_fake_sudo
+from elevation_doubles import (
+    RUNNING_AS_ROOT,
+    link_tools,
+    managed_python_dir,
+    write_fake_sudo,
+    write_recording_uv,
+)
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.enums import RunnerFormat
@@ -523,17 +530,26 @@ def _trust_runner(tmp_path: Path, *, hide_system_uv: bool, as_root: bool = False
 
 
 def _trust_env(tmp_path: Path, *path_first: Path) -> dict[str, str]:
-    """An environment whose PATH is ``path_first`` plus the system dirs, with a barren HOME."""
+    """An environment whose PATH is ``path_first`` plus the system dirs, with a barren HOME.
+
+    Python downloads are off, so a root run (which takes only a uv-managed Python) never reaches
+    the network: it uses the host's managed Pythons, read only, or fails when there are none.
+    """
     barren = tmp_path / "home"
     barren.mkdir(exist_ok=True)
-    return {
+    environment = {
         "PATH": os.pathsep.join([*map(str, path_first), "/usr/bin", "/bin"]),
         "HOME": str(barren),
         "XDG_BIN_HOME": str(barren / "xdgbin"),
         "CARGO_HOME": str(barren / "cargo"),
         "PWSHPY_PACK_CACHE": str(tmp_path / "cache"),
         "PYTHONIOENCODING": "utf-8",
+        "UV_PYTHON_DOWNLOADS": "never",
     }
+    managed = managed_python_dir()
+    if managed is not None:
+        environment["UV_PYTHON_INSTALL_DIR"] = str(managed)
+    return environment
 
 
 def _reported_uv(result: subprocess.CompletedProcess[str]) -> str | None:
@@ -968,3 +984,65 @@ def test_as_root_a_helper_in_usr_local_bin_is_not_used(tmp_path: Path, shell_id:
     assert not marker.exists(), f"helpers from the /usr/local/bin stand-in ran as root: {marker.read_text()}"
     assert result.returncode == 127, result.stdout + result.stderr
     assert f"{_UV_SKIPPED} {planted}: its directory {planted.parent} is writable by every account" in result.stderr
+
+
+# --- [90] the .sh takes every value literally ---------------------------------------------------------
+
+
+def _work_dir(tmp_path: Path) -> Path:
+    """An empty working directory: uv queries a .venv in the cwd or above it, which would answer
+    before the PATH python these tests plant."""
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    return work
+
+
+def _run_in(
+    shell: list[str], runner: Path, *args: str, env: dict[str, str], cwd: Path
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - fixed argv from resolved shell + our own artefact
+        [*shell, str(runner), *args],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+        check=False,
+        env=env,
+        cwd=cwd,
+    )
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize(
+    "spec", ["pkg$HOME", "pkg`echo x`", 'pkg"q', "pkg[ab]"], ids=["dollar", "backtick", "double-quote", "glob"]
+)
+def test_a_uv_arg_is_never_expanded_by_the_runner(tmp_path: Path, shell_id: str, shell: list[str], spec: str) -> None:
+    """[90]: a --with spec reaches uv exactly as packed: the runner once held the list in double quotes."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('never run: uv is a recording double')\n")
+    runner = _pack_sh(entry, tmp_path / "app.sh", with_packages=[spec])
+    record = tmp_path / "argv.txt"
+    uv = write_recording_uv(tmp_path, record)
+    work = _work_dir(tmp_path)
+    (work / "pkga").write_text("bait\n", encoding="utf-8")
+    result = _run_in(shell, runner, "--pwshpy-uv", str(uv), env=_env(tmp_path), cwd=work)
+    assert result.returncode == 0, result.stdout + result.stderr
+    argv = record.read_text(encoding="utf-8").splitlines()
+    assert argv[2:4] == ["--with", spec], argv
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_a_packed_file_name_with_wildcards_is_verified_literally(
+    tmp_path: Path, shell_id: str, shell: list[str]
+) -> None:
+    """[90]: the hash list is never globbed, so a cwd file a 'd[1].json' line matches changes nothing."""
+    entry = _project(tmp_path, exit_code=3)
+    data = tmp_path / "d[1].json"
+    data.write_text("{}\n", encoding="utf-8")
+    runner = _pack_sh(entry, tmp_path / "app.sh", include=[str(data)])
+    digest = hashlib.sha256(data.read_bytes()).hexdigest()
+    work = _work_dir(tmp_path)
+    (work / f"{digest}  d1.json").write_text("bait\n", encoding="utf-8")
+    result = _run_in(shell, runner, env=_env(tmp_path), cwd=work)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "greeting:hello from the submodule" in result.stdout

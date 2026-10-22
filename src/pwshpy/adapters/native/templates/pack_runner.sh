@@ -75,7 +75,9 @@ fi
 
 PWSHPY_ENTRY='@@PWSHPY_ENTRY@@'
 PWSHPY_SHA='@@PWSHPY_PAYLOAD_SHA256@@'
-PWSHPY_UV_ARGS_RAW="@@PWSHPY_UV_ARGS@@"
+# The fixed uv args as one single-quoted word holding a list of single-quoted words, expanded by the
+# eval at the run: a dependency spec carrying $, ` or " is taken literally, never expanded here.
+PWSHPY_UV_ARGS_RAW=@@PWSHPY_UV_ARGS@@
 PWSHPY_FILE_HASHES='@@PWSHPY_FILE_HASHES@@'
 
 # The base64 payload, as a heredoc so a very long blob needs no shell quoting.
@@ -156,8 +158,12 @@ pwshpy_verify_tree() {
     _oldifs=$IFS
     IFS='
 '
+    # The list is split on newlines alone and never globbed (a packed file named data[1].json must
+    # not be matched against the working directory); the body runs with globbing back on.
+    set -f
     for _line in $PWSHPY_FILE_HASHES; do
         IFS=$_oldifs
+        set +f
         if [ -n "$_line" ]; then
             _expected=${_line%%  *}
             _path=${_line#*  }
@@ -179,6 +185,7 @@ pwshpy_verify_tree() {
 '
     done
     IFS=$_oldifs
+    set +f
     return 0
 }
 
@@ -513,6 +520,7 @@ pwshpy_write_manifest() {
     _oldifs=$IFS
     IFS='
 '
+    set -f
     for _line in $PWSHPY_FILE_HASHES; do
         IFS=$_oldifs
         [ -n "$_line" ] && printf '  %s\n' "${_line#*  }"
@@ -520,6 +528,7 @@ pwshpy_write_manifest() {
 '
     done
     IFS=$_oldifs
+    set +f
 }
 
 # --- argument split ---------------------------------------------------------------------

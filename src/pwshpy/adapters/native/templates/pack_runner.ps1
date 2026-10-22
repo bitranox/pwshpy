@@ -602,6 +602,27 @@ function Join-PwshPyCommandLine {
     return (@($quoted) -join ' ')
 }
 
+function ConvertTo-PwshPyNativeCall {
+    param([string] $FilePath, [string[]] $ArgumentList, [string] $StdoutPath, [string] $StderrPath)
+
+    # The call `& FilePath ArgumentList...` as a script block in which every word is a single-quoted
+    # literal. pwsh on Linux and macOS globs and tilde-expands each argument to a native program that
+    # is not a quoted literal in the source - a variable, a splat and a subexpression alike - so
+    # '*.log' would arrive as the matching file names; a quoted "$x" stays literal but cannot carry a
+    # list. Written out as literals, nothing is expanded, on every host and version: the same
+    # quoting a variable gets on Windows, where nothing is globbed. EscapeSingleQuotedStringContent
+    # also doubles the typographic quotes PowerShell reads as single quotes, so no value can end its
+    # literal early. The redirections go inside, so the program itself writes the files as before.
+    $escape = { param([string] $Word) "'" + [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Word) + "'" }
+    $words = New-Object System.Collections.Generic.List[string]
+    $words.Add((& $escape $FilePath))
+    foreach ($argument in $ArgumentList) { $words.Add((& $escape $argument)) }
+    $text = '& ' + ($words -join ' ')
+    if ($StdoutPath) { $text += ' > ' + (& $escape $StdoutPath) }
+    if ($StderrPath) { $text += ' 2> ' + (& $escape $StderrPath) }
+    return [scriptblock]::Create($text)
+}
+
 function Invoke-PwshPyElevated {
     param([string[]] $ForwardArgs)
 
@@ -629,7 +650,11 @@ function Invoke-PwshPyElevated {
         # sudo keeps the console, so output and exit code flow back without a relay. A sudo that
         # grants -v but then refuses the command itself (timestamp_timeout=0, sudoers allowing
         # only -v) exits with that sudo's own code, which no wrapper can tell from the script's.
-        & sudo (Get-PwshPyHostPath) -NoProfile -File $self @ForwardArgs
+        # Every word literal (ConvertTo-PwshPyNativeCall): the caller's '*' or '~' reaches the
+        # script as typed, and a runner path holding '?' names this file, not a sibling it matches.
+        $sudoArgs = @((Get-PwshPyHostPath), '-NoProfile', '-File', $self)
+        if ($null -ne $ForwardArgs) { $sudoArgs += $ForwardArgs }
+        . (ConvertTo-PwshPyNativeCall -FilePath 'sudo' -ArgumentList $sudoArgs)
         exit $LASTEXITCODE
     }
 
@@ -909,11 +934,15 @@ $PwshPyTarget = Join-Path $PwshPyCacheDir $PwshPyShim
 # helpers. (Which interpreter uv picks from that PATH is uv's own lookup.)
 if ($PwshPyRootPath) { $env:PATH = $PwshPyCallerPath }
 
+$PwshPyRunArgs = @('run', '--no-project')
+$PwshPyRunArgs += $PwshPyUvArgs
+$PwshPyRunArgs += $PwshPyTarget
+
 if ($PwshPyRelay) {
     # Elevated child: stream to the relay files the parent replays, then hand back the code.
-    & $PwshPyUv run --no-project @PwshPyUvArgs $PwshPyTarget > "$PwshPyRelay.out" 2> "$PwshPyRelay.err"
+    . (ConvertTo-PwshPyNativeCall -FilePath $PwshPyUv -ArgumentList $PwshPyRunArgs -StdoutPath "$PwshPyRelay.out" -StderrPath "$PwshPyRelay.err")
     exit $LASTEXITCODE
 }
 
-& $PwshPyUv run --no-project @PwshPyUvArgs $PwshPyTarget
+. (ConvertTo-PwshPyNativeCall -FilePath $PwshPyUv -ArgumentList $PwshPyRunArgs)
 exit $LASTEXITCODE

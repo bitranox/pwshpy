@@ -6,6 +6,8 @@ embedding, and that the runner template is fully substituted before it ships.
 
 from __future__ import annotations
 
+import shlex
+
 import pytest
 
 from pwshpy.domain.enums import ImportKind
@@ -212,7 +214,9 @@ def test_render_posix_runner_substitutes_its_placeholders() -> None:
         ),
     )
     assert "@@PWSHPY" not in rendered
-    assert rendered.split("|") == ["Ym9keQ==", "ab12", "tool.py", "'--with' 'rich'", "ff  tool.py"]
+    payload, sha, entry, uv_args, hashes = rendered.split("|")
+    assert [payload, sha, entry, hashes] == ["Ym9keQ==", "ab12", "tool.py", "ff  tool.py"]
+    assert _sh_uv_args(uv_args) == ["--with", "rich"]
 
 
 @pytest.mark.os_agnostic
@@ -225,11 +229,25 @@ def test_render_posix_runner_rejects_a_template_missing_a_placeholder() -> None:
         )
 
 
+def _sh_uv_args(word: str) -> list[str]:
+    """What the .sh runner makes of the rendered uv args: one sh word, then the list it holds.
+
+    shlex in POSIX mode reads sh quoting, so this is the assignment followed by the runner's eval.
+    """
+    (assigned,) = shlex.split(word)
+    return shlex.split(assigned)
+
+
 @pytest.mark.os_agnostic
-def test_posix_uv_args_single_quote_and_escape_embedded_quotes() -> None:
-    """POSIX single-quoting ends the quote, inserts an escaped quote, reopens: ``'\\''``."""
+@pytest.mark.parametrize(
+    "value",
+    ["it's", "pkg$HOME", "a`id`b", 'say "hi"', "back\\slash", "pkg[ab]*?", "~/x"],
+    ids=["quote", "dollar", "backtick", "double-quote", "backslash", "glob", "tilde"],
+)
+def test_posix_uv_args_survive_the_assignment_and_the_eval_literally(value: str) -> None:
+    """[90]: a uv arg reaches uv as given, whatever sh would otherwise expand in it."""
     rendered = render_posix_runner(
         _SH_TEMPLATE,
-        RunnerContent(payload_b64="x", payload_sha256="y", entry="e", uv_args=["it's"]),
+        RunnerContent(payload_b64="x", payload_sha256="y", entry="e", uv_args=["--with", value]),
     )
-    assert "'it'\\''s'" in rendered
+    assert _sh_uv_args(rendered.split("|")[3]) == ["--with", value]

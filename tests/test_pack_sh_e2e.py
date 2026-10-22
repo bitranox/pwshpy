@@ -891,7 +891,10 @@ def test_as_root_a_pin_through_merged_usr_is_accepted(tmp_path: Path, shell_id: 
 
 #: The runner's fixed id locations, and what a test puts in their place to simulate a system with
 #: id at none of them (one counted substitution).
-_FIXED_IDS = "/usr/bin/id /bin/id /run/current-system/sw/bin/id /run/current-system/profile/bin/id"
+_FIXED_IDS = (
+    "/usr/bin/id /bin/id /usr/sbin/id /sbin/id /run/current-system/sw/bin/id \\\n"
+    "        /run/current-system/profile/bin/id"
+)
 
 
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
@@ -910,7 +913,7 @@ def test_an_unanswered_euid_probe_applies_the_root_rule(
     _marker_tool(planted.parent, "id", marker, body="echo 1000")
     fixed = tmp_path / "fixed"
     fixed.mkdir()
-    replacement = " ".join(str(fixed / f"id{n}") for n in range(4))
+    replacement = " ".join(str(fixed / f"id{n}") for n in range(6))
     if probe == "id-answers-garbage":
         _marker_tool(fixed, "id0", tmp_path / "garbage.txt", body="echo not-a-uid")
     runner = _trust_runner(tmp_path, hide_system_uv=True)
@@ -929,4 +932,39 @@ def test_an_unanswered_euid_probe_applies_the_root_rule(
     result = _run(shell, runner, "--pwshpy-no-install-uv", env=environment)
     assert not marker.exists(), "the runner asked an id on PATH"
     assert _reported_uv(result) is None, result.stdout + result.stderr
+    assert f"{_UV_SKIPPED} {planted}: its directory {planted.parent} is writable by every account" in result.stderr
+
+
+#: The PATH a root run gives its own helpers (user decision): system directories only, no /usr/local.
+_ROOT_HELPER_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/run/current-system/sw/bin:/run/current-system/profile/bin"
+
+
+def test_the_root_helper_path_is_system_dirs_only(tmp_path: Path) -> None:
+    """The fixed helper PATH is exactly the decided list: /usr/local is not trusted for root's helpers."""
+    runner = _trust_runner(tmp_path, hide_system_uv=False)
+    text = runner.read_text(encoding="utf-8")
+    assert text.count(f"PATH={_ROOT_HELPER_PATH}\n") == 1
+    assert "/usr/local/sbin:" not in text
+    assert "/usr/local/bin:" not in text
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_a_helper_in_usr_local_bin_is_not_used(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """A tar/ls/base64 in /usr/local/bin is not root's helper. A temp dir stands in for /usr/local/bin.
+
+    It sits first on the caller's PATH, as /usr/local/bin does on most hosts; the root run resets
+    PATH to the system directories, so none of its tools runs (busybox ash runs its own applets
+    either way).
+    """
+    usr_local_bin = tmp_path / "usr-local-bin"
+    usr_local_bin.mkdir()
+    marker = tmp_path / "ran.txt"
+    _marker_tool(usr_local_bin, "ls", marker, body="echo 'drwxr-xr-x 2 0 0 4096 Jan  1 00:00 x'")
+    for name in ("tar", "base64", "sha256sum", "cut", "sed"):
+        _marker_tool(usr_local_bin, name, marker, body=f'exec "{_real(name)}" "$@"')
+    planted = _planted_uv(tmp_path)
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True)
+    result = _run(shell, runner, "--pwshpy-no-install-uv", env=_trust_env(tmp_path, usr_local_bin, planted.parent))
+    assert not marker.exists(), f"helpers from the /usr/local/bin stand-in ran as root: {marker.read_text()}"
+    assert result.returncode == 127, result.stdout + result.stderr
     assert f"{_UV_SKIPPED} {planted}: its directory {planted.parent} is writable by every account" in result.stderr

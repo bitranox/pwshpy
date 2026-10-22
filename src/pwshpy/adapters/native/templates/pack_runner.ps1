@@ -204,8 +204,9 @@ $PwshPyAncestorWriteRights = 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x
 # POSIX: the accounts trusted to own what root runs, by uid: root alone.
 $PwshPyTrustedUids = @('0')
 # POSIX: the PATH a root run executes its own helpers (ls, id, the uv installer's curl and sh) from;
-# the caller's PATH may hold a directory another account can write.
-$PwshPyFixedPath = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+# the caller's PATH may hold a directory another account can write. System directories alone (user
+# decision), identical to the .sh runner: not /usr/local, which local installs populate.
+$PwshPyFixedPath = '/usr/bin:/bin:/usr/sbin:/sbin:/run/current-system/sw/bin:/run/current-system/profile/bin'
 
 function Get-PwshPyRunningUserSid {
     # The account this process runs as, from its token: USERNAME can be set by anyone, and under
@@ -535,13 +536,13 @@ function Test-PwshPyElevated {
 }
 
 function Get-PwshPyEuid {
-    # POSIX: the effective uid from an id at a fixed path (/usr/bin, /bin, NixOS's and Guix's system
-    # profiles), never through PATH: a planted id first on it could answer "not root" for a root run
+    # POSIX: the effective uid from an id in the fixed helper directories ($PwshPyFixedPath), never
+    # through PATH: a planted id first on it could answer "not root" for a root run
     # and switch the uv trust rule and the fixed helper PATH off. When none of them answers with a
     # decimal uid the run is treated as root - it fails closed. That costs a non-root caller on such
     # a system the per-user uv lookup (the root rule refuses a uv its own account owns), never
     # safety; dying instead would cost the same caller the whole run. Identical to the .sh runner.
-    foreach ($id in @('/usr/bin/id', '/bin/id', '/run/current-system/sw/bin/id', '/run/current-system/profile/bin/id')) {
+    foreach ($id in @('/usr/bin/id', '/bin/id', '/usr/sbin/id', '/sbin/id', '/run/current-system/sw/bin/id', '/run/current-system/profile/bin/id')) {
         if (-not (Test-Path -LiteralPath $id -PathType Leaf)) { continue }
         try {
             $uid = ([string](& $id -u 2>$null)).Trim()

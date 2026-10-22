@@ -1523,7 +1523,10 @@ def test_an_elevated_posix_pin_through_merged_usr_is_accepted(tmp_path: Path) ->
 # --- round 3: the POSIX euid probe fails closed; PATH entries are literal --------------------------
 
 #: The .ps1's fixed id locations (one counted substitution simulates a system with id at none).
-_FIXED_IDS = "@('/usr/bin/id', '/bin/id', '/run/current-system/sw/bin/id', '/run/current-system/profile/bin/id')"
+_FIXED_IDS = (
+    "@('/usr/bin/id', '/bin/id', '/usr/sbin/id', '/sbin/id', "
+    "'/run/current-system/sw/bin/id', '/run/current-system/profile/bin/id')"
+)
 
 
 @pytest.mark.local_only
@@ -1548,7 +1551,7 @@ def test_an_unanswered_posix_euid_probe_applies_the_root_rule(tmp_path: Path, pr
     runner = Path(pack_script(entry).output_path)
     text = runner.read_text(encoding="utf-8")
     assert text.count(_FIXED_IDS) == 1
-    replacement = "@(" + ", ".join(f"'{fixed / f'id{n}'}'" for n in range(4)) + ")"
+    replacement = "@(" + ", ".join(f"'{fixed / f'id{n}'}'" for n in range(6)) + ")"
     runner.write_text(text.replace(_FIXED_IDS, replacement), encoding="utf-8")
     result = _run_with_path(tmp_path, runner, path_first=[planted.parent])
     assert not marker.exists(), "the runner asked an id on PATH"
@@ -1603,3 +1606,30 @@ def test_an_elevated_posix_listing_is_never_globbed(tmp_path: Path) -> None:
         result.stderr
     )
     assert not _same(_reported_uv(result), uv), result.stdout + result.stderr
+
+
+#: The PATH an elevated POSIX run gives its own helpers (user decision): system directories only.
+_ROOT_HELPER_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/run/current-system/sw/bin:/run/current-system/profile/bin"
+
+
+def test_the_posix_root_helper_path_is_system_dirs_only(tmp_path: Path) -> None:
+    """The .ps1's fixed helper PATH is exactly the decided list, the same as the .sh runner's."""
+    text = Path(pack_script(_project(tmp_path)).output_path).read_text(encoding="utf-8")
+    assert text.count(f"$PwshPyFixedPath = '{_ROOT_HELPER_PATH}'") == 1
+    assert "/usr/local/" not in text.split("$PwshPyFixedPath = ", 1)[1].splitlines()[0]
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_an_elevated_posix_run_never_uses_ls_from_usr_local_bin(tmp_path: Path) -> None:
+    """An ls in /usr/local/bin is not root's helper. A temp dir first on PATH stands in for it."""
+    usr_local_bin = tmp_path / "usr-local-bin"
+    usr_local_bin.mkdir()
+    marker = tmp_path / "ran.txt"
+    _marker_double(usr_local_bin, "ls", marker, "echo 'drwxr-xr-x 2 0 0 4096 Jan  1 00:00 x'")
+    planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[usr_local_bin, planted.parent])
+    assert not marker.exists(), "the ls from the /usr/local/bin stand-in ran"
+    assert "is writable by every account" in _skip_line(result, planted), result.stderr

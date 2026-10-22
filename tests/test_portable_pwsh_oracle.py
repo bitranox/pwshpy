@@ -13,9 +13,11 @@ volatile set.  Known representational deltas are handled explicitly: psutil's
 ``name`` keeps ``.exe`` (stripped to match ``Get-Process`` - see
 ``marshal.to_process_name``); os.environ upper-cases variable names on Windows
 (compared case-insensitively); psutil reports a mountpoint (``C:\\``) where
-``Get-Volume`` reports a drive letter (``C``); and PID 0 is the idle process
-(psutil ``System Idle Process`` vs Get-Process ``Idle``), excluded from the
-name check as a pseudo-process.
+``Get-Volume`` reports a drive letter (``C``); and two pseudo-processes carry a
+different name in each: PID 0, the idle process (psutil ``System Idle Process`` vs
+Get-Process ``Idle``), and the kernel's memory compression store (psutil
+``MemCompression`` vs Get-Process ``Memory Compression``), both excluded from the
+name check. pwshpy keeps psutil's names (documented on ``ps.get_process``).
 """
 
 from __future__ import annotations
@@ -53,6 +55,23 @@ def _run_ps_json(script: str) -> object:
     return json.loads(completed.stdout)
 
 
+#: Pseudo-processes whose name differs by design, as (psutil name, Get-Process name),
+#: lower-cased. Matched by both names, not by PID: the memory compression store gets a
+#: different PID on every boot.
+_KNOWN_NAME_PAIRS = frozenset({("memcompression", "memory compression")})
+
+
+def _name_mismatches(ours: dict[int, str], theirs: dict[int, str]) -> dict[int, tuple[str, str]]:
+    """Return the shared PIDs whose names differ, minus PID 0 and the known pseudo-process pairs."""
+    common = (set(ours) & set(theirs)) - {0}
+    pairs = {pid: (ours[pid], theirs[pid]) for pid in common}
+    return {
+        pid: pair
+        for pid, pair in pairs.items()
+        if pair[0].lower() != pair[1].lower() and (pair[0].lower(), pair[1].lower()) not in _KNOWN_NAME_PAIRS
+    }
+
+
 def test_processes_match_get_process() -> None:
     """Process names from pwshpy equal Get-Process for the PIDs both snapshots share."""
     ours = {p.pid: p.name for p in ps.get_process().to_list()}
@@ -69,7 +88,7 @@ def test_processes_match_get_process() -> None:
     # Get-Process names it "Idle" - both valid for a pseudo-process, so exclude it.
     common = (set(ours) & set(theirs)) - {0}
     assert len(common) >= 10, "the two snapshots overlap on most processes"
-    mismatches = {pid: (ours[pid], theirs[pid]) for pid in common if ours[pid].lower() != theirs[pid].lower()}
+    mismatches = _name_mismatches(ours, theirs)
     assert not mismatches, f"pwshpy vs Get-Process name mismatches: {list(mismatches.items())[:5]}"
 
 

@@ -27,12 +27,17 @@ from pathlib import Path
 
 import pytest
 from elevation_doubles import (
+    LIBRARY_PATH_PLANTS,
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
     RUNNING_AS_ROOT,
+    UV_SOURCE_VARIABLES,
+    default_uv_cache_dir,
+    default_uv_cache_env,
     link_tools,
     managed_python_env,
     owned_by_another_account,
+    plant_library_path,
     planted_managed_python,
     session_uv_cache,
     trusted_managed_python,
@@ -141,8 +146,10 @@ def _env(tmp_path: Path) -> dict[str, str]:
     child["PATH"] = os.pathsep.join([str(Path(_UV or "uv").parent), child.get("PATH", "")])
     # Never a Python download into a real user directory ([92]): uv uses what is installed.
     child["UV_PYTHON_DOWNLOADS"] = "never"
-    # Nor a script environment in the real user's uv cache ([93]).
+    # Nor a script environment in the real user's uv cache ([93]), not even from a root run, which
+    # drops UV_CACHE_DIR and falls back to uv's default cache.
     child["UV_CACHE_DIR"] = str(session_uv_cache())
+    child.update(default_uv_cache_env(tmp_path))
     return child
 
 
@@ -605,6 +612,8 @@ def _trust_env(tmp_path: Path, *path_first: Path, no_managed: bool = False) -> d
     }
     managed = None if no_managed else trusted_managed_python()
     environment.update(managed_python_env(tmp_path, managed=managed))
+    # uv's cache: with no UV_CACHE_DIR (a root run drops one), uv's default, kept inside the test.
+    environment.update(default_uv_cache_env(tmp_path))
     return environment
 
 
@@ -1279,6 +1288,7 @@ def test_the_uv_command_line_carries_only_managed_exactly_as_root(
             "--no-config",
             "--python-preference",
             "only-managed",
+            "--no-env-file",
             "--python",
             python,
             "--project",
@@ -1286,8 +1296,8 @@ def test_the_uv_command_line_carries_only_managed_exactly_as_root(
             "--directory",
             "/",
         ]
-        assert argv[:11] == ["run", "--no-project", *managed], argv
-        assert argv[11].startswith("/") and argv[11].endswith("/" + SHIM_MODULE), argv
+        assert argv[:12] == ["run", "--no-project", *managed], argv
+        assert argv[12].startswith("/") and argv[12].endswith("/" + SHIM_MODULE), argv
         found = [line for line in Path(f"{record}.python").read_text(encoding="utf-8").splitlines() if ":" not in line]
         assert found == [
             "python",
@@ -1385,6 +1395,73 @@ def test_as_root_the_managed_python_dir_is_the_accounts_own(
             assert name not in recorded and dropped_line, (name, recorded, result.stderr)
         else:
             assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
+
+
+# --- [X21 P2/P3] what the caller's environment still decided in a root run ---------------------------
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize("kind", LIBRARY_PATH_PLANTS)
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_no_library_path_from_the_callers_environment_reaches_the_python(
+    tmp_path: Path, shell_id: str, shell: list[str], kind: str, as_root: bool
+) -> None:
+    """[X21 P2]: uv run loads the env file UV_ENV_FILE names despite --no-config (one holding
+    PYTHONPATH put the caller's sitecustomize ahead of the standard library), and a script without a
+    PEP 723 block runs on the interpreter itself with the user site-packages on (from PYTHONUSERBASE,
+    or below HOME, which some sudo setups keep). As root none of them reaches the Python; not root
+    (the control) each one runs."""
+    _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=as_root)
+    marker = tmp_path / "planted-library-ran.txt"
+    environment = _trust_env(tmp_path, uv.parent)
+    environment.update(plant_library_path(tmp_path, kind, marker, home=Path(environment["HOME"])))
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.is_file() is not as_root, result.stdout + result.stderr
+    assert _reported_python(result) is not None, result.stdout
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_uv_takes_its_default_package_sources_cache_and_no_env_file(tmp_path: Path, as_root: bool) -> None:
+    """[X21 P2/P3], user decision "Drop them too": as root every variable naming a package index, a
+    find-links location, an insecure host, a cache directory or an env file, and PYTHONUSERBASE, is
+    dropped with a line each, before uv python find already; the user site-packages is off and uv run
+    gets --no-env-file. Not root (the control), each reaches uv unchanged and nothing is added."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root)
+    given = {name: str(tmp_path / f"given-{name.lower()}") for name in (*UV_SOURCE_VARIABLES, "PYTHONUSERBASE")}
+    environment = {**_trust_env(tmp_path), **given}
+    result = _run_in(["sh"], runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    argv = record.read_text(encoding="utf-8").splitlines()
+    recorded = _recorded_variables(record)
+    for name, value in given.items():
+        dropped_line = f"pwshpy: ignoring {name}" in result.stderr
+        if as_root:
+            assert name not in recorded and dropped_line, (name, recorded, result.stderr)
+        else:
+            assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
+    if as_root:
+        assert recorded.get("PYTHONNOUSERSITE") == "1" and "--no-env-file" in argv, (recorded, argv)
+        found = _recorded_variables(Path(f"{record}.python"))
+        assert not set(given) & set(found), found  # dropped before uv python find
+    else:
+        assert "PYTHONNOUSERSITE" not in recorded and "--no-env-file" not in argv, (recorded, argv)
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_uv_caches_in_its_default_directory_never_the_callers(tmp_path: Path, as_root: bool) -> None:
+    """[X21 P3]: as root UV_CACHE_DIR is dropped, so uv builds the script environment in its default
+    cache: in a test, the one default_uv_cache_env keeps inside tmp_path, never the real user's ([93]).
+    Not root (the control), the caller's UV_CACHE_DIR is used and the default one is never created."""
+    _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=as_root)
+    caller_cache = tmp_path / "caller-cache"
+    environment = {**_trust_env(tmp_path, uv.parent), "UV_CACHE_DIR": str(caller_cache)}
+    result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert caller_cache.exists() is not as_root, result.stderr
+    assert default_uv_cache_dir(tmp_path).is_dir() is as_root, result.stderr
 
 
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])

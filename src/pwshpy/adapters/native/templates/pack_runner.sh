@@ -34,8 +34,10 @@
 # (uv runs every Python it finds there); one another account can modify is refused with exit code
 # 127. Every uv call it makes as root reads no uv.toml (--no-config). UV_PYTHON, VIRTUAL_ENV,
 # CONDA_PREFIX, UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON, UV_PYTHON_INSTALL_DIR, UV_CONFIG_FILE,
-# UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL, PYTHONHOME and PYTHONPATH are ignored,
-# each with a line on stderr.
+# UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL, PYTHONHOME, PYTHONPATH, PYTHONUSERBASE,
+# UV_INDEX_URL, UV_DEFAULT_INDEX, UV_INDEX, UV_EXTRA_INDEX_URL, UV_FIND_LINKS, UV_INSECURE_HOST,
+# UV_CACHE_DIR, UV_PYTHON_CACHE_DIR and UV_ENV_FILE are ignored, each with a line on stderr; the
+# user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file (--no-env-file).
 #
 # Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -518,8 +520,9 @@ pwshpy_find_uv() {
 # environment each run their own python), or that uv refuses beside that flag; then the ones that
 # move where uv's managed Pythons live or come from (another install directory, config file, download
 # mirror or download list), which would let the caller's environment supply the interpreter after all
-# (user decision on [59]). A root run drops each one that is set, naming it on stderr; identical to
-# the .ps1 runner.
+# (user decision on [59]); then the library variables the interpreter reads itself; then the ones that
+# name where uv takes packages, its cache or an env file from. A root run drops each one that is set,
+# naming it on stderr, and turns the user's own site-packages off; identical to the .ps1 runner.
 pwshpy_drop_interpreter_variables() {
     _iv_why="as root only a uv-managed Python from the running account's own data directory runs"
     for _iv in UV_PYTHON VIRTUAL_ENV CONDA_PREFIX UV_MANAGED_PYTHON UV_NO_MANAGED_PYTHON \
@@ -529,12 +532,29 @@ pwshpy_drop_interpreter_variables() {
             unset "$_iv"
         fi
     done
-    # The interpreter reads these itself, whichever one runs: PYTHONHOME replaces its standard library
-    # and PYTHONPATH puts the caller's directories ahead of it, so either would run code the caller
-    # chose as root.
-    for _iv in PYTHONHOME PYTHONPATH; do
+    # The interpreter reads these itself, whichever one runs: PYTHONHOME replaces its standard library,
+    # PYTHONPATH puts the caller's directories ahead of it and PYTHONUSERBASE names the user
+    # site-packages, so each would run code the caller chose as root.
+    for _iv in PYTHONHOME PYTHONPATH PYTHONUSERBASE; do
         if eval "[ -n \"\${$_iv+set}\" ]"; then
-            printf '%s\n' "pwshpy: ignoring $_iv: as root the Python runs with its own library paths" >&2
+            _iv_text="as root the Python runs with its own library paths and no user site-packages"
+            printf '%s\n' "pwshpy: ignoring $_iv: $_iv_text" >&2
+            unset "$_iv"
+        fi
+    done
+    # Without PYTHONUSERBASE the user site-packages comes from HOME, which some sudo setups keep, so a
+    # .pth the caller put in ~/.local/lib/pythonX.Y/site-packages would run as root (measured): off.
+    PYTHONNOUSERSITE=1
+    export PYTHONNOUSERSITE
+    # Where uv takes packages (an index, a find-links location, a host it skips TLS checks for), its
+    # caches and an env file from: each is the caller's to choose, and an env file can set PYTHONPATH
+    # again (uv run loads UV_ENV_FILE despite --no-config, measured with uv 0.13). A root run uses uv's
+    # defaults (user decision, X21); the run below also passes --no-env-file, which no variable undoes.
+    for _iv in UV_INDEX_URL UV_DEFAULT_INDEX UV_INDEX UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_INSECURE_HOST \
+        UV_CACHE_DIR UV_PYTHON_CACHE_DIR UV_ENV_FILE; do
+        if eval "[ -n \"\${$_iv+set}\" ]"; then
+            _iv_text="as root uv uses its defaults for package sources, caches and env files"
+            printf '%s\n' "pwshpy: ignoring $_iv: $_iv_text" >&2
             unset "$_iv"
         fi
     done
@@ -869,9 +889,10 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     export PATH
     # --no-config: a uv.toml (system-wide under XDG_CONFIG_DIRS or /etc, or the user's own) can name a
     # cache directory, a package index or a Python download mirror, each a way to choose what runs as
-    # root, and its location is the caller's to set; a root run takes uv's defaults plus the flags
-    # here (user decision).
-    set -- --no-config --python-preference only-managed --python "$PWSHPY_PYTHON" \
+    # root, and its location is the caller's to set; with the variables that name the same dropped
+    # above, a root run takes uv's defaults plus the flags here (user decision). --no-env-file: no
+    # .env file either, whatever UV_NO_ENV_FILE says.
+    set -- --no-config --python-preference only-managed --no-env-file --python "$PWSHPY_PYTHON" \
         --project "$PWSHPY_ANCHOR" --directory "$PWSHPY_ANCHOR" "$@"
 else
     set -- "$PWSHPY_CACHE/$PWSHPY_ENTRY" "$@"

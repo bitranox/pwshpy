@@ -50,7 +50,10 @@
     itself still runs in your directory. Every uv call an elevated run makes reads no uv.toml
     (--no-config). UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX, UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON,
     UV_PYTHON_INSTALL_DIR, UV_CONFIG_FILE, UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL,
-    PYTHONHOME and PYTHONPATH are ignored, each with a line on stderr.
+    PYTHONHOME, PYTHONPATH, PYTHONUSERBASE, UV_INDEX_URL, UV_DEFAULT_INDEX, UV_INDEX,
+    UV_EXTRA_INDEX_URL, UV_FIND_LINKS, UV_INSECURE_HOST, UV_CACHE_DIR, UV_PYTHON_CACHE_DIR and
+    UV_ENV_FILE are ignored, each with a line on stderr; the user site-packages is off
+    (PYTHONNOUSERSITE=1) and uv run reads no .env file (--no-env-file).
 
     Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -237,9 +240,19 @@ $PwshPyInterpreterVariables = @(
     'UV_PYTHON_INSTALL_DIR', 'UV_CONFIG_FILE', 'UV_PYTHON_INSTALL_MIRROR', 'UV_PYTHON_DOWNLOADS_JSON_URL'
 )
 # The variables the interpreter reads itself, whichever one runs: PYTHONHOME replaces its standard
-# library and PYTHONPATH puts the caller's directories ahead of it, so either would run code the caller
-# chose with elevated rights. An elevated run drops them too; identical to the .sh runner.
-$PwshPyLibraryVariables = @('PYTHONHOME', 'PYTHONPATH')
+# library, PYTHONPATH puts the caller's directories ahead of it and PYTHONUSERBASE names the user
+# site-packages, so each would run code the caller chose with elevated rights. An elevated run drops
+# them too, and turns the user site-packages off (PYTHONNOUSERSITE); identical to the .sh runner.
+$PwshPyLibraryVariables = @('PYTHONHOME', 'PYTHONPATH', 'PYTHONUSERBASE')
+# Where uv takes packages (an index, a find-links location, a host it skips TLS checks for), its caches
+# and an env file from: each is the caller's to choose, and an env file can set PYTHONPATH again (uv
+# run loads UV_ENV_FILE despite --no-config, measured with uv 0.13). An elevated run drops them and uses
+# uv's defaults (user decision, X21); its uv run also passes --no-env-file, which no variable undoes.
+# Identical to the .sh runner.
+$PwshPyUvSourceVariables = @(
+    'UV_INDEX_URL', 'UV_DEFAULT_INDEX', 'UV_INDEX', 'UV_EXTRA_INDEX_URL', 'UV_FIND_LINKS', 'UV_INSECURE_HOST',
+    'UV_CACHE_DIR', 'UV_PYTHON_CACHE_DIR', 'UV_ENV_FILE'
+)
 
 function Get-PwshPyRunningUserSid {
     # The account this process runs as, from its token: USERNAME can be set by anyone, and under
@@ -670,14 +683,16 @@ function Get-PwshPyManagedPythonOption {
     # The uv options an elevated run adds: no uv.toml at all (--no-config: a system-wide one under
     # %ProgramData% or /etc, or the user's own, can name a cache directory, a package index or a Python
     # download mirror, each a way to choose what runs elevated, and its location is the caller's to set;
-    # an elevated run takes uv's defaults plus these flags, user decision); only a uv-managed Python,
+    # with the variables that name the same dropped (Clear-PwshPyInterpreterVariable), an elevated run
+    # takes uv's defaults plus these flags, user decision); no .env file (--no-env-file, whatever
+    # UV_NO_ENV_FILE says); only a uv-managed Python,
     # named outright (--python, see Resolve-PwshPyManagedPython); project discovery (the .python-version and uv.toml uv would
     # otherwise read from the packed script's directory and every directory above it, the cache,
     # which a non-administrator may be able to write) moved to the anchor; and uv itself started
     # there (--directory), so nothing in the caller's directory is read either. The generated shim
     # changes back to the caller's directory before the script runs.
     $anchor = Get-PwshPyAnchorDirectory
-    return @('--no-config', '--python-preference', 'only-managed', '--python', $Python, '--project', $anchor, '--directory', $anchor)
+    return @('--no-config', '--python-preference', 'only-managed', '--no-env-file', '--python', $Python, '--project', $anchor, '--directory', $anchor)
 }
 
 function Invoke-PwshPyUvPython {
@@ -811,7 +826,15 @@ function Clear-PwshPyInterpreterVariable {
     }
     foreach ($name in $PwshPyLibraryVariables) {
         if ($null -eq [Environment]::GetEnvironmentVariable($name)) { continue }
-        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run runs the Python with its own library paths"
+        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run runs the Python with its own library paths and no user site-packages"
+        Remove-Item -LiteralPath "Env:$name"
+    }
+    # Without PYTHONUSERBASE the user site-packages comes from APPDATA (Windows) or HOME (POSIX, which
+    # some sudo setups keep), so a .pth the caller put there would run elevated (measured): off.
+    Set-Item -LiteralPath 'Env:PYTHONNOUSERSITE' -Value '1'
+    foreach ($name in $PwshPyUvSourceVariables) {
+        if ($null -eq [Environment]::GetEnvironmentVariable($name)) { continue }
+        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run lets uv use its defaults for package sources, caches and env files"
         Remove-Item -LiteralPath "Env:$name"
     }
 }

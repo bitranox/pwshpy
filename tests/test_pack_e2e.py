@@ -30,14 +30,19 @@ from typing import cast
 import pytest
 from elevation_doubles import (
     INTERPRETER_VARIABLES,
+    LIBRARY_PATH_PLANTS,
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
     RUNNING_AS_ROOT,
+    UV_SOURCE_VARIABLES,
     data_home,
+    default_uv_cache_dir,
+    default_uv_cache_env,
     interpreter_probe_env,
     link_tools,
     managed_python_env,
     owned_by_another_account,
+    plant_library_path,
     planted_managed_python,
     session_uv_cache,
     trusted_managed_python,
@@ -191,9 +196,14 @@ def _isolated_cache(tmp_path: Path) -> dict[str, str]:
     """Point the runner's extraction cache and uv's cache at temp dirs so tests never touch the real ones.
 
     ``UV_CACHE_DIR`` too: a run given only this mapping (the whole-runner stand-ins, the concurrent
-    cold start) would otherwise build its script environment in the real user's uv cache ([93]).
+    cold start) would otherwise build its script environment in the real user's uv cache ([93]). And
+    uv's default cache, the one an elevated run falls back to after dropping ``UV_CACHE_DIR`` (X21 P3).
     """
-    return {"PWSHPY_PACK_CACHE": str(tmp_path / "cache"), "UV_CACHE_DIR": str(session_uv_cache())}
+    return {
+        "PWSHPY_PACK_CACHE": str(tmp_path / "cache"),
+        "UV_CACHE_DIR": str(session_uv_cache()),
+        **default_uv_cache_env(tmp_path),
+    }
 
 
 def _has_passwordless_sudo() -> bool:
@@ -2072,6 +2082,7 @@ def test_the_uv_command_line_carries_only_managed_exactly_when_elevated(tmp_path
         "--no-config",
         "--python-preference",
         "only-managed",
+        "--no-env-file",
         "--python",
         python,
         "--project",
@@ -2080,7 +2091,7 @@ def test_the_uv_command_line_carries_only_managed_exactly_when_elevated(tmp_path
         "/",
     ]
     if elevated == "$true":
-        assert argv[:11] == ["run", "--no-project", *managed], argv
+        assert argv[:12] == ["run", "--no-project", *managed], argv
         found = [line for line in Path(f"{record}.python").read_text(encoding="utf-8").splitlines() if ":" not in line]
         assert found == [
             "python",
@@ -2162,6 +2173,37 @@ def test_an_elevated_posix_run_takes_the_managed_python_dir_from_the_account(tmp
             assert name not in recorded and dropped_line, (name, recorded, result.stderr)
         else:
             assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_run_lets_uv_take_its_default_package_sources_cache_and_no_env_file(
+    tmp_path: Path, elevated: str
+) -> None:
+    """[X21 P2/P3], user decision "Drop them too": elevated, every variable naming a package index, a
+    find-links location, an insecure host, a cache directory or an env file, and PYTHONUSERBASE, is
+    dropped with a line each, before uv python find already; the user site-packages is off and uv run
+    gets --no-env-file. The control passes each on unchanged and adds nothing."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
+    given = {name: str(tmp_path / f"given-{name.lower()}") for name in (*UV_SOURCE_VARIABLES, "PYTHONUSERBASE")}
+    result = _run_with_path(tmp_path, runner, "-PwshPyUv", str(uv), path_first=[], env=given, cwd=_clean_cwd(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    argv = record.read_text(encoding="utf-8").splitlines()
+    recorded = _recorded_variables(record)
+    for name, value in given.items():
+        dropped_line = _VARIABLE_DROPPED.format(name=name) in result.stderr
+        if elevated == "$true":
+            assert name not in recorded and dropped_line, (name, recorded, result.stderr)
+        else:
+            assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
+    if elevated == "$true":
+        assert recorded.get("PYTHONNOUSERSITE") == "1" and "--no-env-file" in argv, (recorded, argv)
+        found = _recorded_variables(Path(f"{record}.python"))
+        assert not set(given) & set(found), found  # dropped before uv python find
+    else:
+        assert "PYTHONNOUSERSITE" not in recorded and "--no-env-file" not in argv, (recorded, argv)
 
 
 #: Loads the runner's functions alone and prints what Get-PwshPyAccountDataHome answers, with APPDATA
@@ -2445,6 +2487,47 @@ def test_an_elevated_run_refuses_a_python_whose_install_another_account_can_modi
     assert "refusing the Python uv found at" in result.stderr and _PYTHON_REMEDY in result.stderr, result.stderr
     assert _PYTHON_DIR_REFUSED not in result.stderr, result.stderr
     assert _reported_python(result) is None, result.stdout
+
+
+@pytest.mark.local_only
+@pytest.mark.parametrize("kind", LIBRARY_PATH_PLANTS)
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_run_lets_no_library_path_from_the_callers_environment_reach_the_python(
+    tmp_path: Path, kind: str, elevated: str
+) -> None:
+    """[X21 P2]: uv run loads the env file UV_ENV_FILE names despite --no-config (one holding
+    PYTHONPATH put the caller's sitecustomize ahead of the standard library), and a script without a
+    PEP 723 block runs on the interpreter itself with the user site-packages on (from PYTHONUSERBASE,
+    or below APPDATA on Windows and HOME on POSIX, which some sudo setups keep). Elevated, none of them
+    reaches the Python; the control runs each one."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated=elevated)
+    marker = tmp_path / "planted-library-ran.txt"
+    home = tmp_path / "home"
+    environment = {**interpreter_probe_env(tmp_path, managed=managed)}
+    if sys.platform != "win32":
+        environment["HOME"] = str(home)
+    environment.update(plant_library_path(tmp_path, kind, marker, home=home))
+    result = _run_with_path(tmp_path, runner, path_first=head, env=environment, cwd=_clean_cwd(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.is_file() is (elevated == "$false"), result.stdout + result.stderr
+    assert _reported_python(result) is not None, result.stdout
+
+
+@pytest.mark.local_only
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_run_caches_in_uvs_default_directory_never_the_callers(tmp_path: Path, elevated: str) -> None:
+    """[X21 P3]: elevated, UV_CACHE_DIR is dropped, so uv builds the script environment in its default
+    cache: in a test, the one default_uv_cache_env keeps inside tmp_path (_isolated_cache), never the
+    real user's ([93]). The control uses the caller's UV_CACHE_DIR and never creates the default one."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated=elevated)
+    caller_cache = tmp_path / "caller-cache"
+    environment = {**interpreter_probe_env(tmp_path, managed=managed), "UV_CACHE_DIR": str(caller_cache)}
+    result = _run_with_path(tmp_path, runner, path_first=head, env=environment, cwd=_clean_cwd(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert caller_cache.exists() is (elevated == "$false"), result.stderr
+    assert default_uv_cache_dir(tmp_path).is_dir() is (elevated == "$true"), result.stderr
 
 
 @pytest.mark.local_only

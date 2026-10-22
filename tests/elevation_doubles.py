@@ -21,6 +21,8 @@ Contents:
     * :func:`trusted_managed_python` - that directory, or a copy of one install an elevated run may trust.
     * :func:`write_site_plant` - a ``.pth`` that records every start of an interpreter reading it.
     * :func:`planted_managed_python` - a managed-Python directory whose install carries such a plant.
+    * :func:`plant_library_path` - a caller-supplied library path (env file, user base, user site) planted.
+    * :func:`default_uv_cache_env` - point uv's default cache (no UV_CACHE_DIR) into a test's directory.
     * :func:`interpreter_probe_env` - a uv search confined to one test (fresh cache, no downloads).
     * :func:`session_uv_cache` - a uv cache directory for the whole test session, never a real user's.
     * :func:`managed_python_env` - name uv's managed-Python directory so an elevated run finds it too.
@@ -149,8 +151,24 @@ INTERPRETER_VARIABLES = (
 )
 
 #: The variables the interpreter reads itself, whichever one runs (another standard library, the
-#: caller's directories ahead of it); an elevated run drops these too. Mirrors the runners' list.
-LIBRARY_VARIABLES = ("PYTHONHOME", "PYTHONPATH")
+#: caller's directories ahead of it, the caller's own site-packages); an elevated run drops these too.
+#: Mirrors the runners' list.
+LIBRARY_VARIABLES = ("PYTHONHOME", "PYTHONPATH", "PYTHONUSERBASE")
+
+#: The variables that name where uv takes packages, its cache or an env file from (a package index,
+#: a find-links location, an insecure host, a cache directory, an env file): an elevated run drops
+#: them and uses uv's defaults (user decision, X21 P3). Mirrors the runners' list, in its order.
+UV_SOURCE_VARIABLES = (
+    "UV_INDEX_URL",
+    "UV_DEFAULT_INDEX",
+    "UV_INDEX",
+    "UV_EXTRA_INDEX_URL",
+    "UV_FIND_LINKS",
+    "UV_INSECURE_HOST",
+    "UV_CACHE_DIR",
+    "UV_PYTHON_CACHE_DIR",
+    "UV_ENV_FILE",
+)
 
 
 def _real_python() -> str:
@@ -294,11 +312,12 @@ def write_local_wheel(directory: Path) -> Path:
 def write_recording_uv(directory: Path, record: Path) -> Path:
     """Write a ``uv`` double (POSIX) that records its argv, one argument per line, then exits 0.
 
-    After the arguments it records ``env:<NAME>=<value>`` for each of :data:`INTERPRETER_VARIABLES`
-    and :data:`LIBRARY_VARIABLES` it was handed, so a test can read both what a runner passed and
-    what it dropped. A ``uv python ...`` call (an elevated run resolving its interpreter) is recorded
-    the same way into ``record`` with ``.python`` appended to its name, and ``uv python find`` prints
-    the path of a stand-in ``python`` beside the double, so the run that follows has one to name.
+    After the arguments it records ``env:<NAME>=<value>`` for each of :data:`INTERPRETER_VARIABLES`,
+    :data:`LIBRARY_VARIABLES`, :data:`UV_SOURCE_VARIABLES` and ``PYTHONNOUSERSITE`` it was handed, so a
+    test can read both what a runner passed, dropped and set. A ``uv python ...`` call (an elevated
+    run resolving its interpreter) is recorded the same way into ``record`` with ``.python`` appended
+    to its name, and ``uv python find`` prints the path of a stand-in ``python`` beside the double, so
+    the run that follows has one to name.
 
     Example:
         >>> import tempfile
@@ -308,7 +327,7 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
     """
     report = "".join(
         f'if [ -n "${{{name}+set}}" ]; then printf \'env:%s\\n\' "{name}=${name}" >> "$record"; fi\n'
-        for name in (*INTERPRETER_VARIABLES, *LIBRARY_VARIABLES)
+        for name in (*INTERPRETER_VARIABLES, *LIBRARY_VARIABLES, *UV_SOURCE_VARIABLES, "PYTHONNOUSERSITE")
     )
     python = directory / "python"
     python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
@@ -435,6 +454,85 @@ def planted_managed_python(destination: Path, marker: Path) -> Path | None:
     for site_packages in (*destination.glob("*/lib/python3*/site-packages"), *destination.glob("*/Lib/site-packages")):
         write_site_plant(site_packages, marker)
     return destination
+
+
+#: The ways a caller's environment can put its own library directory in front of an elevated Python
+#: (X21 P2): an env file uv loads (holding PYTHONPATH), PYTHONUSERBASE, and the user site-packages
+#: below HOME (Windows: APPDATA), which some sudo setups keep.
+LIBRARY_PATH_PLANTS = ("env-file", "user-base", "home-user-site")
+
+
+def plant_library_path(scratch: Path, kind: str, marker: Path, *, home: Path) -> dict[str, str]:
+    """Plant code that appends to ``marker`` when a Python starts, reachable through ``kind``.
+
+    Returns the variables that make it reachable (none for ``home-user-site`` on POSIX, where ``home``
+    is the HOME the run already gets). The user site is planted for every version from 3.8 to 3.16,
+    free-threaded included, so whichever managed Python runs finds it.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as d:
+        ...     sorted(plant_library_path(Path(d), "env-file", Path(d) / "m", home=Path(d)))
+        ['UV_ENV_FILE']
+    """
+    if kind == "env-file":
+        injected = scratch / "env-file-path"
+        injected.mkdir()
+        (injected / "sitecustomize.py").write_text(
+            f"import pathlib\npathlib.Path({str(marker)!r}).open('a', encoding='utf-8').write('ran\\n')\n",
+            encoding="utf-8",
+        )
+        env_file = scratch / "injected.env"
+        env_file.write_text(f"PYTHONPATH={injected}\n", encoding="utf-8")
+        return {"UV_ENV_FILE": str(env_file)}
+    if kind == "user-base":
+        base = scratch / "user-base"
+        _plant_user_site(base, marker)
+        return {"PYTHONUSERBASE": str(base)}
+    if kind != "home-user-site":
+        raise ValueError(kind)
+    if sys.platform == "win32":
+        appdata = scratch / "appdata"
+        _plant_user_site(appdata / "Python", marker)
+        return {"APPDATA": str(appdata)}
+    _plant_user_site(home / ".local", marker)
+    return {}
+
+
+def _plant_user_site(base: Path, marker: Path) -> None:
+    """A site plant in every user site-packages below user base ``base`` that site.py could pick."""
+    for minor in range(8, 17):
+        for suffix in ("", "t"):
+            if sys.platform == "win32":
+                write_site_plant(base / f"Python3{minor}{suffix}" / "site-packages", marker)
+            else:
+                write_site_plant(base / "lib" / f"python3.{minor}{suffix}" / "site-packages", marker)
+
+
+def default_uv_cache_env(scratch: Path) -> dict[str, str]:
+    """Point uv's default cache directory, the one it uses without UV_CACHE_DIR, into ``scratch``.
+
+    An elevated run drops UV_CACHE_DIR (X21 P3), so its uv falls back to that default: below
+    XDG_CACHE_HOME on POSIX and LOCALAPPDATA on Windows (measured with uv 0.13), which must never be
+    the real user's ([93]).
+
+    Example:
+        >>> sorted(default_uv_cache_env(Path("/s")).values()) == [str(Path("/s") / "default-cache")]
+        True
+    """
+    variable = "LOCALAPPDATA" if sys.platform == "win32" else "XDG_CACHE_HOME"
+    return {variable: str(scratch / "default-cache")}
+
+
+def default_uv_cache_dir(scratch: Path) -> Path:
+    """The cache directory uv uses under :func:`default_uv_cache_env` (``uv\\cache`` on Windows).
+
+    Example:
+        >>> default_uv_cache_dir(Path("/s")).name in ("uv", "cache")
+        True
+    """
+    root = scratch / "default-cache" / "uv"
+    return root / "cache" if sys.platform == "win32" else root
 
 
 def _install_holding(executable: Path) -> Path | None:
@@ -620,6 +718,7 @@ def without_python_dir_check(text: str, *, powershell: bool) -> str:
 
 __all__ = [
     "INTERPRETER_VARIABLES",
+    "LIBRARY_PATH_PLANTS",
     "LIBRARY_VARIABLES",
     "LOCAL_WHEEL_DISTRIBUTION",
     "MANAGED_PYTHON_VARIABLES",
@@ -627,9 +726,12 @@ __all__ = [
     "PS1_DATA_HOME_LOOKUP",
     "PS1_PYTHON_DIR_CHECK",
     "RUNNING_AS_ROOT",
+    "UV_SOURCE_VARIABLES",
     "SH_DATA_HOME_LOOKUP",
     "SH_PYTHON_DIR_CHECK",
     "data_home",
+    "default_uv_cache_dir",
+    "default_uv_cache_env",
     "trusted_managed_python",
     "interpreter_probe_env",
     "link_tools",
@@ -637,6 +739,7 @@ __all__ = [
     "managed_python_env",
     "owned_by_another_account",
     "session_uv_cache",
+    "plant_library_path",
     "planted_managed_python",
     "with_data_home",
     "without_python_dir_check",

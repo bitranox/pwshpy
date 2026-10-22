@@ -375,7 +375,7 @@ Details worth knowing:
   the reason root's alone (`chown root`, then `chmod go-w`), on Windows take every other account's
   write access off it; or remove it and install the Python again elevated (`uv python install`). The
   run is then
-  `uv run --no-config --python-preference only-managed --python <that path>`, started in `/` on POSIX
+  `uv run --no-config --python-preference only-managed --no-env-file --python <that path>`, started in `/` on POSIX
   or `System32` on Windows (`--directory`, `--project`), so the `.python-version` uv would read from
   the script's directory upwards (the cache, which `PWSHPY_PACK_CACHE` can put anywhere) and every
   `.venv` above the caller's directory or above `System32` (any authenticated user can create
@@ -383,9 +383,13 @@ Details worth knowing:
   `uv python find`, `uv python install`), means no `uv.toml` is read at all: not the system-wide one
   (`%SYSTEMDRIVE%\ProgramData\uv\uv.toml` on Windows, `/etc/uv/uv.toml` or one under
   `XDG_CONFIG_DIRS` on POSIX), not the user's, and not one above the starting directory, since any of
-  them could name a cache directory, a package index or a Python download mirror. An elevated run uses
-  uv's defaults plus the runner's own flags (user decision); a custom install directory or download
-  mirror cannot be configured for it. A directory named `C:\uv.toml` therefore no longer stops
+  them could name a cache directory, a package index or a Python download mirror. With the variables
+  that name the same dropped too (listed below) and `--no-env-file` on `uv run` (no `.env` file,
+  whatever `UV_NO_ENV_FILE` says), an elevated run uses uv's defaults plus the runner's own flags
+  (user decision): the default package index, no find-links location or insecure host, and uv's
+  default cache directory, which follows `XDG_CACHE_HOME` or `HOME` on POSIX and `LOCALAPPDATA` on
+  Windows as the elevated process sees them. A custom install directory, download mirror, package
+  index or cache directory cannot be configured for it. A directory named `C:\uv.toml` therefore no longer stops
   elevated `.ps1` runs. The packed script still runs in your directory: uv runs the generated shim,
   which changes back to it first, or stops with `pwshpy pack: cannot return to the working directory
   <dir>` and exit code 70 when the elevated account cannot enter it (a root-squashed NFS export). What
@@ -398,9 +402,16 @@ Details worth knowing:
   per entry. Dropped from the environment, each with a `pwshpy: ignoring <NAME>` line on stderr:
   `UV_PYTHON`, `VIRTUAL_ENV`, `CONDA_PREFIX`, `UV_MANAGED_PYTHON` and `UV_NO_MANAGED_PYTHON` (they
   name an interpreter), `UV_PYTHON_INSTALL_DIR`, `UV_CONFIG_FILE`, `UV_PYTHON_INSTALL_MIRROR` and
-  `UV_PYTHON_DOWNLOADS_JSON_URL` (they move where uv's managed Pythons live or come from), and
-  `PYTHONHOME` and `PYTHONPATH`, which the interpreter itself reads (another standard library, the
-  caller's directories ahead of it), so the packed script does not see them either. Not elevated,
+  `UV_PYTHON_DOWNLOADS_JSON_URL` (they move where uv's managed Pythons live or come from);
+  `PYTHONHOME`, `PYTHONPATH` and `PYTHONUSERBASE`, which the interpreter itself reads (another
+  standard library, the caller's directories ahead of it, the caller's own site-packages), so the
+  packed script does not see them either; and `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `UV_INDEX`,
+  `UV_EXTRA_INDEX_URL`, `UV_FIND_LINKS`, `UV_INSECURE_HOST`, `UV_CACHE_DIR`, `UV_PYTHON_CACHE_DIR`
+  and `UV_ENV_FILE` (where uv takes packages, its caches and an env file from; an env file can set
+  `PYTHONPATH` again, and `uv run` loads the one `UV_ENV_FILE` names despite `--no-config`). The
+  user's own site-packages is switched off (`PYTHONNOUSERSITE=1`, which the packed script inherits):
+  without `PYTHONUSERBASE` it comes from `HOME` (POSIX, which some `sudo` setups keep) or `APPDATA`
+  (Windows), so a `.pth` the caller put there would otherwise run with the elevated rights. Not elevated,
   nothing changes: uv starts in your directory with your environment and configuration, and the
   `.sh` runs the entry itself. The `-PwshPyUv` / `--pwshpy-uv` pin is unaffected: it chooses the
   `uv`, not the Python.

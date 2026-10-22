@@ -80,6 +80,12 @@ PWSHPY_SHA='@@PWSHPY_PAYLOAD_SHA256@@'
 # The fixed uv args as one single-quoted word holding a list of single-quoted words, expanded by the
 # eval at the run: a dependency spec carrying $, ` or " is taken literally, never expanded here.
 PWSHPY_UV_ARGS_RAW=@@PWSHPY_UV_ARGS@@
+# The same args for a root run, which starts uv in /: a --with path relative to the caller's directory
+# is spelled from "$PWSHPY_CALLER_PREFIX", set before the eval that expands this list.
+PWSHPY_UV_ARGS_ANCHORED_RAW=@@PWSHPY_UV_ARGS_ANCHORED@@
+# The generated shim a root run executes instead of the entry (it changes back to the caller's
+# directory first); it travels in the payload, verified like every other file.
+PWSHPY_SHIM='@@PWSHPY_SHIM@@'
 PWSHPY_FILE_HASHES=@@PWSHPY_FILE_HASHES@@
 
 # The base64 payload, as a heredoc so a very long blob needs no shell quoting.
@@ -511,6 +517,14 @@ pwshpy_drop_interpreter_variables() {
     done
 }
 
+# Sets PWSHPY_CALLER_CWD to the physical working directory, a trailing newline in its name included
+# (command substitution would strip it, so a sentinel character follows and is removed again).
+pwshpy_caller_cwd() {
+    _cwd=$(pwd -P && printf x) || pwshpy_die "cannot determine the working directory" 70
+    _cwd=${_cwd%x}
+    PWSHPY_CALLER_CWD=${_cwd%?}
+}
+
 pwshpy_install_uv() {
     printf '%s\n' "uv was not found; installing it for the current user from https://astral.sh/uv ..." >&2
     if command -v curl >/dev/null 2>&1; then
@@ -684,22 +698,41 @@ fi
 
 # --- run --------------------------------------------------------------------------------
 # POSIX sh forwards "$@" intact, so arguments (empty strings, spaces, quotes, unicode) reach the
-# script unchanged and uv reads the entry's PEP 723 block directly - no shim, no argv encoding.
-# Prepend the entry, then the fixed uv args (a single-quoted list, eval-expanded), then exec.
+# script unchanged - no argv encoding. Not root, uv runs the entry itself and reads its PEP 723 block
+# directly. Prepend the script, then the fixed uv args (a single-quoted list, eval-expanded), then exec.
 
-set -- "$PWSHPY_CACHE/$PWSHPY_ENTRY" "$@"
-eval "set -- $PWSHPY_UV_ARGS_RAW \"\$@\""
-# The packed script runs with the PATH its caller gave, root or not: the fixed one was only for this
-# runner's own helpers.
 if [ "$PWSHPY_AS_ROOT" = "1" ]; then
-    PATH=$PWSHPY_CALLER_PATH
-    export PATH
     # uv picks the interpreter, and runs every one it considers to ask its version, so a python
     # planted in a PATH directory another account can write would run as root. As root uv considers
     # only the Pythons it manages (user decision), downloading one on first use unless downloads are
     # switched off; project discovery (the .python-version and uv.toml uv would read from the cache
-    # and every directory above it) moves to /, which only root can write.
+    # and every directory above it) moves to /, which only root can write; and uv itself starts in /
+    # (--directory), because it probes a .venv in its working directory and every one above, and
+    # under only-managed even runs the script on that venv's python (measured with uv 0.13.0). So uv
+    # runs the generated shim, which changes back to the caller's directory (handed over in
+    # @@PWSHPY_CWD_ENV@@) before the entry runs; every path the caller gave relative to that
+    # directory (a --with path, a relative PWSHPY_PACK_CACHE) is made absolute first.
+    pwshpy_caller_cwd
+    PWSHPY_CALLER_PREFIX=${PWSHPY_CALLER_CWD%/}/
+    case $PWSHPY_CACHE in
+        /*) ;;
+        *) PWSHPY_CACHE=$PWSHPY_CALLER_PREFIX$PWSHPY_CACHE ;;
+    esac
+    set -- "$PWSHPY_CACHE/$PWSHPY_SHIM" "$@"
+    eval "set -- $PWSHPY_UV_ARGS_ANCHORED_RAW \"\$@\""
+    # The packed script runs with the PATH its caller gave: the fixed one was only for this runner's
+    # own helpers.
+    PATH=$PWSHPY_CALLER_PATH
+    export PATH
     pwshpy_drop_interpreter_variables
-    set -- --python-preference only-managed --project / "$@"
+    @@PWSHPY_CWD_ENV@@=$PWSHPY_CALLER_CWD
+    export @@PWSHPY_CWD_ENV@@
+    # The shim keeps its own arguments only when no out-of-band argument vector is set; one inherited
+    # from the caller's environment must not replace them.
+    unset @@PWSHPY_ARGV_ENV@@
+    set -- --python-preference only-managed --project / --directory / "$@"
+else
+    set -- "$PWSHPY_CACHE/$PWSHPY_ENTRY" "$@"
+    eval "set -- $PWSHPY_UV_ARGS_RAW \"\$@\""
 fi
 exec "$PWSHPY_UV" run --no-project "$@"

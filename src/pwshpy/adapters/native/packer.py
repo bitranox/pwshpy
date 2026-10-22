@@ -121,16 +121,17 @@ def pack_script(
     entry_arc = _archive_name(entry_path, root_path)
     members = {_archive_name(path, root_path): body for path, body in sources.items()}
     metadata = extract_script_metadata(sources[entry_path].decode("utf-8", "replace"))
-    if fmt is RunnerFormat.PS1:
-        # PowerShell 5.1 re-quotes native-command args, so the entry runs behind a generated
-        # __main__ shim that rebuilds argv out of band; the shim (not the entry) is what uv runs,
-        # so it carries the entry's PEP 723 block.
-        if SHIM_MODULE in members:
-            raise PackError(
-                f"a file to pack is named {SHIM_MODULE!r}, which is reserved for the generated entry "
-                "shim; rename it so the pack does not silently overwrite it"
-            )
-        members[SHIM_MODULE] = render_shim(entry=entry_arc, metadata=metadata).encode("utf-8")
+    # The .ps1 always runs the entry behind a generated __main__ shim (PowerShell 5.1 re-quotes
+    # native-command args, so the shim rebuilds argv out of band); the .sh only when it runs as root,
+    # where uv starts in / and the shim changes back to the caller's directory. Where the shim (not
+    # the entry) is what uv runs, it carries the entry's PEP 723 block. It travels in the payload so
+    # it is hash-verified like every other file before it runs.
+    if SHIM_MODULE in members:
+        raise PackError(
+            f"a file to pack is named {SHIM_MODULE!r}, which is reserved for the generated entry "
+            "shim; rename it so the pack does not silently overwrite it"
+        )
+    members[SHIM_MODULE] = render_shim(entry=entry_arc, metadata=metadata).encode("utf-8")
 
     payload = _build_archive(members) if fmt is RunnerFormat.PS1 else _build_tar_archive(members)
     payload_sha = hashlib.sha256(payload).hexdigest()
@@ -143,8 +144,6 @@ def pack_script(
         file_hashes=[FileDigest(hashlib.sha256(body).hexdigest(), name) for name, body in sorted(members.items())],
     )
     template = _read_template(fmt)
-    # POSIX sh forwards "$@" intact and uv reads the entry's block directly, so the .sh runs the
-    # entry itself - no shim, no out-of-band argv channel.
     runner = render_runner(template, content) if fmt is RunnerFormat.PS1 else render_posix_runner(template, content)
     _write_runner(destination, runner)
     return PackedScript(
@@ -451,8 +450,8 @@ def _extract_tar_members(payload: bytes, target: Path, *, force: bool) -> list[s
 
     Each regular file is read and written through :func:`_write_member`, whose ``relative_to``
     guard rejects any member that would escape ``target`` (tar-slip); directory/link members are
-    skipped since the packer only ever writes regular files.  The ``.sh`` format has no shim, but
-    the name is skipped defensively.
+    skipped since the packer only ever writes regular files.  The generated shim is machinery, not
+    source, and is skipped as in the zip.
     """
     written: list[str] = []
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as tar:

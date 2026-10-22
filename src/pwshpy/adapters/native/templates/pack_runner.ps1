@@ -61,6 +61,10 @@ $PwshPyShim = '@@PWSHPY_SHIM@@'
 $PwshPySha = '@@PWSHPY_PAYLOAD_SHA256@@'
 $PwshPyArgvEnv = '@@PWSHPY_ARGV_ENV@@'
 $PwshPyUvArgs = @(@@PWSHPY_UV_ARGS@@)
+$PwshPyCwdEnv = '@@PWSHPY_CWD_ENV@@'
+# The same uv args for an elevated run, which starts uv in another directory: a --with path relative
+# to the caller's directory is spelled from $PwshPyCallerPrefix, set by the run before this is called.
+$PwshPyUvArgsAnchored = { @(@@PWSHPY_UV_ARGS_ANCHORED@@) }
 
 $PwshPyFileHashes = @'
 @@PWSHPY_FILE_HASHES@@
@@ -636,14 +640,30 @@ function ConvertTo-PwshPyNativeCall {
     return [scriptblock]::Create($text)
 }
 
+function Get-PwshPyAnchorDirectory {
+    # A directory only administrators can write: / on POSIX, System32 on Windows, asked of the
+    # system rather than of the environment.
+    if ($PwshPyOnWindows) { return [Environment]::SystemDirectory }
+    return '/'
+}
+
 function Get-PwshPyManagedPythonOption {
-    # The uv options an elevated run adds: only a uv-managed Python, and project discovery (the
+    # The uv options an elevated run adds: only a uv-managed Python; project discovery (the
     # .python-version and uv.toml uv would otherwise read from the packed script's directory and
     # every directory above it, the cache, which a non-administrator may be able to write) moved to
-    # a directory only administrators can write: / on POSIX, System32 on Windows, asked of the
-    # system rather than of the environment.
-    $anchor = if ($PwshPyOnWindows) { [Environment]::SystemDirectory } else { '/' }
-    return @('--python-preference', 'only-managed', '--project', $anchor)
+    # the anchor; and uv itself started there (--directory), because uv probes a .venv in its working
+    # directory and every one above, and under only-managed even runs the script on that venv's
+    # python (measured with uv 0.13.0), so a caller's directory another account can write would
+    # choose the interpreter. The generated shim changes back to the caller's directory before the
+    # script runs.
+    $anchor = Get-PwshPyAnchorDirectory
+    return @('--python-preference', 'only-managed', '--project', $anchor, '--directory', $anchor)
+}
+
+function Get-PwshPyCallerDirectory {
+    # The directory the packed script must run in: PowerShell's current FileSystem location, which an
+    # elevated child inherits as its working directory from the parent that started it.
+    return (Get-Location -PSProvider FileSystem).ProviderPath
 }
 
 function Clear-PwshPyInterpreterVariable {
@@ -971,13 +991,25 @@ if ($PwshPyRootPath) { $env:PATH = $PwshPyCallerPath }
 
 # uv picks the interpreter, and runs every one it considers to ask its version, so a python planted
 # in a PATH directory another account can write would run elevated. Elevated, uv considers only the
-# Pythons it manages (user decision), downloading one on first use unless downloads are switched off.
+# Pythons it manages (user decision), downloading one on first use unless downloads are switched off,
+# and starts in the anchor directory; the shim is told where to change back to. Everything uv is
+# handed that the caller gave relative to its own directory (a --with path, a relative
+# PWSHPY_PACK_CACHE) is made absolute first, or it would resolve against the anchor.
 $PwshPyRunArgs = @('run', '--no-project')
 if ($PwshPyElevatedRun) {
     $PwshPyRunArgs += Get-PwshPyManagedPythonOption
     Clear-PwshPyInterpreterVariable
+    $PwshPyCallerCwd = Get-PwshPyCallerDirectory
+    $PwshPyCallerPrefix = $PwshPyCallerCwd.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $PwshPyRunArgs += & $PwshPyUvArgsAnchored
+    $PwshPyTarget = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PwshPyTarget)
+    Set-Item -LiteralPath ('Env:' + $PwshPyCwdEnv) -Value $PwshPyCallerCwd
+} else {
+    $PwshPyRunArgs += $PwshPyUvArgs
+    # Only an elevated run changes directory; one inherited from the caller's environment must not
+    # move an unelevated script.
+    if (Test-Path -LiteralPath ('Env:' + $PwshPyCwdEnv)) { Remove-Item -LiteralPath ('Env:' + $PwshPyCwdEnv) }
 }
-$PwshPyRunArgs += $PwshPyUvArgs
 $PwshPyRunArgs += $PwshPyTarget
 
 if ($PwshPyRelay) {

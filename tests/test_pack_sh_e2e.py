@@ -15,24 +15,28 @@ import hashlib
 import os
 import shutil
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 from elevation_doubles import (
+    LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
     RUNNING_AS_ROOT,
     link_tools,
     managed_python_dir,
     managed_python_env,
     write_fake_sudo,
+    write_local_wheel,
     write_planted_environment,
     write_planted_python,
+    write_planted_venv,
     write_recording_uv,
 )
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.enums import RunnerFormat
-from pwshpy.domain.packing import PackOptions
+from pwshpy.domain.packing import SHIM_MODULE, PackOptions
 
 pytestmark = [pytest.mark.local_only, pytest.mark.os_posix]
 
@@ -1067,12 +1071,14 @@ print("python:" + sys.executable)
 _NO_MANAGED_PYTHON = "No interpreter found in virtual environments or managed installations"
 
 
-def _python_runner(tmp_path: Path, *, as_root: bool) -> tuple[Path, Path]:
+def _python_runner(
+    tmp_path: Path, *, as_root: bool, source: str = _ENTRY_REPORTING_PYTHON, with_packages: Sequence[str] = ()
+) -> tuple[Path, Path]:
     """A which-python .sh runner (root probe forced when ``as_root``) and a uv it trusts, in a tree this
-    test owns that counts as root's."""
+    test owns that counts as root's. ``source`` replaces the packed script."""
     entry = tmp_path / "which_python.py"
-    entry.write_text(_ENTRY_REPORTING_PYTHON)
-    runner = _pack_sh(entry, tmp_path / "which_python.sh")
+    entry.write_text(source)
+    runner = _pack_sh(entry, tmp_path / "which_python.sh", with_packages=list(with_packages))
     text = runner.read_text(encoding="utf-8")
     assert text.count(str(_SYSTEM_WIDE_UV)) == 1
     text = text.replace(str(_SYSTEM_WIDE_UV), str(tmp_path / "no-system-uv"))
@@ -1196,10 +1202,14 @@ def test_the_uv_command_line_carries_only_managed_exactly_as_root(
     assert result.returncode == 0, result.stdout + result.stderr
     argv = record.read_text(encoding="utf-8").splitlines()
     if as_root:
-        assert argv[:6] == ["run", "--no-project", "--python-preference", "only-managed", "--project", "/"], argv
+        managed = ["--python-preference", "only-managed", "--project", "/", "--directory", "/"]
+        assert argv[:8] == ["run", "--no-project", *managed], argv
+        assert argv[8].startswith("/") and argv[8].endswith("/" + SHIM_MODULE), argv
     else:
         assert argv[:2] == ["run", "--no-project"], argv
         assert "--python-preference" not in argv and "--project" not in argv, argv
+        # Not root, the runner is shim-free: uv runs the entry itself.
+        assert "--directory" not in argv and argv[2].endswith("/which_python.py"), argv
 
 
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
@@ -1228,6 +1238,83 @@ def test_as_root_the_variables_that_steer_the_managed_python_are_dropped(
             assert name not in recorded and dropped_line, (name, recorded, result.stderr)
         else:
             assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
+
+
+# --- [57] as root uv starts in / and the shim returns to the caller's directory -------------------------
+# uv probes a .venv in its working directory and every directory above, and under only-managed it even
+# RUNS the script on that venv's python (measured with uv 0.13.0), so a root run started from a
+# directory another account can write would run that account's interpreter. As root, uv starts in /
+# (--directory) and runs the generated shim, which changes back to the caller's directory first.
+
+_ENTRY_REPORTING_CWD = """import os
+import sys
+
+print("python:" + sys.executable)
+print("cwd:" + os.getcwd())
+print("argv:" + repr(sys.argv[1:]))
+"""
+
+
+def _reported_cwd(result: subprocess.CompletedProcess[str]) -> Path | None:
+    for line in result.stdout.splitlines():
+        if line.startswith("cwd:") and line[4:]:
+            return Path(line[4:].strip())
+    return None
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize(("as_root", "planted_runs"), [(True, False), (False, True)], ids=["root", "not-root-control"])
+def test_as_root_a_venv_above_the_working_directory_never_runs(
+    tmp_path: Path, shell_id: str, shell: list[str], as_root: bool, planted_runs: bool
+) -> None:
+    """[57]: the planted .venv's python never starts as root, and the script still sees the caller's
+    cwd and its own arguments; not root (the control) uv starts in the caller's directory and runs it."""
+    _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=as_root, source=_ENTRY_REPORTING_CWD)
+    marker = tmp_path / "planted-venv-ran.txt"
+    work = tmp_path / "project" / "work"
+    write_planted_venv(tmp_path / "project" / ".venv", marker)
+    work.mkdir()
+    arguments = ["a b", "", "it's"]
+    environment = _trust_env(tmp_path, uv.parent)
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", *arguments, env=environment, cwd=work)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.is_file() is planted_runs, result.stdout + result.stderr
+    reported = _reported_cwd(result)
+    assert reported is not None and reported.samefile(work), result.stdout
+    assert f"argv:{arguments!r}" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root"])
+@pytest.mark.parametrize(
+    "spec",
+    ["./{wheel}", "{wheel}", "wheels/{wheel}", LOCAL_WHEEL_DISTRIBUTION + " @ ./{wheel}"],
+    ids=["dot-slash", "bare-file", "subdirectory", "named-direct-reference"],
+)
+def test_a_relative_with_path_resolves_against_the_callers_directory(tmp_path: Path, as_root: bool, spec: str) -> None:
+    """[57]: a --with path relative to where the runner is started still resolves when uv starts in /."""
+    _needs_managed_python()
+    work = tmp_path / "work"
+    wheel = write_local_wheel(work / "wheels" if spec.startswith("wheels/") else work)
+    source = f"import {LOCAL_WHEEL_DISTRIBUTION}\nprint('wheel:' + {LOCAL_WHEEL_DISTRIBUTION}.VALUE)\n"
+    runner, uv = _python_runner(tmp_path, as_root=as_root, source=source, with_packages=[spec.format(wheel=wheel.name)])
+    result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=_trust_env(tmp_path, uv.parent), cwd=work)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "wheel:from the wheel" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root"])
+def test_a_relative_cache_directory_still_runs_the_script(tmp_path: Path, as_root: bool) -> None:
+    """[57]: PWSHPY_PACK_CACHE given relative to the caller's directory still names the script uv runs."""
+    _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=as_root, source=_ENTRY_REPORTING_CWD)
+    work = _work_dir(tmp_path)
+    environment = {**_trust_env(tmp_path, uv.parent), "PWSHPY_PACK_CACHE": "relative-cache"}
+    result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=work)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (work / "relative-cache").is_dir()
+    reported = _reported_cwd(result)
+    assert reported is not None and reported.samefile(work), result.stdout
 
 
 # --- [62] names the .sh carries as literals ----------------------------------------------------------

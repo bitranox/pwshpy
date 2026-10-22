@@ -30,14 +30,17 @@ from typing import cast
 import pytest
 from elevation_doubles import (
     INTERPRETER_VARIABLES,
+    LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
     RUNNING_AS_ROOT,
     interpreter_probe_env,
     link_tools,
     managed_python_dir,
     write_fake_sudo,
+    write_local_wheel,
     write_planted_environment,
     write_planted_python,
+    write_planted_venv,
     write_recording_uv,
 )
 
@@ -1797,16 +1800,18 @@ def _reported_python(result: subprocess.CompletedProcess[str]) -> Path | None:
     return None
 
 
-def _python_runner(tmp_path: Path, *, elevated: str) -> tuple[Path, list[Path]]:
+def _python_runner(
+    tmp_path: Path, *, elevated: str, source: str = _ENTRY_REPORTING_PYTHON, with_packages: Sequence[str] = ()
+) -> tuple[Path, list[Path]]:
     """A which-python runner with its elevation probe forced, plus the PATH head holding a uv it trusts.
 
     POSIX: a stand-in uv in a tree this test owns, counted as root's. Windows: the module's uv,
-    which an elevated host already trusts.
+    which an elevated host already trusts. ``source`` replaces the packed script.
     """
     entry = tmp_path / "which_python.py"
-    entry.write_text(_ENTRY_REPORTING_PYTHON)
+    entry.write_text(source)
     runner = _elevation_stand_in(
-        Path(pack_script(entry).output_path),
+        Path(pack_script(entry, options=PackOptions(with_packages=list(with_packages))).output_path),
         tmp_path / "python_stand_in.ps1",
         elevated=elevated,
         trust_my_uid=True,
@@ -1954,12 +1959,13 @@ def test_the_uv_command_line_carries_only_managed_exactly_when_elevated(tmp_path
     result = _run_with_path(tmp_path, runner, "-PwshPyUv", str(uv), path_first=[], cwd=_clean_cwd(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     argv = record.read_text(encoding="utf-8").splitlines()
-    managed = ["--python-preference", "only-managed", "--project", "/"]
+    managed = ["--python-preference", "only-managed", "--project", "/", "--directory", "/"]
     if elevated == "$true":
-        assert argv[:6] == ["run", "--no-project", *managed], argv
+        assert argv[:8] == ["run", "--no-project", *managed], argv
     else:
         assert argv[:2] == ["run", "--no-project"], argv
         assert "--python-preference" not in argv and "--project" not in argv, argv
+        assert "--directory" not in argv, argv
 
 
 def _recorded_variables(record: Path) -> dict[str, str]:
@@ -1990,6 +1996,100 @@ def test_an_elevated_run_drops_the_variables_that_steer_the_managed_python(tmp_p
             assert name not in recorded and dropped_line, (name, recorded, result.stderr)
         else:
             assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
+
+
+# --- [57] an elevated run starts uv in a directory only administrators can write -------------------
+# uv probes a .venv in its working directory and every directory above, and under only-managed it even
+# RUNS the script on that venv's python (measured with uv 0.13.0), so an elevated run started from a
+# directory another account can write would run that account's interpreter. Elevated, uv starts in
+# the anchor (/ on POSIX, System32 on Windows) via --directory, and the generated shim moves the
+# script back to the caller's directory before it runs.
+
+#: The packed script under test: the interpreter and the working directory it runs with.
+_ENTRY_REPORTING_CWD = """import os
+import sys
+
+print("python:" + sys.executable)
+print("cwd:" + os.getcwd())
+"""
+
+
+def _reported_cwd(result: subprocess.CompletedProcess[str]) -> Path | None:
+    for line in result.stdout.splitlines():
+        if line.startswith("cwd:") and line[4:]:
+            return Path(line[4:].strip())
+    return None
+
+
+def _planted_chain(tmp_path: Path, marker: Path) -> Path:
+    """A working directory one level below a directory holding a planted ``.venv``."""
+    project = tmp_path / "project"
+    write_planted_venv(project / ".venv", marker)
+    work = project / "work"
+    work.mkdir()
+    return work
+
+
+@pytest.mark.local_only
+@pytest.mark.parametrize(
+    ("elevated", "planted_runs"),
+    [pytest.param("$true", False, id="elevated"), pytest.param("$false", True, id="not-elevated-control")],
+)
+def test_an_elevated_run_never_executes_a_venv_above_the_working_directory(
+    tmp_path: Path, elevated: str, planted_runs: bool
+) -> None:
+    """[57]: the planted .venv's python never starts elevated, and the script still sees the caller's cwd.
+
+    The control shows the plant is reachable: not elevated, uv starts in the caller's directory and
+    runs the planted interpreter.
+    """
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated=elevated, source=_ENTRY_REPORTING_CWD)
+    marker = tmp_path / "planted-venv-ran.txt"
+    work = _planted_chain(tmp_path, marker)
+    probe = interpreter_probe_env(tmp_path, managed=managed)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=work)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.is_file() is planted_runs, result.stdout + result.stderr
+    reported = _reported_cwd(result)
+    assert reported is not None and reported.samefile(work), result.stdout
+
+
+@pytest.mark.local_only
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated"])
+@pytest.mark.parametrize(
+    "spec",
+    ["./{wheel}", "{wheel}", "wheels/{wheel}", LOCAL_WHEEL_DISTRIBUTION + " @ ./{wheel}"],
+    ids=["dot-slash", "bare-file", "subdirectory", "named-direct-reference"],
+)
+def test_a_relative_with_path_resolves_against_the_callers_directory(tmp_path: Path, elevated: str, spec: str) -> None:
+    """[57]: a --with path relative to where the runner is started still resolves when uv starts elsewhere."""
+    managed = _needs_managed_python()
+    work = tmp_path / "work"
+    wheel = write_local_wheel(work / "wheels" if spec.startswith("wheels/") else work)
+    source = f"import {LOCAL_WHEEL_DISTRIBUTION}\nprint('wheel:' + {LOCAL_WHEEL_DISTRIBUTION}.VALUE)\n"
+    runner, head = _python_runner(
+        tmp_path, elevated=elevated, source=source, with_packages=[spec.format(wheel=wheel.name)]
+    )
+    probe = interpreter_probe_env(tmp_path, managed=managed)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=work)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "wheel:from the wheel" in result.stdout, result.stdout
+
+
+@pytest.mark.local_only
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated"])
+def test_a_relative_cache_directory_still_runs_the_script(tmp_path: Path, elevated: str) -> None:
+    """[57]: PWSHPY_PACK_CACHE given relative to the caller's directory still names the script uv runs."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated=elevated, source=_ENTRY_REPORTING_CWD)
+    work = _clean_cwd(tmp_path)
+    probe = {**interpreter_probe_env(tmp_path, managed=managed), "PWSHPY_PACK_CACHE": "relative-cache"}
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=work)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (work / "relative-cache").is_dir()
+    reported = _reported_cwd(result)
+    assert reported is not None and reported.samefile(work), result.stdout
 
 
 # --- [61] [62] values the generated .ps1 carries as literals ----------------------------------------

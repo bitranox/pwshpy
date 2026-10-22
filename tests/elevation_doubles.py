@@ -12,6 +12,8 @@ Contents:
     * :data:`INTERPRETER_VARIABLES` - the variables an elevated run drops before uv picks a Python.
     * :func:`write_planted_python` - ``python`` / ``python3`` doubles that record being run.
     * :func:`write_planted_environment` - a virtual or conda environment whose python is such a double.
+    * :func:`write_planted_venv` - a real virtual environment whose python records every start.
+    * :func:`write_local_wheel` - a dependency-free wheel uv installs without the network.
     * :func:`write_recording_uv` - a ``uv`` double that records its argv and the variables it got.
     * :func:`managed_python_dir` - the host's uv-managed Python directory, when one holds an install.
     * :func:`interpreter_probe_env` - a uv search confined to one test (fresh cache, no downloads).
@@ -25,6 +27,8 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
+import zipfile
 from pathlib import Path
 
 #: The runners only elevate for a non-root uid, so as root no test reaches the sudo branch.
@@ -168,6 +172,66 @@ def write_planted_environment(root: Path, marker: Path) -> Path:
     return root
 
 
+def write_planted_venv(root: Path, marker: Path) -> Path:
+    """A real virtual environment at ``root`` whose interpreter appends a line to ``marker`` on every start.
+
+    Built with the suite's own interpreter (``venv --without-pip``), so it works on every OS, Windows
+    included, where no test can write a ``python.exe`` double. A ``sitecustomize`` in its
+    site-packages records each start: uv queries an interpreter with ``python -I``, which still
+    imports it. Planted as ``.venv`` in a working directory or above, it is what uv probes (and,
+    measured with uv 0.13.0, even RUNS under ``--python-preference only-managed``) unless started
+    elsewhere. Returns ``root``.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as d:
+        ...     (write_planted_venv(Path(d) / ".venv", Path(d) / "ran.txt") / "pyvenv.cfg").is_file()
+        True
+    """
+    subprocess.run(  # noqa: S603 - fixed argv from the running interpreter
+        [sys.executable, "-m", "venv", "--without-pip", str(root)], check=True, capture_output=True, timeout=120
+    )
+    site_packages = Path(sysconfig.get_path("purelib", vars={"base": str(root), "platbase": str(root)}))
+    site_packages.mkdir(parents=True, exist_ok=True)
+    (site_packages / "sitecustomize.py").write_text(
+        f"import sys\nwith open({str(marker)!r}, 'a', encoding='utf-8') as _f:\n    _f.write(sys.executable + '\\n')\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+#: The distribution :func:`write_local_wheel` builds, and the module it carries.
+LOCAL_WHEEL_DISTRIBUTION = "pwshpy_probe_wheel"
+
+
+def write_local_wheel(directory: Path) -> Path:
+    """Write a minimal pure-Python wheel of :data:`LOCAL_WHEEL_DISTRIBUTION` into ``directory``.
+
+    Its module holds ``VALUE = "from the wheel"``. It has no dependencies, so uv installs it from
+    the file alone. Returns the wheel's path.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as d:
+        ...     write_local_wheel(Path(d)).name
+        'pwshpy_probe_wheel-0.1-py3-none-any.whl'
+    """
+    name = LOCAL_WHEEL_DISTRIBUTION
+    info = f"{name}-0.1.dist-info"
+    members = {
+        f"{name}/__init__.py": 'VALUE = "from the wheel"\n',
+        f"{info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: 0.1\n",
+        f"{info}/WHEEL": "Wheel-Version: 1.0\nGenerator: pwshpy-tests\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    record = "".join(f"{member},,\n" for member in members) + f"{info}/RECORD,,\n"
+    directory.mkdir(parents=True, exist_ok=True)
+    wheel = directory / f"{name}-0.1-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for member, text in {**members, f"{info}/RECORD": record}.items():
+            archive.writestr(member, text)
+    return wheel
+
+
 def write_recording_uv(directory: Path, record: Path) -> Path:
     """Write a ``uv`` double (POSIX) that records its argv, one argument per line, then exits 0.
 
@@ -288,6 +352,7 @@ def managed_python_env(scratch: Path, *, managed: Path | None) -> dict[str, str]
 
 __all__ = [
     "INTERPRETER_VARIABLES",
+    "LOCAL_WHEEL_DISTRIBUTION",
     "MANAGED_PYTHON_VARIABLES",
     "RUNNING_AS_ROOT",
     "interpreter_probe_env",
@@ -296,6 +361,8 @@ __all__ = [
     "managed_python_env",
     "write_fake_sudo",
     "write_planted_environment",
+    "write_local_wheel",
     "write_planted_python",
+    "write_planted_venv",
     "write_recording_uv",
 ]

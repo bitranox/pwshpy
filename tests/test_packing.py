@@ -25,15 +25,18 @@ from pwshpy.domain.packing import (
     render_posix_runner,
     render_runner,
     render_shim,
+    split_relative_requirement,
 )
 
 _FULL_TEMPLATE = (
     "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|"
-    "@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@|@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@"
+    "@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@|@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@|"
+    "@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_ANCHORED@@"
 )
 
 _SH_TEMPLATE = (
-    "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@"
+    "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@|"
+    "@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@|@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_ANCHORED@@"
 )
 
 
@@ -177,6 +180,8 @@ def test_render_runner_substitutes_every_placeholder() -> None:
         "ff *tool.py",
         SHIM_MODULE,
         "PWSHPY_PACK_ARGV",
+        "PWSHPY_PACK_CWD",
+        "'--with','rich'",
     ]
 
 
@@ -214,8 +219,15 @@ def test_render_posix_runner_substitutes_its_placeholders() -> None:
         ),
     )
     assert "@@PWSHPY" not in rendered
-    payload, sha, entry, uv_args, hashes = rendered.split("|")
-    assert [payload, sha] == ["Ym9keQ==", "ab12"]
+    payload, sha, entry, uv_args, hashes, shim, argv_env, cwd_env, anchored = rendered.split("|")
+    assert [payload, sha, shim, argv_env, cwd_env] == [
+        "Ym9keQ==",
+        "ab12",
+        SHIM_MODULE,
+        "PWSHPY_PACK_ARGV",
+        "PWSHPY_PACK_CWD",
+    ]
+    assert _sh_uv_args(anchored) == ["--with", "rich"]
     assert [*shlex.split(entry), *shlex.split(hashes)] == ["tool.py", "ff  tool.py"]
     assert _sh_uv_args(uv_args) == ["--with", "rich"]
 
@@ -298,7 +310,7 @@ def test_the_entry_name_and_file_list_are_quoted_words_in_the_posix_runner() -> 
         _SH_TEMPLATE,
         RunnerContent(payload_b64="x", payload_sha256="y", entry="it's.py", file_hashes=[FileDigest("ff", "it's.py")]),
     )
-    _, _, entry, _, hashes = rendered.split("|")
+    _, _, entry, _, hashes = rendered.split("|")[:5]
     assert shlex.split(entry) == ["it's.py"]
     assert shlex.split(hashes) == ["ff  it's.py"]
 
@@ -331,3 +343,63 @@ def test_a_placeholder_spelled_in_a_value_is_not_substituted_again() -> None:
         RunnerContent(payload_b64="x", payload_sha256="y", entry="@@PWSHPY_SHIM@@.py", uv_args=["--with", "z"]),
     )
     assert rendered.split("|")[2] == "'@@PWSHPY_SHIM@@.py'"
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        ("./x.whl", ("", "./x.whl")),
+        ("../up/x", ("", "../up/x")),
+        (".", ("", ".")),
+        ("wheels/x.whl", ("", "wheels/x.whl")),
+        ("wheels\\x.whl", ("", "wheels\\x.whl")),
+        ("x-1.0-py3-none-any.whl", ("", "x-1.0-py3-none-any.whl")),
+        ("x-1.0.tar.gz", ("", "x-1.0.tar.gz")),
+        ("tool @ ./tool", ("tool @ ", "./tool")),
+        ("tool[cli]@../tool ; python_version > '3'", ("tool[cli]@", "../tool ; python_version > '3'")),
+        ("./a@b/x.whl", ("", "./a@b/x.whl")),
+    ],
+)
+def test_a_relative_with_path_is_split_for_re_anchoring(spec: str, expected: tuple[str, str]) -> None:
+    """[57]: what uv reads as a path relative to its working directory is split off its ``name @``."""
+    assert split_relative_requirement(spec) == expected
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "rich",
+        "rich>=13",
+        "pkg[ab]",
+        "/abs/x.whl",
+        "C:\\wheels\\x.whl",
+        "\\\\server\\share\\x.whl",
+        "~/x.whl",
+        "$HOME/x.whl",
+        "file:./x",
+        "tool @ https://example.invalid/tool.whl",
+        "git+https://example.invalid/r.git",
+        "tool @ file:///abs/tool",
+        "",
+    ],
+)
+def test_anything_else_is_left_alone(spec: str) -> None:
+    """[57]: a requirement, URL, absolute or home-relative path is never re-anchored."""
+    assert split_relative_requirement(spec) is None
+
+
+@pytest.mark.os_agnostic
+def test_only_with_values_are_re_anchored_in_both_runners() -> None:
+    """[57]: a relative --with value is spelled from the caller-prefix variable; nothing else changes."""
+    content = RunnerContent(
+        payload_b64="x", payload_sha256="y", entry="e", uv_args=["--with", "./x.whl", "--with", "rich"]
+    )
+    ps1 = render_runner(_FULL_TEMPLATE, content).split("|")
+    assert ps1[8] == "'--with',('' + $PwshPyCallerPrefix + './x.whl'),'--with','rich'"
+    assert ps1[3] == "'--with','./x.whl','--with','rich'"
+    sh = render_posix_runner(_SH_TEMPLATE, content).split("|")
+    (anchored,) = shlex.split(sh[8])
+    assert anchored == "'--with' ''\"$PWSHPY_CALLER_PREFIX\"'./x.whl' '--with' 'rich'"
+    assert _sh_uv_args(sh[3]) == ["--with", "./x.whl", "--with", "rich"]

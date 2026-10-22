@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import base64
 import io
+import os
+import subprocess
 import sys
 import tarfile
 import zipfile
@@ -18,7 +20,7 @@ import pytest
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.enums import RunnerFormat
 from pwshpy.domain.errors import PackError
-from pwshpy.domain.packing import SHIM_MODULE, PackOptions
+from pwshpy.domain.packing import ARGV_ENV_VAR, CWD_ENV_VAR, SHIM_CWD_EXIT, SHIM_MODULE, PackOptions, render_shim
 
 _PEP723 = '# /// script\n# requires-python = ">=3.10"\n# dependencies = ["cowsay"]\n# ///\n'
 
@@ -272,14 +274,17 @@ _SH = PackOptions(format=RunnerFormat.SH)
 
 
 @pytest.mark.os_agnostic
-def test_sh_pack_emits_a_shell_runner_without_the_shim(tmp_path: Path) -> None:
-    """The .sh runner needs no argv shim - POSIX sh forwards ``"$@"`` - so the embedded tree is pure source."""
+def test_sh_pack_carries_the_shim_a_root_run_executes(tmp_path: Path) -> None:
+    """[57]: the .sh carries the shim a root run executes (verified like any file); unpack leaves it out.
+
+    An unelevated .sh run still executes the entry itself (test_pack_sh_e2e.py checks the argv).
+    """
     manifest = pack_script(_project(tmp_path), tmp_path / "app.sh", options=_SH)
     runner = Path(manifest.output_path)
     assert runner.read_text().startswith("#!/bin/sh")
-    assert manifest.files == ["app.py", "pkg/__init__.py", "pkg/helper.py", "sibling.py"]
-    assert SHIM_MODULE not in manifest.files
-    assert SHIM_MODULE not in _tar_of(runner)
+    assert manifest.files == [SHIM_MODULE, "app.py", "pkg/__init__.py", "pkg/helper.py", "sibling.py"]
+    assert _tar_of(runner)[SHIM_MODULE].decode("utf-8").count("runpy.run_path(_ENTRY") == 1
+    assert SHIM_MODULE not in unpack_script(runner, tmp_path / "out").files
 
 
 @pytest.mark.os_agnostic
@@ -456,3 +461,61 @@ def test_a_data_file_named_with_a_line_break_is_refused(tmp_path: Path) -> None:
     data.write_text("{}\n")
     with pytest.raises(PackError, match="line break"):
         pack_script(entry, options=PackOptions(include=[data]))
+
+
+def _run_shim(tmp_path: Path, *arguments: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run a generated shim fronting an entry that prints its cwd and argv, from ``tmp_path``."""
+    (tmp_path / "entry.py").write_text(
+        "import os, sys\nprint('cwd:' + os.getcwd())\nprint('argv:' + repr(sys.argv[1:]))\n"
+    )
+    shim = tmp_path / SHIM_MODULE
+    shim.write_text(render_shim(entry="entry.py", metadata=""), encoding="utf-8")
+    child = {k: v for k, v in os.environ.items() if k not in (CWD_ENV_VAR, ARGV_ENV_VAR)}
+    return subprocess.run(  # noqa: S603 - the running interpreter and a file this test wrote
+        [sys.executable, str(shim), *arguments],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+        env={**child, **env},
+        cwd=tmp_path,
+    )
+
+
+@pytest.mark.os_agnostic
+def test_the_shim_changes_to_the_directory_an_elevated_run_hands_over(tmp_path: Path) -> None:
+    """[57]: with the variable set, the entry runs in that directory and keeps the shim's own arguments."""
+    target = tmp_path / "caller"
+    target.mkdir()
+    result = _run_shim(tmp_path, "a b", "", env={CWD_ENV_VAR: str(target)})
+    assert result.returncode == 0, result.stderr
+    assert f"cwd:{target}" in result.stdout, result.stdout
+    assert "argv:['a b', '']" in result.stdout, result.stdout
+
+
+@pytest.mark.os_agnostic
+def test_the_shim_stays_where_it_started_without_the_variable(tmp_path: Path) -> None:
+    """[57]: unset, nothing changes: the shim neither moves nor drops its arguments."""
+    result = _run_shim(tmp_path, "x", env={})
+    assert result.returncode == 0, result.stderr
+    assert f"cwd:{tmp_path}" in result.stdout, result.stdout
+    assert "argv:['x']" in result.stdout, result.stdout
+
+
+@pytest.mark.os_agnostic
+def test_the_shim_names_a_directory_it_cannot_return_to(tmp_path: Path) -> None:
+    """[57]: a directory the elevated account cannot enter ends the run with one line, never a traceback."""
+    missing = tmp_path / "gone"
+    result = _run_shim(tmp_path, env={CWD_ENV_VAR: str(missing)})
+    assert result.returncode == SHIM_CWD_EXIT, result.stdout + result.stderr
+    assert f"pwshpy pack: cannot return to the working directory {missing}: " in result.stderr, result.stderr
+    assert "Traceback" not in result.stderr and "cwd:" not in result.stdout
+
+
+@pytest.mark.os_agnostic
+def test_the_shim_prefers_the_out_of_band_argument_vector(tmp_path: Path) -> None:
+    """The .ps1 hands its arguments over out of band; they replace the shim's own."""
+    result = _run_shim(tmp_path, "ignored", env={ARGV_ENV_VAR: "v1|" + "eA=="})
+    assert result.returncode == 0, result.stderr
+    assert "argv:['x']" in result.stdout, result.stdout

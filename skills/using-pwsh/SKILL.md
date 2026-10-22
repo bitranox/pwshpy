@@ -189,8 +189,11 @@ automatically. Two ways:
    `PackOptions(with_packages=["rich", "httpx"])` (library).
 
 The artefact forwards every argument to your script untouched (empty strings, quotes, unicode,
-`-v`/`-d`) and takes its own help/info/clean/no-install-uv/elevate switches - spelled
-`-PwshPyHelp` ... on the `.ps1`, `--pwshpy-help` ... on the `.sh`.
+`-v`/`-d`) and takes its own help/info/clean/no-install-uv/elevate/uv switches - spelled
+`-PwshPyHelp` ... on the `.ps1`, `--pwshpy-help` ... on the `.sh`. Run elevated (admin token,
+SYSTEM, root) it only executes a `uv` no non-administrator can modify and skips any other; pin one
+with `-PwshPyUv <absolute path>` / `--pwshpy-uv <absolute path>` (refused with exit 127 when elevated
+and untrusted).
 
 ## Install
 

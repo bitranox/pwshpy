@@ -257,6 +257,7 @@ to your script untouched. The `.ps1` spells them `-PwshPy...`; the `.sh` spells 
 | `-PwshPyClean`       | `--pwshpy-clean`         | discard the cached extraction and unpack again                                  |
 | `-PwshPyNoInstallUv` | `--pwshpy-no-install-uv` | fail with exit 127 instead of installing uv                                     |
 | `-PwshPyElevate`     | `--pwshpy-elevate`       | relaunch elevated first (UAC on Windows, `sudo` on POSIX); exit 77 if refused   |
+| `-PwshPyUv PATH`     | `--pwshpy-uv PATH`       | run the uv at this absolute path, no search and no install; exit 64 if relative |
 | `-PwshPyHelp`        | `--pwshpy-help`          | show the artefact's own help                                                    |
 
 Details worth knowing:
@@ -282,12 +283,33 @@ Details worth knowing:
   line on stderr with exit code 70. Only a child stopped before it can run a line of the runner (a
   Group Policy execution policy, a closed window) leaves nothing to relay; then the parent prints a
   `pwshpy: the elevated child produced no output` line and exits with the child's code.
+- **An elevated run only runs a uv no non-administrator can modify.** Run with an administrator
+  token, as SYSTEM (a scheduled task) or as root, the runner executes uv with those rights, so a
+  `uv` that another account can replace would hand that account the machine. What decides is who
+  can write the binary, not where it was found: every `uv` on `PATH` (in order) and every fixed
+  install location is accepted only when neither the file nor the directory holding it lets anyone
+  else change it. On Windows that means owned by, and writable only by, SYSTEM, Administrators,
+  LOCAL SERVICE, NETWORK SERVICE or TrustedInstaller, judged by SID so a German `Administratoren`
+  reads the same; the rights that count are write, append, delete, change permissions and take
+  ownership (on the directory also adding or removing entries). On POSIX root must own both, nobody
+  else may write them, group write counts only for group 0, and a mode carrying an ACL (`+`) is
+  refused because `ls` cannot say who it lets write. A symlink is followed one hop at a time and
+  every hop's directory is judged too. A refused `uv` is skipped with a `pwshpy: skipping uv at
+  <path>: <reason>` line on stderr and the next one is tried; an elevated `.ps1` child relays those
+  lines to the parent. A `-PwshPyUv` / `--pwshpy-uv` path is used as given when not elevated; elevated
+  it must pass the same check or the run stops with `pwshpy: refusing the uv given with ...` and exit
+  127, without searching further. Not elevated, nothing changes: the first `uv` on `PATH` runs.
+  What follows from the rule: a per-user `uv` (`~\.local\bin`, a winget package the installing
+  user may write) is refused when an administrator runs the artefact elevated, because that account
+  can replace it unelevated; install one where only administrators can write (for example under
+  `C:\Program Files` or root-owned `/usr/local/bin`) and pass its path. Under SYSTEM a fresh install
+  lands in SYSTEM's own profile, which only administrators can write, so it is accepted.
 - **Self-elevation keeps working.** A packed script calling `ps.elevate()` re-execs the extracted
   entry with the environment uv already built, so it elevates exactly as it would unpacked.
 - **The cache is verified before every run** against per-file hashes embedded in the artefact, and
   re-extracted on any mismatch - a cache directory that may later be executed elevated must not be
   tamperable between runs. Both runners serialize a cold-cache extraction with an atomic lock
-  (`FileShare.None` on Windows, a `mkdir` lock on POSIX), so two concurrent first runs never race.
+  (`FileShare.None` on Windows, a lock file created under `noclobber` on POSIX), so two concurrent first runs never race.
 - **Packing is deterministic**: identical sources produce identical bytes (the `.sh` tar is built
   with fixed mtime/mode/order), so the payload hash is a stable cache key and two builds are
   comparable.

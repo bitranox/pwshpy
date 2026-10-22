@@ -428,3 +428,234 @@ def test_elevate_forwards_the_no_install_uv_switch(tmp_path: Path) -> None:
     )
     assert result.returncode == 127, result.stderr
     assert not fetched.exists(), "--pwshpy-no-install-uv was dropped by the elevated relaunch"
+
+
+# --- which uv a root run trusts ([56]) -------------------------------------------------------
+# As root the runner executes the uv it finds with full rights, so it accepts a uv only when root
+# owns the file and every directory hop to it and no one else can write them. One counted text
+# substitution forces that branch here (this box is not root and sudo is not used; an ``id`` double
+# on PATH would not do, because busybox ash runs its own ``id`` applet whatever PATH says), and a
+# wrapper uv that names itself shows which uv actually ran.
+
+#: The system-wide uv the runner probes whatever PATH says; a root-owned one is the positive control.
+_SYSTEM_WIDE_UV = Path("/usr/local/bin/uv")
+#: The line the runner prints for each uv a root run skips.
+_UV_SKIPPED = "pwshpy: skipping uv at"
+#: The refusal for a pinned uv a root run cannot trust.
+_PIN_REFUSED = "pwshpy: refusing the uv given with"
+
+_ENTRY_REPORTING_UV = """import os
+import sys
+
+print("uv:" + (os.environ.get("PWSHPY_TEST_UV") or os.environ.get("UV") or ""))
+sys.exit(0)
+"""
+
+
+def _root_only_writable(path: Path) -> bool:
+    """Whether root owns ``path`` and its directory and nobody else may write either."""
+    for item in (path, path.parent):
+        info = item.stat()
+        group_writable_by_others = bool(info.st_mode & 0o020) and info.st_gid != 0
+        if info.st_uid != 0 or info.st_mode & 0o002 or group_writable_by_others:
+            return False
+    return not path.is_symlink()
+
+
+_needs_trusted_system_uv = pytest.mark.skipif(
+    not (_SYSTEM_WIDE_UV.is_file() and _root_only_writable(_SYSTEM_WIDE_UV)),
+    reason=f"needs a root-owned {_SYSTEM_WIDE_UV} that only root can modify",
+)
+
+
+def _planted_uv(tmp_path: Path, name: str = "planted-bin") -> Path:
+    """A world-writable directory holding a uv wrapper that names itself, then runs the real uv."""
+    directory = tmp_path / name
+    directory.mkdir()
+    directory.chmod(0o777)
+    wrapper = directory / "uv"
+    wrapper.write_text(
+        f'#!/bin/sh\nPWSHPY_TEST_UV="$0"\nexport PWSHPY_TEST_UV\nexec "{_UV}" "$@"\n', encoding="utf-8", newline="\n"
+    )
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+#: The runner's root probe for the trust rule, and what a forced-root runner has in its place.
+_ROOT_PROBE = ('if [ "$(id -u)" = "0" ]; then\n    PWSHPY_AS_ROOT=1', "if true; then\n    PWSHPY_AS_ROOT=1")
+
+
+def _trust_runner(tmp_path: Path, *, hide_system_uv: bool, as_root: bool = False) -> Path:
+    """A packed which-uv script, its fixed /usr/local/bin/uv probe hidden, its root probe forced.
+
+    Both are exact, counted substitutions; the rest is the shipped runner.
+    """
+    entry = tmp_path / "which_uv.py"
+    entry.write_text(_ENTRY_REPORTING_UV)
+    runner = _pack_sh(entry, tmp_path / "which_uv.sh")
+    text = runner.read_text(encoding="utf-8")
+    if hide_system_uv:
+        assert text.count(str(_SYSTEM_WIDE_UV)) == 1
+        text = text.replace(str(_SYSTEM_WIDE_UV), str(tmp_path / "no-system-uv"))
+    if as_root:
+        assert text.count(_ROOT_PROBE[0]) == 1
+        text = text.replace(*_ROOT_PROBE)
+    runner.write_text(text, encoding="utf-8", newline="\n")
+    return runner
+
+
+def _trust_env(tmp_path: Path, *path_first: Path) -> dict[str, str]:
+    """An environment whose PATH is ``path_first`` plus the system dirs, with a barren HOME."""
+    barren = tmp_path / "home"
+    barren.mkdir(exist_ok=True)
+    return {
+        "PATH": os.pathsep.join([*map(str, path_first), "/usr/bin", "/bin"]),
+        "HOME": str(barren),
+        "XDG_BIN_HOME": str(barren / "xdgbin"),
+        "CARGO_HOME": str(barren / "cargo"),
+        "PWSHPY_PACK_CACHE": str(tmp_path / "cache"),
+        "PYTHONIOENCODING": "utf-8",
+    }
+
+
+def _reported_uv(result: subprocess.CompletedProcess[str]) -> str | None:
+    for line in result.stdout.splitlines():
+        if line.startswith("uv:") and line[3:]:
+            return line[3:].strip()
+    return None
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_a_writable_uv_first_on_path_is_skipped(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """[56]: a uv planted first on PATH in a world-writable directory never runs as root."""
+    planted = _planted_uv(tmp_path)
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True)
+    environment = _trust_env(tmp_path, planted.parent)
+    result = _run(shell, runner, "--pwshpy-no-install-uv", env=environment)
+    assert _reported_uv(result) is None, result.stdout + result.stderr
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert f"{_UV_SKIPPED} {planted}" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_each_skipped_uv_names_its_reason(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """Every PATH hit is judged and named: a world-writable directory, then one this uid owns.
+
+    Pins the parsed owner too: a reason with an empty uid would mean the listing was misread.
+    """
+    planted = _planted_uv(tmp_path)
+    owned = tmp_path / "owned-bin"
+    owned.mkdir()
+    owned.chmod(0o755)
+    owned_uv = owned / "uv"
+    owned_uv.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8", newline="\n")
+    owned_uv.chmod(0o755)
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True)
+    environment = _trust_env(tmp_path, planted.parent, owned)
+    result = _run(shell, runner, "--pwshpy-no-install-uv", env=environment)
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert f"{_UV_SKIPPED} {planted}: its directory {planted.parent} is writable by every account" in result.stderr
+    assert f"{_UV_SKIPPED} {owned_uv}: its directory {owned} is owned by uid {os.getuid()}, not root" in result.stderr
+
+
+@_needs_trusted_system_uv
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_a_root_owned_uv_still_runs(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """The trusted fallback: after skipping the planted one, the root-owned system uv runs."""
+    planted = _planted_uv(tmp_path)
+    runner = _trust_runner(tmp_path, hide_system_uv=False, as_root=True)
+    environment = _trust_env(tmp_path, planted.parent)
+    result = _run(shell, runner, "--pwshpy-no-install-uv", env=environment)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _reported_uv(result) == str(_SYSTEM_WIDE_UV), result.stdout + result.stderr
+    assert f"{_UV_SKIPPED} {planted}" in result.stderr, result.stderr
+
+
+def test_not_root_the_first_uv_on_path_still_runs(tmp_path: Path) -> None:
+    """Control: without root the lookup is unchanged - the first uv on PATH runs, trusted or not."""
+    planted = _planted_uv(tmp_path)
+    runner = _trust_runner(tmp_path, hide_system_uv=True)
+    result = _run(["sh"], runner, env=_trust_env(tmp_path, planted.parent))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _reported_uv(result) == str(planted), result.stdout + result.stderr
+    assert _UV_SKIPPED not in result.stderr, result.stderr
+
+
+def test_not_root_the_pinned_uv_is_used_as_is(tmp_path: Path) -> None:
+    """--pwshpy-uv names the uv outright: without root it is taken as given, ahead of PATH."""
+    planted = _planted_uv(tmp_path)
+    runner = _trust_runner(tmp_path, hide_system_uv=True)
+    environment = _trust_env(tmp_path, Path(_UV or "uv").parent)
+    result = _run(["sh"], runner, "--pwshpy-uv", str(planted), env=environment)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _reported_uv(result) == str(planted), result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_an_untrusted_pinned_uv_is_refused(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """As root a pin anyone can modify is refused with exit 127, and nothing else is tried."""
+    planted = _planted_uv(tmp_path)
+    runner = _trust_runner(tmp_path, hide_system_uv=False, as_root=True)
+    environment = _trust_env(tmp_path)
+    result = _run(shell, runner, "--pwshpy-uv", str(planted), env=environment)
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert f"{_PIN_REFUSED} --pwshpy-uv: {planted}" in result.stderr, result.stderr
+    assert _reported_uv(result) is None, result.stdout
+
+
+@_needs_trusted_system_uv
+def test_as_root_a_trusted_pinned_uv_runs(tmp_path: Path) -> None:
+    """As root a root-owned pin is used, even with a planted uv first on PATH."""
+    planted = _planted_uv(tmp_path)
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True)
+    environment = _trust_env(tmp_path, planted.parent)
+    result = _run(["sh"], runner, "--pwshpy-uv", str(_SYSTEM_WIDE_UV), env=environment)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _reported_uv(result) == str(_SYSTEM_WIDE_UV), result.stdout + result.stderr
+
+
+@pytest.mark.skipif(
+    not (Path("/usr/bin/python3").is_symlink() and _root_only_writable(Path("/usr/bin/python3").resolve())),
+    reason="needs /usr/bin/python3 as a root-owned symlink to a root-owned interpreter",
+)
+def test_as_root_a_trusted_symlinked_pin_is_followed_and_accepted(tmp_path: Path) -> None:
+    """A root-owned symlink in a root-owned dir is resolved hop by hop and accepted.
+
+    No unprivileged test can create such a link, so a system one stands in for uv: the runner
+    accepts it and execs it as ``python3 run --no-project ...``, which fails on the missing file
+    ``run`` - proof the link passed the trust rule and was the program started.
+    """
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True)
+    environment = _trust_env(tmp_path)
+    result = _run(["sh"], runner, "--pwshpy-no-install-uv", "--pwshpy-uv", "/usr/bin/python3", env=environment)
+    assert _PIN_REFUSED not in result.stderr, result.stderr
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "can't open file" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [pytest.param(["--pwshpy-uv", "relative/uv"], id="relative"), pytest.param(["--pwshpy-uv"], id="missing")],
+)
+def test_a_pinned_uv_must_be_an_absolute_path(tmp_path: Path, arguments: list[str]) -> None:
+    """A relative or missing --pwshpy-uv value is a usage error (64), before anything is unpacked."""
+    runner = _trust_runner(tmp_path, hide_system_uv=True)
+    result = _run(["sh"], runner, *arguments, env=_trust_env(tmp_path, Path(_UV or "uv").parent))
+    assert result.returncode == 64, result.stdout + result.stderr
+    assert "--pwshpy-uv" in result.stderr, result.stderr
+    assert not (tmp_path / "cache").exists(), "the payload was unpacked for a malformed switch"
+
+
+@_needs_non_root
+def test_elevate_forwards_the_pinned_uv(tmp_path: Path) -> None:
+    """--pwshpy-uv survives the sudo relaunch, a path with a space included."""
+    planted = _planted_uv(tmp_path, name="planted bin")
+    runner = _trust_runner(tmp_path, hide_system_uv=True)
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    write_fake_sudo(bin_dir, grant=True, calls=tmp_path / "sudo-calls.txt")
+    environment = _trust_env(tmp_path, bin_dir, Path(_UV or "uv").parent)
+    result = _run(["sh"], runner, "--pwshpy-elevate", "--pwshpy-uv", str(planted), "--", "a b", env=environment)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _reported_uv(result) == str(planted), result.stdout + result.stderr
+    assert (tmp_path / "sudo-calls.txt").exists(), "the runner never relaunched through sudo"

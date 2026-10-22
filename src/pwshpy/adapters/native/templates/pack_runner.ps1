@@ -30,6 +30,14 @@
         -PwshPyNoInstallUv  fail with exit code 127 rather than installing uv
         -PwshPyElevate      relaunch elevated first (UAC on Windows, sudo on POSIX);
                             exit code 77 if the elevation is refused
+        -PwshPyUv PATH      run the uv at this absolute path instead of searching for one
+
+    Run elevated (an administrator token, SYSTEM, or root), it only runs a uv that no
+    non-administrator can modify: neither the file nor the directory holding it may grant write
+    access to any account other than SYSTEM, Administrators, LOCAL SERVICE, NETWORK SERVICE or
+    TrustedInstaller (on POSIX: root must own both, and nobody else may write them). Any other uv
+    it finds is skipped with a line on stderr, and a -PwshPyUv path that fails the check is
+    refused with exit code 127.
 
     Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -169,28 +177,177 @@ function Test-PwshPyTree {
     return $true
 }
 
-function Get-PwshPyUvPath {
-    $found = Get-Command uv -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($found) { return $found.Source }
-    if ($PwshPyOnWindows) {
-        $candidates = @(
-            (Join-Path $env:USERPROFILE '.local\bin\uv.exe'),
-            (Join-Path $env:LOCALAPPDATA 'Programs\uv\uv.exe'),
-            (Join-Path $env:USERPROFILE '.cargo\bin\uv.exe')
-        )
-    } else {
-        $candidates = @(
-            (Join-Path $HOME '.local/bin/uv'),
-            (Join-Path $HOME '.cargo/bin/uv'),
-            '/usr/local/bin/uv'
-        )
-        # The installer honours XDG_BIN_HOME / CARGO_HOME, so a machine that sets either installs
-        # uv there rather than under ~/.local/bin - check them too before giving up.
-        if ($env:XDG_BIN_HOME) { $candidates += (Join-Path $env:XDG_BIN_HOME 'uv') }
-        if ($env:CARGO_HOME) { $candidates += (Join-Path $env:CARGO_HOME 'bin/uv') }
+# The accounts whose write access to uv changes nothing, because an elevated run already acts with
+# their rights: SYSTEM, LOCAL SERVICE, NETWORK SERVICE, BUILTIN\Administrators, TrustedInstaller.
+# By SID, never by name: the names are localised ('Administratoren' on a German Windows).
+$PwshPyTrustedSids = @(
+    'S-1-5-18',
+    'S-1-5-19',
+    'S-1-5-20',
+    'S-1-5-32-544',
+    'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+)
+# The rights that let their holder change what runs. On a file: rewrite it (WriteData, AppendData),
+# delete it, or take it over (WriteDAC, WriteOwner); on a directory also add or remove an entry
+# (AddFile = WriteData, AddSubdirectory = AppendData, DeleteSubdirectoriesAndFiles). GenericAll and
+# GenericWrite are the unmapped forms an ACE may still carry. Read and execute rights are harmless.
+$PwshPyFileWriteRights = 0x2 -bor 0x4 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+$PwshPyDirectoryWriteRights = $PwshPyFileWriteRights -bor 0x40
+
+function Test-PwshPyAbsolutePath {
+    param([string] $Path)
+
+    # [IO.Path]::IsPathRooted calls 'C:uv.exe' and '\uv.exe' rooted, though both depend on the
+    # current drive or directory; only a drive-qualified or UNC path names one file.
+    if ($PwshPyOnWindows) { return ($Path -match '^[A-Za-z]:[\\/]' -or $Path -match '^[\\/]{2}[^\\/]') }
+    return $Path.StartsWith('/')
+}
+
+function Get-PwshPyAclDistrust {
+    param([string] $Path, [bool] $Directory)
+
+    # Returns why a non-administrator could change $Path, or '' when none can. The owner counts as
+    # a writer whatever the ACL says, because an owner may always rewrite the ACL.
+    try {
+        $acl = Get-Acl -LiteralPath $Path
+    } catch {
+        return "the ACL of $Path cannot be read ($($_.Exception.Message))"
     }
-    foreach ($candidate in $candidates) {
-        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    $sidType = [Security.Principal.SecurityIdentifier]
+    $owner = $acl.GetOwner($sidType)
+    $ownerSid = if ($owner) { $owner.Value } else { 'an unknown account' }
+    if ($PwshPyTrustedSids -notcontains $ownerSid) { return "$Path is owned by $ownerSid, not an administrative account" }
+    $dangerous = if ($Directory) { $PwshPyDirectoryWriteRights } else { $PwshPyFileWriteRights }
+    foreach ($rule in $acl.GetAccessRules($true, $true, $sidType)) {
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+        # An inherit-only entry applies to children created later, not to this object.
+        if ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+        $sid = $rule.IdentityReference.Value
+        # CREATOR OWNER and OWNER RIGHTS stand for the owner, already judged above.
+        if ($sid -eq 'S-1-3-0' -or $sid -eq 'S-1-3-4') { continue }
+        if ($PwshPyTrustedSids -contains $sid) { continue }
+        if (([int]$rule.FileSystemRights) -band $dangerous) {
+            return "$Path lets $sid change it ($($rule.FileSystemRights))"
+        }
+    }
+    return ''
+}
+
+function Get-PwshPyModeDistrust {
+    param([string] $Path)
+
+    # POSIX: root must own $Path, nobody else may write it, and group write counts only for group 0,
+    # whose members are root equivalents. A mode with an ACL ('+') is refused outright: its group
+    # bits then show the ACL mask, not who may write. ls -ldn because it is on every POSIX system
+    # (stat's flags differ between GNU, BSD and busybox).
+    $ls = Get-Command ls -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $ls) { return "$Path cannot be inspected (no ls)" }
+    try {
+        $listing = & $ls.Source -ldn $Path 2>$null
+    } catch {
+        $listing = $null
+    }
+    if ($LASTEXITCODE -ne 0 -or -not $listing) { return "$Path cannot be inspected" }
+    $fields = ([string](@($listing)[0])).Trim() -split '\s+'
+    $mode = $fields[0]
+    if ($mode.Length -gt 10 -and $mode[10] -eq [char]'+') { return "$Path carries an ACL" }
+    if ($mode[8] -eq [char]'w') { return "$Path is writable by every account" }
+    if ($fields[2] -ne '0') { return "$Path is owned by uid $($fields[2]), not root" }
+    if ($fields[3] -ne '0' -and $mode[5] -eq [char]'w') { return "$Path is writable by group $($fields[3])" }
+    return ''
+}
+
+function Get-PwshPyUvDistrust {
+    param([string] $Path)
+
+    # Returns why an elevated run must not execute the uv at $Path, or '' when it may. Judges the
+    # directory holding it, then follows a symlink one hop at a time, judging each hop's directory,
+    # and finally the file the chain ends at: whoever can rewrite a link's directory decides what
+    # runs as much as whoever can write the target.
+    $current = $Path
+    for ($hop = 0; $hop -le 40; $hop++) {
+        if (-not (Test-PwshPyAbsolutePath -Path $current)) { return "$current is not an absolute path" }
+        $directory = [IO.Path]::GetDirectoryName($current)
+        if ($directory) {
+            $why = if ($PwshPyOnWindows) { Get-PwshPyAclDistrust -Path $directory -Directory $true } else { Get-PwshPyModeDistrust -Path $directory }
+            if ($why) { return "its directory $why" }
+        }
+        $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item) { return "$current cannot be inspected" }
+        if ([string]$item.LinkType -ne 'SymbolicLink') {
+            if ($PwshPyOnWindows) { return (Get-PwshPyAclDistrust -Path $current -Directory $false) }
+            return (Get-PwshPyModeDistrust -Path $current)
+        }
+        # Target is a string on PowerShell 7 and a one-element array on 5.1.
+        $target = [string](@($item.Target)[0])
+        if (-not $target) { return "the symlink $current cannot be read" }
+        if (-not (Test-PwshPyAbsolutePath -Path $target)) { $target = Join-Path $directory $target }
+        $current = $target
+    }
+    return "$Path is a chain of more than 40 symlinks"
+}
+
+function Write-PwshPyNotice {
+    param([string] $Message)
+
+    # A line that does not stop the run. An elevated child's console window is never seen, and the
+    # run below rewrites the .err relay file with the script's own stderr, so the child keeps its
+    # notices in a relay file of their own, which the parent replays first.
+    if ($PwshPyRelay) {
+        [IO.File]::AppendAllText("$PwshPyRelay.note", $Message + [Environment]::NewLine)
+        return
+    }
+    [Console]::Error.WriteLine($Message)
+}
+
+function Test-PwshPyUvAcceptable {
+    param([string] $Candidate)
+
+    # Only reached for an elevated run: a uv that fails the trust rule is named on stderr, so the
+    # reason a different uv ran (or none) is visible.
+    $why = Get-PwshPyUvDistrust -Path $Candidate
+    if (-not $why) { return $true }
+    Write-PwshPyNotice "pwshpy: skipping uv at ${Candidate}: $why (an elevated run only runs a uv no non-administrator can modify)"
+    return $false
+}
+
+function Get-PwshPyUvLocation {
+    # The fixed places the installer puts uv, for a uv that is not on PATH. An unset variable
+    # contributes nothing (Join-Path would fail on it).
+    $locations = @()
+    if ($PwshPyOnWindows) {
+        if ($env:USERPROFILE) { $locations += (Join-Path $env:USERPROFILE '.local\bin\uv.exe') }
+        if ($env:LOCALAPPDATA) { $locations += (Join-Path $env:LOCALAPPDATA 'Programs\uv\uv.exe') }
+        if ($env:USERPROFILE) { $locations += (Join-Path $env:USERPROFILE '.cargo\bin\uv.exe') }
+        # The installer honours XDG_BIN_HOME on Windows too, and installs there when it is set.
+        if ($env:XDG_BIN_HOME) { $locations += (Join-Path $env:XDG_BIN_HOME 'uv.exe') }
+        return $locations
+    }
+    $locations += (Join-Path $HOME '.local/bin/uv')
+    $locations += (Join-Path $HOME '.cargo/bin/uv')
+    $locations += '/usr/local/bin/uv'
+    # The installer honours XDG_BIN_HOME / CARGO_HOME, so a machine that sets either installs
+    # uv there rather than under ~/.local/bin - check them too before giving up.
+    if ($env:XDG_BIN_HOME) { $locations += (Join-Path $env:XDG_BIN_HOME 'uv') }
+    if ($env:CARGO_HOME) { $locations += (Join-Path $env:CARGO_HOME 'bin/uv') }
+    return $locations
+}
+
+function Get-PwshPyUvPath {
+    param([bool] $Elevated)
+
+    # Not elevated: the first uv on PATH, then the fixed install locations. Elevated: EVERY uv on
+    # PATH in order, then the fixed locations, the first that passes the trust rule - a planted uv
+    # early on PATH must not hide a trusted one later on it.
+    $found = @(Get-Command uv -CommandType Application -ErrorAction SilentlyContinue)
+    foreach ($hit in $found) {
+        if (-not $Elevated) { return $hit.Source }
+        if (Test-PwshPyUvAcceptable -Candidate $hit.Source) { return $hit.Source }
+    }
+    foreach ($candidate in (Get-PwshPyUvLocation)) {
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        if (-not $Elevated) { return $candidate }
+        if (Test-PwshPyUvAcceptable -Candidate $candidate) { return $candidate }
     }
     return $null
 }
@@ -345,7 +502,7 @@ function Invoke-PwshPyElevated {
     # which Get-Content on 5.1 decodes as the ANSI code page (a German error message would arrive
     # mangled), while the script's redirected streams carry a BOM that ReadAllText honours.
     $relayText = @{}
-    foreach ($suffix in @('out', 'err')) {
+    foreach ($suffix in @('out', 'note', 'err')) {
         $path = "$relay.$suffix"
         $relayText[$suffix] = $null
         if (Test-Path -LiteralPath $path) {
@@ -357,9 +514,11 @@ function Invoke-PwshPyElevated {
     # stopped, so a failure with neither means it never ran a line that could tell us (refused by
     # the execution policy, a window closed early). Its own window is gone by now, so say so
     # rather than exit with a bare code and nothing on screen. The exit code is left unchanged.
-    if ($process.ExitCode -ne 0 -and $null -eq $relayText['out'] -and -not $relayText['err']) {
+    if ($process.ExitCode -ne 0 -and $null -eq $relayText['out'] -and -not $relayText['err'] -and -not $relayText['note']) {
         [Console]::Error.WriteLine("pwshpy: the elevated child produced no output and exited $($process.ExitCode) (it stopped before running the script, e.g. refused by the execution policy or its window was closed)")
     }
+    # Notices first: they were written before the script started (which uv was skipped, and why).
+    if ($relayText['note']) { [Console]::Error.Write($relayText['note']) }
     if ($relayText['out']) { Write-Host $relayText['out'] -NoNewline }
     # The child's stderr goes back to stderr, so a caller capturing stdout gets only the script's
     # output, and an early failure reads as the error it is.
@@ -417,15 +576,24 @@ $PwshPyWantElevate = $false
 $PwshPyInfo = $false
 $PwshPyHelp = $false
 $PwshPyRelay = ''
+$PwshPyUvPin = ''
 $PwshPyRest = New-Object System.Collections.ArrayList
 # The consumed switches an elevated relaunch must pass on again; every other one is either
 # handled before the relaunch (-PwshPyHelp, -PwshPyInfo) or set by it (-PwshPyRelay).
 $PwshPyRelaunchSwitches = New-Object System.Collections.ArrayList
 $PwshPyExpectRelay = $false
+$PwshPyExpectUv = $false
 
 foreach ($argument in $args) {
     $text = [string]$argument
     if ($PwshPyExpectRelay) { $PwshPyRelay = $text; $PwshPyExpectRelay = $false; continue }
+    if ($PwshPyExpectUv) {
+        $PwshPyUvPin = $text
+        $PwshPyExpectUv = $false
+        [void]$PwshPyRelaunchSwitches.Add('-PwshPyUv')
+        [void]$PwshPyRelaunchSwitches.Add($text)
+        continue
+    }
     switch -Exact ($text) {
         '-PwshPyClean' { $PwshPyClean = $true; [void]$PwshPyRelaunchSwitches.Add($text); continue }
         '-PwshPyNoInstallUv' { $PwshPyNoInstallUv = $true; [void]$PwshPyRelaunchSwitches.Add($text); continue }
@@ -433,8 +601,18 @@ foreach ($argument in $args) {
         '-PwshPyInfo' { $PwshPyInfo = $true; continue }
         '-PwshPyHelp' { $PwshPyHelp = $true; continue }
         '-PwshPyRelay' { $PwshPyExpectRelay = $true; continue }
+        '-PwshPyUv' { $PwshPyExpectUv = $true; continue }
         default { [void]$PwshPyRest.Add($text) }
     }
+}
+# 64 (EX_USAGE): a malformed switch is neither a missing uv (127) nor the script's own exit code.
+if ($PwshPyExpectUv) {
+    [Console]::Error.WriteLine('pwshpy: -PwshPyUv needs the absolute path of a uv executable')
+    exit 64
+}
+if ($PwshPyUvPin -and -not (Test-PwshPyAbsolutePath -Path $PwshPyUvPin)) {
+    [Console]::Error.WriteLine("pwshpy: -PwshPyUv needs an absolute path, got: $PwshPyUvPin")
+    exit 64
 }
 $PwshPyForward = @($PwshPyRest.ToArray())
 
@@ -464,21 +642,57 @@ $PwshPyPrepare = {
 
     # --- uv ---------------------------------------------------------------------------------
 
-    $PwshPyUv = Get-PwshPyUvPath
+    # Asked after any relaunch: the trust rule applies to whatever runs elevated, UAC, SYSTEM
+    # (a scheduled task) or root alike.
+    $PwshPyElevatedRun = Test-PwshPyElevated
+    if ($PwshPyOnWindows) {
+        $PwshPyUvHint = 'An elevated run only runs a uv no non-administrator can modify: install one where only administrators can write (for example under C:\Program Files) or pass -PwshPyUv <path>.'
+    } else {
+        $PwshPyUvHint = 'As root only a uv owned by root that no other account can modify is run: install one there (for example under /usr/local/bin) or pass -PwshPyUv <path>.'
+    }
+
+    if ($PwshPyUvPin) {
+        # A pin is the whole answer: no search and no install behind it, so a refused pin fails here.
+        if (-not (Test-Path -LiteralPath $PwshPyUvPin -PathType Leaf)) {
+            Write-PwshPyFailure "pwshpy: no uv at the path given with -PwshPyUv: $PwshPyUvPin"
+            exit 127
+        }
+        if ($PwshPyElevatedRun) {
+            $PwshPyPinWhy = Get-PwshPyUvDistrust -Path $PwshPyUvPin
+            if ($PwshPyPinWhy) {
+                Write-PwshPyFailure "pwshpy: refusing the uv given with -PwshPyUv: ${PwshPyUvPin}: $PwshPyPinWhy. $PwshPyUvHint"
+                exit 127
+            }
+        }
+        $PwshPyUv = $PwshPyUvPin
+    } else {
+        $PwshPyUv = Get-PwshPyUvPath -Elevated $PwshPyElevatedRun
+    }
     if (-not $PwshPyUv) {
         if ($PwshPyNoInstallUv) {
             # Written by Write-PwshPyFailure rather than through Write-Error: with
             # $ErrorActionPreference = 'Stop' the error stream terminates the script on the spot,
             # and the caller would get PowerShell's exit 1 (or an elevated child's 70) instead of
             # the 127 meant here.
-            Write-PwshPyFailure 'uv is not installed and -PwshPyNoInstallUv was given. Install it from https://astral.sh/uv'
+            if ($PwshPyElevatedRun) {
+                Write-PwshPyFailure "pwshpy: no uv this elevated run can trust was found and -PwshPyNoInstallUv was given. $PwshPyUvHint"
+            } else {
+                Write-PwshPyFailure 'uv is not installed and -PwshPyNoInstallUv was given. Install it from https://astral.sh/uv'
+            }
             exit 127
         }
+        # Elevated, the installer writes into the running account's profile: SYSTEM's is admin-only,
+        # so a scheduled task's fresh install passes the trust rule; an administrator's own profile
+        # is theirs to write unelevated, so a uv installed there is refused just like one found there.
         Install-PwshPyUv
-        $PwshPyUv = Get-PwshPyUvPath
+        $PwshPyUv = Get-PwshPyUvPath -Elevated $PwshPyElevatedRun
     }
     if (-not $PwshPyUv) {
-        Write-PwshPyFailure 'uv is still not on PATH after installation. Install it manually from https://astral.sh/uv'
+        if ($PwshPyElevatedRun) {
+            Write-PwshPyFailure "pwshpy: no uv this elevated run can trust was found after installation. $PwshPyUvHint"
+        } else {
+            Write-PwshPyFailure 'uv is still not on PATH after installation. Install it manually from https://astral.sh/uv'
+        }
         exit 127
     }
 }

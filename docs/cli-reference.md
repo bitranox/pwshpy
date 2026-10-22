@@ -216,7 +216,10 @@ on Windows and a `.ps1` on Linux, and `unpack` sniffs the format on either OS. `
 packed sources (`-o DIR`, `--force`) so a pack can be edited and packed again. See
 [Power Tools](power-tools.md) for the artefact's own switches (`-PwshPyInfo` / `--pwshpy-info`,
 `-PwshPyClean` / `--pwshpy-clean`, `-PwshPyNoInstallUv` / `--pwshpy-no-install-uv`,
-`-PwshPyElevate` / `--pwshpy-elevate`).
+`-PwshPyElevate` / `--pwshpy-elevate`, `-PwshPyUv PATH` / `--pwshpy-uv PATH`). Run elevated (an
+administrator token, SYSTEM or root) a runner only executes a `uv` that no non-administrator can
+modify, skipping any other with a `pwshpy: skipping uv at` line on stderr; an untrusted `-PwshPyUv` /
+`--pwshpy-uv` path is refused with exit 127, and a relative one is a usage error (exit 64).
 
 Exit code 77 (`EX_NOPERM`) means an elevation was refused or declined: `pwshpy --elevate`, a `.sh`
 runner's `--pwshpy-elevate` and a `.ps1` runner's `-PwshPyElevate` all exit 77 and write a line

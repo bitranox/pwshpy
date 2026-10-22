@@ -20,6 +20,11 @@
 #     --pwshpy-clean         discard the cached extraction and unpack again
 #     --pwshpy-no-install-uv fail instead of installing uv when it is missing
 #     --pwshpy-elevate       relaunch under sudo first; exit 77 if sudo refuses
+#     --pwshpy-uv PATH       run the uv at this absolute path instead of searching for one
+#
+# Run as root, it only runs a uv that root owns and no other account can modify (the file and every
+# directory holding it); any other uv it finds is skipped with a line on stderr, and a --pwshpy-uv
+# path that fails the check is refused with exit code 127.
 #
 # Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -196,14 +201,126 @@ pwshpy_unpack_locked() {
 
 # --- uv ---------------------------------------------------------------------------------
 
-pwshpy_find_uv() {
-    if command -v uv >/dev/null 2>&1; then
-        command -v uv
+# As root the uv found here runs with full rights, so a uv another account can replace would hand
+# that account root: where it was found (PATH, a fixed location) proves nothing, who can write it
+# does. Prints why "$1" may not run as root, or nothing when it may: root owns it, group 0 or no
+# group may write it, and nobody else may. Group 0 is accepted because its members are root
+# equivalents on every system this targets; any other writable group is not. A mode with an ACL
+# ('+') is refused outright, because its group bits then show the ACL mask, not who may write.
+pwshpy_path_distrust() {
+    _pd_ls=$(ls -ldn "$1" 2>/dev/null) || {
+        printf '%s' "$1 cannot be inspected"
+        return 0
+    }
+    # IFS pinned for this read alone: a caller splitting on another IFS (the PATH walk splits on
+    # ':') would otherwise cut the listing at the colon in its time of day.
+    IFS=' ' read -r _pd_mode _ _pd_uid _pd_gid _ <<__PWSHPY_LS__
+$_pd_ls
+__PWSHPY_LS__
+    case $_pd_mode in
+        ??????????+*) printf '%s' "$1 carries an ACL" ;;
+        ????????w*) printf '%s' "$1 is writable by every account" ;;
+        *)
+            if [ "$_pd_uid" != "0" ]; then
+                printf '%s' "$1 is owned by uid $_pd_uid, not root"
+            elif [ "$_pd_gid" != "0" ]; then
+                case $_pd_mode in ?????w*) printf '%s' "$1 is writable by group $_pd_gid" ;; esac
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# Prints why the uv at "$1" may not run as root, or nothing when it may. Judges the directory
+# holding it, then follows a symlink one hop at a time (readlink without -f, which older macOS
+# lacks) and judges each hop's directory, then the file the chain ends at: whoever can rewrite a
+# link, or the directory holding one, decides what runs as much as whoever can write the target.
+# A relative path is refused: it names whatever the working directory holds.
+pwshpy_uv_distrust() {
+    _ud_path=$1
+    _ud_hops=0
+    while :; do
+        case $_ud_path in
+            /*) ;;
+            *)
+                printf '%s' "$_ud_path is not an absolute path"
+                return 0
+                ;;
+        esac
+        _ud_dir=${_ud_path%/*}
+        [ -n "$_ud_dir" ] || _ud_dir=/
+        _ud_why=$(pwshpy_path_distrust "$_ud_dir")
+        if [ -n "$_ud_why" ]; then
+            printf '%s' "its directory $_ud_why"
+            return 0
+        fi
+        [ -L "$_ud_path" ] || break
+        _ud_hops=$((_ud_hops + 1))
+        if [ "$_ud_hops" -gt 40 ]; then
+            printf '%s' "$1 is a chain of more than 40 symlinks"
+            return 0
+        fi
+        _ud_target=$(readlink "$_ud_path") || {
+            printf '%s' "the symlink $_ud_path cannot be read"
+            return 0
+        }
+        case $_ud_target in
+            /*) _ud_path=$_ud_target ;;
+            *) _ud_path=$_ud_dir/$_ud_target ;;
+        esac
+    done
+    pwshpy_path_distrust "$_ud_path"
+    return 0
+}
+
+# Whether "$1" is a uv this run may execute. Not root: any executable, exactly as before. As root:
+# a regular file that passes pwshpy_uv_distrust; a refused one is named on stderr so the reason a
+# different uv ran (or none) is visible.
+pwshpy_uv_acceptable() {
+    if [ -z "$1" ] || [ ! -x "$1" ]; then
+        return 1
+    fi
+    [ "$PWSHPY_AS_ROOT" = "1" ] || return 0
+    [ -f "$1" ] || return 1
+    _ua_why=$(pwshpy_uv_distrust "$1")
+    if [ -z "$_ua_why" ]; then
         return 0
     fi
+    printf '%s\n' "pwshpy: skipping uv at $1: $_ua_why (as root only a uv no other account can modify is run)" >&2
+    return 1
+}
+
+# Prints the uv to run. Not root: the first uv on PATH, then the fixed install locations. As root:
+# EVERY uv on PATH in order, then the fixed locations, the first that passes pwshpy_uv_acceptable -
+# a planted uv early on PATH must not hide a trusted one later on it.
+pwshpy_find_uv() {
+    if [ "$PWSHPY_AS_ROOT" != "1" ]; then
+        if command -v uv >/dev/null 2>&1; then
+            command -v uv
+            return 0
+        fi
+    else
+        _fu_oldifs=$IFS
+        IFS=:
+        set -f
+        for _fu_dir in $PATH; do
+            # The list is split once, up front; the body runs with the caller's IFS and globbing.
+            IFS=$_fu_oldifs
+            set +f
+            # An empty PATH entry means the working directory; spelled "." it is refused as relative.
+            if pwshpy_uv_acceptable "${_fu_dir:-.}/uv"; then
+                printf '%s' "${_fu_dir:-.}/uv"
+                return 0
+            fi
+        done
+        IFS=$_fu_oldifs
+        set +f
+    fi
+    # The installer honours XDG_BIN_HOME / CARGO_HOME; each is a candidate only when it is set, or
+    # an unset one would probe /uv and /bin/uv.
     for _c in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" /usr/local/bin/uv \
-        "${XDG_BIN_HOME:-}/uv" "${CARGO_HOME:-}/bin/uv"; do
-        if [ -n "$_c" ] && [ -x "$_c" ]; then
+        "${XDG_BIN_HOME:+$XDG_BIN_HOME/uv}" "${CARGO_HOME:+$CARGO_HOME/bin/uv}"; do
+        if pwshpy_uv_acceptable "$_c"; then
             printf '%s' "$_c"
             return 0
         fi
@@ -250,8 +367,9 @@ PWSHPY_CLEAN=0
 PWSHPY_NO_INSTALL_UV=0
 PWSHPY_WANT_ELEVATE=0
 PWSHPY_INFO=0
-# The consumed switches an elevated relaunch must pass on again. They take no values, so the list
-# needs no quoting.
+PWSHPY_UV_PIN=
+# The consumed value-less switches an elevated relaunch must pass on again, so the list needs no
+# quoting; --pwshpy-uv carries a path and is passed on separately, quoted.
 PWSHPY_FWD=
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -276,6 +394,18 @@ while [ "$#" -gt 0 ]; do
         --pwshpy-elevate)
             PWSHPY_WANT_ELEVATE=1
             shift
+            ;;
+        --pwshpy-uv)
+            # 64 (EX_USAGE): a malformed switch is neither a missing uv (127) nor the script's own code.
+            if [ "$#" -lt 2 ]; then
+                pwshpy_die "--pwshpy-uv needs the absolute path of a uv executable" 64
+            fi
+            case $2 in
+                /*) ;;
+                *) pwshpy_die "--pwshpy-uv needs an absolute path, got: $2" 64 ;;
+            esac
+            PWSHPY_UV_PIN=$2
+            shift 2
             ;;
         --)
             shift
@@ -309,9 +439,22 @@ if [ "$PWSHPY_WANT_ELEVATE" = "1" ] && [ "$(id -u)" != "0" ]; then
     fi
     # A sudo that grants -v but then refuses the command itself (timestamp_timeout=0, sudoers
     # allowing only -v) exits with that sudo's own code, which no wrapper can tell from the script's.
-    # The switches carry no values, so splitting the unquoted list is exactly what is wanted.
+    # The pin goes in front of the script's arguments as two quoted words, so a path with a space
+    # survives; the value-less switches carry no values, so splitting their unquoted list is
+    # exactly what is wanted.
+    if [ -n "$PWSHPY_UV_PIN" ]; then
+        set -- --pwshpy-uv "$PWSHPY_UV_PIN" -- "$@"
+    else
+        set -- -- "$@"
+    fi
     # shellcheck disable=SC2086
-    exec sudo /bin/sh "$0" $PWSHPY_FWD -- "$@"
+    exec sudo /bin/sh "$0" $PWSHPY_FWD "$@"
+fi
+
+# Asked once, after any relaunch: the trust rule below applies to whatever runs as root, sudo or not.
+PWSHPY_AS_ROOT=0
+if [ "$(id -u)" = "0" ]; then
+    PWSHPY_AS_ROOT=1
 fi
 
 # --- unpack -----------------------------------------------------------------------------
@@ -325,13 +468,32 @@ fi
 
 # --- uv ---------------------------------------------------------------------------------
 
-if ! PWSHPY_UV="$(pwshpy_find_uv)"; then
+# What to say when no usable uv is left: as root, also how to provide one the trust rule accepts.
+PWSHPY_UV_HINT="Install it from https://astral.sh/uv"
+if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+    PWSHPY_UV_HINT="As root only a uv owned by root that no other account can modify is run: install one there (for example under /usr/local/bin) or pass --pwshpy-uv PATH"
+fi
+
+if [ -n "$PWSHPY_UV_PIN" ]; then
+    # A pin is the whole answer: no search and no install behind it, so a refused pin fails here.
+    if [ ! -f "$PWSHPY_UV_PIN" ] || [ ! -x "$PWSHPY_UV_PIN" ]; then
+        pwshpy_die "no executable uv at the path given with --pwshpy-uv: $PWSHPY_UV_PIN" 127
+    fi
+    if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+        PWSHPY_PIN_WHY=$(pwshpy_uv_distrust "$PWSHPY_UV_PIN")
+        if [ -n "$PWSHPY_PIN_WHY" ]; then
+            printf '%s\n' "pwshpy: refusing the uv given with --pwshpy-uv: $PWSHPY_UV_PIN: $PWSHPY_PIN_WHY. $PWSHPY_UV_HINT" >&2
+            exit 127
+        fi
+    fi
+    PWSHPY_UV=$PWSHPY_UV_PIN
+elif ! PWSHPY_UV="$(pwshpy_find_uv)"; then
     if [ "$PWSHPY_NO_INSTALL_UV" = "1" ]; then
-        pwshpy_die "uv is not installed and --pwshpy-no-install-uv was given. Install it from https://astral.sh/uv" 127
+        pwshpy_die "no usable uv was found and --pwshpy-no-install-uv was given. $PWSHPY_UV_HINT" 127
     fi
     pwshpy_install_uv
     if ! PWSHPY_UV="$(pwshpy_find_uv)"; then
-        pwshpy_die "uv is still not on PATH after installation. Install it manually from https://astral.sh/uv" 127
+        pwshpy_die "no usable uv was found after installation. $PWSHPY_UV_HINT" 127
     fi
 fi
 

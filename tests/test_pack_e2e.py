@@ -16,13 +16,14 @@ and the uv-absent test (it blanks ``PATH``/``HOME``, which can break process cre
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -43,6 +44,34 @@ _UV_LOCATION_VARIABLES = ("XDG_BIN_HOME", "CARGO_HOME")
 
 if _PWSH is None or _UV is None:  # pragma: no cover - environment gate, not logic
     pytest.skip("the packer end-to-end test needs both pwsh and uv", allow_module_level=True)
+
+
+class _UvLocation:
+    """The directory the e2e runs put first on PATH so the runner finds uv there.
+
+    On an elevated Windows host (CI's windows-latest, the dev VM) the runner accepts only a uv that
+    no non-administrator can modify, which a toolcache or per-user install is not, so the module
+    fixture below points this at an admin-only copy for the duration of the module.
+    """
+
+    directory: Path = Path(_UV or "uv").parent
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _uv_the_runner_trusts(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Give an elevated Windows run a uv it trusts; elsewhere the found uv is used as it is."""
+    if not _windows_elevated():
+        yield
+        return
+    trusted = _trusted_uv(tmp_path_factory.mktemp("module-uv"))
+    assert trusted is not None
+    _UvLocation.directory = trusted.parent
+    try:
+        yield
+    finally:
+        _UvLocation.directory = Path(_UV or "uv").parent
+        shutil.rmtree(trusted.parent, ignore_errors=True)
+
 
 _ENTRY_WITH_SUBMODULE = """import sys
 from pkg import helper
@@ -68,7 +97,7 @@ def _run(runner: Path, *arguments: str, env: dict[str, str] | None = None) -> su
     child_env = {**os.environ, **(env or {})}
     # The uv the runner finds must be the one this test found, so a PATH-less environment
     # does not silently exercise the network installer.
-    child_env["PATH"] = os.pathsep.join([str(Path(_UV or "uv").parent), child_env.get("PATH", "")])
+    child_env["PATH"] = os.pathsep.join([str(_UvLocation.directory), child_env.get("PATH", "")])
     # Pin the packed script's stdout to UTF-8 and decode it as UTF-8, so a non-ASCII argument
     # round-trips through the assertion regardless of the host's console code page. Without this,
     # `text=True` decodes the child's UTF-8 output as cp1252 on Windows and mangles it - a capture
@@ -205,7 +234,7 @@ def test_concurrent_cold_starts_do_not_race(tmp_path: Path) -> None:
     manifest = pack_script(_project(tmp_path))
     environment = {
         **os.environ,
-        "PATH": os.pathsep.join([str(Path(_UV or "uv").parent), os.environ.get("PATH", "")]),
+        "PATH": os.pathsep.join([str(_UvLocation.directory), os.environ.get("PATH", "")]),
         **_isolated_cache(tmp_path),
     }
     assert _PWSH is not None
@@ -590,31 +619,33 @@ _EARLY_FAILURE_LINE = "pwshpy: the elevated child failed before running the scri
 #: The exit code of that failure (EX_SOFTWARE), kept apart from PowerShell's generic 1.
 _EARLY_FAILURE_EXIT = 70
 
-#: The three exact substitutions that turn a whole packed runner into a relaunch stand-in.
+#: Two of the three exact substitutions that turn a whole packed runner into a relaunch stand-in;
+#: the third, the elevation probe, is built per call (see _whole_runner_stand_in).
 _WHOLE_RUNNER_SUBSTITUTIONS = (
     (
         "if ($null -eq $IsWindows) { $PwshPyOnWindows = $true } else { $PwshPyOnWindows = $IsWindows }",
         "$PwshPyOnWindows = $true",
     ),
     ("'runas'", "''"),
-    (
-        "function Test-PwshPyElevated {",
-        "function Test-PwshPyElevated {\n    return $false\n}\n\nfunction Test-PwshPyElevatedOnHost {",
-    ),
 )
 
 
-def _whole_runner_stand_in(runner: Path, output: Path) -> Path:
+def _whole_runner_stand_in(runner: Path, output: Path, *, elevated: str = "$false") -> Path:
     """Turn a whole packed runner into a Windows-relaunch stand-in that runs its REAL body.
 
     Three exact, counted substitutions and nothing else: the host is declared Windows so the UAC
     branch of Invoke-PwshPyElevated is taken; the 'runas' verb becomes '' because no test can answer
-    a UAC prompt; and the elevation probe answers "not elevated" (the Windows token API does not
-    exist off Windows). The child the relaunch starts is this same file, so it unpacks, finds uv
-    and fails exactly where the shipped runner would.
+    a UAC prompt; and the elevation probe answers ``elevated`` (a PowerShell expression, "not
+    elevated" by default: the Windows token API does not exist off Windows). The child the relaunch
+    starts is this same file, so it unpacks, finds uv and fails exactly where the shipped runner
+    would. ``[bool]$PwshPyRelay`` answers "elevated" in the relaunched child only, as UAC would.
     """
     text = runner.read_text(encoding="utf-8")
-    for old, new in _WHOLE_RUNNER_SUBSTITUTIONS:
+    probe = (
+        "function Test-PwshPyElevated {",
+        f"function Test-PwshPyElevated {{\n    return {elevated}\n}}\n\nfunction Test-PwshPyElevatedOnHost {{",
+    )
+    for old, new in (*_WHOLE_RUNNER_SUBSTITUTIONS, probe):
         assert text.count(old) == 1, f"expected exactly one {old!r} in the runner"
         text = text.replace(old, new)
     output.write_text(text, encoding="utf-8")
@@ -628,7 +659,7 @@ def _run_whole_runner_elevated(
     assert _PWSH is not None
     stand_in = _whole_runner_stand_in(runner, tmp_path / "stand_in.ps1")
     child_env = {**os.environ, **env}
-    child_env["PATH"] = os.pathsep.join([str(Path(_UV or "uv").parent), child_env.get("PATH", "")])
+    child_env["PATH"] = os.pathsep.join([str(_UvLocation.directory), child_env.get("PATH", "")])
     return subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
         [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(stand_in), "-PwshPyElevate", *arguments],
         capture_output=True,
@@ -821,3 +852,369 @@ def test_unpack_of_a_freshly_packed_artefact_round_trips(tmp_path: Path) -> None
     restored = unpack_script(manifest.output_path, tmp_path / "out")
     assert restored.files == ["app.py", "pkg/__init__.py", "pkg/helper.py"]
     assert (tmp_path / "out" / "pkg" / "helper.py").read_bytes() == (tmp_path / "pkg" / "helper.py").read_bytes()
+
+
+# --- which uv an elevated run trusts ([56]) --------------------------------------------------
+# An elevated (or SYSTEM) run executes the uv it finds with full rights, so a uv that a
+# non-administrator can replace is a privilege escalation. The runner judges WHO CAN WRITE the
+# binary and its directory, never where it was found. These tests force the runner's elevation probe
+# so the same artefact code is exercised elevated and not, on any host.
+
+#: The packed script under test: prints which uv started it. A POSIX stand-in exports its own path
+#: as PWSHPY_TEST_UV before handing over; a real (or copied) uv sets UV to its own executable.
+_ENTRY_REPORTING_UV = """import os
+import sys
+
+print("uv:" + (os.environ.get("PWSHPY_TEST_UV") or os.environ.get("UV") or ""))
+sys.exit(0)
+"""
+
+#: The refusal the runner prints when an elevated run is pinned to a uv it cannot trust.
+_PIN_REFUSED = "pwshpy: refusing the uv given with"
+#: The line the runner prints for each uv an elevated run skips.
+_UV_SKIPPED = "pwshpy: skipping uv at"
+#: Exit code for a malformed wrapper switch (EX_USAGE).
+_USAGE_EXIT = 64
+#: SIDs granted in the Windows layouts; by SID because the guests are German (Administratoren).
+_SID_ADMINISTRATORS = "*S-1-5-32-544"
+_SID_SYSTEM = "*S-1-5-18"
+_SID_USERS = "*S-1-5-32-545"
+
+
+def _windows_elevated() -> bool:
+    """Whether this process holds an elevated administrator token (False off Windows)."""
+    if sys.platform != "win32":
+        return False
+    return bool(ctypes.windll.shell32.IsUserAnAdmin())
+
+
+def _icacls(path: Path, *arguments: str) -> None:
+    """Run icacls and fail the test on a non-zero exit (it changes nothing when it fails)."""
+    result = subprocess.run(  # noqa: S603 - fixed argv; icacls is a system tool
+        ["icacls", str(path), *arguments],  # noqa: S607 - resolved from System32 on every Windows host
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"icacls {path} {arguments} exited {result.returncode}: {result.stdout} {result.stderr}"
+    )
+
+
+def _admin_only_dir(path: Path) -> Path:
+    """A directory only SYSTEM and Administrators can change (Users may read and run), owned by Administrators."""
+    path.mkdir(parents=True)
+    _icacls(
+        path,
+        "/inheritance:r",
+        "/grant:r",
+        f"{_SID_ADMINISTRATORS}:(OI)(CI)F",
+        f"{_SID_SYSTEM}:(OI)(CI)F",
+        f"{_SID_USERS}:(OI)(CI)RX",
+    )
+    _icacls(path, "/setowner", _SID_ADMINISTRATORS)
+    return path
+
+
+def _user_writable_dir(path: Path) -> Path:
+    """A directory every member of Users may modify: the planted-uv situation.
+
+    On Windows it is owned by Administrators, so the Users grant alone is what makes it untrusted.
+    """
+    path.mkdir(parents=True)
+    if sys.platform == "win32":
+        _icacls(path, "/grant", f"{_SID_USERS}:(OI)(CI)M")
+        if _windows_elevated():
+            _icacls(path, "/setowner", _SID_ADMINISTRATORS)
+    else:
+        path.chmod(0o777)
+    return path
+
+
+def _copy_uv(directory: Path) -> Path:
+    """Copy the real uv into ``directory``: the copy sets UV to its own path when it runs."""
+    assert _UV is not None
+    target = directory / Path(_UV).name
+    shutil.copy2(Path(_UV).resolve(), target)
+    return target
+
+
+def _uv_stand_in(directory: Path) -> Path:
+    """A uv the runner can execute from ``directory`` whose own path the packed script reports.
+
+    On POSIX a two-line wrapper that names itself and hands over to the real uv; on Windows a copy
+    of uv.exe (no test can write an .exe), which reports itself through uv's own UV variable.
+    """
+    assert _UV is not None
+    if sys.platform == "win32":
+        return _copy_uv(directory)
+    wrapper = directory / "uv"
+    wrapper.write_text(
+        f'#!/bin/sh\nPWSHPY_TEST_UV="$0"\nexport PWSHPY_TEST_UV\nexec "{_UV}" "$@"\n', encoding="utf-8", newline="\n"
+    )
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def _root_only_writable(path: Path) -> bool:
+    """Whether a POSIX file and its directory are owned by root and writable by nobody else."""
+    for item in (path, path.parent):
+        info = item.stat()
+        group_writable_by_others = bool(info.st_mode & 0o020) and info.st_gid != 0
+        if info.st_uid != 0 or info.st_mode & 0o002 or group_writable_by_others:
+            return False
+    return not path.is_symlink()
+
+
+def _trusted_uv(tmp_path: Path) -> Path | None:
+    """A uv an elevated run must accept, or None where this host cannot provide one.
+
+    Windows: an admin-only copy (needs an elevated test process to set the owner). POSIX: the
+    system-wide /usr/local/bin/uv when root owns it, since no unprivileged test can create one.
+    """
+    if sys.platform == "win32":
+        if not _windows_elevated():
+            return None
+        directory = _admin_only_dir(tmp_path / "trusted-bin")
+        copied = _copy_uv(directory)
+        # A new file's owner is its creator on a Windows client, not the Administrators group.
+        _icacls(copied, "/setowner", _SID_ADMINISTRATORS)
+        return copied
+    system_wide = Path(_SYSTEM_WIDE_UV)
+    if system_wide.is_file() and _root_only_writable(system_wide):
+        return system_wide
+    return None
+
+
+def _elevation_stand_in(runner: Path, output: Path, *, elevated: str) -> Path:
+    """The whole runner with its elevation probe answering ``elevated`` (a PowerShell expression).
+
+    One exact substitution and nothing else, so the uv lookup, the pin and the run are the shipped
+    code. Without -PwshPyElevate nothing relaunches, so this probes the uv trust rule alone.
+    """
+    text = runner.read_text(encoding="utf-8")
+    old = "function Test-PwshPyElevated {"
+    assert text.count(old) == 1
+    text = text.replace(
+        old, f"function Test-PwshPyElevated {{\n    return {elevated}\n}}\n\nfunction Test-PwshPyElevatedOnHost {{"
+    )
+    output.write_text(text, encoding="utf-8")
+    return output
+
+
+def _run_with_path(
+    tmp_path: Path, runner: Path, *arguments: str, path_first: Sequence[Path], env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run a runner with exactly ``path_first`` ahead of the inherited PATH (no real uv added)."""
+    assert _PWSH is not None
+    child_env = {**os.environ, **_isolated_cache(tmp_path), "PYTHONIOENCODING": "utf-8", **(env or {})}
+    child_env.pop("PWSHPY_TEST_UV", None)
+    child_env["PATH"] = os.pathsep.join([*map(str, path_first), os.environ.get("PATH", "")])
+    return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), *arguments],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+        check=False,
+        env=child_env,
+    )
+
+
+def _reported_uv(result: subprocess.CompletedProcess[str]) -> Path | None:
+    """The uv the packed script says started it, or None when the script never ran."""
+    for line in result.stdout.splitlines():
+        if line.startswith("uv:") and line[3:]:
+            return Path(line[3:].strip())
+    return None
+
+
+def _same(reported: Path | None, expected: Path) -> bool:
+    return reported is not None and reported.exists() and reported.samefile(expected)
+
+
+def _trust_runner(tmp_path: Path, *, elevated: str) -> Path:
+    entry = tmp_path / "which_uv.py"
+    entry.write_text(_ENTRY_REPORTING_UV)
+    manifest = pack_script(entry)
+    return _elevation_stand_in(Path(manifest.output_path), tmp_path / "trust_stand_in.ps1", elevated=elevated)
+
+
+_needs_a_trusted_uv = "this host cannot provide a uv an elevated run may trust (see _trusted_uv)"
+
+
+@pytest.mark.local_only
+def test_an_elevated_run_skips_a_uv_a_non_admin_can_modify(tmp_path: Path) -> None:
+    """[56]: a uv planted FIRST on PATH in a directory non-admins can write is not what runs elevated."""
+    trusted = _trusted_uv(tmp_path)
+    if trusted is None:
+        pytest.skip(_needs_a_trusted_uv)
+    planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[planted.parent, trusted.parent])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _same(_reported_uv(result), trusted), result.stdout + result.stderr
+    assert _skip_line(result, planted), result.stderr
+
+
+def _current_user_sid() -> str:
+    """This process's user SID, from whoami's locale-independent CSV form (Windows only)."""
+    result = subprocess.run(
+        ["whoami", "/user", "/fo", "csv", "/nh"],  # noqa: S607 - resolved from System32 on every Windows host
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=True,
+    )
+    return result.stdout.strip().split(",")[-1].strip('"')
+
+
+def _skip_line(result: subprocess.CompletedProcess[str], uv: Path) -> str:
+    """The runner's skip line for ``uv``; case-folded on Windows, where Get-Command reports uv.EXE."""
+    wanted = os.path.normcase(f"{_UV_SKIPPED} {uv}:")
+    return next((line for line in result.stderr.splitlines() if os.path.normcase(line).startswith(wanted)), "")
+
+
+@pytest.mark.local_only
+def test_an_elevated_run_names_why_it_skipped_each_uv(tmp_path: Path) -> None:
+    """Every PATH hit is judged and named: a directory Users may modify, then one this account owns.
+
+    Pins the parsed reason as well as the skip, so a misread ACL or listing cannot pass for a check.
+    On Windows an elevated process creates directories owned by Administrators (as this account's
+    profile ACL grants OWNER RIGHTS), so the test hands the second directory to this user itself.
+    """
+    planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
+    owned = tmp_path / "owned-bin"
+    owned.mkdir()
+    if sys.platform == "win32":
+        user_sid = _current_user_sid()
+        _icacls(owned, "/setowner", f"*{user_sid}")
+        expected_planted = f"its directory {planted.parent} lets {_SID_USERS[1:]} change it"
+        expected_owned = f"its directory {owned} is owned by {user_sid}, not an administrative account"
+    else:
+        owned.chmod(0o755)
+        expected_planted = f"its directory {planted.parent} is writable by every account"
+        expected_owned = f"its directory {owned} is owned by uid {os.getuid()}, not root"
+    owned_uv = _uv_stand_in(owned)
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, "-PwshPyNoInstallUv", path_first=[planted.parent, owned])
+    # Only an elevated test can hand the planted directory to Administrators; otherwise its owner
+    # (this account) is what the runner names first.
+    if sys.platform != "win32" or _windows_elevated():
+        assert expected_planted in _skip_line(result, planted), result.stderr
+    assert expected_owned in _skip_line(result, owned_uv), result.stderr
+
+
+@pytest.mark.local_only
+def test_an_elevated_run_uses_a_trusted_pinned_uv(tmp_path: Path) -> None:
+    """-PwshPyUv names the uv outright; elevated, a trusted pin wins over a planted PATH hit."""
+    trusted = _trusted_uv(tmp_path)
+    if trusted is None:
+        pytest.skip(_needs_a_trusted_uv)
+    planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, "-PwshPyUv", str(trusted), path_first=[planted.parent])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _same(_reported_uv(result), trusted), result.stdout + result.stderr
+
+
+@pytest.mark.local_only
+def test_an_elevated_run_refuses_an_untrusted_pinned_uv(tmp_path: Path) -> None:
+    """Elevated, a pin a non-admin can modify is refused with exit 127; the script never runs."""
+    planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, "-PwshPyUv", str(planted), path_first=[])
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert os.path.normcase(f"{_PIN_REFUSED} -PwshPyUv: {planted}:") in os.path.normcase(result.stderr), result.stderr
+    assert _reported_uv(result) is None, result.stdout
+
+
+@pytest.mark.local_only
+def test_an_unelevated_run_still_takes_the_first_uv_on_path(tmp_path: Path) -> None:
+    """Control: not elevated, the lookup is unchanged - the first uv on PATH runs, trusted or not."""
+    planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
+    runner = _trust_runner(tmp_path, elevated="$false")
+    result = _run_with_path(tmp_path, runner, path_first=[planted.parent, Path(_UV or "uv").parent])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _same(_reported_uv(result), planted), result.stdout + result.stderr
+    assert _UV_SKIPPED not in result.stderr, result.stderr
+
+
+@pytest.mark.local_only
+def test_an_unelevated_run_uses_the_pinned_uv_as_is(tmp_path: Path) -> None:
+    """Not elevated, a pin is taken as given, ahead of whatever PATH holds."""
+    planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
+    runner = _trust_runner(tmp_path, elevated="$false")
+    result = _run_with_path(tmp_path, runner, "-PwshPyUv", str(planted), path_first=[Path(_UV or "uv").parent])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _same(_reported_uv(result), planted), result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [pytest.param(["-PwshPyUv", "relative/uv"], id="relative"), pytest.param(["-PwshPyUv"], id="missing")],
+)
+def test_a_pinned_uv_must_be_an_absolute_path(tmp_path: Path, arguments: list[str]) -> None:
+    """A relative or missing -PwshPyUv value is a usage error (64), before anything is unpacked."""
+    entry = tmp_path / "which_uv.py"
+    entry.write_text(_ENTRY_REPORTING_UV)
+    manifest = pack_script(entry)
+    result = _run(Path(manifest.output_path), *arguments, env=_isolated_cache(tmp_path))
+    assert result.returncode == _USAGE_EXIT, result.stdout + result.stderr
+    assert "-PwshPyUv" in result.stderr, result.stderr
+    assert _reported_uv(result) is None, result.stdout
+    assert not (tmp_path / "cache").exists(), "the payload was unpacked for a malformed switch"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows symbolic links and ACLs")
+def test_an_elevated_run_follows_a_symlinked_uv_to_its_target(tmp_path: Path) -> None:
+    """A uv.exe symlink is judged by its target too: an admin-only link into a writable dir is skipped."""
+    trusted = _trusted_uv(tmp_path)
+    if trusted is None:
+        pytest.skip(_needs_a_trusted_uv)
+    planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
+    links = _admin_only_dir(tmp_path / "links-bin")
+    link = links / "uv.exe"
+    link.symlink_to(planted)
+    _icacls(link, "/setowner", _SID_ADMINISTRATORS, "/L")
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[links, trusted.parent])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _same(_reported_uv(result), trusted), result.stdout + result.stderr
+    assert _skip_line(result, link), result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="the UAC relay exists only on Windows")
+def test_the_elevated_child_keeps_the_pin_and_relays_what_it_skipped(tmp_path: Path) -> None:
+    """-PwshPyUv survives the UAC relaunch, and the child's skip lines reach the parent's stderr.
+
+    The stand-in answers "elevated" only in the relaunched child (the one holding -PwshPyRelay),
+    as UAC would. The child skips the planted PATH hit, names it through the relay, and runs the
+    pinned uv; the pinned one must also pass the trust rule there.
+    """
+    trusted = _trusted_uv(tmp_path)
+    if trusted is None:
+        pytest.skip(_needs_a_trusted_uv)
+    planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
+    entry = tmp_path / "which_uv.py"
+    entry.write_text(_ENTRY_REPORTING_UV)
+    manifest = pack_script(entry)
+    stand_in = _whole_runner_stand_in(
+        Path(manifest.output_path), tmp_path / "relay_stand_in.ps1", elevated="[bool]$PwshPyRelay"
+    )
+    pinned = _run_with_path(
+        tmp_path, stand_in, "-PwshPyElevate", "-PwshPyUv", str(trusted), path_first=[planted.parent]
+    )
+    assert pinned.returncode == 0, pinned.stdout + pinned.stderr
+    assert _same(_reported_uv(pinned), trusted), pinned.stdout + pinned.stderr
+    searched = _run_with_path(tmp_path, stand_in, "-PwshPyElevate", path_first=[planted.parent, trusted.parent])
+    assert searched.returncode == 0, searched.stdout + searched.stderr
+    assert _same(_reported_uv(searched), trusted), searched.stdout + searched.stderr
+    assert _skip_line(searched, planted), searched.stderr

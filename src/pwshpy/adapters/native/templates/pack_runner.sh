@@ -728,8 +728,7 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     PATH=$PWSHPY_CALLER_PATH
     export PATH
     pwshpy_drop_interpreter_variables
-    @@PWSHPY_CWD_ENV@@=$PWSHPY_CALLER_CWD
-    export @@PWSHPY_CWD_ENV@@
+    export "@@PWSHPY_CWD_ENV@@=$PWSHPY_CALLER_CWD"
     # The shim keeps its own arguments only when no out-of-band argument vector is set; one inherited
     # from the caller's environment must not replace them.
     unset @@PWSHPY_ARGV_ENV@@

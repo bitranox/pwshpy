@@ -65,9 +65,9 @@ $PwshPySha = '@@PWSHPY_PAYLOAD_SHA256@@'
 $PwshPyArgvEnv = '@@PWSHPY_ARGV_ENV@@'
 $PwshPyUvArgs = @(@@PWSHPY_UV_ARGS@@)
 $PwshPyCwdEnv = '@@PWSHPY_CWD_ENV@@'
-# The same uv args for an elevated run, which starts uv in another directory: a --with path relative
-# to the caller's directory is spelled from $PwshPyCallerPrefix, set by the run before this is called.
-$PwshPyUvArgsAnchored = { @(@@PWSHPY_UV_ARGS_ANCHORED@@) }
+# Per uv arg, the relative path an elevated run (which starts uv in another directory) puts the
+# caller's directory in front of: '' for a value left as it is. Parallel to $PwshPyUvArgs.
+$PwshPyUvArgsRelative = @(@@PWSHPY_UV_ARGS_RELATIVE@@)
 
 $PwshPyFileHashes = @'
 @@PWSHPY_FILE_HASHES@@
@@ -663,6 +663,22 @@ function Get-PwshPyManagedPythonOption {
     return @('--python-preference', 'only-managed', '--project', $anchor, '--directory', $anchor)
 }
 
+function Get-PwshPyAnchoredUvArg {
+    param([string] $CallerDirectory)
+
+    # The uv args with each relative --with path made absolute against the caller's directory: the
+    # value's head (a 'name @ ', or nothing) stays, the directory goes in front of the relative tail.
+    $prefix = $CallerDirectory.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $anchored = New-Object System.Collections.Generic.List[string]
+    for ($index = 0; $index -lt $PwshPyUvArgs.Count; $index++) {
+        $value = [string]$PwshPyUvArgs[$index]
+        $relative = [string]$PwshPyUvArgsRelative[$index]
+        if (-not $relative) { $anchored.Add($value); continue }
+        $anchored.Add($value.Substring(0, $value.Length - $relative.Length) + $prefix + $relative)
+    }
+    return $anchored.ToArray()
+}
+
 function Get-PwshPyCallerDirectory {
     # The directory the packed script must run in: PowerShell's current FileSystem location, which an
     # elevated child inherits as its working directory from the parent that started it.
@@ -1003,8 +1019,7 @@ if ($PwshPyElevatedRun) {
     $PwshPyRunArgs += Get-PwshPyManagedPythonOption
     Clear-PwshPyInterpreterVariable
     $PwshPyCallerCwd = Get-PwshPyCallerDirectory
-    $PwshPyCallerPrefix = $PwshPyCallerCwd.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-    $PwshPyRunArgs += & $PwshPyUvArgsAnchored
+    $PwshPyRunArgs += Get-PwshPyAnchoredUvArg -CallerDirectory $PwshPyCallerCwd
     $PwshPyTarget = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PwshPyTarget)
     Set-Item -LiteralPath ('Env:' + $PwshPyCwdEnv) -Value $PwshPyCallerCwd
 } else {

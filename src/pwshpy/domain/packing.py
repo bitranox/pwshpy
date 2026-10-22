@@ -149,7 +149,7 @@ _PLACEHOLDERS = (
     "@@PWSHPY_SHIM@@",
     "@@PWSHPY_ARGV_ENV@@",
     "@@PWSHPY_CWD_ENV@@",
-    "@@PWSHPY_UV_ARGS_ANCHORED@@",
+    "@@PWSHPY_UV_ARGS_RELATIVE@@",
 )
 
 #: The entry name as plain text, for the runners' help comments. Optional (a template may or may not
@@ -177,9 +177,8 @@ _SH_PLACEHOLDERS = (
     "@@PWSHPY_UV_ARGS_ANCHORED@@",
 )
 
-#: The variable each runner sets, for an elevated run, to the caller's directory with one trailing
-#: separator; the re-anchored uv args (:func:`split_relative_requirement`) are spelled with it.
-_POWERSHELL_PREFIX_VARIABLE = "$PwshPyCallerPrefix"
+#: The variable the POSIX runner sets, for a root run, to the caller's directory with one trailing
+#: separator; its re-anchored uv args (:func:`split_relative_requirement`) are spelled with it.
 _POSIX_PREFIX_VARIABLE = '"$PWSHPY_CALLER_PREFIX"'
 
 #: File suffixes uv reads as a local distribution even with no directory part (``x.whl``).
@@ -452,7 +451,7 @@ def render_runner(template: str, content: RunnerContent) -> str:
         ...                         uv_args=["--with", "rich"], file_hashes=[FileDigest("ff", "t.py")])
         >>> render_runner("|".join(_PLACEHOLDERS), content).split("|")  # doctest: +NORMALIZE_WHITESPACE
         ['Ym9keQ==', 'ab12', "'t.py'", "'--with','rich'", 'ff *t.py', '__pwshpy_pack_main__.py',
-         'PWSHPY_PACK_ARGV', 'PWSHPY_PACK_CWD', "'--with','rich'"]
+         'PWSHPY_PACK_ARGV', 'PWSHPY_PACK_CWD', "'',''"]
     """
     missing = [token for token in _PLACEHOLDERS if token not in template]
     if missing:
@@ -475,7 +474,7 @@ def render_runner(template: str, content: RunnerContent) -> str:
             "@@PWSHPY_SHIM@@": SHIM_MODULE,
             "@@PWSHPY_ARGV_ENV@@": ARGV_ENV_VAR,
             "@@PWSHPY_CWD_ENV@@": CWD_ENV_VAR,
-            "@@PWSHPY_UV_ARGS_ANCHORED@@": _powershell_anchored_array(content.uv_args),
+            "@@PWSHPY_UV_ARGS_RELATIVE@@": _powershell_relative_suffixes(content.uv_args),
         },
     )
 
@@ -681,25 +680,18 @@ def _anchored_values(values: Sequence[str]) -> Iterator[tuple[str, tuple[str, st
         previous = value
 
 
-def _powershell_anchored_array(values: Sequence[str]) -> str:
-    """Render uv args as a PowerShell list whose relative ``--with`` paths start at the caller's directory.
+def _powershell_relative_suffixes(values: Sequence[str]) -> str:
+    """Render, per uv arg, the relative path an elevated .ps1 run puts the caller's directory in front of.
 
-    A relative path becomes ``('head' + $PwshPyCallerPrefix + 'location')``, evaluated by the
-    runner once it has set that variable; every other value is the plain literal.
+    A PowerShell list parallel to the uv args: ``''`` for a value left as it is, else the value's
+    relative-path tail (the head is the rest of the value). Data rather than an expression, so the
+    runner code that joins the caller's directory in is code a linter sees.
 
     Example:
-        >>> print(_powershell_anchored_array(["--with", "./x.whl", "--with", "rich"]))
-        '--with',('' + $PwshPyCallerPrefix + './x.whl'),'--with','rich'
+        >>> print(_powershell_relative_suffixes(["--with", "tool @ ./x.whl", "--with", "rich"]))
+        '','./x.whl','',''
     """
-    rendered: list[str] = []
-    for value, split in _anchored_values(values):
-        if split is None:
-            rendered.append(_powershell_literal(value))
-            continue
-        head, location = split
-        parts = (_powershell_literal(head), _POWERSHELL_PREFIX_VARIABLE, _powershell_literal(location))
-        rendered.append("(" + " + ".join(parts) + ")")
-    return ",".join(rendered)
+    return ",".join(_powershell_literal(split[1] if split else "") for _, split in _anchored_values(values))
 
 
 def _posix_anchored_args(values: Sequence[str]) -> str:

@@ -31,7 +31,7 @@ from pwshpy.domain.packing import (
 _FULL_TEMPLATE = (
     "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|"
     "@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@|@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@|"
-    "@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_ANCHORED@@"
+    "@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_RELATIVE@@"
 )
 
 _SH_TEMPLATE = (
@@ -181,7 +181,7 @@ def test_render_runner_substitutes_every_placeholder() -> None:
         SHIM_MODULE,
         "PWSHPY_PACK_ARGV",
         "PWSHPY_PACK_CWD",
-        "'--with','rich'",
+        "'',''",
     ]
 
 
@@ -397,7 +397,7 @@ def test_only_with_values_are_re_anchored_in_both_runners() -> None:
         payload_b64="x", payload_sha256="y", entry="e", uv_args=["--with", "./x.whl", "--with", "rich"]
     )
     ps1 = render_runner(_FULL_TEMPLATE, content).split("|")
-    assert ps1[8] == "'--with',('' + $PwshPyCallerPrefix + './x.whl'),'--with','rich'"
+    assert ps1[8] == "'','./x.whl','',''"
     assert ps1[3] == "'--with','./x.whl','--with','rich'"
     sh = render_posix_runner(_SH_TEMPLATE, content).split("|")
     (anchored,) = shlex.split(sh[8])

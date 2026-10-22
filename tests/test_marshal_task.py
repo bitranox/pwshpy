@@ -76,7 +76,9 @@ def test_com_date_is_local_wall_time_whatever_the_label() -> None:
 @pytest.fixture
 def vienna_tz(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Pin the process zone to Europe/Vienna, restoring the previous zone afterwards."""
-    if not hasattr(time, "tzset"):
+    # A sys.platform guard, not hasattr: pyright narrows on sys.platform, so the Windows
+    # type-check run does not see a call to a function its stubs do not define there.
+    if sys.platform == "win32":
         pytest.skip("time.tzset is POSIX-only")
     monkeypatch.setenv("TZ", "Europe/Vienna")
     time.tzset()

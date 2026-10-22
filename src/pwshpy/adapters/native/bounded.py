@@ -15,19 +15,28 @@ Contents:
 from __future__ import annotations
 
 import multiprocessing
+import sys
 from collections.abc import Callable
-from multiprocessing.connection import Connection, wait
+from multiprocessing.connection import wait
 from multiprocessing.context import SpawnContext, SpawnProcess
 from typing import Any
 
 from ...domain.errors import NativeCallError, OperationTimeoutError
+
+# Pipe() returns a PipeConnection on Windows and a Connection elsewhere; the two share only the
+# private _ConnectionBase, so name the concrete class per platform (pyright narrows on
+# sys.platform) rather than annotate with Connection, which is wrong on Windows.
+if sys.platform == "win32":
+    from multiprocessing.connection import PipeConnection as PipeEnd
+else:
+    from multiprocessing.connection import Connection as PipeEnd
 
 # How long the parent waits for a killed (or finished) child to be reaped, so a call never
 # leaves a zombie behind and never blocks on a child that ignores the kill.
 _KILL_GRACE_SECONDS = 5.0
 
 
-def _child(conn: Connection, target: Callable[..., Any], args: tuple[Any, ...]) -> None:
+def _child(conn: PipeEnd, target: Callable[..., Any], args: tuple[Any, ...]) -> None:
     try:
         conn.send(("ok", target(*args)))
     # BaseException, not Exception: every failure (SystemExit and KeyboardInterrupt included)
@@ -72,7 +81,7 @@ def run_bounded(target: Callable[..., Any], args: tuple[Any, ...], *, timeout: f
     return payload
 
 
-def _start(context: SpawnContext, child: Connection, target: Callable[..., Any], args: tuple[Any, ...]) -> SpawnProcess:
+def _start(context: SpawnContext, child: PipeEnd, target: Callable[..., Any], args: tuple[Any, ...]) -> SpawnProcess:
     """Start the child, or raise NativeCallError when the OS cannot spawn it."""
     process = context.Process(target=_child, args=(child, target, args), daemon=True)
     # Only OSError (the OS cannot spawn) is wrapped: a PicklingError from a lambda or nested
@@ -89,7 +98,7 @@ def _start(context: SpawnContext, child: Connection, target: Callable[..., Any],
     return process
 
 
-def _await_result(parent: Connection, process: SpawnProcess, *, name: str, timeout: float) -> tuple[str, Any]:
+def _await_result(parent: PipeEnd, process: SpawnProcess, *, name: str, timeout: float) -> tuple[str, Any]:
     """Return the child's ``(kind, payload)`` message; the child is reaped on every path."""
     try:
         # Wait on the process sentinel too, not only the pipe: on Windows the parent holds a

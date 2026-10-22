@@ -183,4 +183,3 @@ def test_an_exec_timeout_outside_the_accepted_range_is_refused(value: str, code:
     was: -1 a timeout at once (110), NaN an internal message (22), 1e12 a raw OverflowError."""
     argv = ["exec", "--timeout", value, "--", sys.executable, "-c", "pass"]
     assert main(argv, services_factory=_services({})) == code
-

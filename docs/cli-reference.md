@@ -18,6 +18,12 @@ were already streamed leaves a partial, unterminated array: that is the price of
 check the exit code before trusting the output, or use `--jsonl`, whose lines stay individually
 parseable.
 
+`--json` and `--jsonl` write UTF-8 bytes with LF line ends on every OS, whatever the console
+code page, `PYTHONIOENCODING` or `PYTHONUTF8` say (JSON is UTF-8 by spec), so a consumer reading
+the pipe decodes it as UTF-8 even from a cp1252 Windows console. The JSON that `run`, `cmdlet`,
+`get_command` and `invoke_rest_method` print is written the same way. The human table and
+`get_content` stay on the console's own encoding.
+
 **Everywhere** - one binding on Windows, macOS and Linux:
 
 | Command                         | Shows                         | Binding                                |

@@ -11,6 +11,13 @@ AFTER records were streamed leaves a partial, unterminated array on stdout: the
 streaming trade-off, accepted because closing it would mean buffering the whole
 stream.  The exit code is non-zero either way.
 
+JSON output (``--json``, ``--jsonl``, :func:`emit_json`) is written as UTF-8 bytes below
+the text layer, whatever the console code page, ``PYTHONIOENCODING`` or ``PYTHONUTF8``
+say: JSON is UTF-8 by spec, and a cp1252 stdout (German Windows) turned every non-ASCII
+field into mojibake for a consumer reading the pipe.  Lines end in LF on every OS.  The
+human table and :func:`emit_lines` stay on the console's own encoding: they are text for
+a person or a text tool, not JSON.
+
 Contents:
     * :class:`RecordFormat` - human / json / jsonl selector.
     * :func:`emit` - render an iterable of records in the chosen format.
@@ -25,6 +32,7 @@ import itertools
 import os
 import sys
 from collections.abc import Generator, Iterable
+from typing import BinaryIO, TextIO
 
 import orjson
 from rich.console import Console
@@ -99,15 +107,50 @@ def _clean_broken_pipe() -> Generator[None, None, None]:
         _redirect_stdout_to_devnull()
 
 
-def _dumps(record: PSRecord) -> str:
-    return orjson.dumps(record.to_dict()).decode("utf-8")
+class _Utf8Stdout:
+    """UTF-8 byte writer for stdout that bypasses the text layer's encoding.
+
+    Writes go to ``sys.stdout.buffer`` so the bytes are UTF-8 whatever encoding the
+    text layer was opened with. Whatever the text layer still holds is flushed first,
+    so earlier text output stays ahead of the JSON. A stdout with no ``buffer`` (a
+    ``StringIO`` stand-in, doctest's capture) has no encoding step to bypass, so the
+    UTF-8 is decoded and written as text there.
+
+    Example:
+        >>> out = _Utf8Stdout()
+        >>> out.write(b"ok\\n"); out.flush()
+        ok
+    """
+
+    def __init__(self) -> None:
+        self._text: TextIO = sys.stdout
+        self._binary: BinaryIO | None = getattr(self._text, "buffer", None)
+        if self._binary is not None:
+            self._text.flush()
+
+    def write(self, data: bytes) -> None:
+        """Write UTF-8 ``data`` to stdout."""
+        if self._binary is None:
+            self._text.write(data.decode("utf-8"))
+        else:
+            self._binary.write(data)
+
+    def flush(self) -> None:
+        """Flush the stream the bytes went to."""
+        if self._binary is None:
+            self._text.flush()
+        else:
+            self._binary.flush()
+
+
+def _dumps(record: PSRecord) -> bytes:
+    return orjson.dumps(record.to_dict())
 
 
 def _write_jsonl(records: Iterable[PSRecord]) -> None:
-    out = sys.stdout
+    out = _Utf8Stdout()
     for record in records:
-        out.write(_dumps(record))
-        out.write("\n")
+        out.write(_dumps(record) + b"\n")
         out.flush()
 
 
@@ -119,17 +162,15 @@ def _write_json_array(records: Iterable[PSRecord]) -> None:
     # whole stream to avoid that would end --json's lazy, memory-bounded streaming.
     iterator = iter(records)
     first = next(iterator, None)
-    out = sys.stdout
+    out = _Utf8Stdout()
     if first is None:
-        out.write("[]\n")
+        out.write(b"[]\n")
         out.flush()
         return
-    out.write("[")
-    out.write(_dumps(first))
+    out.write(b"[" + _dumps(first))
     for record in iterator:
-        out.write(",")
-        out.write(_dumps(record))
-    out.write("]\n")
+        out.write(b"," + _dumps(record))
+    out.write(b"]\n")
     out.flush()
 
 
@@ -173,9 +214,9 @@ def emit_json(data: object) -> None:
         {"ok":true,"n":1}
     """
     with _clean_broken_pipe():
-        sys.stdout.write(orjson.dumps(data, default=str).decode("utf-8"))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        out = _Utf8Stdout()
+        out.write(orjson.dumps(data, default=str) + b"\n")
+        out.flush()
 
 
 def emit_lines(lines: Iterable[str]) -> None:

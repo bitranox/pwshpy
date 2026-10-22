@@ -326,7 +326,9 @@ except NativeCallError as exc:
 
 - **Services:** `start_service`, `stop_service` and `restart_service` wait until the service settles
   (default 30 s) and raise `OperationTimeoutError` after the control was issued, on Windows and
-  Linux alike. `stop_service(name, wait=False)` issues the stop and returns the state right after
+  Linux alike. On Linux a start or restart whose unit settles in systemd's `failed` state raises
+  `NativeCallError` naming the unit's `Result` (`exit-code`, `signal`, `timeout`, ...); a
+  `Type=oneshot` unit that ran and ended inactive has succeeded and reads `Stopped`. `stop_service(name, wait=False)` issues the stop and returns the state right after
   it, typically `StopPending`, for a service that takes long to stop.
 - **Programs:** `exec(argv, timeout=...)` kills the program when the time is up; the output it wrote
   so far is not returned. `exec(argv, wait_tree=True)` waits, like `Start-Process -Wait`, until the

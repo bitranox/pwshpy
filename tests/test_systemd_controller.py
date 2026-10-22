@@ -20,7 +20,7 @@ import pytest
 from pwshpy.adapters.native.systemd_services import SystemdServiceController
 from pwshpy.composition.facade import build_ps
 from pwshpy.domain.enums import ServiceStartType, ServiceState
-from pwshpy.domain.errors import OperationTimeoutError
+from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
 
 _UNIT = "pwshpy-pytest.service"
 _UNIT_PATH = Path("/etc/systemd/system") / _UNIT
@@ -144,3 +144,32 @@ def test_starting_a_oneshot_unit_returns_once_its_job_is_done(oneshot_unit: str)
         info = verb(oneshot_unit, timeout=20.0)
         assert time.monotonic() - started < 5, verb.__name__
         assert info.status is ServiceState.STOPPED, verb.__name__
+
+
+_FAILING_UNIT = "pwshpy-pytest-failing.service"
+_FAILING_UNIT_PATH = Path("/etc/systemd/system") / _FAILING_UNIT
+# A oneshot whose process exits 1: its start job ends with the unit failed, Result=exit-code.
+_FAILING_UNIT_BODY = (
+    "[Unit]\nDescription=pwshpy pytest failing scratch\n[Service]\nType=oneshot\nExecStart=/bin/false\n"
+)
+
+
+@pytest.fixture
+def failing_unit() -> object:
+    """Install a throwaway oneshot unit that fails; reset and remove it on teardown."""
+    _FAILING_UNIT_PATH.write_text(_FAILING_UNIT_BODY)
+    subprocess.run(["systemctl", "daemon-reload"], check=True)  # noqa: S607 - fixed argv
+    try:
+        yield _FAILING_UNIT
+    finally:
+        subprocess.run(["systemctl", "reset-failed", _FAILING_UNIT], check=False)  # noqa: S603, S607
+        _FAILING_UNIT_PATH.unlink(missing_ok=True)
+        subprocess.run(["systemctl", "daemon-reload"], check=False)  # noqa: S607
+
+
+def test_a_unit_that_fails_to_start_raises_naming_its_result(failing_unit: str) -> None:
+    """[C2] on real systemd: start and restart of a unit that ends failed raise, naming Result=exit-code."""
+    ps = build_ps()
+    for verb in (ps.start_service, ps.restart_service):
+        with pytest.raises(NativeCallError, match="exit-code"):
+            verb(failing_unit, timeout=20.0)

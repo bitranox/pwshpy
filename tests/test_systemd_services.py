@@ -485,13 +485,22 @@ def test_read_back_of_a_running_not_found_service_reports_its_state(monkeypatch:
 
 
 def _settling_conn(
-    active_state: str, *, failing: frozenset[str] = frozenset(), walks: dict[str, list[str]] | None = None
+    active_state: str,
+    *,
+    failing: frozenset[str] = frozenset(),
+    walks: dict[str, list[str]] | None = None,
+    result: str | None = None,
 ) -> FakeConn:
-    """A loaded service in ``active_state``; frozen there (like a hung stop) unless ``walks`` moves it."""
+    """A loaded service in ``active_state``; frozen there (like a hung stop) unless ``walks`` moves it.
+
+    ``result`` is its ``Service.Result`` (unreadable when None).
+    """
     props: dict[tuple[str, str, str], Any] = {
         ("wuauserv.service", _UNIT, "ActiveState"): active_state,
         ("wuauserv.service", _UNIT, "Description"): "Update daemon",
     }
+    if result is not None:
+        props[("wuauserv.service", systemd_dbus.SERVICE_IFACE, "Result")] = result
     return FakeConn([], props, frozenset({"wuauserv.service"}), failing=failing, walks=walks)
 
 
@@ -580,3 +589,34 @@ def test_a_stop_settles_when_its_job_ends(monkeypatch: pytest.MonkeyPatch) -> No
     """A waiting stop of a deactivating unit returns Stopped once the stop job is done."""
     use_bus(monkeypatch, _settling_conn("active", walks={"StopUnit": ["deactivating", "deactivating", "inactive"]}))
     assert SystemdServiceController().stop("wuauserv.service", timeout=3.0).status is ServiceState.STOPPED
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("method", "verb", "walk"),
+    [
+        ("start", "StartUnit", ["activating", "activating", "failed"]),
+        ("restart", "RestartUnit", ["deactivating", "activating", "failed"]),
+    ],
+)
+def test_a_start_whose_job_ends_failed_raises_naming_the_result(
+    monkeypatch: pytest.MonkeyPatch, method: str, verb: str, walk: list[str]
+) -> None:
+    """[C2]: a unit whose start job settles at failed did not start; that raises NativeCallError
+    naming systemd's Service.Result, instead of returning a plain Stopped as if it had worked."""
+    conn = _settling_conn("failed", walks={verb: walk}, result="exit-code")
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeCallError, match="exit-code") as caught:
+        getattr(SystemdServiceController(), method)("wuauserv.service", timeout=3.0)
+    assert not isinstance(caught.value, OperationTimeoutError)
+    assert conn.verbs == [verb]
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_a_failed_start_whose_result_cannot_be_read_still_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[C2]: the failure is the ActiveState; an unreadable Result only leaves the reason unnamed."""
+    conn = _settling_conn("failed", walks={"StartUnit": ["activating", "failed"]})
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeCallError, match="failed"):
+        SystemdServiceController().start("wuauserv.service", timeout=3.0)

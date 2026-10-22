@@ -222,8 +222,10 @@ class SystemdServiceController:
     verbs need admin. Each verb waits for the unit to settle, then returns its :class:`ServiceInfo`;
     a unit that has not settled by the deadline raises :class:`OperationTimeoutError`, as on
     Windows, while a job systemd refuses raises a plain :class:`NativeCallError`. Settled means the
-    unit has no pending job (a stop also settles at inactive/failed), so a start or restart reports
-    whatever state its job reached - inactive for a Type=oneshot unit without RemainAfterExit.
+    unit has no pending job (a stop also settles at inactive/failed). A start or restart whose unit
+    settles at ``failed`` raises :class:`NativeCallError` naming systemd's ``Service.Result`` (such as
+    ``exit-code``), like Start-Service on a service that fails to start; any other settled state is
+    reported as it is - inactive for a Type=oneshot unit without RemainAfterExit, which succeeded.
     ``stop(wait=False)`` sends ``StopUnit`` and returns the unit's state right after it.
 
     Example:
@@ -232,7 +234,12 @@ class SystemdServiceController:
     """
 
     def start(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
-        """Start a unit; wait until its start job is done; return its state (like Start-Service)."""
+        """Start a unit; wait until its start job is done; return its state (like Start-Service).
+
+        Raises:
+            NativeCallError: systemd refused the job, or the unit settled at ``failed``.
+            OperationTimeoutError: the unit did not settle within ``timeout`` seconds.
+        """
         return self._transition(name, "StartUnit", timeout)
 
     def stop(self, name: str, *, timeout: float = 30.0, wait: bool = True) -> ServiceInfo:
@@ -241,10 +248,15 @@ class SystemdServiceController:
         With ``wait=False`` the StopUnit job is queued and the unit is read back at once
         (typically ``deactivating``, so ``StopPending``) without polling; ``timeout`` is unused.
         """
-        return self._transition(name, "StopUnit", timeout, settled_states=_STOPPED_STATES, wait=wait)
+        return self._transition(name, "StopUnit", timeout, wait=wait)
 
     def restart(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
-        """Restart a unit; wait until its restart job is done; return its state (like Restart-Service)."""
+        """Restart a unit; wait until its restart job is done; return its state (like Restart-Service).
+
+        Raises:
+            NativeCallError: systemd refused the job, or the unit settled at ``failed``.
+            OperationTimeoutError: the unit did not settle within ``timeout`` seconds.
+        """
         return self._transition(name, "RestartUnit", timeout)
 
     def set_startup(self, name: str, start_type: ServiceStartType) -> ServiceInfo:
@@ -270,18 +282,39 @@ class SystemdServiceController:
         method: str,
         timeout: float,
         *,
-        settled_states: frozenset[str] = frozenset(),
         wait: bool = True,
     ) -> ServiceInfo:
-        """Send ``method`` for ``name``; unless ``wait`` is False, poll until it settles."""
+        """Send ``method`` for ``name``; unless ``wait`` is False, poll until it settles.
+
+        A stop also settles at inactive or failed (both mean stopped); a start or restart that
+        settles at ``failed`` raises instead (:func:`_refuse_a_failed_unit`).
+        """
+        stopping = method == "StopUnit"
         bus = _dbus.open_bus()
         try:
             _dbus.call(bus, method, "ss", (name, "replace"))
             if wait:
-                _wait_until_settled(bus, name, settled_states, timeout)
+                _wait_until_settled(bus, name, _STOPPED_STATES if stopping else frozenset(), timeout)
+                if not stopping:
+                    _refuse_a_failed_unit(bus, name)
             return _get_one(bus, name)
         finally:
             bus.conn.close()
+
+
+def _refuse_a_failed_unit(bus: _dbus.Bus, name: str) -> None:
+    """Raise when the settled unit's ActiveState is ``failed``: its start or restart did not work.
+
+    The job settling only says systemd finished with it; a unit whose process exited non-zero, was
+    killed or timed out settles at ``failed``, and returning that as a plain Stopped would read as
+    success. ``Service.Result`` names why (``exit-code``, ``signal``, ``timeout``, ...); an
+    unreadable one only leaves the reason unnamed, never the failure unreported.
+    """
+    if _dbus.active_state(bus, name) != "failed":
+        return
+    result = _dbus.unit_property(bus, name, "Result", None, interface=_dbus.SERVICE_IFACE)
+    reason = f" (Result={result})" if isinstance(result, str) and result else ""
+    raise NativeCallError(f"unit {name!r} failed{reason}: systemd ended its job with the unit in the failed state.")
 
 
 def _is_settled(bus: _dbus.Bus, name: str, settled_states: frozenset[str]) -> bool:

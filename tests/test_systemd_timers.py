@@ -1343,7 +1343,14 @@ def test_a_listed_instance_timer_can_be_run_stopped_enabled_and_disabled(
         ("a@b c", "instance"),
         ("a@b%c", "instance"),
     ],
-    ids=["bare-template", "template-timer", "empty-prefix", "space-in-prefix", "space-in-instance", "percent-in-instance"],
+    ids=[
+        "bare-template",
+        "template-timer",
+        "empty-prefix",
+        "space-in-prefix",
+        "space-in-instance",
+        "percent-in-instance",
+    ],
 )
 def test_a_template_or_invalid_instance_name_is_refused_before_the_bus(
     monkeypatch: pytest.MonkeyPatch, verb: str, task_path: str, match: str
@@ -1366,7 +1373,9 @@ def test_a_template_or_invalid_instance_name_is_refused_before_the_bus(
     [r"zfs-scrub-monthly@my\x2dpool.timer", r"backup\x2dnightly.timer", r"scrub@a\x5cb\x2dc.timer"],
     ids=["escaped-instance", "escaped-prefix", "escaped-backslash-in-instance"],
 )
-def test_a_listed_escaped_timer_is_addressed_by_its_exact_unit_name(monkeypatch: pytest.MonkeyPatch, timer: str) -> None:
+def test_a_listed_escaped_timer_is_addressed_by_its_exact_unit_name(
+    monkeypatch: pytest.MonkeyPatch, timer: str
+) -> None:
     """[X22 T1]: base_name read the backslash of systemd's \\xNN escape as a folder separator, so the
     verbs sent a listed ``zfs-scrub-monthly@my\\x2dpool.timer`` to ``x2dpool``. Every unit name on the
     bus is now the listed one, escape included."""

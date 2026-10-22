@@ -352,7 +352,13 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
     """
     report = "".join(
         f'if [ -n "${{{name}+set}}" ]; then printf \'env:%s\\n\' "{name}=${name}" >> "$record"; fi\n'
-        for name in (*INTERPRETER_VARIABLES, *LIBRARY_VARIABLES, *UV_SOURCE_VARIABLES, *NETWORK_VARIABLES, "PYTHONNOUSERSITE")
+        for name in (
+            *INTERPRETER_VARIABLES,
+            *LIBRARY_VARIABLES,
+            *UV_SOURCE_VARIABLES,
+            *NETWORK_VARIABLES,
+            "PYTHONNOUSERSITE",
+        )
     )
     python = directory / "python"
     python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")

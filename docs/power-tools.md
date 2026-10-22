@@ -266,7 +266,8 @@ Details worth knowing:
   POSIX `/bin/sh`** - dash, busybox ash, macOS `sh`, bash - not only bash, and independent of your
   login shell.
 - **Arguments arrive exactly as typed**, including empty strings, embedded quotes, and unicode. On
-  the `.sh` that is free - POSIX `sh` forwards `"$@"` untouched, so there is no shim. On the `.ps1`
+  the `.sh` that is free - POSIX `sh` forwards `"$@"` untouched, so it needs no argument shim (a root
+  run goes through the generated shim only to return to your directory, see below). On the `.ps1`
   the argument vector travels out of band (because 5.1 re-quotes arguments on their way to a native
   executable), which also protects `-v` / `-d` from binding to `-Verbose` / `-Debug`. One caveat is
   outside pwshpy's reach: `pwsh -File tool.ps1 --path=C:\dir` is split by PowerShell's own
@@ -342,14 +343,36 @@ Details worth knowing:
   of megabytes) by itself, unless uv's Python downloads are switched off
   (`UV_PYTHON_DOWNLOADS=never`, `python-downloads = "never"`), in which case uv stops with `No
   interpreter found in virtual environments or managed installations` and a hint naming the
-  setting; `uv python install` as the elevated account provides one ahead of time. Three more
-  ways to name an interpreter outright would beat that flag, and an elevated run closes each:
-  the `.python-version` and `uv.toml` uv reads from the script's directory upwards (the cache, which
-  `PWSHPY_PACK_CACHE` can put anywhere) are looked up from `/` on POSIX or `System32` on Windows
-  instead (`--project`), directories only administrators can write; and `UV_PYTHON`, `VIRTUAL_ENV`,
-  `CONDA_PREFIX`, `UV_MANAGED_PYTHON` and `UV_NO_MANAGED_PYTHON` are dropped from uv's environment,
-  each with a `pwshpy: ignoring <NAME>` line on stderr. Not elevated, nothing changes. The
-  `-PwshPyUv` / `--pwshpy-uv` pin is unaffected: it chooses the `uv`, not the Python.
+  setting; `uv python install` as the elevated account provides one ahead of time. That first
+  download (about 36 MiB, unpacked to about 100 MB) is also why the first elevated run is slow, and
+  why it fails on a machine without network access. More ways to name an interpreter outright
+  would beat that flag, and an elevated run closes each. uv probes a `.venv` in its working
+  directory and every directory above, and under `only-managed` it even runs the script on that
+  venv's `python` (measured with uv 0.13), so uv is started in `/` on POSIX or `System32` on Windows
+  (`--directory`), directories only administrators can write, and looks up the `.python-version`
+  and `uv.toml` it would read from the script's directory upwards (the cache, which
+  `PWSHPY_PACK_CACHE` can put anywhere) from there too (`--project`). The packed script still runs
+  in your directory: uv runs the generated shim, which changes back to it first, or stops with
+  `pwshpy pack: cannot return to the working directory <dir>` and exit code 70 when the elevated
+  account cannot enter it (a root-squashed NFS export). What you gave relative to your directory is
+  made absolute before uv starts elsewhere: a relative `PWSHPY_PACK_CACHE`, and a `--with` value that
+  names a relative path (`./x.whl`, `dist/x.whl`, `x.whl`, `name @ ./x`; a `file:` URL is not
+  rewritten). And `UV_PYTHON`, `VIRTUAL_ENV`, `CONDA_PREFIX`, `UV_MANAGED_PYTHON`,
+  `UV_NO_MANAGED_PYTHON`, `UV_PYTHON_INSTALL_DIR`, `UV_CONFIG_FILE`, `UV_PYTHON_INSTALL_MIRROR` and
+  `UV_PYTHON_DOWNLOADS_JSON_URL` are dropped from uv's environment, each with a `pwshpy: ignoring
+  <NAME>` line on stderr: the first five name an interpreter, the last four move where uv's managed
+  Pythons live or come from, so an administrator who points elevated runs at a custom install
+  directory or download mirror on purpose has to set that in uv's own system-wide configuration.
+  One denial of service remains on Windows: starting in `System32`, uv also reads a `uv.toml` from
+  each directory above it, so any account can create a folder named `C:\uv.toml` and make every
+  elevated `.ps1` run fail (it cannot change what runs). Not elevated, nothing changes: uv starts in
+  your directory with your environment, and the `.sh` runs the entry itself. The `-PwshPyUv` /
+  `--pwshpy-uv` pin is unaffected: it chooses the `uv`, not the Python.
+- **Any file name packs.** The entry name and every packed file name land in the runner as quoted
+  literals, so `it's.py`, a typographic quote, `$`, a backtick or a space in a name, or in a `--with`
+  value, reaches the runner and uv as given. Refused at pack time, with the reason: a name holding a
+  line break (both runners keep one name per line), and `#>` in the entry name of a `.ps1` (it would
+  end the runner's help block, which has no escape).
 - **Self-elevation keeps working.** A packed script calling `ps.elevate()` re-execs the extracted
   entry with the environment uv already built, so it elevates exactly as it would unpacked.
 - **The cache is verified before every run** against per-file hashes embedded in the artefact, and

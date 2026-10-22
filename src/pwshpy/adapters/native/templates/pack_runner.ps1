@@ -41,8 +41,11 @@
     skipped with a line on stderr, and a -PwshPyUv path that fails the check is refused with exit
     code 127. As root on POSIX it runs its own helpers only from the fixed system directories.
     Elevated, the script runs only on a Python uv manages (downloaded on first use unless uv's
-    Python downloads are switched off); UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX, UV_MANAGED_PYTHON
-    and UV_NO_MANAGED_PYTHON are ignored, each with a line on stderr.
+    Python downloads are switched off), and uv starts in a directory only administrators can write
+    (/ on POSIX, System32 on Windows), so no .venv in or above your directory is ever run; the
+    script itself still runs in your directory. UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX,
+    UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON, UV_PYTHON_INSTALL_DIR, UV_CONFIG_FILE,
+    UV_PYTHON_INSTALL_MIRROR and UV_PYTHON_DOWNLOADS_JSON_URL are ignored, each with a line on stderr.
 
     Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 

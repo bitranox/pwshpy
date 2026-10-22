@@ -815,6 +815,29 @@ function Read-PwshPySecurity {
     return [IO.FileSystemAclExtensions]::GetAccessControl([IO.FileInfo]$Item, $sections)
 }
 
+function ConvertTo-PwshPyLongPath {
+    param([string] $Path)
+
+    # Windows: $Path in the extended-length form (\\?\C:\..., \\?\UNC\server\share\...). Windows
+    # PowerShell 5.1 (.NET Framework) refuses a longer path than MAX_PATH (260) with "Illegal name" in
+    # GetAccessControl and "does not exist" in Get-Acl, measured on vm-pydev-win at 377 characters,
+    # while both read the extended form; an install's deepest .pyc already comes close in a profile.
+    $Path = $Path.Replace('/', '\')
+    if ($Path.StartsWith('\\?\')) { return $Path }
+    if ($Path -match '^[A-Za-z]:\\') { return '\\?\' + $Path }
+    if ($Path.StartsWith('\\')) { return '\\?\UNC\' + $Path.Substring(2) }
+    return $Path
+}
+
+function ConvertFrom-PwshPyLongPath {
+    param([string] $Path)
+
+    # The usual spelling of an extended-length path (ConvertTo-PwshPyLongPath), for a message.
+    if ($Path.StartsWith('\\?\UNC\')) { return '\\' + $Path.Substring(8) }
+    if ($Path.StartsWith('\\?\')) { return $Path.Substring(4) }
+    return $Path
+}
+
 function Get-PwshPyWindowsTreeDistrust {
     param([string] $Path)
 
@@ -828,8 +851,9 @@ function Get-PwshPyWindowsTreeDistrust {
     $trusted = Get-PwshPyTrustedSid
     $sections = [Security.AccessControl.AccessControlSections]'Access, Owner'
     $verdicts = @{}
+    # Walked in the extended-length form, so a path past MAX_PATH reads on 5.1 too.
     $stack = New-Object System.Collections.Generic.Stack[IO.DirectoryInfo]
-    $stack.Push((New-Object IO.DirectoryInfo $Path))
+    $stack.Push((New-Object IO.DirectoryInfo (ConvertTo-PwshPyLongPath -Path $Path)))
     while ($stack.Count -gt 0) {
         $directory = $stack.Pop()
         try {
@@ -838,20 +862,27 @@ function Get-PwshPyWindowsTreeDistrust {
             return "the entries below $Path cannot be listed ($($_.Exception.Message))"
         }
         foreach ($child in $children) {
+            $shown = ConvertFrom-PwshPyLongPath -Path $child.FullName
             if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                $why = Get-PwshPyLinkDistrust -Path $child.FullName
+                # As Get-PwshPyLinkDistrust judges a link, read through the extended form.
+                try {
+                    $security = Get-Acl -LiteralPath $child.FullName
+                } catch {
+                    return "the ACL of $shown cannot be read ($($_.Exception.Message))"
+                }
+                $why = Get-PwshPyAclDistrust -Path $shown -Rights $PwshPyAncestorWriteRights -Security $security -Trusted $trusted
             } else {
                 $isDirectory = $child -is [IO.DirectoryInfo]
                 try {
                     $security = Read-PwshPySecurity -Item $child
                 } catch {
-                    return "the ACL of $($child.FullName) cannot be read ($($_.Exception.Message))"
+                    return "the ACL of $shown cannot be read ($($_.Exception.Message))"
                 }
                 $key = [string]$isDirectory + '|' + $security.GetSecurityDescriptorSddlForm($sections)
                 $why = $verdicts[$key]
                 if ($null -eq $why) {
                     $rights = if ($isDirectory) { $PwshPyDirectoryWriteRights } else { $PwshPyFileWriteRights }
-                    $why = Get-PwshPyAclDistrust -Path $child.FullName -Rights $rights -Security $security -Trusted $trusted
+                    $why = Get-PwshPyAclDistrust -Path $shown -Rights $rights -Security $security -Trusted $trusted
                     # A refusal names its path, so only an acceptance is kept for the others.
                     if (-not $why) { $verdicts[$key] = '' }
                 }

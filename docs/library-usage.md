@@ -201,20 +201,27 @@ break or NUL in any of them is a `ConfigurationError` and `%` is escaped. The `E
 `program`, written as one double-quoted word (so a path with a space stays one path), followed by
 `arguments`, which systemd reads with its own rules, not a shell's: it splits and unquotes them
 itself and expands `$VAR` / `${VAR}` from the unit's environment (write `$$` for a literal dollar).
-A `program` starting with `+`, `!`, `-`, `@` or `:` is a `ConfigurationError`: systemd reads that
-character as an `ExecStart=` prefix even inside quotes, and `+` would run it with full privileges,
-ignoring `User=`.
+A `program` starting with `@`, `-`, `:`, `+`, `!` or `|` is a `ConfigurationError`: systemd reads
+that character as an `ExecStart=` prefix even inside quotes, `+` would run it with full privileges,
+ignoring `User=`, and `|` through a shell. So is a `program` that is a lone `;` (systemd's
+command-line separator) or holds any other control character (a tab, an escape, DEL), which systemd
+does not allow in a command line.
 
-The task name must be a name systemd accepts for a unit: ASCII letters, digits, `:`, `-`, `_` and
-`.`, at most 247 characters (255 with `.service`), and no `@` (a template or instance unit), or
-`register`, `unregister`, `run`, `stop`, `enable` and `disable` raise `ConfigurationError` before
-anything is written or sent. Every unit pwshpy writes carries `X-PwshPy=<version>` in `[Unit]`,
+The task name must be a name systemd accepts for a unit, at most 247 characters (255 with
+`.service`), or the call raises `ConfigurationError` before anything is written or sent. `register`
+and `unregister`, which write and delete unit files, take ASCII letters, digits, `:`, `-`, `_` and `.`
+only, so no `@` (a template or instance unit). `run`, `stop`, `enable` and `disable` write nothing
+and also take an instance name such as `zfs-scrub-monthly@rpool`, as `ps.get_scheduled_task()` lists
+it: a non-empty part before the first `@`, then an instance of the same characters plus `@`; a bare
+template (`scrub@`, nothing after the `@`) is refused. Every unit pwshpy writes carries `X-PwshPy=<version>` in `[Unit]`,
 which systemd ignores, and pwshpy only replaces or deletes a unit that carries it: `register` raises
 `NativeCallError` when `/etc/systemd/system` holds a unit of that name without the key, or systemd
 already has one from anywhere else (a vendor unit under `/lib`, a runtime or masked one), and
-`unregister` stops, disables and deletes only the marked files, raising `NativeCallError` ("no such
-task") when there are none. A unit registered by pwshpy 1.5 or earlier carries no key and is refused
-the same way. `ps.enable_scheduled_task` on a boot timer also only enables it,
+`unregister` stops, disables and deletes only the marked files: it raises `NativeCallError` ("not
+written by pwshpy") when a file of that name without the key is there, and ("no such task") when
+there is no file at all. A unit registered by pwshpy 1.5 or earlier carries no key and is refused the
+same way; to take such a task over, remove its `.service` / `.timer` files under `/etc/systemd/system`
+by hand (`systemctl disable --now` the timer first), or add `X-PwshPy=` to their `[Unit]` section. `ps.enable_scheduled_task` on a boot timer also only enables it,
 because systemd runs a started boot timer at once when its offset has already passed.
 
 `register_scheduled_task` returns the task read back as a `ScheduledTaskInfo`, the same record

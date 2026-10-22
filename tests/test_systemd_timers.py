@@ -1261,3 +1261,88 @@ def test_unregister_removes_an_on_demand_task_it_wrote(monkeypatch: pytest.Monke
     SystemdScheduledTaskController().unregister("job")
     assert list(tmp_path.iterdir()) == []
     assert conn.verbs == ["StopUnit", "Reload"]
+
+
+# --- [X21 L1] every ExecStart= prefix systemd honours, and control characters in the program -----------
+
+
+@pytest.mark.os_agnostic
+def test_service_unit_refuses_the_shell_prefix_on_the_program() -> None:
+    """[X21 L1]: systemd 259 reads a leading '|' as "spawn through the shell", inside quotes too
+    (``ExecStart="|a/bin/true"`` verifies clean), so it is refused like the other prefixes."""
+    with pytest.raises(ConfigurationError, match="prefix"):
+        service_unit("|/bin/true", "", "", user="1000")
+
+
+@pytest.mark.os_agnostic
+def test_service_unit_refuses_a_lone_semicolon_as_the_program() -> None:
+    """[X21 L1]: a standalone ';' separates command lines in ExecStart=, so it is no executable."""
+    with pytest.raises(ConfigurationError, match="';'"):
+        service_unit(";", "/bin/true", "")
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("char", ["\t", "\x01", "\x1b", "\x7f"], ids=["tab", "soh", "escape", "delete"])
+def test_service_unit_refuses_a_control_character_in_the_program(char: str) -> None:
+    """[X21 L1]: systemd.service(5) does not allow control characters in a command line."""
+    with pytest.raises(ConfigurationError, match="control character"):
+        service_unit(f"/bin/tr{char}ue", "", "")
+
+
+# --- [X21 L2] instance units: the verbs that write nothing take systemd's full unit-name grammar ------
+
+
+def _instance_conn(name: str) -> FakeConn:
+    """A box holding one listed, enabled instance timer ``name`` (with its calendar schedule)."""
+    base = name[: -len(".timer")]
+    props = {
+        **_job_props(base, user=""),
+        (name, systemd_dbus.UNIT_IFACE, "ActiveState"): "inactive",
+        (name, _TIMER, "TimersMonotonic"): [("OnUnitActiveUSec", 86_400_000_000, 0)],
+    }
+    return FakeConn([(name, "Scrub", "inactive")], props, frozenset({name}))
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("timer", ["zfs-scrub-monthly@rpool.timer", "btrfs-scrub@-.timer"])
+def test_a_listed_instance_timer_can_be_run_stopped_enabled_and_disabled(
+    monkeypatch: pytest.MonkeyPatch, timer: str
+) -> None:
+    """[X21 L2]: 1.5.2 ran the instance timers get_scheduled_task lists; the strict register-time
+    name check must not refuse them for the verbs that write nothing."""
+    conn = _instance_conn(timer)
+    use_bus(monkeypatch, conn)
+    (listed,) = list(iter_timers())
+    controller = SystemdScheduledTaskController()
+    controller.run(listed.task_name)
+    controller.stop(listed.task_name)
+    assert controller.enable(listed.task_name).task_name == listed.task_name
+    assert controller.disable(listed.task_name).task_name == listed.task_name
+    assert conn.verbs == [
+        "StartUnit",
+        "StopUnit",
+        "EnableUnitFiles",
+        "Reload",
+        "StartUnit",
+        "StopUnit",
+        "DisableUnitFiles",
+        "Reload",
+    ]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("verb", ["run", "stop", "enable", "disable"])
+@pytest.mark.parametrize(
+    ("task_path", "match"),
+    [("scrub@", "template"), ("scrub@.timer", "template"), ("@rpool", "unit name"), ("a b@c", "unit name")],
+    ids=["bare-template", "template-timer", "empty-prefix", "space-in-prefix"],
+)
+def test_a_template_or_invalid_instance_name_is_refused_before_the_bus(
+    monkeypatch: pytest.MonkeyPatch, verb: str, task_path: str, match: str
+) -> None:
+    """[X21 L2]: a bare template (empty instance) is no unit to act on; an empty prefix is no name."""
+    conn = FakeConn([], {})
+    use_bus(monkeypatch, conn)
+    with pytest.raises(ConfigurationError, match=match):
+        getattr(SystemdScheduledTaskController(), verb)(task_path)
+    assert conn.methods == []

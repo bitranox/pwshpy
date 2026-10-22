@@ -75,6 +75,11 @@ OWNERSHIP_KEY = "X-PwshPy"
 #: pwshpy does not register.
 _UNIT_NAME_PREFIX = re.compile(r"[A-Za-z0-9:_.\-]+")
 
+#: The characters systemd allows in an instance name (after the first "@"): the prefix characters
+#: plus "@" itself (systemd's unit_instance_is_valid; ``systemd-escape`` turns "/" into "-", so
+#: ``btrfs-scrub@-.timer`` is the instance for "/").
+_UNIT_NAME_INSTANCE = re.compile(r"[A-Za-z0-9:_.\-@]+")
+
 #: The longest unit name systemd accepts, suffix included: UNIT_NAME_MAX is 256 with the NUL
 #: (src/basic/unit-name.h; measured on systemd 259: 255 characters load, 256 are "not valid").
 _UNIT_NAME_MAX = 255
@@ -475,6 +480,53 @@ def unit_base(task_path: str) -> str:
             f"{base!r} is not a systemd unit name: use ASCII letters, digits, ':', '-', '_' and '.' only "
             "('@' would make a template or instance unit)."
         )
+    return _within_unit_name_max(base)
+
+
+def existing_unit_base(task_path: str) -> str:
+    """The unit base name of a task to act on (run, stop, enable, disable), in systemd's full grammar.
+
+    Unlike :func:`unit_base` (register and unregister, which write and delete files), an instance
+    name is accepted: ``get_scheduled_task`` lists instance timers such as
+    ``zfs-scrub-monthly@rpool.timer``, and the verbs that write nothing must reach them, as they did
+    in 1.5.2. A bare template (``name@``, an empty instance) is no unit systemd can start.
+
+    Raises:
+        ConfigurationError: The prefix (before the first "@") is empty or holds a character outside
+            :data:`_UNIT_NAME_PREFIX`, the instance is empty (a template) or holds a character outside
+            :data:`_UNIT_NAME_INSTANCE`, or the name is longer than systemd allows.
+
+    Example:
+        >>> existing_unit_base("zfs-scrub-monthly@rpool.timer")
+        'zfs-scrub-monthly@rpool'
+        >>> existing_unit_base("scrub@")
+        Traceback (most recent call last):
+        ...
+        pwshpy.domain.errors.ConfigurationError: 'scrub@' is a template, not a unit: ...
+    """
+    base = base_name(task_path)
+    prefix, at, instance = base.partition("@")
+    if not at:
+        return unit_base(task_path)
+    if not _UNIT_NAME_PREFIX.fullmatch(prefix):
+        raise ConfigurationError(
+            f"{base!r} is not a systemd unit name: the part before '@' must be non-empty ASCII letters, "
+            "digits, ':', '-', '_' and '.'."
+        )
+    if not instance:
+        raise ConfigurationError(
+            f"{base!r} is a template, not a unit: name one of its instances ({prefix}@<instance>)."
+        )
+    if not _UNIT_NAME_INSTANCE.fullmatch(instance):
+        raise ConfigurationError(
+            f"{base!r} is not a systemd unit name: the instance after '@' may hold ASCII letters, digits, "
+            "':', '-', '_', '.' and '@' only."
+        )
+    return _within_unit_name_max(base)
+
+
+def _within_unit_name_max(base: str) -> str:
+    """``base``, or ConfigurationError when ``base.service`` is longer than systemd allows."""
     if len(base) + len(".service") > _UNIT_NAME_MAX:
         raise ConfigurationError(
             f"{base[:40]!r}... is too long for a systemd unit name: at most "
@@ -501,10 +553,14 @@ def _unit_value(text: str, field: str) -> str:
 
 
 #: The characters systemd reads as a prefix of ExecStart='s executable (systemd.service(5), "Command
-#: lines"): "@" (argv[0]), "-" (ignore the exit code), ":" (no variable expansion), "+" (full
-#: privileges, ignoring User=) and "!" / "!!" (no privilege drop). systemd strips them from the word
-#: after unquoting it, so quoting does not keep one literal.
-_EXEC_PREFIXES = frozenset("@-:+!")
+#: lines", Table 2 on 259): "@" (argv[0]), "-" (ignore the exit code), ":" (no variable expansion),
+#: "+" (full privileges, ignoring User=), "!" / "!!" (no privilege drop) and "|" (spawn the command
+#: through the user's shell). systemd strips them from the word after unquoting it, so quoting does
+#: not keep one literal (``ExecStart="|a/bin/true"`` verifies clean on 259).
+_EXEC_PREFIXES = frozenset("@-:+!|")
+
+#: An ASCII control character (C0 or DEL), which systemd does not allow in a command line.
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _exec_program(program: str) -> str:
@@ -515,15 +571,23 @@ def _exec_program(program: str) -> str:
     backslash and a double quote are escaped; ``%`` is doubled like every value (:func:`_unit_value`).
 
     Raises:
-        ConfigurationError: ``program`` is empty, holds a line break, or starts with a prefix.
+        ConfigurationError: ``program`` is empty, holds a line break or another control character,
+            is a lone ``;``, or starts with a prefix.
     """
     program = _unit_value(program, "program")
     if not program:
         raise ConfigurationError("program must not be empty: it is the executable ExecStart= runs.")
+    if _CONTROL_CHARACTER.search(program):
+        # systemd.service(5): "control characters are not allowed" in a command line.
+        raise ConfigurationError("program must not contain a control character: systemd does not allow one.")
+    if program == ";":
+        # A standalone ';' separates command lines in ExecStart=, so it never names an executable.
+        raise ConfigurationError("program must not be ';': systemd reads it as a command-line separator.")
     if program[0] in _EXEC_PREFIXES:
         raise ConfigurationError(
             f"program must not start with {program[0]!r}: systemd reads it as an ExecStart= prefix "
-            "('+' would run it with full privileges, ignoring User=); give the executable's path."
+            "('+' would run it with full privileges, ignoring User=, '|' through a shell); give the "
+            "executable's path."
         )
     return '"' + program.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -864,12 +928,22 @@ class SystemdScheduledTaskController:
             bus.conn.close()
 
     def run(self, task_path: str) -> None:
-        """Run the task now: start its ``.service`` (like Start-ScheduledTask, on demand)."""
-        self._start_stop(unit_base(task_path), "StartUnit")
+        """Run the task now: start its ``.service`` (like Start-ScheduledTask, on demand).
+
+        Raises:
+            ConfigurationError: ``task_path`` is no systemd unit name, or a bare template (:func:`existing_unit_base`).
+            NativeCallError: the D-Bus call failed.
+        """
+        self._start_stop(existing_unit_base(task_path), "StartUnit")
 
     def stop(self, task_path: str) -> None:
-        """Stop the task's running ``.service`` (like Stop-ScheduledTask)."""
-        self._start_stop(unit_base(task_path), "StopUnit")
+        """Stop the task's running ``.service`` (like Stop-ScheduledTask).
+
+        Raises:
+            ConfigurationError: ``task_path`` is no systemd unit name, or a bare template (:func:`existing_unit_base`).
+            NativeCallError: the D-Bus call failed.
+        """
+        self._start_stop(existing_unit_base(task_path), "StopUnit")
 
     def enable(self, task_path: str) -> ScheduledTaskInfo:
         """Arm a task's ``.timer`` so it runs on schedule (like Enable-ScheduledTask).
@@ -880,10 +954,11 @@ class SystemdScheduledTaskController:
         treated the same way - never running the job unexpectedly is the safe side.
 
         Raises:
+            ConfigurationError: ``task_path`` is no systemd unit name, or a bare template (:func:`existing_unit_base`).
             NativeCallError: the task is on-demand (no ``.timer``) or its timer is static (no
                 ``[Install]`` section), or a D-Bus call failed.
         """
-        base = unit_base(task_path)
+        base = existing_unit_base(task_path)
         timer = f"{base}.timer"
         bus = _dbus.open_bus()
         try:
@@ -901,10 +976,11 @@ class SystemdScheduledTaskController:
         """Disarm a task's ``.timer`` so it no longer runs on schedule (like Disable-ScheduledTask).
 
         Raises:
+            ConfigurationError: ``task_path`` is no systemd unit name, or a bare template (:func:`existing_unit_base`).
             NativeCallError: the task is on-demand (no ``.timer``) or its timer is static (no
                 ``[Install]`` section) - refused before anything is stopped - or a D-Bus call failed.
         """
-        base = unit_base(task_path)
+        base = existing_unit_base(task_path)
         bus = _dbus.open_bus()
         try:
             self._require_timer(bus, base, "disable")
@@ -982,6 +1058,7 @@ __all__ = [
     "arms_on_register",
     "OWNERSHIP_KEY",
     "base_name",
+    "existing_unit_base",
     "is_pwshpy_unit",
     "iter_timers",
     "latest_usec",

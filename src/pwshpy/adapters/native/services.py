@@ -62,15 +62,26 @@ def _service_config(win32service: Any, scm: Any, name: str) -> tuple[ServiceStar
     return start_type, required
 
 
-def iter_services() -> Iterator[ServiceInfo]:
+def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
     """Yield a :class:`ServiceInfo` for every Windows service (like ``Get-Service``).
+
+    Args:
+        strict: Accepted for parity with the Linux source; it changes nothing here, because this
+            listing drops no service. ``EnumServicesStatusEx`` returns every service in one bulk
+            call (a failure there raises in both modes), and a service whose ``OpenService`` or
+            ``QueryServiceConfig`` fails is still yielded with ``start_type`` None and no
+            ``required_services`` - a field default, which ``strict`` keeps, as on Linux.
+
+    Raises:
+        NativeCallError: The service control manager cannot be opened or enumerated.
 
     Example:
         >>> import sys
         >>> from pwshpy.domain.records import ServiceInfo
-        >>> sys.platform != "win32" or isinstance(next(iter_services()), ServiceInfo)
+        >>> sys.platform != "win32" or isinstance(next(iter_services(strict=True)), ServiceInfo)
         True
     """
+    del strict  # nothing in this listing drops an item, so there is nothing to raise on (see Args)
     win32service: Any = _load_win32service()
     accept_stop = win32service.SERVICE_ACCEPT_STOP
     accept_pause = win32service.SERVICE_ACCEPT_PAUSE_CONTINUE

@@ -25,6 +25,7 @@ from ...domain.enums import ServiceStartType, ServiceState
 from ...domain.errors import NativeCallError, OperationTimeoutError
 from ...domain.records import ServiceInfo
 from . import systemd_dbus as _dbus
+from .marshal import skip_or_raise
 
 logger = logging.getLogger(__name__)
 
@@ -104,20 +105,35 @@ def _service_at(bus: _dbus.Bus, name: str, path: str | None, *, start_type: Serv
     )
 
 
-def _service_files(bus: _dbus.Bus) -> list[tuple[str, str]]:
-    """Every ``.service`` unit file as (unit name, UnitFileState); [] when systemd lists none.
+def _service_files(bus: _dbus.Bus, *, strict: bool) -> list[tuple[str, str]]:
+    """Every ``.service`` unit file as (unit name, UnitFileState); [] when no listing answers.
 
-    Fail-soft: when no unit-file listing answers, the listing keeps the loaded services rather
-    than failing.
+    When no unit-file listing answers, the default keeps the loaded services with a WARNING (every
+    unloaded service is then missing); ``strict`` raises instead.
     """
     try:
         return _dbus.unit_files(bus, ".service")
     except NativeCallError as exc:
-        logger.debug("cannot list the service unit files, listing loaded services only: %s", exc)
+        what = "cannot list the service unit files, so no unloaded service is listed"
+        skip_or_raise(what, exc, strict=strict, log=logger)
         return []
 
 
-def iter_services() -> Iterator[ServiceInfo]:
+def _service_file_path(bus: _dbus.Bus, name: str, *, strict: bool) -> str | None:
+    """The loaded object path of service file ``name``; None for a stale file or (by default) a failed load.
+
+    :func:`~.systemd_dbus.load_unit`, not the fail-soft ``load_unit_path``: a refused ``LoadUnit``
+    or an unreadable ``LoadState`` is "could not ask", which must not pass for systemd's own
+    "no such unit" answer.
+    """
+    try:
+        return _dbus.load_unit(bus, name)
+    except NativeCallError as exc:
+        skip_or_raise(f"cannot load service unit '{name}'", exc, strict=strict, log=logger)
+        return None
+
+
+def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
     """Yield a :class:`ServiceInfo` per systemd ``.service`` unit (like Get-Service, Linux).
 
     The loaded services come first, from ``ListUnits``, which already carries their description
@@ -134,9 +150,26 @@ def iter_services() -> Iterator[ServiceInfo]:
     state lookups. Reading an unloaded service loads it transiently; systemd unloads it again when
     nothing references it.
 
+    Args:
+        strict: What happens when systemd does not answer a read the listing needs - the
+            unit-file listing (without it no unloaded service can be listed), or the ``LoadUnit``
+            of one service file or its ``LoadState`` read. False (default) skips what it could not
+            read and logs a WARNING naming it; True raises :class:`NativeCallError` naming it, when
+            iteration reaches it. The deliberate filtering above (not-found, masked, alias,
+            template, stale) is systemd's answer, not a failure, and is the same either way; a
+            single property that cannot be read (description, state, start type) still falls back
+            to its default in both modes (the service is kept).
+
+    Raises:
+        NativeCallError: The system bus or ``ListUnits`` cannot be reached, or (with ``strict``)
+            a read named above fails.
+
     Example:
         >>> callable(iter_services)
         True
+        >>> import inspect
+        >>> inspect.signature(iter_services).parameters["strict"].default
+        False
     """
     bus = _dbus.open_bus()
     try:
@@ -160,12 +193,12 @@ def iter_services() -> Iterator[ServiceInfo]:
                 can_stop=True,
                 can_pause_continue=False,
             )
-        for name, state in _service_files(bus):
+        for name, state in _service_files(bus, strict=strict):
             if name in seen or state in _dbus.UNLISTED_FILE_STATES:
                 continue
             seen.add(name)
-            path = _dbus.load_unit_path(bus, name)
-            if path is None:  # a stale or broken file: systemd has no unit behind the name
+            path = _service_file_path(bus, name, strict=strict)
+            if path is None:  # a stale or broken file (no unit behind the name), or a refused load
                 continue
             yield _service_at(bus, name, path, start_type=to_start_type(state))
     finally:

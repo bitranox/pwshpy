@@ -223,6 +223,32 @@ before it have already been yielded. Systemd timers that are not-found or masked
 templates are no tasks in either mode; a single field that cannot be read (a run time, a principal)
 falls back to its documented default and the task stays listed.
 
+## Listing services: skipped versus strict
+
+`ps.get_service(*, strict=False)` streams the services. On Linux something systemd does not answer -
+a refused unit-file listing (then no stopped, unloaded service can be listed) or a service unit it
+will not load or whose load state it will not read - is skipped by default with a WARNING through
+the `logging` module naming the unit and the error, so a non-root caller still gets every service it
+can read. With `strict=True` the same item raises `NativeCallError` naming it, when iteration
+reaches it. Pass it when an absent record must mean an absent service:
+
+```python
+from pwshpy import NativeCallError, ps
+
+try:
+    leftover = ps.get_service(strict=True).first(lambda s: s.name == "legacy-agent.service")
+except NativeCallError as exc:
+    print(f"cannot tell whether the service is gone: {exc}")
+else:
+    print("still there" if leftover else "removed")
+```
+
+On Windows the listing drops no service (`EnumServicesStatusEx` returns them all in one call), so
+`strict` changes nothing there: a service whose configuration cannot be queried is still listed with
+`start_type` None and no `required_services`. On both OSes a single field that cannot be read keeps
+its default and the service stays listed; services systemd reports as not-found or masked (and
+stopped), aliases, templates and stale unit files are no services in either mode.
+
 ## Errors
 
 Every failure across both backends raises a subclass of `PwshPyError`: `NativeCallError` (a wrapped

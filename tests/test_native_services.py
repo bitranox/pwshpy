@@ -8,6 +8,7 @@ branches deterministically on every OS, plus a real structural check on Windows.
 
 from __future__ import annotations
 
+import logging
 import sys
 from typing import Any
 
@@ -103,6 +104,26 @@ def test_iter_services_marshals_fake_backend(monkeypatch: pytest.MonkeyPatch) ->
     assert gamma.start_type is None
     assert gamma.required_services == []
     assert gamma.can_stop is True  # ControlsAccepted 1 & SERVICE_ACCEPT_STOP
+
+
+@pytest.mark.os_agnostic
+def test_strict_keeps_a_service_whose_config_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """[86] strict means the same on Windows: only a dropped ITEM fails, and this listing drops none.
+
+    EnumServicesStatusEx returns every service in one bulk call; a service whose OpenService or
+    QueryServiceConfig fails (Beta, Gamma) is still listed with its start type and dependencies
+    at their defaults - a FIELD default, which X11's contract keeps in both modes. So strict
+    yields exactly the lenient records and logs nothing.
+    """
+    monkeypatch.setattr(services_mod, "_load_win32service", _FakeWin32Service)
+    with caplog.at_level(logging.WARNING, logger=services_mod.__name__):
+        lenient = [s.to_dict() for s in iter_services()]
+        strict = [s.to_dict() for s in iter_services(strict=True)]
+    assert strict == lenient
+    assert [s["name"] for s in strict] == ["Alpha", "Beta", "Gamma"]
+    assert caplog.records == []
 
 
 @pytest.mark.os_agnostic

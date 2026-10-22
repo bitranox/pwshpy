@@ -82,6 +82,15 @@ deleted. The listing streams, so the records before the unreadable item are alre
 later one leaves an unterminated array (see [Portable record commands](#portable-record-commands)).
 Timers systemd reports as not-found or masked, aliases and templates are no tasks in either mode.
 
+`get_service [--strict]` follows the same contract. On Linux it skips, with a warning naming it, a
+refused unit-file listing (then no stopped, unloaded service is listed) or a service unit systemd
+will not load or whose load state it will not read; `--strict` exits 1 with one `NativeCallError`
+line on stderr naming the unit instead, with the same `--jsonl` / `--json` output as above. On
+Windows the listing drops no service, so `--strict` changes nothing there: a service whose
+configuration the caller may not query is still listed, with `start_type` null. Services systemd
+reports as not-found or masked (and stopped), aliases, templates and stale unit files are no services
+in either mode, and a single field that cannot be read keeps its default in both.
+
 **Windows only** - no honest Linux analog: `pwshpy get_item_property KEY` / `pwshpy registry_keys KEY`,
 `pwshpy get_cim_instance CLASS`, `pwshpy get_hotfix`, `pwshpy get_windows_update`.
 

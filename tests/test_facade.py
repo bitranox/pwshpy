@@ -380,10 +380,11 @@ def _fake_registry_keys(key: str) -> Iterator[RegistryKey]:
     yield RegistryKey(hive=RegistryHive.HKLM, key=key, name="Sub")
 
 
-def _fake_services() -> Iterator[ServiceInfo]:
+def _fake_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
+    # The display name echoes the strict choice so a test can see what the facade forwarded.
     yield ServiceInfo(
         name="Svc",
-        display_name="A Service",
+        display_name=f"strict={strict}",
         status=ServiceState.RUNNING,
         service_type=ServiceKind.WIN32_OWN_PROCESS,
         start_type=ServiceStartType.AUTOMATIC,
@@ -781,6 +782,9 @@ def test_injected_service_adapters(injected: _InjectedPs) -> None:
     facade = injected.facade
     fake_service_controller = injected.service_controller
     assert facade.get_service().select(lambda s: s.name).to_list() == ["Svc"]
+    # [86] the per-call strict choice reaches the source; lenient is the default.
+    assert facade.get_service().select(lambda s: s.display_name).to_list() == ["strict=False"]
+    assert facade.get_service(strict=True).select(lambda s: s.display_name).to_list() == ["strict=True"]
     assert facade.start_service("Svc").name == "Svc"
     assert facade.stop_service("Svc").status is ServiceState.RUNNING
     assert facade.restart_service("Svc").name == "Svc"

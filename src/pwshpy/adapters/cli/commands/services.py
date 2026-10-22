@@ -27,14 +27,21 @@ logger = logging.getLogger(__name__)
 
 
 @click.command("get_service", context_settings=CLICK_CONTEXT_SETTINGS)
+@option(
+    "--strict",
+    is_flag=True,
+    default=False,
+    help="Fail on a service unit that cannot be read, instead of skipping it with a warning.",
+)
 @option("--json", "as_json", is_flag=True, default=False, help="Emit records as a JSON array.")
 @option("--jsonl", "as_jsonl", is_flag=True, default=False, help="Stream one JSON record per line.")
 @click.pass_context
-def cli_services(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
+def cli_services(ctx: click.Context, strict: bool, as_json: bool, as_jsonl: bool) -> None:
     """List services as typed records - win32service on Windows, systemd on Linux (native; like Get-Service).
 
     Filter and sort in Python via the pipeline, not switches, e.g.
-    ``ps.get_service().where(lambda s: s.status == ServiceState.RUNNING)``.
+    ``ps.get_service().where(lambda s: s.status == ServiceState.RUNNING)``. A service unit that
+    cannot be read is skipped with a warning; with ``--strict`` it exits 1 naming the unit instead.
 
     \f
     Example:
@@ -46,7 +53,7 @@ def cli_services(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
     ps = get_cli_context(ctx).services.ps
     with lib_log_rich.runtime.bind(job_id="cli-services", extra={"command": "services"}):
         logger.info("Listing services")
-        emit(ps.get_service(), fmt)
+        emit(ps.get_service(strict=strict), fmt)
 
 
 __all__ = ["cli_services"]

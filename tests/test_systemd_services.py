@@ -205,7 +205,123 @@ def test_iter_services_still_lists_loaded_services_when_no_unit_file_listing_ans
     use_bus(monkeypatch, conn)
     with caplog.at_level(logging.DEBUG, logger=systemd_services.__name__):
         assert [s.name for s in iter_services()] == ["sshd.service"]
-    assert any("unit files" in r.getMessage() for r in caplog.records)
+    # [86] a WARNING, not a debug line: every unloaded service is missing from what was listed.
+    assert [r.levelno for r in caplog.records if "unit files" in r.getMessage()] == [logging.WARNING]
+
+
+@pytest.mark.os_agnostic
+def test_strict_raises_when_no_unit_file_listing_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[86] strict=True: the refused unit-file listing raises instead of dropping every unloaded service.
+
+    Lazy: the loaded service from ListUnits is yielded first; the raise comes with the file pass.
+    """
+    conn = _listing_conn(failing=frozenset({"ListUnitFilesByPatterns", "ListUnitFiles"}))
+    use_bus(monkeypatch, conn)
+    services = iter_services(strict=True)
+    assert next(services).name == "sshd.service"
+    with pytest.raises(NativeCallError, match="service unit files"):
+        list(services)
+    assert conn.closed is True
+
+
+def _refused_load_conn(failure: str) -> FakeConn:
+    """Two unloaded service files; reading the first fails at ``failure``.
+
+    ``LoadUnit``: the LoadUnit call itself fails. ``LoadState``: LoadUnit answers, but reading
+    the loaded object's LoadState fails - which must not pass for systemd saying "not-found".
+    """
+    props: dict[tuple[str, str, str], Any] = {
+        ("good.service", _UNIT, "ActiveState"): "inactive",
+        ("good.service", _UNIT, "Description"): "Good daemon",
+    }
+    return FakeConn(
+        [],
+        props,
+        frozenset({"denied.service", "good.service"}),
+        file_states={"denied.service": "disabled", "good.service": "disabled"},
+        unloaded=frozenset({"denied.service", "good.service"}),
+        refused_loads=frozenset({"denied.service"}) if failure == "LoadUnit" else frozenset(),
+        refused_reads=frozenset({("denied.service", "LoadState")}) if failure == "LoadState" else frozenset(),
+    )
+
+
+_LOAD_FAILURES = ["LoadUnit", "LoadState"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("failure", _LOAD_FAILURES)
+def test_strict_raises_naming_a_service_file_that_cannot_be_loaded(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """[86] strict=True: a listed service file whose LoadUnit call or LoadState read fails raises, naming it."""
+    conn = _refused_load_conn(failure)
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeCallError, match=r"'denied\.service'") as caught:
+        list(iter_services(strict=True))
+    assert failure in str(caught.value)
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("failure", _LOAD_FAILURES)
+def test_lenient_skips_a_service_file_that_cannot_be_loaded_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure: str
+) -> None:
+    """[86] The default lists on past a service file it cannot load, but logs a WARNING naming it.
+
+    Before, the skip was silent, so an unreadable service read exactly like "no such service".
+    """
+    use_bus(monkeypatch, _refused_load_conn(failure))
+    with caplog.at_level(logging.WARNING, logger=systemd_services.__name__):
+        assert [s.name for s in iter_services()] == ["good.service"]
+    (warning,) = caplog.records
+    assert warning.levelno == logging.WARNING
+    assert "'denied.service'" in warning.getMessage()
+    assert failure in warning.getMessage()
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("failing", [_NOTHING_FAILS, frozenset({"ListUnitFilesByPatterns"})])
+def test_strict_lists_a_readable_box_like_lenient_and_keeps_the_deliberate_filtering(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failing: frozenset[str]
+) -> None:
+    """[86] strict changes only read FAILURES: not-found, masked, alias, template and stale units stay unlisted.
+
+    The listing box holds every kind of unit the listing filters on purpose; strict must neither
+    raise on them nor list them, and must yield what the default yields, with no warning. The
+    second case falls back to ListUnitFiles, which answers, so it is no failure either.
+    """
+    use_bus(monkeypatch, _listing_conn(failing=failing))
+    with caplog.at_level(logging.WARNING, logger=systemd_services.__name__):
+        lenient = [s.to_dict() for s in iter_services()]
+        use_bus(monkeypatch, _listing_conn(failing=failing))
+        strict = [s.to_dict() for s in iter_services(strict=True)]
+    assert strict == lenient
+    assert [s["name"] for s in strict] == ["sshd.service", "acpid.service", "vendor.service"]
+    assert caplog.records == []
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
+def test_a_property_read_failure_keeps_the_service_with_its_default(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, strict: bool
+) -> None:
+    """[86] Only dropping an ITEM is a strict failure: an unreadable Description still defaults to "".
+
+    The service is listed in both modes; strict does not escalate a single field's default.
+    """
+    conn = FakeConn(
+        [],
+        {("good.service", _UNIT, "ActiveState"): "inactive", ("good.service", _UNIT, "Description"): "Good"},
+        frozenset({"good.service"}),
+        file_states={"good.service": "disabled"},
+        unloaded=frozenset({"good.service"}),
+        refused_reads=frozenset({("good.service", "Description")}),
+    )
+    use_bus(monkeypatch, conn)
+    with caplog.at_level(logging.WARNING, logger=systemd_services.__name__):
+        assert [(s.name, s.display_name) for s in iter_services(strict=strict)] == [("good.service", "")]
+    assert caplog.records == []
 
 
 @pytest.mark.os_agnostic
@@ -315,15 +431,19 @@ def test_iter_services_lists_a_running_service_whose_unit_is_gone_or_masked(
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
 @pytest.mark.parametrize("load_state", ["not-found", "masked"])
 @pytest.mark.parametrize("active_state", ["inactive", "failed"])
 def test_iter_services_skips_a_stopped_service_whose_unit_is_gone_or_masked(
-    monkeypatch: pytest.MonkeyPatch, load_state: str, active_state: str
+    monkeypatch: pytest.MonkeyPatch, load_state: str, active_state: str, strict: bool
 ) -> None:
-    """Stopped, a not-found or masked service is no service: only a reference or an unstartable name is left."""
+    """Stopped, a not-found or masked service is no service: only a reference or an unstartable name is left.
+
+    Deliberate filtering, not a read failure, so ``strict`` skips it the same way.
+    """
     conn = _orphan_service_conn(load_state, active_state)
     use_bus(monkeypatch, conn)
-    assert list(iter_services()) == []
+    assert list(iter_services(strict=strict)) == []
 
 
 @pytest.mark.os_agnostic

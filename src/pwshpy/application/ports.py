@@ -301,9 +301,13 @@ class RegistryKeySource(Protocol):
 
 
 class ServiceSource(Protocol):
-    """Enumerate the Windows services as typed :class:`ServiceInfo` records (native)."""
+    """Enumerate the services as typed :class:`ServiceInfo` records (native).
 
-    def __call__(self) -> Iterator[ServiceInfo]: ...
+    ``strict`` decides what happens to a service the source cannot read: False skips it with a
+    logged WARNING, True raises :class:`~pwshpy.domain.errors.NativeCallError` naming it.
+    """
+
+    def __call__(self, *, strict: bool = False) -> Iterator[ServiceInfo]: ...
 
 
 class ServiceController(Protocol):

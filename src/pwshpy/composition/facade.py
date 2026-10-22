@@ -476,17 +476,33 @@ class Ps:
         """
         self._registry_controller.remove_key(key, recursive=recursive)
 
-    def get_service(self) -> Pipeline[ServiceInfo]:
+    def get_service(self, *, strict: bool = False) -> Pipeline[ServiceInfo]:
         """Return a lazy pipeline over the services (native, portable).
 
         win32service on Windows, systemd (D-Bus) on Linux - the same ``ServiceInfo`` records.
 
+        Args:
+            strict: What happens to a service that cannot be read. On Linux that is a refused
+                unit-file listing (no unloaded service could be listed) or a refused ``LoadUnit``
+                or ``LoadState`` read of one service file. False (default) skips it and logs a
+                WARNING naming it, so a non-root caller still lists what it can read. True raises
+                :class:`NativeCallError` naming the unit instead: use it when "not listed" must
+                mean "does not exist", e.g. to check a service is gone. The pipeline is lazy, so
+                the error is raised when iteration reaches the item. On Windows the listing drops
+                no service (an unreadable configuration only leaves ``start_type`` None), so
+                ``strict`` changes nothing there. A single field that cannot be read keeps its
+                default in both modes on both OSes.
+
+        Raises:
+            NativeCallError: The service manager cannot be reached, or (with ``strict``) a
+                service cannot be read - raised during iteration.
+
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
-            >>> isinstance(build_ps().get_service(), Pipeline)
+            >>> isinstance(build_ps().get_service(strict=True), Pipeline)
             True
         """
-        return Pipeline(self._service_source())
+        return Pipeline(self._service_source(strict=strict))
 
     def start_service(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
         """Start a service; return its post-start state (native, portable, **mutating**).

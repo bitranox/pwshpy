@@ -32,12 +32,12 @@
                             exit code 77 if the elevation is refused
         -PwshPyUv PATH      run the uv at this absolute path instead of searching for one
 
-    Run elevated (an administrator token, SYSTEM, or root), it only runs a uv that no
-    non-administrator can modify: neither the file nor the directory holding it may grant write
-    access to any account other than SYSTEM, Administrators, LOCAL SERVICE, NETWORK SERVICE or
-    TrustedInstaller (on POSIX: root must own both, and nobody else may write them). Any other uv
-    it finds is skipped with a line on stderr, and a -PwshPyUv path that fails the check is
-    refused with exit code 127.
+    Run elevated (an administrator token, SYSTEM, or root), it only runs a uv that no other
+    account can modify: neither the file nor the directory holding it may be owned by, or grant
+    write access to, any account other than the running one, SYSTEM, Administrators, LOCAL
+    SERVICE, NETWORK SERVICE or TrustedInstaller (on POSIX: root must own both, and nobody else
+    may write them). Any other uv it finds is skipped with a line on stderr, and a -PwshPyUv path
+    that fails the check is refused with exit code 127.
 
     Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -178,8 +178,9 @@ function Test-PwshPyTree {
 }
 
 # The accounts whose write access to uv changes nothing, because an elevated run already acts with
-# their rights: SYSTEM, LOCAL SERVICE, NETWORK SERVICE, BUILTIN\Administrators, TrustedInstaller.
-# By SID, never by name: the names are localised ('Administratoren' on a German Windows).
+# their rights: SYSTEM, LOCAL SERVICE, NETWORK SERVICE, BUILTIN\Administrators, TrustedInstaller,
+# plus the running account itself (added in Get-PwshPyTrustedSid). By SID, never by name: the names
+# are localised ('Administratoren' on a German Windows).
 $PwshPyTrustedSids = @(
     'S-1-5-18',
     'S-1-5-19',
@@ -194,6 +195,20 @@ $PwshPyTrustedSids = @(
 $PwshPyFileWriteRights = 0x2 -bor 0x4 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
 $PwshPyDirectoryWriteRights = $PwshPyFileWriteRights -bor 0x40
 
+function Get-PwshPyRunningUserSid {
+    # The account this process runs as, from its token: USERNAME can be set by anyone, and under
+    # SYSTEM it names the machine account rather than S-1-5-18.
+    return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
+
+function Get-PwshPyTrustedSid {
+    # The running account may write its own uv: whatever that uv could do elevated, this account
+    # could already do by swapping it before elevating (the accepted residual risk, user decision on
+    # [56]). Under SYSTEM it adds nothing, so a scheduled task keeps the strict rule; another user,
+    # Users, Authenticated Users or Everyone holding write access still refuses the uv.
+    return @($PwshPyTrustedSids) + @(Get-PwshPyRunningUserSid)
+}
+
 function Test-PwshPyAbsolutePath {
     param([string] $Path)
 
@@ -206,8 +221,9 @@ function Test-PwshPyAbsolutePath {
 function Get-PwshPyAclDistrust {
     param([string] $Path, [bool] $Directory)
 
-    # Returns why a non-administrator could change $Path, or '' when none can. The owner counts as
-    # a writer whatever the ACL says, because an owner may always rewrite the ACL.
+    # Returns why another account could change $Path, or '' when none can. The owner counts as a
+    # writer whatever the ACL says, because an owner may always rewrite the ACL.
+    $trusted = Get-PwshPyTrustedSid
     try {
         $acl = Get-Acl -LiteralPath $Path
     } catch {
@@ -216,7 +232,7 @@ function Get-PwshPyAclDistrust {
     $sidType = [Security.Principal.SecurityIdentifier]
     $owner = $acl.GetOwner($sidType)
     $ownerSid = if ($owner) { $owner.Value } else { 'an unknown account' }
-    if ($PwshPyTrustedSids -notcontains $ownerSid) { return "$Path is owned by $ownerSid, not an administrative account" }
+    if ($trusted -notcontains $ownerSid) { return "$Path is owned by $ownerSid, neither the running account nor an administrative one" }
     $dangerous = if ($Directory) { $PwshPyDirectoryWriteRights } else { $PwshPyFileWriteRights }
     foreach ($rule in $acl.GetAccessRules($true, $true, $sidType)) {
         if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
@@ -225,7 +241,7 @@ function Get-PwshPyAclDistrust {
         $sid = $rule.IdentityReference.Value
         # CREATOR OWNER and OWNER RIGHTS stand for the owner, already judged above.
         if ($sid -eq 'S-1-3-0' -or $sid -eq 'S-1-3-4') { continue }
-        if ($PwshPyTrustedSids -contains $sid) { continue }
+        if ($trusted -contains $sid) { continue }
         if (([int]$rule.FileSystemRights) -band $dangerous) {
             return "$Path lets $sid change it ($($rule.FileSystemRights))"
         }
@@ -307,7 +323,7 @@ function Test-PwshPyUvAcceptable {
     # reason a different uv ran (or none) is visible.
     $why = Get-PwshPyUvDistrust -Path $Candidate
     if (-not $why) { return $true }
-    Write-PwshPyNotice "pwshpy: skipping uv at ${Candidate}: $why (an elevated run only runs a uv no non-administrator can modify)"
+    Write-PwshPyNotice "pwshpy: skipping uv at ${Candidate}: $why (an elevated run only runs a uv no other account can modify)"
     return $false
 }
 
@@ -646,7 +662,7 @@ $PwshPyPrepare = {
     # (a scheduled task) or root alike.
     $PwshPyElevatedRun = Test-PwshPyElevated
     if ($PwshPyOnWindows) {
-        $PwshPyUvHint = 'An elevated run only runs a uv no non-administrator can modify: install one where only administrators can write (for example under C:\Program Files) or pass -PwshPyUv <path>.'
+        $PwshPyUvHint = 'An elevated run only runs a uv no account but this one, SYSTEM and Administrators can modify: install one in this account''s profile or where only administrators can write (for example under C:\Program Files), or pass -PwshPyUv <path>.'
     } else {
         $PwshPyUvHint = 'As root only a uv owned by root that no other account can modify is run: install one there (for example under /usr/local/bin) or pass -PwshPyUv <path>.'
     }
@@ -681,9 +697,9 @@ $PwshPyPrepare = {
             }
             exit 127
         }
-        # Elevated, the installer writes into the running account's profile: SYSTEM's is admin-only,
-        # so a scheduled task's fresh install passes the trust rule; an administrator's own profile
-        # is theirs to write unelevated, so a uv installed there is refused just like one found there.
+        # Elevated, the installer writes into the running account's own profile, which only that
+        # account, SYSTEM and Administrators may change, so a fresh install passes the trust rule
+        # (under SYSTEM that profile is admin-only).
         Install-PwshPyUv
         $PwshPyUv = Get-PwshPyUvPath -Elevated $PwshPyElevatedRun
     }

@@ -555,7 +555,8 @@ def test_as_root_each_skipped_uv_names_its_reason(tmp_path: Path, shell_id: str,
     result = _run(shell, runner, "--pwshpy-no-install-uv", env=environment)
     assert result.returncode == 127, result.stdout + result.stderr
     assert f"{_UV_SKIPPED} {planted}: its directory {planted.parent} is writable by every account" in result.stderr
-    assert f"{_UV_SKIPPED} {owned_uv}: its directory {owned} is owned by uid {os.getuid()}, not root" in result.stderr
+    owner = owned.stat().st_uid
+    assert f"{_UV_SKIPPED} {owned_uv}: its directory {owned} is owned by uid {owner}, not root" in result.stderr
 
 
 @_needs_trusted_system_uv

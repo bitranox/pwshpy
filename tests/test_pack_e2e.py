@@ -37,6 +37,10 @@ pytestmark = [pytest.mark.os_agnostic]
 
 _PWSH = shutil.which("pwsh") or shutil.which("powershell")
 _UV = shutil.which("uv")
+#: Passed on every run: a run that finds no uv it may use must fail with 127, never fetch the network
+#: installer, which would install uv into the real profile of whoever runs the suite (it did once,
+#: on the dev VM, while the runner refused every uv during a RED run).
+_NEVER_INSTALL_UV = "-PwshPyNoInstallUv"
 #: The POSIX path the runner probes whatever the environment says (pack_runner.ps1).
 _SYSTEM_WIDE_UV = "/usr/local/bin/uv"
 #: Variables that point the runner's uv lookup at an install directory.
@@ -50,8 +54,11 @@ class _UvLocation:
     """The directory the e2e runs put first on PATH so the runner finds uv there.
 
     On an elevated Windows host (CI's windows-latest, the dev VM) the runner accepts only a uv that
-    no non-administrator can modify, which a toolcache or per-user install is not, so the module
-    fixture below points this at an admin-only copy for the duration of the module.
+    no account other than the running one, Administrators and the system accounts can modify. A
+    per-user uv passes that, but CI's uv sits in the hosted tool cache under the C: drive root, and
+    a directory created there inherits the root's Authenticated Users Modify grant on a default
+    Windows install, so the found uv cannot be relied on: the module fixture below points this at a
+    copy in a directory only this account, SYSTEM and Administrators may change (no /setowner).
     """
 
     directory: Path = Path(_UV or "uv").parent
@@ -104,7 +111,7 @@ def _run(runner: Path, *arguments: str, env: dict[str, str] | None = None) -> su
     # artefact, not a packer defect (the argument reaches sys.argv intact either way).
     child_env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
-        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), *arguments],
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), _NEVER_INSTALL_UV, *arguments],
         capture_output=True,
         encoding="utf-8",
         errors="replace",
@@ -238,7 +245,7 @@ def test_concurrent_cold_starts_do_not_race(tmp_path: Path) -> None:
         **_isolated_cache(tmp_path),
     }
     assert _PWSH is not None
-    argv = [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(manifest.output_path), "concurrent"]
+    argv = [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(manifest.output_path), _NEVER_INSTALL_UV, "concurrent"]
     first = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
     second = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
     out_a, err_a = first.communicate(timeout=300)
@@ -661,7 +668,16 @@ def _run_whole_runner_elevated(
     child_env = {**os.environ, **env}
     child_env["PATH"] = os.pathsep.join([str(_UvLocation.directory), child_env.get("PATH", "")])
     return subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
-        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(stand_in), "-PwshPyElevate", *arguments],
+        [
+            _PWSH,
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(stand_in),
+            _NEVER_INSTALL_UV,
+            "-PwshPyElevate",
+            *arguments,
+        ],
         capture_output=True,
         encoding="utf-8",
         errors="replace",
@@ -855,10 +871,11 @@ def test_unpack_of_a_freshly_packed_artefact_round_trips(tmp_path: Path) -> None
 
 
 # --- which uv an elevated run trusts ([56]) --------------------------------------------------
-# An elevated (or SYSTEM) run executes the uv it finds with full rights, so a uv that a
-# non-administrator can replace is a privilege escalation. The runner judges WHO CAN WRITE the
-# binary and its directory, never where it was found. These tests force the runner's elevation probe
-# so the same artefact code is exercised elevated and not, on any host.
+# An elevated (or SYSTEM) run executes the uv it finds with full rights, so a uv that another account
+# can replace is a privilege escalation; the running account itself, SYSTEM and Administrators may
+# write it. The runner judges WHO CAN WRITE the binary and its directory, never where it was found.
+# These tests force the runner's elevation probe so the same artefact code is exercised elevated and
+# not, on any host.
 
 #: The packed script under test: prints which uv started it. A POSIX stand-in exports its own path
 #: as PWSHPY_TEST_UV before handing over; a real (or copied) uv sets UV to its own executable.
@@ -879,6 +896,8 @@ _USAGE_EXIT = 64
 _SID_ADMINISTRATORS = "*S-1-5-32-544"
 _SID_SYSTEM = "*S-1-5-18"
 _SID_USERS = "*S-1-5-32-545"
+#: Broad groups whose write access always refuses a uv: Users, Authenticated Users, Everyone.
+_BROAD_GROUP_SIDS = ("S-1-5-32-545", "S-1-5-11", "S-1-1-0")
 
 
 def _windows_elevated() -> bool:
@@ -903,6 +922,43 @@ def _icacls(path: Path, *arguments: str) -> None:
     )
 
 
+def _current_user_sid() -> str:
+    """This process's user SID, from whoami's locale-independent CSV form (Windows only)."""
+    result = subprocess.run(
+        ["whoami", "/user", "/fo", "csv", "/nh"],  # noqa: S607 - resolved from System32 on every Windows host
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=True,
+    )
+    return result.stdout.strip().split(",")[-1].strip('"')
+
+
+def _other_user_sid() -> str:
+    """A real account that is not this one: the Guest (RID 501) of this account's own domain."""
+    return _current_user_sid().rsplit("-", 1)[0] + "-501"
+
+
+def _private_dir(path: Path) -> Path:
+    """A directory only this account, SYSTEM and Administrators can change (Users may read and run).
+
+    The owner is left as Windows sets it (this account, or Administrators for an elevated process
+    on some hosts); both are trusted by the runner, so no /setowner is needed.
+    """
+    path.mkdir(parents=True)
+    _icacls(
+        path,
+        "/inheritance:r",
+        "/grant:r",
+        f"*{_current_user_sid()}:(OI)(CI)F",
+        f"{_SID_ADMINISTRATORS}:(OI)(CI)F",
+        f"{_SID_SYSTEM}:(OI)(CI)F",
+        f"{_SID_USERS}:(OI)(CI)RX",
+    )
+    return path
+
+
 def _admin_only_dir(path: Path) -> Path:
     """A directory only SYSTEM and Administrators can change (Users may read and run), owned by Administrators."""
     path.mkdir(parents=True)
@@ -918,16 +974,15 @@ def _admin_only_dir(path: Path) -> Path:
     return path
 
 
-def _user_writable_dir(path: Path) -> Path:
-    """A directory every member of Users may modify: the planted-uv situation.
+def _user_writable_dir(path: Path, *, sid: str = _SID_USERS[1:]) -> Path:
+    """A directory ``sid`` (every member of Users by default) may modify: the planted-uv situation.
 
-    On Windows it is owned by Administrators, so the Users grant alone is what makes it untrusted.
+    On Windows its owner is this account or Administrators, both trusted, so the grant alone is
+    what makes it untrusted. On POSIX it is world-writable (``sid`` does not apply).
     """
     path.mkdir(parents=True)
     if sys.platform == "win32":
-        _icacls(path, "/grant", f"{_SID_USERS}:(OI)(CI)M")
-        if _windows_elevated():
-            _icacls(path, "/setowner", _SID_ADMINISTRATORS)
+        _icacls(path, "/grant", f"*{sid}:(OI)(CI)M")
     else:
         path.chmod(0o777)
     return path
@@ -971,35 +1026,32 @@ def _root_only_writable(path: Path) -> bool:
 def _trusted_uv(tmp_path: Path) -> Path | None:
     """A uv an elevated run must accept, or None where this host cannot provide one.
 
-    Windows: an admin-only copy (needs an elevated test process to set the owner). POSIX: the
-    system-wide /usr/local/bin/uv when root owns it, since no unprivileged test can create one.
+    Windows: a copy in a directory only this account, SYSTEM and Administrators may change. POSIX:
+    the system-wide /usr/local/bin/uv when root owns it, since no unprivileged test can create one.
     """
     if sys.platform == "win32":
-        if not _windows_elevated():
-            return None
-        directory = _admin_only_dir(tmp_path / "trusted-bin")
-        copied = _copy_uv(directory)
-        # A new file's owner is its creator on a Windows client, not the Administrators group.
-        _icacls(copied, "/setowner", _SID_ADMINISTRATORS)
-        return copied
+        return _copy_uv(_private_dir(tmp_path / "trusted-bin"))
     system_wide = Path(_SYSTEM_WIDE_UV)
     if system_wide.is_file() and _root_only_writable(system_wide):
         return system_wide
     return None
 
 
-def _elevation_stand_in(runner: Path, output: Path, *, elevated: str) -> Path:
+def _elevation_stand_in(runner: Path, output: Path, *, elevated: str, running_sid: str | None = None) -> Path:
     """The whole runner with its elevation probe answering ``elevated`` (a PowerShell expression).
 
     One exact substitution and nothing else, so the uv lookup, the pin and the run are the shipped
     code. Without -PwshPyElevate nothing relaunches, so this probes the uv trust rule alone.
+    ``running_sid`` also makes the runner believe it runs as that SID ('S-1-5-18' stands in for a
+    SYSTEM scheduled task, which no test can start without changing the host).
     """
     text = runner.read_text(encoding="utf-8")
-    old = "function Test-PwshPyElevated {"
-    assert text.count(old) == 1
-    text = text.replace(
-        old, f"function Test-PwshPyElevated {{\n    return {elevated}\n}}\n\nfunction Test-PwshPyElevatedOnHost {{"
-    )
+    probes = [("function Test-PwshPyElevated {", elevated, "Test-PwshPyElevatedOnHost")]
+    if running_sid is not None:
+        probes.append(("function Get-PwshPyRunningUserSid {", f"'{running_sid}'", "Get-PwshPyRunningUserSidOnHost"))
+    for old, answer, renamed in probes:
+        assert text.count(old) == 1, old
+        text = text.replace(old, f"{old}\n    return {answer}\n}}\n\nfunction {renamed} {{")
     output.write_text(text, encoding="utf-8")
     return output
 
@@ -1013,7 +1065,7 @@ def _run_with_path(
     child_env.pop("PWSHPY_TEST_UV", None)
     child_env["PATH"] = os.pathsep.join([*map(str, path_first), os.environ.get("PATH", "")])
     return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
-        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), *arguments],
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), _NEVER_INSTALL_UV, *arguments],
         capture_output=True,
         encoding="utf-8",
         errors="replace",
@@ -1059,19 +1111,6 @@ def test_an_elevated_run_skips_a_uv_a_non_admin_can_modify(tmp_path: Path) -> No
     assert _skip_line(result, planted), result.stderr
 
 
-def _current_user_sid() -> str:
-    """This process's user SID, from whoami's locale-independent CSV form (Windows only)."""
-    result = subprocess.run(
-        ["whoami", "/user", "/fo", "csv", "/nh"],  # noqa: S607 - resolved from System32 on every Windows host
-        capture_output=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=60,
-        check=True,
-    )
-    return result.stdout.strip().split(",")[-1].strip('"')
-
-
 def _skip_line(result: subprocess.CompletedProcess[str], uv: Path) -> str:
     """The runner's skip line for ``uv``; case-folded on Windows, where Get-Command reports uv.EXE."""
     wanted = os.path.normcase(f"{_UV_SKIPPED} {uv}:")
@@ -1080,32 +1119,99 @@ def _skip_line(result: subprocess.CompletedProcess[str], uv: Path) -> str:
 
 @pytest.mark.local_only
 def test_an_elevated_run_names_why_it_skipped_each_uv(tmp_path: Path) -> None:
-    """Every PATH hit is judged and named: a directory Users may modify, then one this account owns.
+    """Every PATH hit is judged and named: a directory Users may modify, then one another account may.
 
     Pins the parsed reason as well as the skip, so a misread ACL or listing cannot pass for a check.
-    On Windows an elevated process creates directories owned by Administrators (as this account's
-    profile ACL grants OWNER RIGHTS), so the test hands the second directory to this user itself.
+    On Windows "another account" is a specific user SID (this domain's Guest); on POSIX, where an
+    elevated run is root, any non-root owner is one.
     """
     planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
-    owned = tmp_path / "owned-bin"
-    owned.mkdir()
     if sys.platform == "win32":
-        user_sid = _current_user_sid()
-        _icacls(owned, "/setowner", f"*{user_sid}")
+        other_sid = _other_user_sid()
+        other = _user_writable_dir(tmp_path / "other-bin", sid=other_sid)
         expected_planted = f"its directory {planted.parent} lets {_SID_USERS[1:]} change it"
-        expected_owned = f"its directory {owned} is owned by {user_sid}, not an administrative account"
+        expected_other = f"its directory {other} lets {other_sid} change it"
     else:
-        owned.chmod(0o755)
+        other = tmp_path / "other-bin"
+        other.mkdir()
+        other.chmod(0o755)
         expected_planted = f"its directory {planted.parent} is writable by every account"
-        expected_owned = f"its directory {owned} is owned by uid {os.getuid()}, not root"
-    owned_uv = _uv_stand_in(owned)
+        expected_other = f"its directory {other} is owned by uid {os.getuid()}, not root"
+    other_uv = _uv_stand_in(other)
     runner = _trust_runner(tmp_path, elevated="$true")
-    result = _run_with_path(tmp_path, runner, "-PwshPyNoInstallUv", path_first=[planted.parent, owned])
-    # Only an elevated test can hand the planted directory to Administrators; otherwise its owner
-    # (this account) is what the runner names first.
-    if sys.platform != "win32" or _windows_elevated():
-        assert expected_planted in _skip_line(result, planted), result.stderr
-    assert expected_owned in _skip_line(result, owned_uv), result.stderr
+    result = _run_with_path(tmp_path, runner, path_first=[planted.parent, other])
+    assert expected_planted in _skip_line(result, planted), result.stderr
+    assert expected_other in _skip_line(result, other_uv), result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs")
+def test_an_elevated_run_accepts_a_uv_only_the_running_account_can_modify(tmp_path: Path) -> None:
+    """An elevated administrator's own per-user uv runs: owned by and writable only by that account.
+
+    The running account already holds everything an elevated run could do with that uv, so only
+    another principal's write access makes it a privilege escalation (user decision on [56]).
+    """
+    user_sid = _current_user_sid()
+    own = _private_dir(tmp_path / "own-bin")
+    own_uv = _copy_uv(own)
+    for item in (own, own_uv):
+        _icacls(item, "/setowner", f"*{user_sid}")
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[own])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _same(_reported_uv(result), own_uv), result.stdout + result.stderr
+    assert not _skip_line(result, own_uv), result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs")
+@pytest.mark.parametrize("group_sid", _BROAD_GROUP_SIDS, ids=["users", "authenticated-users", "everyone"])
+def test_an_elevated_run_refuses_a_uv_a_broad_group_can_modify(tmp_path: Path, group_sid: str) -> None:
+    """Users, Authenticated Users and Everyone write access still refuses a uv; the next one runs."""
+    planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin", sid=group_sid))
+    trusted = _trusted_uv(tmp_path)
+    assert trusted is not None
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[planted.parent, trusted.parent])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _same(_reported_uv(result), trusted), result.stdout + result.stderr
+    assert f"its directory {planted.parent} lets {group_sid} change it" in _skip_line(result, planted), result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs")
+def test_as_system_the_strict_rule_is_unchanged(tmp_path: Path) -> None:
+    """Running as SYSTEM, a logged-on account's own uv is refused; an admin-only one still runs.
+
+    The runner's identity probe answers S-1-5-18 here (starting a real SYSTEM task would change the
+    host); since SYSTEM is already trusted, the running account adds nothing to the trusted set.
+    """
+    user_sid = _current_user_sid()
+    own = _private_dir(tmp_path / "own-bin")
+    own_uv = _copy_uv(own)
+    for item in (own, own_uv):
+        _icacls(item, "/setowner", f"*{user_sid}")
+    path_first = [own]
+    admin_uv: Path | None = None
+    if _windows_elevated():  # only an elevated test can hand a directory to Administrators
+        admin_dir = _admin_only_dir(tmp_path / "admin-bin")
+        admin_uv = _copy_uv(admin_dir)
+        _icacls(admin_uv, "/setowner", _SID_ADMINISTRATORS)
+        path_first.append(admin_dir)
+    entry = tmp_path / "which_uv.py"
+    entry.write_text(_ENTRY_REPORTING_UV)
+    manifest = pack_script(entry)
+    runner = _elevation_stand_in(
+        Path(manifest.output_path), tmp_path / "system_stand_in.ps1", elevated="$true", running_sid="S-1-5-18"
+    )
+    result = _run_with_path(tmp_path, runner, path_first=path_first)
+    assert f"its directory {own} is owned by {user_sid}" in _skip_line(result, own_uv), result.stderr
+    if admin_uv is not None:
+        assert _same(_reported_uv(result), admin_uv), result.stdout + result.stderr
 
 
 @pytest.mark.local_only
@@ -1178,10 +1284,9 @@ def test_an_elevated_run_follows_a_symlinked_uv_to_its_target(tmp_path: Path) ->
     if trusted is None:
         pytest.skip(_needs_a_trusted_uv)
     planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
-    links = _admin_only_dir(tmp_path / "links-bin")
+    links = _private_dir(tmp_path / "links-bin")
     link = links / "uv.exe"
     link.symlink_to(planted)
-    _icacls(link, "/setowner", _SID_ADMINISTRATORS, "/L")
     runner = _trust_runner(tmp_path, elevated="$true")
     result = _run_with_path(tmp_path, runner, path_first=[links, trusted.parent])
     assert result.returncode == 0, result.stdout + result.stderr

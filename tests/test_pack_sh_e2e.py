@@ -21,6 +21,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from elevation_doubles import (
     managed_python_dir,
     managed_python_env,
     owned_by_another_account,
+    with_data_home,
     write_fake_sudo,
     write_local_wheel,
     write_planted_environment,
@@ -44,6 +46,9 @@ from elevation_doubles import (
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.enums import RunnerFormat
 from pwshpy.domain.packing import SHIM_MODULE, PackOptions
+
+if sys.platform != "win32":
+    import pwd
 
 pytestmark = [pytest.mark.local_only, pytest.mark.os_posix]
 
@@ -97,23 +102,30 @@ _ROOT_PROBE = ('if [ "$(pwshpy_euid)" = "0" ]; then\n    PWSHPY_AS_ROOT=1', "if 
 _NOT_ROOT_PROBE = "if false; then\n    PWSHPY_AS_ROOT=1"
 
 
-def _force_probe(runner: Path, *, as_root: bool | None) -> None:
+def _force_probe(runner: Path, *, as_root: bool | None, real_data_home: bool = False) -> None:
     """Make ``runner``'s root probe answer ``as_root`` (one counted substitution); None keeps the real one.
 
     False only changes anything when the suite runs as root, where the real probe would say root.
+    A runner forced to root also takes ``data_home(runner.parent)`` for its account's data directory
+    (see :func:`elevation_doubles.with_data_home`) unless ``real_data_home`` keeps the passwd lookup.
     """
     if as_root is None or (not as_root and not RUNNING_AS_ROOT):
         return
     text = runner.read_text(encoding="utf-8")
     assert text.count(_ROOT_PROBE[0]) == 1
-    runner.write_text(text.replace(_ROOT_PROBE[0], _ROOT_PROBE[1] if as_root else _NOT_ROOT_PROBE), encoding="utf-8")
+    text = text.replace(_ROOT_PROBE[0], _ROOT_PROBE[1] if as_root else _NOT_ROOT_PROBE)
+    if as_root and not real_data_home:
+        text = with_data_home(text, runner.parent, powershell=False)
+    runner.write_text(text, encoding="utf-8")
 
 
-def _pack_sh(entry: Path, dest: Path, *, as_root: bool | None = False, **opts: object) -> Path:
+def _pack_sh(
+    entry: Path, dest: Path, *, as_root: bool | None = False, real_data_home: bool = False, **opts: object
+) -> Path:
     """Pack ``entry`` to a .sh runner whose root probe answers ``as_root`` (see :func:`_force_probe`)."""
     manifest = pack_script(entry, dest, options=PackOptions(format=RunnerFormat.SH, **opts))  # type: ignore[arg-type]
     runner = Path(manifest.output_path)
-    _force_probe(runner, as_root=as_root)
+    _force_probe(runner, as_root=as_root, real_data_home=real_data_home)
     return runner
 
 
@@ -1109,13 +1121,25 @@ _NO_MANAGED_PYTHON = "No interpreter found in virtual environments or managed in
 
 
 def _python_runner(
-    tmp_path: Path, *, as_root: bool, source: str = _ENTRY_REPORTING_PYTHON, with_packages: Sequence[str] = ()
+    tmp_path: Path,
+    *,
+    as_root: bool,
+    source: str = _ENTRY_REPORTING_PYTHON,
+    with_packages: Sequence[str] = (),
+    real_data_home: bool = False,
 ) -> tuple[Path, Path]:
     """A which-python .sh runner (root probe forced when ``as_root``) and a uv it trusts, in a tree this
-    test owns that counts as root's. ``source`` replaces the packed script."""
+    test owns that counts as root's. ``source`` replaces the packed script; ``real_data_home`` as for
+    :func:`_force_probe`."""
     entry = tmp_path / "which_python.py"
     entry.write_text(source)
-    runner = _pack_sh(entry, tmp_path / "which_python.sh", as_root=as_root, with_packages=list(with_packages))
+    runner = _pack_sh(
+        entry,
+        tmp_path / "which_python.sh",
+        as_root=as_root,
+        with_packages=list(with_packages),
+        real_data_home=real_data_home,
+    )
     text = runner.read_text(encoding="utf-8")
     assert text.count(str(_SYSTEM_WIDE_UV)) == 1
     text = text.replace(str(_SYSTEM_WIDE_UV), str(tmp_path / "no-system-uv"))
@@ -1267,6 +1291,59 @@ def test_as_root_the_variables_that_steer_the_managed_python_are_dropped(
     lines = record.read_text(encoding="utf-8").splitlines()
     recorded = dict(line[4:].split("=", 1) for line in lines if line.startswith("env:"))
     for name, value in steering.items():
+        dropped_line = f"pwshpy: ignoring {name}" in result.stderr
+        if as_root:
+            # The runner names its own install directory (the account's), never the caller's.
+            assert recorded.get(name) != value and dropped_line, (name, recorded, result.stderr)
+        else:
+            assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
+
+
+def _recording_python_runner(tmp_path: Path, *, as_root: bool, real_data_home: bool = False) -> tuple[Path, Path, Path]:
+    """A which-python runner whose uv is a recording double in a tree counted as root's: the runner,
+    the double, and the file it records the ``uv run`` call into."""
+    runner, _ = _python_runner(tmp_path, as_root=as_root, real_data_home=real_data_home)
+    leaf = tmp_path / "rec" / "bin"
+    leaf.mkdir(parents=True)
+    record = tmp_path / "argv.txt"
+    uv = write_recording_uv(leaf, record)
+    leaf.chmod(0o755)
+    (tmp_path / "rec").chmod(0o755)
+    return runner, uv, record
+
+
+def _recorded_variables(record: Path) -> dict[str, str]:
+    lines = record.read_text(encoding="utf-8").splitlines()
+    return dict(line[4:].split("=", 1) for line in lines if line.startswith("env:"))
+
+
+def _passwd_data_home() -> Path:
+    """The data directory the passwd database gives this process's account (POSIX only)."""
+    if sys.platform == "win32":  # pragma: no cover - this module is POSIX-only
+        raise AssertionError("POSIX only")
+    return Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".local" / "share"
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_the_managed_python_dir_is_the_accounts_own(
+    tmp_path: Path, shell_id: str, shell: list[str], as_root: bool
+) -> None:
+    """[93]: as root uv's managed-Python directory is the passwd home's, whatever HOME and XDG_DATA_HOME
+    say, and PYTHONHOME / PYTHONPATH are dropped with a line each; not root (the control) the runner
+    names no directory and both variables reach uv unchanged."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root, real_data_home=True)
+    library = {"PYTHONHOME": str(tmp_path / "planted-home"), "PYTHONPATH": str(tmp_path / "planted-path")}
+    environment = {**_trust_env(tmp_path), **library, "XDG_DATA_HOME": str(tmp_path / "elsewhere")}
+    environment.pop("UV_PYTHON_INSTALL_DIR")
+    result = _run_in(shell, runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = _recorded_variables(record)
+    if as_root:
+        assert recorded.get("UV_PYTHON_INSTALL_DIR") == str(_passwd_data_home() / "uv" / "python"), recorded
+    else:
+        assert "UV_PYTHON_INSTALL_DIR" not in recorded, recorded
+    for name, value in library.items():
         dropped_line = f"pwshpy: ignoring {name}" in result.stderr
         if as_root:
             assert name not in recorded and dropped_line, (name, recorded, result.stderr)

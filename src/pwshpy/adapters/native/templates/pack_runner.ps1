@@ -217,6 +217,8 @@ $PwshPyTrustedUids = @('0')
 # the caller's PATH may hold a directory another account can write. System directories alone (user
 # decision), identical to the .sh runner: not /usr/local, which local installs populate.
 $PwshPyFixedPath = '/usr/bin:/bin:/usr/sbin:/sbin:/run/current-system/sw/bin:/run/current-system/profile/bin'
+# POSIX: the id executables in those same directories, the only ones a root run ever asks.
+$PwshPyFixedIds = @('/usr/bin/id', '/bin/id', '/usr/sbin/id', '/sbin/id', '/run/current-system/sw/bin/id', '/run/current-system/profile/bin/id')
 # The variables through which a caller names the interpreter itself, past --python-preference
 # only-managed (measured with uv 0.13: an explicit UV_PYTHON path and an active virtual or conda
 # environment each run their own python), or that uv refuses beside that flag; then the ones that
@@ -227,6 +229,10 @@ $PwshPyInterpreterVariables = @(
     'UV_PYTHON', 'VIRTUAL_ENV', 'CONDA_PREFIX', 'UV_MANAGED_PYTHON', 'UV_NO_MANAGED_PYTHON',
     'UV_PYTHON_INSTALL_DIR', 'UV_CONFIG_FILE', 'UV_PYTHON_INSTALL_MIRROR', 'UV_PYTHON_DOWNLOADS_JSON_URL'
 )
+# The variables the interpreter reads itself, whichever one runs: PYTHONHOME replaces its standard
+# library and PYTHONPATH puts the caller's directories ahead of it, so either would run code the caller
+# chose with elevated rights. An elevated run drops them too; identical to the .sh runner.
+$PwshPyLibraryVariables = @('PYTHONHOME', 'PYTHONPATH')
 
 function Get-PwshPyRunningUserSid {
     # The account this process runs as, from its token: USERNAME can be set by anyone, and under
@@ -562,7 +568,7 @@ function Get-PwshPyEuid {
     # decimal uid the run is treated as root - it fails closed. That costs a non-root caller on such
     # a system the per-user uv lookup (the root rule refuses a uv its own account owns), never
     # safety; dying instead would cost the same caller the whole run. Identical to the .sh runner.
-    foreach ($id in @('/usr/bin/id', '/bin/id', '/usr/sbin/id', '/sbin/id', '/run/current-system/sw/bin/id', '/run/current-system/profile/bin/id')) {
+    foreach ($id in $PwshPyFixedIds) {
         if (-not (Test-Path -LiteralPath $id -PathType Leaf)) { continue }
         try {
             $uid = ([string](& $id -u 2>$null)).Trim()
@@ -692,9 +698,64 @@ function Clear-PwshPyInterpreterVariable {
     # which uv does not read as unset for every variable.
     foreach ($name in $PwshPyInterpreterVariables) {
         if ($null -eq [Environment]::GetEnvironmentVariable($name)) { continue }
-        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run lets no environment variable choose its Python"
+        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run only runs a uv-managed Python from the running account's own data directory"
         Remove-Item -LiteralPath "Env:$name"
     }
+    foreach ($name in $PwshPyLibraryVariables) {
+        if ($null -eq [Environment]::GetEnvironmentVariable($name)) { continue }
+        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run runs the Python with its own library paths"
+        Remove-Item -LiteralPath "Env:$name"
+    }
+}
+
+function Get-PwshPyPasswdHome {
+    param([string] $Entry, [string] $Uid)
+
+    # The home in one passwd entry, or '' when the entry is not this uid's or names no absolute home.
+    # It is the second-to-last field both in the 7-field passwd form and in the 10-field
+    # master.passwd form BSD's id -P prints.
+    $fields = ([string]$Entry).Trim() -split ':'
+    if ($fields.Count -lt 7 -or $fields[2] -ne $Uid) { return '' }
+    $accountHome = $fields[$fields.Count - 2]
+    if (-not $accountHome.StartsWith('/')) { return '' }
+    return $accountHome
+}
+
+function Get-PwshPyAccountDataHome {
+    # The data directory of the account this run is (uv keeps its managed Pythons in
+    # <it>/uv/python), asked of the system rather than of the environment: APPDATA, HOME and
+    # XDG_DATA_HOME are whatever the caller or the service that started it set. Windows: the
+    # RoamingAppData known folder of the running token (Environment.GetFolderPath, which asks the shell,
+    # not the APPDATA variable). POSIX: <home>/.local/share, the home from the passwd database: getent
+    # asks every name service (Linux), id -P is the BSD and macOS form, and /etc/passwd itself lists
+    # root everywhere; the tools come from the fixed helper directories, never from PATH. No answer
+    # throws: a guessed directory would be one the caller could create.
+    if ($PwshPyOnWindows) {
+        $roaming = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
+        if (-not $roaming -or -not (Test-PwshPyAbsolutePath -Path $roaming)) {
+            throw 'cannot read the RoamingAppData known folder of the running account'
+        }
+        return $roaming
+    }
+    $uid = Get-PwshPyEuid
+    $answers = New-Object System.Collections.Generic.List[string]
+    foreach ($directory in ($PwshPyFixedPath -split ':')) {
+        $getent = "$directory/getent"
+        if (-not (Test-Path -LiteralPath $getent -PathType Leaf)) { continue }
+        try { $answers.AddRange([string[]]@(. (ConvertTo-PwshPyNativeCall -FilePath $getent -ArgumentList @('passwd', $uid) -StderrPath '/dev/null'))) } catch { }
+        break
+    }
+    foreach ($id in $PwshPyFixedIds) {
+        if (-not (Test-Path -LiteralPath $id -PathType Leaf)) { continue }
+        try { $answers.AddRange([string[]]@(. (ConvertTo-PwshPyNativeCall -FilePath $id -ArgumentList @('-P') -StderrPath '/dev/null'))) } catch { }
+        break
+    }
+    if (Test-Path -LiteralPath '/etc/passwd' -PathType Leaf) { $answers.AddRange([IO.File]::ReadAllLines('/etc/passwd')) }
+    foreach ($answer in $answers) {
+        $accountHome = Get-PwshPyPasswdHome -Entry $answer -Uid $uid
+        if ($accountHome) { return ($accountHome.TrimEnd('/') + '/.local/share') }
+    }
+    throw "cannot read the home directory of uid $uid from the passwd database"
 }
 
 function Invoke-PwshPyElevated {
@@ -972,6 +1033,10 @@ $PwshPyPrepare = {
         }
         exit 127
     }
+
+    # Asked here, while a root run on POSIX still runs its helpers from the fixed PATH, and inside the
+    # elevated child's guard, so a failure is relayed.
+    if ($PwshPyElevatedRun) { $PwshPyDataHome = Get-PwshPyAccountDataHome }
 }
 
 if ($PwshPyRelay) {
@@ -1018,6 +1083,9 @@ $PwshPyRunArgs = @('run', '--no-project')
 if ($PwshPyElevatedRun) {
     $PwshPyRunArgs += Get-PwshPyManagedPythonOption
     Clear-PwshPyInterpreterVariable
+    # Named outright after the caller's own choice was dropped: left to itself uv would look in the
+    # data home APPDATA (Windows) or XDG_DATA_HOME (POSIX) names, which is the caller's to set too.
+    Set-Item -LiteralPath 'Env:UV_PYTHON_INSTALL_DIR' -Value (Join-Path (Join-Path $PwshPyDataHome 'uv') 'python')
     $PwshPyCallerCwd = Get-PwshPyCallerDirectory
     $PwshPyRunArgs += Get-PwshPyAnchoredUvArg -CallerDirectory $PwshPyCallerCwd
     $PwshPyTarget = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PwshPyTarget)

@@ -90,6 +90,10 @@ PWSHPY_UV_ARGS_ANCHORED_RAW=@@PWSHPY_UV_ARGS_ANCHORED@@
 # directory first); it travels in the payload, verified like every other file.
 PWSHPY_SHIM='@@PWSHPY_SHIM@@'
 PWSHPY_FILE_HASHES=@@PWSHPY_FILE_HASHES@@
+# Where a root run starts uv: a directory only root can write, so no .venv, .python-version or
+# uv.toml in it or above it can be planted by another account. Named once so every uv call a root
+# run makes uses the same one.
+PWSHPY_ANCHOR=/
 
 # The base64 payload, as a heredoc so a very long blob needs no shell quoting.
 pwshpy_payload_b64() {
@@ -514,10 +518,49 @@ pwshpy_drop_interpreter_variables() {
     for _iv in UV_PYTHON VIRTUAL_ENV CONDA_PREFIX UV_MANAGED_PYTHON UV_NO_MANAGED_PYTHON \
         UV_PYTHON_INSTALL_DIR UV_CONFIG_FILE UV_PYTHON_INSTALL_MIRROR UV_PYTHON_DOWNLOADS_JSON_URL; do
         if eval "[ -n \"\${$_iv+set}\" ]"; then
-            printf '%s\n' "pwshpy: ignoring $_iv: as root no environment variable chooses the Python" >&2
+            printf '%s\n' "pwshpy: ignoring $_iv: as root only a uv-managed Python from the running account's own data directory runs" >&2
             unset "$_iv"
         fi
     done
+    # The interpreter reads these itself, whichever one runs: PYTHONHOME replaces its standard library
+    # and PYTHONPATH puts the caller's directories ahead of it, so either would run code the caller
+    # chose as root.
+    for _iv in PYTHONHOME PYTHONPATH; do
+        if eval "[ -n \"\${$_iv+set}\" ]"; then
+            printf '%s\n' "pwshpy: ignoring $_iv: as root the Python runs with its own library paths" >&2
+            unset "$_iv"
+        fi
+    done
+}
+
+# Prints the data directory of the account this run is (uv keeps its managed Pythons in
+# <it>/uv/python), from the home the passwd database records: as root $HOME and XDG_DATA_HOME are
+# whatever the caller or the service that started it set (sudo keeps HOME on some systems). getent asks every name service (Linux), id -P is the BSD and
+# macOS form, and /etc/passwd itself lists root everywhere; all three come from the fixed helper PATH,
+# and an entry counts only when its uid field is the euid. The home is the second-to-last field in
+# both the 7-field passwd and the 10-field master.passwd form id -P prints. No absolute answer fails
+# the call: a guessed directory would be one the caller could create.
+pwshpy_account_data_home() {
+    _ah_uid=$(pwshpy_euid)
+    for _ah_source in getent id passwd; do
+        _ah_entry=
+        case $_ah_source in
+            getent) command -v getent >/dev/null 2>&1 && _ah_entry=$(getent passwd "$_ah_uid" 2>/dev/null) ;;
+            id) _ah_entry=$(id -P 2>/dev/null) ;;
+            passwd) [ -r /etc/passwd ] && _ah_entry=$(awk -F: -v u="$_ah_uid" '$3 == u { print; exit }' /etc/passwd) ;;
+        esac || _ah_entry=
+        _ah_rest=${_ah_entry#*:*:}
+        [ "${_ah_rest%%:*}" = "$_ah_uid" ] || continue
+        _ah_home=${_ah_entry%:*}
+        _ah_home=${_ah_home##*:}
+        case $_ah_home in
+            /*)
+                printf '%s' "${_ah_home%/}/.local/share"
+                return 0
+                ;;
+        esac
+    done
+    return 1
 }
 
 # Sets PWSHPY_CALLER_CWD to the physical working directory, a trailing newline in its name included
@@ -715,6 +758,9 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # runs the generated shim, which changes back to the caller's directory (handed over in
     # @@PWSHPY_CWD_ENV@@) before the entry runs; every path the caller gave relative to that
     # directory (a --with path, a relative PWSHPY_PACK_CACHE) is made absolute first.
+    # Asked while the helpers still come from the fixed PATH.
+    PWSHPY_DATA_HOME=$(pwshpy_account_data_home) ||
+        pwshpy_die "cannot read the home directory of uid $(pwshpy_euid) from the passwd database" 70
     pwshpy_caller_cwd
     PWSHPY_CALLER_PREFIX=${PWSHPY_CALLER_CWD%/}/
     case $PWSHPY_CACHE in
@@ -732,7 +778,11 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # The shim keeps its own arguments only when no out-of-band argument vector is set; one inherited
     # from the caller's environment must not replace them.
     unset @@PWSHPY_ARGV_ENV@@
-    set -- --python-preference only-managed --project / --directory / "$@"
+    # Named outright after the caller's own choice was dropped: left to itself uv would look in the
+    # data home XDG_DATA_HOME names, which is the caller's to set too.
+    UV_PYTHON_INSTALL_DIR=$PWSHPY_DATA_HOME/uv/python
+    export UV_PYTHON_INSTALL_DIR
+    set -- --python-preference only-managed --project "$PWSHPY_ANCHOR" --directory "$PWSHPY_ANCHOR" "$@"
 else
     set -- "$PWSHPY_CACHE/$PWSHPY_ENTRY" "$@"
     eval "set -- $PWSHPY_UV_ARGS_RAW \"\$@\""

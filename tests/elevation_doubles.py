@@ -11,6 +11,7 @@ Contents:
     * :func:`link_tools` - a ``PATH`` directory holding only the named tools.
     * :data:`MANAGED_PYTHON_VARIABLES` - the variables that steer where uv's managed Pythons come from.
     * :data:`INTERPRETER_VARIABLES` - the variables an elevated run drops before uv picks a Python.
+    * :data:`LIBRARY_VARIABLES` - the variables the interpreter reads itself, dropped too.
     * :func:`write_planted_python` - ``python`` / ``python3`` doubles that record being run.
     * :func:`write_planted_environment` - a virtual or conda environment whose python is such a double.
     * :func:`write_planted_venv` - a real virtual environment whose python records every start.
@@ -19,6 +20,8 @@ Contents:
     * :func:`managed_python_dir` - the host's uv-managed Python directory, when one holds an install.
     * :func:`interpreter_probe_env` - a uv search confined to one test (fresh cache, no downloads).
     * :func:`managed_python_env` - name uv's managed-Python directory so an elevated run finds it too.
+    * :func:`data_home` - the data directory a test makes an elevated runner believe is its account's.
+    * :func:`with_data_home` - a runner whose account data-home lookup answers :func:`data_home`.
 """
 
 from __future__ import annotations
@@ -137,6 +140,10 @@ INTERPRETER_VARIABLES = (
     "UV_NO_MANAGED_PYTHON",
     *MANAGED_PYTHON_VARIABLES,
 )
+
+#: The variables the interpreter reads itself, whichever one runs (another standard library, the
+#: caller's directories ahead of it); an elevated run drops these too. Mirrors the runners' list.
+LIBRARY_VARIABLES = ("PYTHONHOME", "PYTHONPATH")
 
 
 def _real_python() -> str:
@@ -281,7 +288,10 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
     """Write a ``uv`` double (POSIX) that records its argv, one argument per line, then exits 0.
 
     After the arguments it records ``env:<NAME>=<value>`` for each of :data:`INTERPRETER_VARIABLES`
-    it was handed, so a test can read both what a runner passed and what it dropped.
+    and :data:`LIBRARY_VARIABLES` it was handed, so a test can read both what a runner passed and
+    what it dropped. A ``uv python ...`` call (an elevated run resolving its interpreter) is recorded
+    the same way into ``record`` with ``.python`` appended to its name, and ``uv python find`` prints
+    the path of a stand-in ``python`` beside the double, so the run that follows has one to name.
 
     Example:
         >>> import tempfile
@@ -290,12 +300,17 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
         'uv'
     """
     report = "".join(
-        f'if [ -n "${{{name}+set}}" ]; then printf \'env:%s\\n\' "{name}=${name}" >> "{record}"; fi\n'
-        for name in INTERPRETER_VARIABLES
+        f'if [ -n "${{{name}+set}}" ]; then printf \'env:%s\\n\' "{name}=${name}" >> "$record"; fi\n'
+        for name in (*INTERPRETER_VARIABLES, *LIBRARY_VARIABLES)
     )
+    python = directory / "python"
+    python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
+    python.chmod(0o755)
     double = directory / "uv"
     double.write_text(
-        f'#!/bin/sh\nfor arg in "$@"; do printf \'%s\\n\' "$arg" >> "{record}"; done\n{report}exit 0\n',
+        f'#!/bin/sh\nrecord="{record}"\nif [ "$1" = python ]; then record="{record}.python"; fi\n'
+        f'for arg in "$@"; do printf \'%s\\n\' "$arg" >> "$record"; done\n{report}'
+        f'if [ "$1 $2" = "python find" ]; then printf \'%s\\n\' "{python}"; fi\nexit 0\n',
         encoding="utf-8",
         newline="\n",
     )
@@ -329,9 +344,12 @@ def managed_python_dir() -> Path | None:
 
 def _ask_uv(uv: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     """Run ``uv arguments`` with downloads off, no interpreter variables, outside any project."""
+    # UV_PYTHON_INSTALL_DIR stays: a run that isolates uv's managed Pythons (a CT, a CI job) names
+    # them there, and the answer must be that directory, not the default the variable overrides.
     environment = {**os.environ, "UV_PYTHON_DOWNLOADS": "never"}
     for name in INTERPRETER_VARIABLES:
-        environment.pop(name, None)
+        if name != "UV_PYTHON_INSTALL_DIR":
+            environment.pop(name, None)
     return subprocess.run(  # noqa: S603 - fixed argv from a resolved uv
         [uv, *arguments],
         capture_output=True,
@@ -349,8 +367,7 @@ def interpreter_probe_env(scratch: Path, *, managed: Path | None) -> dict[str, s
 
     A fresh cache because uv remembers what it learned about an interpreter and would not run a
     planted one again; ``managed`` is the managed-install directory to use (an empty one under
-    ``scratch`` when None). It is named twice, because an elevated run drops UV_PYTHON_INSTALL_DIR
-    ([59]) and then takes uv's default, ``<data home>/uv/python``: see :func:`managed_python_env`.
+    ``scratch`` when None), named as :func:`managed_python_env` names it.
 
     Example:
         >>> import tempfile
@@ -365,47 +382,93 @@ def interpreter_probe_env(scratch: Path, *, managed: Path | None) -> dict[str, s
     }
 
 
-def managed_python_env(scratch: Path, *, managed: Path | None) -> dict[str, str]:
-    """Point uv at ``managed`` as its managed-Python directory, both with and without UV_PYTHON_INSTALL_DIR.
+def data_home(scratch: Path) -> Path:
+    """The data directory a test's elevated runner takes for its account's (see :func:`with_data_home`).
 
-    UV_PYTHON_INSTALL_DIR names it outright; an elevated run drops that variable, and uv then uses
-    ``<data home>/uv/python``, where the data home is XDG_DATA_HOME on POSIX and APPDATA on Windows
-    (measured with uv 0.13: XDG_DATA_HOME changes nothing on Windows). So the data home is set too:
-    to the directory two above ``managed`` when that already ends in ``uv/python`` (uv's own default
-    layout), else to a scratch directory whose ``uv/python`` links to it. With ``managed`` None both
-    name an empty directory, so uv finds no managed Python either way.
+    Example:
+        >>> data_home(Path("/s")).as_posix()
+        '/s/data-home'
+    """
+    return scratch / "data-home"
+
+
+def managed_python_env(scratch: Path, *, managed: Path | None) -> dict[str, str]:
+    """Make ``<data home>/uv/python`` name ``managed`` and point UV_PYTHON_INSTALL_DIR at it too.
+
+    An elevated run drops UV_PYTHON_INSTALL_DIR ([59]) and names ``<its account's data home>/uv/python``
+    itself, from the passwd database or the RoamingAppData known folder ([93]), so a test hands it
+    :func:`data_home` through :func:`with_data_home` and this links that directory's ``uv/python`` to
+    ``managed`` (an empty directory when None, so uv finds no managed Python). An unelevated run reads
+    UV_PYTHON_INSTALL_DIR, set here to the same directory; the data-home variable (XDG_DATA_HOME on
+    POSIX, APPDATA on Windows) is set too, so neither run falls back to the real user's. A link or
+    directory an earlier call left there (uv writes a ``.lock`` into an empty one) is replaced.
 
     Example:
         >>> import tempfile
         >>> with tempfile.TemporaryDirectory() as d:
-        ...     env = managed_python_env(Path(d), managed=None)
-        ...     Path(env["UV_PYTHON_INSTALL_DIR"]).is_dir(), len(env)
+        ...     first = managed_python_env(Path(d), managed=None)
+        ...     again = managed_python_env(Path(d), managed=None)
+        ...     Path(again["UV_PYTHON_INSTALL_DIR"]).is_dir(), len(again)
         (True, 2)
     """
-    data_home = scratch / "data-home"
-    install = data_home / "uv" / "python"
+    install = data_home(scratch) / "uv" / "python"
+    install.parent.mkdir(parents=True, exist_ok=True)
+    if install.is_symlink():
+        install.unlink()
+    elif install.is_dir():
+        shutil.rmtree(install)
     if managed is None:
-        install.mkdir(parents=True, exist_ok=True)
-    elif managed.name == "python" and managed.parent.name == "uv":
-        data_home, install = managed.parent.parent, managed
-    elif not install.is_symlink():
-        install.parent.mkdir(parents=True, exist_ok=True)
+        install.mkdir()
+    else:
         install.symlink_to(managed, target_is_directory=True)
     home_variable = "APPDATA" if sys.platform == "win32" else "XDG_DATA_HOME"
-    return {"UV_PYTHON_INSTALL_DIR": str(install), home_variable: str(data_home)}
+    return {"UV_PYTHON_INSTALL_DIR": str(install), home_variable: str(data_home(scratch))}
+
+
+#: The account data-home lookup each runner makes when elevated: the ``.sh`` runner's command
+#: substitution, and the ``.ps1`` runner's function header.
+SH_DATA_HOME_LOOKUP = "$(pwshpy_account_data_home)"
+PS1_DATA_HOME_LOOKUP = "function Get-PwshPyAccountDataHome {"
+
+
+def with_data_home(text: str, scratch: Path, *, powershell: bool) -> str:
+    """``text`` (a rendered runner) with its account data-home lookup answering :func:`data_home`.
+
+    A test cannot make the passwd database or the known-folder API name a directory of its own, and
+    the real answer is the real user's data directory, which a test must not read uv's Pythons from
+    or write to. One counted substitution; the rest is the shipped runner. The ``.ps1`` lookup is
+    renamed rather than removed, so the runner keeps a definition of it.
+
+    Example:
+        >>> with_data_home("X=$(pwshpy_account_data_home) || exit", Path("/s"), powershell=False)
+        "X='/s/data-home' || exit"
+    """
+    home = str(data_home(scratch))
+    if powershell:
+        assert text.count(PS1_DATA_HOME_LOOKUP) == 1
+        answer = "'" + home.replace("'", "''") + "'"
+        stand_in = f"{PS1_DATA_HOME_LOOKUP}\n    return {answer}\n}}\n\nfunction Get-PwshPyAccountDataHomeOnHost {{"
+        return text.replace(PS1_DATA_HOME_LOOKUP, stand_in)
+    assert text.count(SH_DATA_HOME_LOOKUP) == 1
+    return text.replace(SH_DATA_HOME_LOOKUP, "'" + home.replace("'", "'\\''") + "'")
 
 
 __all__ = [
     "INTERPRETER_VARIABLES",
+    "LIBRARY_VARIABLES",
     "LOCAL_WHEEL_DISTRIBUTION",
     "MANAGED_PYTHON_VARIABLES",
     "OTHER_UID",
+    "PS1_DATA_HOME_LOOKUP",
     "RUNNING_AS_ROOT",
+    "SH_DATA_HOME_LOOKUP",
+    "data_home",
     "interpreter_probe_env",
     "link_tools",
     "managed_python_dir",
     "managed_python_env",
     "owned_by_another_account",
+    "with_data_home",
     "write_fake_sudo",
     "write_planted_environment",
     "write_local_wheel",

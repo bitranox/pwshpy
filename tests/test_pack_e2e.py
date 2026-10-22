@@ -38,6 +38,7 @@ from elevation_doubles import (
     managed_python_dir,
     managed_python_env,
     owned_by_another_account,
+    with_data_home,
     write_fake_sudo,
     write_local_wheel,
     write_planted_environment,
@@ -48,6 +49,9 @@ from elevation_doubles import (
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.packing import PackOptions
+
+if sys.platform != "win32":
+    import pwd
 
 pytestmark = [pytest.mark.os_agnostic]
 
@@ -1083,7 +1087,13 @@ _TRUSTED_UIDS = "$PwshPyTrustedUids = @('0')"
 
 
 def _elevation_stand_in(
-    runner: Path, output: Path, *, elevated: str, running_sid: str | None = None, trust_my_uid: bool = False
+    runner: Path,
+    output: Path,
+    *,
+    elevated: str,
+    running_sid: str | None = None,
+    trust_my_uid: bool = False,
+    real_data_home: bool = False,
 ) -> Path:
     """The whole runner with its elevation probe answering ``elevated`` (a PowerShell expression).
 
@@ -1092,9 +1102,13 @@ def _elevation_stand_in(
     ``running_sid`` also makes the runner believe it runs as that SID ('S-1-5-18' stands in for a
     SYSTEM scheduled task, which no test can start without changing the host). ``trust_my_uid``
     (POSIX) counts this test's uid as root for ownership, so a layout the test builds can pass or
-    fail on everything but its owner.
+    fail on everything but its owner. A runner forced elevated also takes ``data_home(output.parent)``
+    for its account's data directory (see :func:`elevation_doubles.with_data_home`) unless
+    ``real_data_home`` keeps the passwd or known-folder lookup.
     """
     text = runner.read_text(encoding="utf-8")
+    if elevated != "$false" and not real_data_home:
+        text = with_data_home(text, output.parent, powershell=True)
     if trust_my_uid and sys.platform != "win32":
         assert text.count(_TRUSTED_UIDS) == 1
         text = text.replace(_TRUSTED_UIDS, f"$PwshPyTrustedUids = @('0', '{os.getuid()}')")
@@ -1716,10 +1730,13 @@ def test_an_elevated_posix_run_never_uses_ls_from_usr_local_bin(tmp_path: Path) 
 _GLOB_BAIT = ("a.log", "b.log", "pkga")
 
 
-def _recording_runner(tmp_path: Path, *, elevated: str, with_packages: Sequence[str] = ()) -> tuple[Path, Path, Path]:
+def _recording_runner(
+    tmp_path: Path, *, elevated: str, with_packages: Sequence[str] = (), real_data_home: bool = False
+) -> tuple[Path, Path, Path]:
     """A runner whose uv is a recording double pinned with -PwshPyUv (POSIX), in a tree counted as root's.
 
-    Returns the runner, the double, and the file it records into.
+    Returns the runner, the double, and the file it records into. ``real_data_home`` as for
+    :func:`_elevation_stand_in`.
     """
     entry = tmp_path / "app.py"
     entry.write_text("print('never run: uv is a recording double')\n")
@@ -1728,6 +1745,7 @@ def _recording_runner(tmp_path: Path, *, elevated: str, with_packages: Sequence[
         tmp_path / "recording_stand_in.ps1",
         elevated=elevated,
         trust_my_uid=True,
+        real_data_home=real_data_home,
     )
     leaf = tmp_path / "rec" / "bin"
     leaf.mkdir(parents=True)
@@ -2040,9 +2058,89 @@ def test_an_elevated_run_drops_the_variables_that_steer_the_managed_python(tmp_p
     for name, value in steering.items():
         dropped_line = _VARIABLE_DROPPED.format(name=name) in result.stderr
         if elevated == "$true":
+            # The runner names its own install directory (the account's), never the caller's.
+            assert recorded.get(name) != value and dropped_line, (name, recorded, result.stderr)
+        else:
+            assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_posix_run_takes_the_managed_python_dir_from_the_account(tmp_path: Path, elevated: str) -> None:
+    """[93]: elevated, uv's managed-Python directory is the passwd home's whatever HOME and XDG_DATA_HOME
+    say, and PYTHONHOME / PYTHONPATH are dropped with a line each; the control names no directory and
+    passes both on."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated, real_data_home=True)
+    library = {"PYTHONHOME": str(tmp_path / "planted-home"), "PYTHONPATH": str(tmp_path / "planted-path")}
+    result = _run_with_path(
+        tmp_path,
+        runner,
+        "-PwshPyUv",
+        str(uv),
+        path_first=[],
+        env={**library, "XDG_DATA_HOME": str(tmp_path / "elsewhere"), "HOME": str(tmp_path / "elsewhere")},
+        cwd=_clean_cwd(tmp_path),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = _recorded_variables(record)
+    if elevated == "$true":
+        assert sys.platform != "win32"
+        expected = Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".local" / "share" / "uv" / "python"
+        assert recorded.get("UV_PYTHON_INSTALL_DIR") == str(expected), recorded
+    else:
+        assert "UV_PYTHON_INSTALL_DIR" not in recorded, recorded
+    for name, value in library.items():
+        dropped_line = _VARIABLE_DROPPED.format(name=name) in result.stderr
+        if elevated == "$true":
             assert name not in recorded and dropped_line, (name, recorded, result.stderr)
         else:
             assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
+
+
+#: Loads the runner's functions alone and prints what Get-PwshPyAccountDataHome answers, with APPDATA
+#: pointed somewhere the test chose.
+_DATA_HOME_PROBE = r"""
+param([string] $Artefact, [string] $PlantedAppData)
+$ErrorActionPreference = 'Stop'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Artefact, [ref]$null, [ref]$null)
+$language = 'System.Management.Automation.Language'
+$functions = $ast.FindAll({ param($n) $n -is ("$language.FunctionDefinitionAst" -as [type]) }, $false)
+foreach ($definition in $functions) { . ([ScriptBlock]::Create($definition.Extent.Text)) }
+$PwshPyOnWindows = $true
+$env:APPDATA = $PlantedAppData
+Write-Output ('known:' + [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData))
+Write-Output ('answer:' + (Get-PwshPyAccountDataHome))
+"""
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+def test_the_windows_data_home_is_the_known_folder_not_appdata(tmp_path: Path) -> None:
+    """[93]: an elevated run's managed-Python directory comes from the RoamingAppData known folder.
+
+    APPDATA is pointed at a directory of the test's own; the answer must be the known folder, which
+    the probe also prints, and the control is that the two differ.
+    """
+    assert _PWSH is not None
+    manifest = pack_script(_project(tmp_path))
+    probe = tmp_path / "data_home_probe.ps1"
+    probe.write_text(_DATA_HOME_PROBE, encoding="utf-8")
+    planted = tmp_path / "planted-appdata"
+    result = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(probe), str(manifest.output_path), str(planted)],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = dict(line.split(":", 1) for line in result.stdout.splitlines() if line.startswith(("known:", "answer:")))
+    assert lines["known"] and Path(lines["known"]) != planted, lines
+    assert lines["answer"] == lines["known"], lines
 
 
 # --- [57] an elevated run starts uv in a directory only administrators can write -------------------

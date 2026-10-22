@@ -38,9 +38,11 @@ from elevation_doubles import (
     link_tools,
     managed_python_env,
     owned_by_another_account,
+    planted_managed_python,
     session_uv_cache,
     trusted_managed_python,
     with_data_home,
+    without_python_dir_check,
     write_fake_sudo,
     write_local_wheel,
     write_planted_environment,
@@ -1135,11 +1137,14 @@ def _elevation_stand_in(
     (POSIX) counts this test's uid as root for ownership, so a layout the test builds can pass or
     fail on everything but its owner. A runner forced elevated also takes ``data_home(output.parent)``
     for its account's data directory (see :func:`elevation_doubles.with_data_home`) unless
-    ``real_data_home`` keeps the passwd or known-folder lookup.
+    ``real_data_home`` keeps the passwd or known-folder lookup; that real directory is then taken as
+    trusted (see :func:`elevation_doubles.without_python_dir_check`).
     """
     text = runner.read_text(encoding="utf-8")
     if elevated != "$false" and not real_data_home:
         text = with_data_home(text, output.parent, powershell=True)
+    elif elevated != "$false":
+        text = without_python_dir_check(text, powershell=True)
     if trust_my_uid and sys.platform != "win32":
         assert text.count(_TRUSTED_UIDS) == 1
         text = text.replace(_TRUSTED_UIDS, f"$PwshPyTrustedUids = @('0', '{os.getuid()}')")
@@ -1631,8 +1636,12 @@ def test_an_elevated_posix_run_judges_every_ancestor(tmp_path: Path, ancestor_mo
     reason="needs a merged-/usr host (/bin -> usr/bin) with /usr/bin/python3",
 )
 def test_an_elevated_posix_pin_through_merged_usr_is_accepted(tmp_path: Path) -> None:
-    """/bin/python3 resolves through /bin -> usr/bin and python3's own link and is accepted, then run."""
+    """/bin/python3 resolves through /bin -> usr/bin and python3's own link and is accepted, then run.
+
+    This test's own managed-Python directory is not root's, so its check is taken as passed.
+    """
     runner = _trust_runner(tmp_path, elevated="$true")
+    runner.write_text(without_python_dir_check(runner.read_text(encoding="utf-8"), powershell=True), encoding="utf-8")
     result = _run_with_path(tmp_path, runner, "-PwshPyUv", "/bin/python3", path_first=[])
     assert _PIN_REFUSED not in result.stderr, result.stderr
     assert result.returncode == 2, result.stdout + result.stderr
@@ -2370,32 +2379,72 @@ def test_a_uv_toml_directory_above_the_anchor_changes_nothing(tmp_path: Path, no
     assert _reported_python(result) is not None, result.stdout
 
 
-@pytest.mark.local_only
-@pytest.mark.parametrize(
-    ("elevated", "refused"),
-    [pytest.param("$true", True, id="elevated"), pytest.param("$false", False, id="not-elevated-control")],
+#: The refusal of uv's managed-Python directory, and the remedy every refused managed-Python path names.
+_PYTHON_DIR_REFUSED = "refusing uv's managed-Python directory"
+_PYTHON_REMEDY = (
+    "take every other account's write access off" if sys.platform == "win32" else "chown root, then chmod go-w"
 )
-def test_an_elevated_run_refuses_a_managed_python_another_account_can_modify(
-    tmp_path: Path, elevated: str, refused: bool
-) -> None:
-    """[A1]: the Python uv found must pass the same check as uv itself; a directory above it that Users
-    (Windows) or every account (POSIX) may modify refuses it (exit 127, the script never runs). The
-    control runs it."""
-    managed = _needs_managed_python()
-    runner, head = _python_runner(tmp_path, elevated=elevated)
-    probe = interpreter_probe_env(tmp_path, managed=managed)
+
+
+def _open_to_other_accounts(directory: Path) -> None:
+    """Let every account modify ``directory`` itself, nothing below it (no inheritance on Windows).
+
+    The planted install's files are hard links to shared ones; an inherited grant would reach them.
+    """
     if sys.platform == "win32":
-        _icacls(data_home(tmp_path), "/grant", f"{_SID_USERS}:(OI)(CI)M")
+        _icacls(directory, "/grant", f"{_SID_USERS}:(M)")
     else:
-        data_home(tmp_path).chmod(0o777)
+        directory.chmod(0o777)
+
+
+def _planted_python_probe(tmp_path: Path, marker: Path) -> tuple[dict[str, str], Path]:
+    """An elevated run's environment whose managed-Python directory holds a planted install."""
+    planted = planted_managed_python(tmp_path / "planted-managed", marker)
+    if planted is None:
+        pytest.skip("this host has no uv-managed Python (and the test must not download one)")
+    return interpreter_probe_env(tmp_path, managed=planted), planted
+
+
+@pytest.mark.local_only
+@pytest.mark.parametrize("refused", [True, False], ids=["untrusted-directory", "trusted-directory-control"])
+def test_an_untrusted_managed_python_dir_is_refused_before_uv_runs_a_python_in_it(
+    tmp_path: Path, refused: bool
+) -> None:
+    """[X21 P1]: `uv python find` EXECUTES every interpreter it considers in uv's managed-Python
+    directory, so a .pth planted there ran elevated before the found path was judged. The directory
+    is now judged before uv starts: when Users (Windows) or every account (POSIX) may modify it, the
+    run exits 127 and the plant never runs. The control, the same elevated run with the directory
+    left trusted, runs the plant."""
+    runner, head = _python_runner(tmp_path, elevated="$true")
+    marker = tmp_path / "planted-pth-ran.txt"
+    probe, planted = _planted_python_probe(tmp_path, marker)
+    if refused:
+        _open_to_other_accounts(planted)
     result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))
     if refused:
+        assert not marker.exists(), "uv ran a Python from the untrusted directory elevated: " + marker.read_text()
         assert result.returncode == 127, result.stdout + result.stderr
-        assert "refusing the Python uv found at" in result.stderr, result.stderr
-        assert _reported_python(result) is None, result.stdout
+        assert _PYTHON_DIR_REFUSED in result.stderr and _PYTHON_REMEDY in result.stderr, result.stderr
         return
     assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.is_file(), "the control never ran the planted .pth: " + result.stderr
     assert _reported_python(result) is not None, result.stdout
+
+
+@pytest.mark.local_only
+def test_an_elevated_run_refuses_a_python_whose_install_another_account_can_modify(tmp_path: Path) -> None:
+    """[A1]: the Python uv found must still pass the same check as uv itself, inside a trusted
+    managed-Python directory too: an install Users (Windows) or every account (POSIX) may modify
+    refuses it (exit 127, the script never runs), and the refusal names the remedy."""
+    runner, head = _python_runner(tmp_path, elevated="$true")
+    probe, planted = _planted_python_probe(tmp_path, tmp_path / "planted-pth-ran.txt")
+    (install,) = [child for child in planted.iterdir() if child.is_dir()]
+    _open_to_other_accounts(install)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert "refusing the Python uv found at" in result.stderr and _PYTHON_REMEDY in result.stderr, result.stderr
+    assert _PYTHON_DIR_REFUSED not in result.stderr, result.stderr
+    assert _reported_python(result) is None, result.stdout
 
 
 @pytest.mark.local_only

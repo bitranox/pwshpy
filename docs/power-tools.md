@@ -362,9 +362,19 @@ Details worth knowing:
   Windows), which downloads a CPython build (about 36 MiB, unpacked to about 100 MB, hence a slow
   first run and a failure without network access), unless `UV_PYTHON_DOWNLOADS` is `never` or
   `manual`, in which case the run stops with uv's own `No interpreter found in managed installations`
-  and its exit code 2; `uv python install` as the elevated account provides one ahead of time. The
-  path uv found must pass the same check as `uv` itself (see above, the directories above it
-  included), or the run stops with `refusing the Python uv found at <path>: <reason>` and exit code 127. The run is then
+  and its exit code 2; `uv python install` as the elevated account provides one ahead of time.
+  `uv python find` executes every interpreter it considers in that directory to ask its version, so
+  a `.pth` file planted in an install's `site-packages` would run with the elevated rights before
+  any check of the path uv answers. The runner therefore judges the directory before uv starts, as
+  it judges a `uv`: the directory itself and every directory above it (one that does not exist yet
+  by the nearest one that does, where `uv python install` creates it). One another account can
+  modify stops the run with `refusing uv's managed-Python directory <dir>: <reason>` and exit code
+  127, and uv never runs. The path uv then finds must pass the same check (see above, the
+  directories above it included), or the run stops with `refusing the Python uv found at <path>:
+  <reason>` and exit code 127. Both refusals name the remedy: on POSIX make the directory named in
+  the reason root's alone (`chown root`, then `chmod go-w`), on Windows take every other account's
+  write access off it; or remove it and install the Python again elevated (`uv python install`). The
+  run is then
   `uv run --no-config --python-preference only-managed --python <that path>`, started in `/` on POSIX
   or `System32` on Windows (`--directory`, `--project`), so the `.python-version` uv would read from
   the script's directory upwards (the cache, which `PWSHPY_PACK_CACHE` can put anywhere) and every

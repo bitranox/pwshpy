@@ -19,11 +19,14 @@ Contents:
     * :func:`write_recording_uv` - a ``uv`` double that records its argv and the variables it got.
     * :func:`managed_python_dir` - the host's uv-managed Python directory, when one holds an install.
     * :func:`trusted_managed_python` - that directory, or a copy of one install an elevated run may trust.
+    * :func:`write_site_plant` - a ``.pth`` that records every start of an interpreter reading it.
+    * :func:`planted_managed_python` - a managed-Python directory whose install carries such a plant.
     * :func:`interpreter_probe_env` - a uv search confined to one test (fresh cache, no downloads).
     * :func:`session_uv_cache` - a uv cache directory for the whole test session, never a real user's.
     * :func:`managed_python_env` - name uv's managed-Python directory so an elevated run finds it too.
     * :func:`data_home` - the data directory a test makes an elevated runner believe is its account's.
     * :func:`with_data_home` - a runner whose account data-home lookup answers :func:`data_home`.
+    * :func:`without_python_dir_check` - a runner that skips judging uv's managed-Python directory.
 """
 
 from __future__ import annotations
@@ -367,14 +370,88 @@ def trusted_managed_python() -> Path | None:
         return managed
     found = _ask_uv(uv, *_FIND_MANAGED)
     install = Path(found.stdout.strip()).resolve().parents[1]
-    root = Path(tempfile.mkdtemp(prefix="pwshpy-managed-python-"))
-    atexit.register(shutil.rmtree, root, ignore_errors=True)
+    scratch = Path(tempfile.mkdtemp(prefix="pwshpy-managed-python-"))
+    atexit.register(shutil.rmtree, scratch, ignore_errors=True)
+    # One level below the temp directory: an elevated run judges the managed-Python directory itself
+    # and the one holding it, and /tmp is writable by every account (sticky or not).
+    root = scratch / "managed"
+    root.mkdir()
     shutil.copytree(install, root / install.name, symlinks=True)
     for directory, _subdirectories, files in os.walk(root):
         for path in (Path(directory), *(Path(directory) / name for name in files)):
             if not path.is_symlink():
                 path.chmod(path.stat().st_mode & ~0o022)
     return root
+
+
+def write_site_plant(site_packages: Path, marker: Path) -> Path:
+    """Write a ``.pth`` into ``site_packages`` that appends a line to ``marker`` on every interpreter start.
+
+    The site module executes a ``.pth`` line starting with ``import`` while the interpreter starts,
+    before any script, so the marker shows that something ran the interpreter at all - uv asking it
+    for its version included.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as d:
+        ...     write_site_plant(Path(d) / "site", Path(d) / "ran.txt").read_text(encoding="utf-8")[:6]
+        'import'
+    """
+    site_packages.mkdir(parents=True, exist_ok=True)
+    plant = site_packages / "pwshpy_planted.pth"
+    line = f"import pathlib; pathlib.Path({str(marker)!r}).open('a', encoding='utf-8').write('ran\\n')\n"
+    plant.write_text(line, encoding="utf-8")
+    return plant
+
+
+def planted_managed_python(destination: Path, marker: Path) -> Path | None:
+    """A managed-Python directory holding the install an elevated run would pick, with a site plant in it.
+
+    The install of :func:`trusted_managed_python` is linked into ``destination`` file by file (a hard
+    link where the filesystem allows, a copy otherwise), so its directories are this test's own: a
+    test may change their modes or plant into them without touching the shared copy or, on Windows,
+    the host's own directory. Only directories are new, so change their modes and ACLs without
+    inheritance, or the change reaches the shared files. None when the host has no managed Python.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as d:
+        ...     planted = planted_managed_python(Path(d) / "managed", Path(d) / "ran.txt")
+        >>> planted is None or planted.name == "managed"
+        True
+    """
+    managed = trusted_managed_python()
+    uv = shutil.which("uv")
+    if managed is None or uv is None:
+        return None
+    install = _install_holding(Path(_ask_uv(uv, *_FIND_MANAGED).stdout.strip()))
+    if install is None:
+        return None
+    destination.mkdir(parents=True)
+    # Whatever the umask: an elevated run refuses a managed-Python directory another account (the group,
+    # on a host with per-user groups) can modify. The install's own directories keep the source's modes.
+    destination.chmod(destination.stat().st_mode & ~0o022)
+    shutil.copytree(managed / install.name, destination / install.name, symlinks=True, copy_function=_link_or_copy)
+    for site_packages in (*destination.glob("*/lib/python3*/site-packages"), *destination.glob("*/Lib/site-packages")):
+        write_site_plant(site_packages, marker)
+    return destination
+
+
+def _install_holding(executable: Path) -> Path | None:
+    """The install directory (a child of the host's managed-Python directory) holding ``executable``."""
+    root = managed_python_dir()
+    if root is None:
+        return None
+    return next((parent for parent in executable.resolve().parents if parent.parent == root.resolve()), None)
+
+
+def _link_or_copy(source: str, destination: str) -> str:
+    """Hard-link ``source`` to ``destination`` (about 100 MB per install saved), else copy it."""
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+    return destination
 
 
 #: How the helpers ask uv for a managed Python: as an elevated run does (``--system``), so the answer is
@@ -480,6 +557,7 @@ def managed_python_env(scratch: Path, *, managed: Path | None) -> dict[str, str]
         shutil.rmtree(install)
     if managed is None:
         install.mkdir()
+        install.chmod(install.stat().st_mode & ~0o022)
     else:
         install.symlink_to(managed, target_is_directory=True)
     home_variable = "APPDATA" if sys.platform == "win32" else "XDG_DATA_HOME"
@@ -514,6 +592,32 @@ def with_data_home(text: str, scratch: Path, *, powershell: bool) -> str:
     return text.replace(SH_DATA_HOME_LOOKUP, "'" + home.replace("'", "'\\''") + "'")
 
 
+#: Where each runner judges uv's managed-Python directory before uv searches it, and what a test that
+#: is about something else puts in its place (the directory is then taken as trusted).
+SH_PYTHON_DIR_CHECK = 'PWSHPY_PYTHON_DIR_WHY=$(pwshpy_python_dir_distrust "$UV_PYTHON_INSTALL_DIR")'
+PS1_PYTHON_DIR_CHECK = "$PwshPyPythonDirWhy = Get-PwshPyPythonDirDistrust -Path $env:UV_PYTHON_INSTALL_DIR"
+
+
+def without_python_dir_check(text: str, *, powershell: bool) -> str:
+    """``text`` (a rendered runner) with the check of uv's managed-Python directory answering "trusted".
+
+    For a test of what an elevated run names or drops, run with the REAL account data home: that
+    directory is the user's own, and on a host with per-user groups uv made it group-writable, so the
+    check would stop the run before the part under test. One counted substitution.
+
+    Example:
+        >>> without_python_dir_check(SH_PYTHON_DIR_CHECK, powershell=False)
+        'PWSHPY_PYTHON_DIR_WHY='
+    """
+    check, answer = (
+        (PS1_PYTHON_DIR_CHECK, "$PwshPyPythonDirWhy = ''")
+        if powershell
+        else (SH_PYTHON_DIR_CHECK, "PWSHPY_PYTHON_DIR_WHY=")
+    )
+    assert text.count(check) == 1
+    return text.replace(check, answer)
+
+
 __all__ = [
     "INTERPRETER_VARIABLES",
     "LIBRARY_VARIABLES",
@@ -521,8 +625,10 @@ __all__ = [
     "MANAGED_PYTHON_VARIABLES",
     "OTHER_UID",
     "PS1_DATA_HOME_LOOKUP",
+    "PS1_PYTHON_DIR_CHECK",
     "RUNNING_AS_ROOT",
     "SH_DATA_HOME_LOOKUP",
+    "SH_PYTHON_DIR_CHECK",
     "data_home",
     "trusted_managed_python",
     "interpreter_probe_env",
@@ -531,11 +637,14 @@ __all__ = [
     "managed_python_env",
     "owned_by_another_account",
     "session_uv_cache",
+    "planted_managed_python",
     "with_data_home",
+    "without_python_dir_check",
     "write_fake_sudo",
     "write_planted_environment",
     "write_local_wheel",
     "write_planted_python",
     "write_planted_venv",
     "write_recording_uv",
+    "write_site_plant",
 ]

@@ -29,11 +29,13 @@
 # from the PATH it was given, and runs the script only on a Python uv manages in root's own data
 # directory (<home from the passwd database>/.local/share/uv/python; downloaded on first use unless
 # UV_PYTHON_DOWNLOADS is never or manual), found with `uv python find --system` and handed to uv run
-# as --python, after the same check as uv itself, so no .venv anywhere is ever run (the script itself
-# still runs in your directory). Every uv call it makes as root reads no uv.toml (--no-config).
-# UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX, UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON, UV_PYTHON_INSTALL_DIR,
-# UV_CONFIG_FILE, UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL, PYTHONHOME and PYTHONPATH
-# are ignored, each with a line on stderr.
+# as --python, after the same check as uv itself, so no .venv anywhere is ever run (the script
+# itself still runs in your directory). That directory passes the same check before uv searches it
+# (uv runs every Python it finds there); one another account can modify is refused with exit code
+# 127. Every uv call it makes as root reads no uv.toml (--no-config). UV_PYTHON, VIRTUAL_ENV,
+# CONDA_PREFIX, UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON, UV_PYTHON_INSTALL_DIR, UV_CONFIG_FILE,
+# UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL, PYTHONHOME and PYTHONPATH are ignored,
+# each with a line on stderr.
 #
 # Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -569,6 +571,29 @@ pwshpy_account_data_home() {
     return 1
 }
 
+# What a root run that refused a managed-Python path tells the caller to do about it.
+PWSHPY_PYTHON_REMEDY="make the directory named above root's alone (chown root, then chmod go-w on it), or remove it"
+PWSHPY_PYTHON_REMEDY="$PWSHPY_PYTHON_REMEDY and install the Python again as root (uv python install)"
+
+# Prints why uv's managed-Python directory "$1" may not be searched as root, or nothing. `uv python
+# find` EXECUTES every interpreter it considers there to ask its version, so a .pth planted in one's
+# site-packages would run as root before any check of the path uv answers (measured with uv 0.13):
+# the directory is judged before uv starts, as a uv is, itself and every directory above it. One
+# that does not exist yet is judged by the nearest one that does, where `uv python install` will
+# create it.
+pwshpy_python_dir_distrust() {
+    _pd_dir=$1
+    while [ ! -e "$_pd_dir" ] && [ ! -L "$_pd_dir" ]; do
+        _pd_dir=${_pd_dir%/*}
+        [ -n "$_pd_dir" ] || _pd_dir=/
+    done
+    if [ "$_pd_dir" = / ]; then
+        pwshpy_leaf_distrust /
+    else
+        pwshpy_uv_distrust "$_pd_dir"
+    fi
+}
+
 # Runs `uv python $1 ...` started in the anchor and reading no uv.toml (--no-config, see the run
 # below), with the packed script's requires-python as the request when it has one, so the Python found
 # or installed is one the script accepts.
@@ -607,7 +632,7 @@ pwshpy_resolve_managed_python() {
     esac
     _rp_why=$(pwshpy_uv_distrust "$PWSHPY_PYTHON")
     if [ -n "$_rp_why" ]; then
-        _rp_why="$_rp_why (as root only a Python no other account can modify is run)"
+        _rp_why="$_rp_why (as root only a Python no other account can modify is run): $PWSHPY_PYTHON_REMEDY"
         pwshpy_die "refusing the Python uv found at $PWSHPY_PYTHON: $_rp_why" 127
     fi
 }
@@ -829,7 +854,14 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # data home XDG_DATA_HOME names, which is the caller's to set too.
     UV_PYTHON_INSTALL_DIR=$PWSHPY_DATA_HOME/uv/python
     export UV_PYTHON_INSTALL_DIR
-    # While the helpers still come from the fixed PATH: the check of the Python's path runs ls.
+    # While the helpers still come from the fixed PATH: the checks of the directory and of the Python's
+    # path run ls. The directory first: uv runs every Python it finds there.
+    PWSHPY_PYTHON_DIR_WHY=$(pwshpy_python_dir_distrust "$UV_PYTHON_INSTALL_DIR")
+    if [ -n "$PWSHPY_PYTHON_DIR_WHY" ]; then
+        PWSHPY_PYTHON_DIR_WHY="$PWSHPY_PYTHON_DIR_WHY (as root uv searches only a directory no other account can"
+        PWSHPY_PYTHON_DIR_WHY="$PWSHPY_PYTHON_DIR_WHY modify): $PWSHPY_PYTHON_REMEDY"
+        pwshpy_die "refusing uv's managed-Python directory $UV_PYTHON_INSTALL_DIR: $PWSHPY_PYTHON_DIR_WHY" 127
+    fi
     pwshpy_resolve_managed_python
     # The packed script runs with the PATH its caller gave: the fixed one was only for this runner's
     # own helpers.

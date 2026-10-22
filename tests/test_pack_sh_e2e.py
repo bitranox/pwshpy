@@ -30,13 +30,14 @@ from elevation_doubles import (
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
     RUNNING_AS_ROOT,
-    data_home,
     link_tools,
     managed_python_env,
     owned_by_another_account,
+    planted_managed_python,
     session_uv_cache,
     trusted_managed_python,
     with_data_home,
+    without_python_dir_check,
     write_fake_sudo,
     write_local_wheel,
     write_planted_environment,
@@ -109,7 +110,8 @@ def _force_probe(runner: Path, *, as_root: bool | None, real_data_home: bool = F
 
     False only changes anything when the suite runs as root, where the real probe would say root.
     A runner forced to root also takes ``data_home(runner.parent)`` for its account's data directory
-    (see :func:`elevation_doubles.with_data_home`) unless ``real_data_home`` keeps the passwd lookup.
+    (see :func:`elevation_doubles.with_data_home`) unless ``real_data_home`` keeps the passwd lookup;
+    that real directory is then taken as trusted (:func:`elevation_doubles.without_python_dir_check`).
     """
     if as_root is None or (not as_root and not RUNNING_AS_ROOT):
         return
@@ -118,6 +120,8 @@ def _force_probe(runner: Path, *, as_root: bool | None, real_data_home: bool = F
     text = text.replace(_ROOT_PROBE[0], _ROOT_PROBE[1] if as_root else _NOT_ROOT_PROBE)
     if as_root and not real_data_home:
         text = with_data_home(text, runner.parent, powershell=False)
+    elif as_root:
+        text = without_python_dir_check(text, powershell=False)
     runner.write_text(text, encoding="utf-8")
 
 
@@ -713,9 +717,11 @@ def test_as_root_a_trusted_symlinked_pin_is_followed_and_accepted(tmp_path: Path
 
     No unprivileged test can create such a link, so a system one stands in for uv: the runner
     accepts it and execs it as ``python3 run --no-project ...``, which fails on the missing file
-    ``run`` - proof the link passed the trust rule and was the program started.
+    ``run`` - proof the link passed the trust rule and was the program started. This test's own
+    managed-Python directory is not root's, so its check is taken as passed (the pin is the subject).
     """
     runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True)
+    runner.write_text(without_python_dir_check(runner.read_text(encoding="utf-8"), powershell=False), encoding="utf-8")
     environment = _trust_env(tmp_path)
     result = _run(["sh"], runner, "--pwshpy-no-install-uv", "--pwshpy-uv", "/usr/bin/python3", env=environment)
     assert _PIN_REFUSED not in result.stderr, result.stderr
@@ -955,9 +961,11 @@ def test_as_root_a_directory_with_a_write_acl_is_refused(tmp_path: Path, shell_i
 def test_as_root_a_pin_through_merged_usr_is_accepted(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
     """/bin/python3 passes the /bin -> usr/bin link and python3's own link and is accepted, then run.
 
-    python3 stands in for uv and fails on the file ``run``; the refusal message must be absent.
+    python3 stands in for uv and fails on the file ``run``; the refusal message must be absent. This
+    test's own managed-Python directory is not root's, so its check is taken as passed.
     """
     runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True)
+    runner.write_text(without_python_dir_check(runner.read_text(encoding="utf-8"), powershell=False), encoding="utf-8")
     result = _run(shell, runner, "--pwshpy-no-install-uv", "--pwshpy-uv", "/bin/python3", env=_trust_env(tmp_path))
     assert _PIN_REFUSED not in result.stderr, result.stderr
     assert result.returncode == 2, result.stdout + result.stderr
@@ -1513,25 +1521,62 @@ def test_as_root_a_venv_above_the_anchor_never_runs(
     assert reported is not None and reported.samefile(anchor), result.stdout
 
 
+#: The refusal of uv's managed-Python directory, and the remedy every refused managed-Python path names.
+_PYTHON_DIR_REFUSED = "refusing uv's managed-Python directory"
+_PYTHON_REMEDY = "chown root, then chmod go-w"
+
+
+def _planted_python_env(tmp_path: Path, uv_dir: Path, marker: Path) -> tuple[dict[str, str], Path]:
+    """A root run's environment whose managed-Python directory holds a planted install: (env, directory)."""
+    planted = planted_managed_python(tmp_path / "planted-managed", marker)
+    if planted is None:
+        pytest.skip("this host has no uv-managed Python (and the test must not download one)")
+    environment = _trust_env(tmp_path, uv_dir)
+    environment.update(managed_python_env(tmp_path, managed=planted))
+    return environment, planted
+
+
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
-@pytest.mark.parametrize(("as_root", "refused"), [(True, True), (False, False)], ids=["root", "not-root-control"])
-def test_as_root_a_managed_python_another_account_can_modify_is_refused(
-    tmp_path: Path, shell_id: str, shell: list[str], as_root: bool, refused: bool
+@pytest.mark.parametrize("refused", [True, False], ids=["untrusted-directory", "trusted-directory-control"])
+def test_as_root_an_untrusted_managed_python_dir_is_refused_before_uv_runs_a_python_in_it(
+    tmp_path: Path, shell_id: str, shell: list[str], refused: bool
 ) -> None:
-    """[A1]: the Python uv found must pass the same check as uv itself; a directory above it that every
-    account can write refuses it as root (exit 127, the script never runs). The control runs it."""
-    _needs_managed_python()
-    runner, uv = _python_runner(tmp_path, as_root=as_root)
-    environment = _trust_env(tmp_path, uv.parent)
-    data_home(tmp_path).chmod(0o777)
+    """[X21 P1]: `uv python find` EXECUTES every interpreter it considers in uv's managed-Python
+    directory, so a .pth planted there ran as root before the found path was judged. The directory is
+    now judged before uv starts: every account may write it, the run exits 127 and the plant never
+    runs. The control, the same root run with the directory left trusted, runs the plant."""
+    runner, uv = _python_runner(tmp_path, as_root=True)
+    marker = tmp_path / "planted-pth-ran.txt"
+    environment, planted = _planted_python_env(tmp_path, uv.parent, marker)
+    if refused:
+        planted.chmod(0o777)
     result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
     if refused:
+        assert not marker.exists(), "uv ran a Python from the untrusted directory as root: " + marker.read_text()
         assert result.returncode == 127, result.stdout + result.stderr
-        assert "refusing the Python uv found at" in result.stderr, result.stderr
-        assert _reported_python(result) is None, result.stdout
+        assert _PYTHON_DIR_REFUSED in result.stderr and _PYTHON_REMEDY in result.stderr, result.stderr
         return
     assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.is_file(), "the control never ran the planted .pth: " + result.stderr
     assert _reported_python(result) is not None, result.stdout
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_a_python_whose_install_another_account_can_modify_is_refused(
+    tmp_path: Path, shell_id: str, shell: list[str]
+) -> None:
+    """[A1]: the Python uv found must still pass the same check as uv itself, inside a trusted
+    managed-Python directory too: an install every account can write refuses it (exit 127, the
+    script never runs), and the refusal names the remedy."""
+    runner, uv = _python_runner(tmp_path, as_root=True)
+    environment, planted = _planted_python_env(tmp_path, uv.parent, tmp_path / "planted-pth-ran.txt")
+    (install,) = [child for child in planted.iterdir() if child.is_dir()]
+    install.chmod(0o777)
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert "refusing the Python uv found at" in result.stderr and _PYTHON_REMEDY in result.stderr, result.stderr
+    assert _PYTHON_DIR_REFUSED not in result.stderr, result.stderr
+    assert _reported_python(result) is None, result.stdout
 
 
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root"])

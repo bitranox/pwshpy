@@ -41,15 +41,16 @@
     skipped with a line on stderr, and a -PwshPyUv path that fails the check is refused with exit
     code 127. As root on POSIX it runs its own helpers only from the fixed system directories.
     Elevated, the script runs only on a Python uv manages in the running account's own data
-    directory (the RoamingAppData known folder on Windows, <home from the passwd database>/.local/share
-    on POSIX; downloaded on first use unless UV_PYTHON_DOWNLOADS is never or manual), found with
-    `uv python find --system` and handed to uv run as --python after the same check as uv itself,
-    so no .venv anywhere is ever run; uv starts in a directory only administrators can write (/ on
-    POSIX, System32 on Windows), and the script itself still runs in your directory. Every uv call
-    an elevated run makes reads no uv.toml (--no-config). UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX,
-    UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON, UV_PYTHON_INSTALL_DIR, UV_CONFIG_FILE,
-    UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL, PYTHONHOME and PYTHONPATH are ignored,
-    each with a line on stderr.
+    directory (the RoamingAppData known folder on Windows, <home from the passwd
+    database>/.local/share on POSIX; downloaded on first use unless UV_PYTHON_DOWNLOADS is never or
+    manual), found with `uv python find --system` and handed to uv run as --python after the same
+    check as uv itself, so no .venv anywhere is ever run; that directory passes the same check
+    before uv searches it (uv runs every Python it finds there), or the run exits 127; uv starts in
+    a directory only administrators can write (/ on POSIX, System32 on Windows), and the script
+    itself still runs in your directory. Every uv call an elevated run makes reads no uv.toml
+    (--no-config). UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX, UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON,
+    UV_PYTHON_INSTALL_DIR, UV_CONFIG_FILE, UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL,
+    PYTHONHOME and PYTHONPATH are ignored, each with a line on stderr.
 
     Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -393,7 +394,7 @@ function Split-PwshPyPath {
 }
 
 function Get-PwshPyUvDistrust {
-    param([string] $Path)
+    param([string] $Path, [bool] $Directory = $false)
 
     # Returns why an elevated run must not execute the uv at $Path, or '' when it may. Walks the
     # path one component at a time from its root, resolving each symlink or junction where it is
@@ -401,7 +402,8 @@ function Get-PwshPyUvDistrust {
     # included: whoever can rename any of them, or repoint a link, decides what runs. Reported in
     # order: a link that fails (at once), the directory holding uv, the first ancestor that fails,
     # then the file. A directory link on the way (/bin -> usr/bin on a merged-/usr system) is
-    # resolved like any other.
+    # resolved like any other. -Directory judges the last component as a directory (on Windows the
+    # rights that add or remove an entry count too), for a path that names one.
     if (-not (Test-PwshPyAbsolutePath -Path $Path)) { return "$Path is not an absolute path" }
     if ($PwshPyOnWindows) { $Path = $Path.Replace('/', '\') }
     $current = [IO.Path]::GetPathRoot($Path)
@@ -449,7 +451,7 @@ function Get-PwshPyUvDistrust {
     $why = Get-PwshPyLeafDistrust -Path $current -Directory $true
     if ($why) { return "its directory $why" }
     if ($ancestor) { return "its ancestor $ancestor" }
-    return (Get-PwshPyLeafDistrust -Path $next -Directory $false)
+    return (Get-PwshPyLeafDistrust -Path $next -Directory $Directory)
 }
 
 function Write-PwshPyNotice {
@@ -704,6 +706,33 @@ function Invoke-PwshPyUvPython {
     return @{ Code = $code; Out = ((@($stdout) | ForEach-Object { [string]$_ }) -join "`n").Trim(); Err = $text.TrimEnd() }
 }
 
+function Get-PwshPyPythonRemedy {
+    # What an elevated run that refused a managed-Python path tells the caller to do about it.
+    if ($PwshPyOnWindows) {
+        return 'take every other account''s write access off the path named above (only the running account, SYSTEM and Administrators may change it), or remove it and install the Python again elevated (uv python install)'
+    }
+    return 'make the directory named above root''s alone (chown root, then chmod go-w on it), or remove it and install the Python again as root (uv python install)'
+}
+
+function Get-PwshPyPythonDirDistrust {
+    param([string] $Path)
+
+    # Why uv's managed-Python directory $Path may not be searched elevated, or ''. `uv python find`
+    # EXECUTES every interpreter it considers there to ask its version, so a .pth planted in one's
+    # site-packages would run elevated before any check of the path uv answers (measured with uv
+    # 0.13): the directory is judged before uv starts, as a uv is, itself and every directory above
+    # it. One that does not exist yet is judged by the nearest one that does, where
+    # `uv python install` will create it.
+    $directory = $Path
+    while (-not (Test-Path -LiteralPath $directory)) {
+        $parent = [IO.Path]::GetDirectoryName($directory)
+        if (-not $parent) { break }
+        $directory = $parent
+    }
+    if ($directory -eq [IO.Path]::GetPathRoot($directory)) { return (Get-PwshPyLeafDistrust -Path $directory -Directory $true) }
+    return (Get-PwshPyUvDistrust -Path $directory -Directory $true)
+}
+
 function Resolve-PwshPyManagedPython {
     param([string] $Uv)
 
@@ -742,7 +771,7 @@ function Resolve-PwshPyManagedPython {
     }
     $why = Get-PwshPyUvDistrust -Path $python
     if ($why) {
-        Write-PwshPyFailure "pwshpy: refusing the Python uv found at ${python}: $why (an elevated run only runs a Python no other account can modify)"
+        Write-PwshPyFailure "pwshpy: refusing the Python uv found at ${python}: $why (an elevated run only runs a Python no other account can modify): $(Get-PwshPyPythonRemedy)"
         exit 127
     }
     return $python
@@ -1135,6 +1164,12 @@ $PwshPyPrepare = {
         Clear-PwshPyInterpreterVariable
         $PwshPyDataHome = Get-PwshPyAccountDataHome
         Set-Item -LiteralPath 'Env:UV_PYTHON_INSTALL_DIR' -Value (Join-Path (Join-Path $PwshPyDataHome 'uv') 'python')
+        # The directory before uv searches it: uv runs every Python it finds there.
+        $PwshPyPythonDirWhy = Get-PwshPyPythonDirDistrust -Path $env:UV_PYTHON_INSTALL_DIR
+        if ($PwshPyPythonDirWhy) {
+            Write-PwshPyFailure "pwshpy: refusing uv's managed-Python directory $($env:UV_PYTHON_INSTALL_DIR): $PwshPyPythonDirWhy (an elevated run lets uv search only a directory no other account can modify): $(Get-PwshPyPythonRemedy)"
+            exit 127
+        }
         # Script scope by name: the run preparation, a block of its own, reads it.
         $script:PwshPyPython = Resolve-PwshPyManagedPython -Uv $PwshPyUv
     }

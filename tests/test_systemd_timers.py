@@ -151,14 +151,14 @@ def test_service_unit_text() -> None:
     """service_unit renders a oneshot exec unit; arguments are appended to ExecStart."""
     text = service_unit("/usr/bin/backup", "--full /data", "nightly backup")
     assert "Type=oneshot" in text
-    assert "ExecStart=/usr/bin/backup --full /data" in text
+    assert 'ExecStart="/usr/bin/backup" --full /data' in text
     assert "Description=nightly backup" in text
 
 
 @pytest.mark.os_agnostic
 def test_service_unit_no_arguments() -> None:
     """With no arguments, ExecStart is just the program (no trailing space)."""
-    assert "ExecStart=/bin/true\n" in service_unit("/bin/true", "", "")
+    assert 'ExecStart="/bin/true"\n' in service_unit("/bin/true", "", "")
 
 
 _AT = datetime(2026, 10, 21, 21, 59, tzinfo=timezone.utc)
@@ -197,9 +197,35 @@ def test_timer_unit_fires_on_time() -> None:
 def test_unit_text_escapes_percent_specifiers() -> None:
     """A literal % reaches the program and the description, never a systemd specifier."""
     service = service_unit("/usr/bin/date", "+%Y-%m-%d", "100% done")
-    assert "ExecStart=/usr/bin/date +%%Y-%%m-%%d\n" in service
+    assert 'ExecStart="/usr/bin/date" +%%Y-%%m-%%d\n' in service
     assert "Description=100%% done\n" in service
     assert "Description=50%% off\n" in timer_unit("job", "50% off", [OnceTrigger(at=_AT)])
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("prefix", ["+", "!", "-", "@", ":"])
+def test_service_unit_refuses_an_execstart_prefix_on_the_program(prefix: str) -> None:
+    """[C3]: systemd reads a leading + ! - @ : on ExecStart='s executable as a prefix, quoted or not
+    ('+' runs it with full privileges, ignoring User=), so a program starting with one is refused."""
+    with pytest.raises(ConfigurationError, match="prefix"):
+        service_unit(f"{prefix}/bin/true", "", "", user="1000")
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("program", "rendered"),
+    [
+        ("/opt/my app/run", '"/opt/my app/run"'),
+        ("/opt/it's/run", '"/opt/it\'s/run"'),
+        ('/opt/a"b/run', '"/opt/a\\"b/run"'),
+        ("/opt/a\\b/run", '"/opt/a\\\\b/run"'),
+    ],
+    ids=["space", "single-quote", "double-quote", "backslash"],
+)
+def test_service_unit_quotes_the_program_as_one_word(program: str, rendered: str) -> None:
+    """[C3]: unquoted, systemd splits ExecStart= on whitespace, so "/opt/my app/run" ran "/opt/my"
+    (measured with systemd-analyze verify on 259); quoted with C escapes, the path is one word."""
+    assert f"ExecStart={rendered} --flag\n" in service_unit(program, "--flag", "")
 
 
 @pytest.mark.os_agnostic

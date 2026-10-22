@@ -500,19 +500,51 @@ def _unit_value(text: str, field: str) -> str:
     return _single_line(text, field).replace("%", "%%")
 
 
+#: The characters systemd reads as a prefix of ExecStart='s executable (systemd.service(5), "Command
+#: lines"): "@" (argv[0]), "-" (ignore the exit code), ":" (no variable expansion), "+" (full
+#: privileges, ignoring User=) and "!" / "!!" (no privilege drop). systemd strips them from the word
+#: after unquoting it, so quoting does not keep one literal.
+_EXEC_PREFIXES = frozenset("@-:+!")
+
+
+def _exec_program(program: str) -> str:
+    """``program`` as ExecStart='s first word: refused with a leading prefix, else double-quoted.
+
+    Unquoted, systemd splits the line on whitespace, so ``/opt/my app/run`` would run ``/opt/my``
+    (measured with systemd-analyze verify on 259). Inside double quotes it reads C escapes, so a
+    backslash and a double quote are escaped; ``%`` is doubled like every value (:func:`_unit_value`).
+
+    Raises:
+        ConfigurationError: ``program`` is empty, holds a line break, or starts with a prefix.
+    """
+    program = _unit_value(program, "program")
+    if not program:
+        raise ConfigurationError("program must not be empty: it is the executable ExecStart= runs.")
+    if program[0] in _EXEC_PREFIXES:
+        raise ConfigurationError(
+            f"program must not start with {program[0]!r}: systemd reads it as an ExecStart= prefix "
+            "('+' would run it with full privileges, ignoring User=); give the executable's path."
+        )
+    return '"' + program.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def service_unit(program: str, arguments: str, description: str, *, user: str | None = None) -> str:
     """The unit-file text for a oneshot ``.service`` (the exec action), run as ``user`` if given.
 
+    ``program`` is one quoted word (:func:`_exec_program`); ``arguments`` follow it as written, so
+    systemd splits and unquotes them with its own rules and expands ``$VAR``, as documented.
+
     Raises:
-        ConfigurationError: ``program``, ``arguments`` or ``description`` holds a line break.
+        ConfigurationError: ``program``, ``arguments`` or ``description`` holds a line break, or
+            ``program`` is empty or starts with an ExecStart= prefix.
 
     Example:
         >>> "User=1000" in service_unit("/bin/true", "", "d", user="1000")
         True
-        >>> "ExecStart=/usr/bin/date +%%Y" in service_unit("/usr/bin/date", "+%Y", "")
+        >>> 'ExecStart="/usr/bin/date" +%%Y' in service_unit("/usr/bin/date", "+%Y", "")
         True
     """
-    program = _unit_value(program, "program")
+    program = _exec_program(program)
     arguments = _unit_value(arguments, "arguments")
     exec_line = program if not arguments else f"{program} {arguments}"
     user_line = f"User={user}\n" if user is not None else ""

@@ -143,7 +143,8 @@ Logon triggers, `every_days > 1` and a logon type are Windows-only (`PlatformUns
 
 ## Errors, timeouts and exit codes
 
-Every failure raises a `PwshPyError` subclass; catch a subclass before its parent:
+Every failure raises a `PwshPyError` subclass, except a bad argument (`ValueError`, CLI exit 22);
+catch a subclass before its parent:
 
 - `NativeCallError` - an OS call failed, `.check()` saw a nonzero exit, or a `strict=True` listing
   hit an item it cannot read. Its subclasses: `OperationTimeoutError` (`.timeout` holds the limit:
@@ -243,8 +244,10 @@ The artefact forwards every argument to your script untouched (empty strings, qu
 `--pwshpy-uv PATH` to pin the `uv` it runs (absolute path; relative exits 64). Run elevated
 (administrator, SYSTEM or root) it only runs a `uv` no other account can modify (on POSIX: root
 alone), skipping others with a `pwshpy: skipping uv at` line and refusing an untrusted pin with exit
-127, and only a uv-managed Python (`--python-preference only-managed`; the first elevated run
-downloads one, so it fails offline or with `UV_PYTHON_DOWNLOADS=never` and none installed).
+127, and only a uv-managed Python from the running account's own data directory, found with
+`uv python find --system`, checked like the `uv` and named to `uv run --python` (the first elevated
+run downloads one, so it fails offline or with `UV_PYTHON_DOWNLOADS` `never` / `manual` and none
+installed); every uv call it makes reads no `uv.toml` (`--no-config`).
 
 ## Every public name
 

@@ -184,7 +184,7 @@ def iter_scheduled_tasks(folder_path: str = _ROOT, *, strict: bool = False) -> I
         root = service.GetFolder(folder_path)
         root_path = _folder_path(root)
     except Exception as exc:
-        raise NativeCallError(str(exc) or f"cannot open task folder {folder_path!r}") from exc
+        raise NativeCallError(f"cannot open task folder '{folder_path}': {exc}") from exc
     yield from _walk(root, root_path, strict=strict)
 
 

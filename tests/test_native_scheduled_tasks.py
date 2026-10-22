@@ -156,8 +156,11 @@ def test_iter_scheduled_tasks_wraps_folder_failure(monkeypatch: pytest.MonkeyPat
             raise OSError("no such folder")
 
     monkeypatch.setattr(st_mod, "_connect_scheduler", _BadService)
-    with pytest.raises(NativeCallError):
+    with pytest.raises(NativeCallError) as caught:
         list(iter_scheduled_tasks("\\Nope"))
+    # Named like every other unreadable item: a raw COM error tuple alone does not say which folder.
+    assert "'\\Nope'" in str(caught.value)
+    assert "no such folder" in str(caught.value)
 
 
 @pytest.mark.os_agnostic

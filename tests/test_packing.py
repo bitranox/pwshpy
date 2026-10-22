@@ -424,6 +424,12 @@ def test_only_with_values_are_re_anchored_in_both_runners() -> None:
         ("# /// script\n# 'requires-python' = '>=3.11'\n# ///\n", ">=3.11"),
         ('# /// script\n#   [tool.x]\n# requires-python = ">=3.12"\n# ///\n', ""),
         ('# /// script\n# requires-python-note = "x"\n# requires-python = ">=3.12"\n# ///\n', ">=3.12"),
+        (
+            '# /// script\n# dependencies = [\n#   ["x"],\n#   "y",\n# ]\n# requires-python = ">=3.12"\n# ///\n',
+            ">=3.12",
+        ),
+        ('# /// script\n# x = [\n#   "]",\n#   [1],\n# ]\n# requires-python = ">=3.12"\n# ///\n', ">=3.12"),
+        ('# /// script\n# x = [\n#   1,\n# ]  # [a]\n# [tool.x]\n# requires-python = ">=3.12"\n# ///\n', ""),
     ],
     ids=[
         "basic-string",
@@ -436,12 +442,16 @@ def test_only_with_values_are_re_anchored_in_both_runners() -> None:
         "literal-quoted-key",
         "indented-table",
         "longer-key-is-another-key",
+        "nested-array-element-line",
+        "bracket-inside-a-string-in-an-array",
+        "table-after-a-closed-array",
     ],
 )
 def test_requires_python_is_read_from_the_top_level_of_the_block(block: str, expected: str) -> None:
     """[A1]: the request an elevated run hands uv python find is the block's own requires-python.
 
-    [X21 M1]: an indented key and a quoted key are valid TOML that uv honours, so they count too."""
+    [X21 M1]: an indented key and a quoted key are valid TOML that uv honours, so they count too.
+    [X22 M-P1]: a line of a multi-line array that opens with '[' is an element, not a table header."""
     assert extract_requires_python(block) == expected
 
 

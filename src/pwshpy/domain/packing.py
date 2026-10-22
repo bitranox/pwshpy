@@ -409,6 +409,41 @@ _REQUIRES_PYTHON_LINE = re.compile(
 _SPECIFIER_CHARACTERS = re.compile(r"[0-9A-Za-z.,<>=!~*+ ]*")
 
 
+def _array_depth_change(line: str) -> int:
+    """How many TOML arrays ``line`` opens minus how many it closes, ignoring strings and a comment.
+
+    Example:
+        >>> _array_depth_change('dependencies = [  # "]" in a comment')
+        1
+        >>> _array_depth_change('  "a[1]", ["b\\\\"]"],')
+        0
+        >>> _array_depth_change("]")
+        -1
+    """
+    change = 0
+    quote = ""
+    escaped = False
+    for character in line:
+        if quote:
+            # Only a basic string ("...") has escapes; a literal one ('...') ends at its next quote.
+            if escaped:
+                escaped = False
+            elif quote == '"' and character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = ""
+            continue
+        if character == "#":
+            break
+        if character in "\"'":
+            quote = character
+        elif character == "[":
+            change += 1
+        elif character == "]":
+            change -= 1
+    return change
+
+
 def extract_requires_python(metadata: str) -> str:
     """Return the ``requires-python`` of a PEP 723 block (as :func:`extract_script_metadata` returns it), or ``""``.
 
@@ -430,11 +465,15 @@ def extract_requires_python(metadata: str) -> str:
         >>> extract_requires_python("")
         ''
     """
+    depth = 0
     for raw in metadata.splitlines()[1:-1]:
         # TOML allows whitespace before a key and a table header, so neither has to start the line.
         line = (raw[2:] if raw.startswith("# ") else raw[1:]).strip()
-        if line.startswith("["):
+        # A line opening with '[' inside a multi-line array (`#   ["x"],`) is one of its elements; only
+        # one outside every open array is a table header, which ends the top level.
+        if line.startswith("[") and depth == 0:
             return ""
+        depth = max(depth + _array_depth_change(line), 0)
         if not _REQUIRES_PYTHON_KEY.match(line):
             continue
         match = _REQUIRES_PYTHON_LINE.fullmatch(line)

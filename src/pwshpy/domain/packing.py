@@ -23,6 +23,7 @@ Contents:
     * :func:`classify_import` - stdlib / local / external for one dotted name.
     * :func:`candidate_relative_paths` - the file paths a dotted name may live at.
     * :func:`extract_script_metadata` - lift the entry's PEP 723 block onto the shim.
+    * :func:`extract_requires_python` - the block's ``requires-python``, the request an elevated run makes.
     * :func:`render_shim` - the generated ``__main__`` shim for one entry.
     * :func:`render_runner` - substitute a payload into the runner template.
     * :func:`split_relative_requirement` - a ``--with`` path an elevated run re-anchors.
@@ -85,6 +86,8 @@ class RunnerContent:
         entry: Archive-relative path of the entry script.
         uv_args: Extra arguments spliced into the ``uv run`` invocation.
         file_hashes: ``(digest, path)`` pairs the runner verifies before running.
+        python_request: The entry's ``requires-python`` (see :func:`extract_requires_python`), which
+            an elevated run hands ``uv python find``; ``""`` for none.
     """
 
     payload_b64: str
@@ -92,6 +95,7 @@ class RunnerContent:
     entry: str
     uv_args: Sequence[str] = ()
     file_hashes: Sequence[FileDigest] = field(default_factory=tuple)
+    python_request: str = ""
 
 
 class FileDigest(NamedTuple):
@@ -150,6 +154,7 @@ _PLACEHOLDERS = (
     "@@PWSHPY_ARGV_ENV@@",
     "@@PWSHPY_CWD_ENV@@",
     "@@PWSHPY_UV_ARGS_RELATIVE@@",
+    "@@PWSHPY_PYTHON_REQUEST@@",
 )
 
 #: The entry name as plain text, for the runners' help comments. Optional (a template may or may not
@@ -175,6 +180,7 @@ _SH_PLACEHOLDERS = (
     "@@PWSHPY_ARGV_ENV@@",
     "@@PWSHPY_CWD_ENV@@",
     "@@PWSHPY_UV_ARGS_ANCHORED@@",
+    "@@PWSHPY_PYTHON_REQUEST@@",
 )
 
 #: The variable the POSIX runner sets, for a root run, to the caller's directory with one trailing
@@ -385,6 +391,52 @@ def extract_script_metadata(source: str) -> str:
     return ""
 
 
+#: A ``requires-python`` line inside a PEP 723 block, the key at the start of a line; the value is a
+#: basic or literal TOML string.
+_REQUIRES_PYTHON_LINE = re.compile(r"""requires-python\s*=\s*(?:"(?P<basic>[^"\\]*)"|'(?P<literal>[^']*)')\s*(?:#.*)?""")
+
+#: The characters a PEP 440 version specifier set is written with. The value travels into both runners
+#: and onto uv's command line, so anything else is refused rather than quoted.
+_SPECIFIER_CHARACTERS = re.compile(r"[0-9A-Za-z.,<>=!~*+ ]*")
+
+
+def extract_requires_python(metadata: str) -> str:
+    """Return the ``requires-python`` of a PEP 723 block (as :func:`extract_script_metadata` returns it), or ``""``.
+
+    An elevated run names its interpreter to uv outright (``--python <path>``, so no ``.venv`` above
+    the directory uv starts in is probed), and uv then only warns when that interpreter is outside the
+    script's ``requires-python``. So the runner asks ``uv python find`` for a managed Python matching
+    this request first. Only a top-level key counts (a ``[tool...]`` table may hold its own), and only
+    a plain quoted string of specifier characters is accepted: anything else would be a runner value
+    no reader can check at a glance.
+
+    Raises:
+        PackError: When the key is there but is not such a string.
+
+    Example:
+        >>> extract_requires_python('# /// script\n# requires-python = ">=3.11,<3.14"\n# ///\n')
+        '>=3.11,<3.14'
+        >>> extract_requires_python('# /// script\n# dependencies = []\n# ///\n')
+        ''
+        >>> extract_requires_python("")
+        ''
+    """
+    for raw in metadata.splitlines()[1:-1]:
+        line = raw[2:] if raw.startswith("# ") else raw[1:]
+        if line.startswith("["):
+            return ""
+        if not line.startswith("requires-python"):
+            continue
+        match = _REQUIRES_PYTHON_LINE.fullmatch(line.rstrip())
+        value = None if match is None else match.group("basic") or match.group("literal") or ""
+        if value is None or _SPECIFIER_CHARACTERS.fullmatch(value) is None:
+            raise PackError(
+                f"the entry's requires-python must be one quoted string of version specifiers, got: {line.strip()!r}"
+            )
+        return value.strip()
+    return ""
+
+
 def render_shim(*, entry: str, metadata: str) -> str:
     """Render the generated ``__main__`` shim that fronts ``entry`` inside a pack.
 
@@ -451,7 +503,7 @@ def render_runner(template: str, content: RunnerContent) -> str:
         ...                         uv_args=["--with", "rich"], file_hashes=[FileDigest("ff", "t.py")])
         >>> render_runner("|".join(_PLACEHOLDERS), content).split("|")  # doctest: +NORMALIZE_WHITESPACE
         ['Ym9keQ==', 'ab12', "'t.py'", "'--with','rich'", 'ff *t.py', '__pwshpy_pack_main__.py',
-         'PWSHPY_PACK_ARGV', 'PWSHPY_PACK_CWD', "'',''"]
+         'PWSHPY_PACK_ARGV', 'PWSHPY_PACK_CWD', "'',''", "''"]
     """
     missing = [token for token in _PLACEHOLDERS if token not in template]
     if missing:
@@ -475,6 +527,7 @@ def render_runner(template: str, content: RunnerContent) -> str:
             "@@PWSHPY_ARGV_ENV@@": ARGV_ENV_VAR,
             "@@PWSHPY_CWD_ENV@@": CWD_ENV_VAR,
             "@@PWSHPY_UV_ARGS_RELATIVE@@": _powershell_relative_suffixes(content.uv_args),
+            "@@PWSHPY_PYTHON_REQUEST@@": _powershell_literal(content.python_request),
         },
     )
 
@@ -603,6 +656,7 @@ def render_posix_runner(template: str, content: RunnerContent) -> str:
             "@@PWSHPY_ARGV_ENV@@": ARGV_ENV_VAR,
             "@@PWSHPY_CWD_ENV@@": CWD_ENV_VAR,
             "@@PWSHPY_UV_ARGS_ANCHORED@@": _posix_shell_word(_posix_anchored_args(content.uv_args)),
+            "@@PWSHPY_PYTHON_REQUEST@@": _posix_shell_word(content.python_request),
         },
     )
 
@@ -728,6 +782,7 @@ __all__ = [
     "candidate_relative_paths",
     "chunk_base64",
     "classify_import",
+    "extract_requires_python",
     "extract_script_metadata",
     "iter_import_candidates",
     "render_posix_runner",

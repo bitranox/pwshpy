@@ -30,10 +30,11 @@ from elevation_doubles import (
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
     RUNNING_AS_ROOT,
+    data_home,
     link_tools,
-    managed_python_dir,
     managed_python_env,
     owned_by_another_account,
+    trusted_managed_python,
     with_data_home,
     write_fake_sudo,
     write_local_wheel,
@@ -595,7 +596,7 @@ def _trust_env(tmp_path: Path, *path_first: Path, no_managed: bool = False) -> d
         "PYTHONIOENCODING": "utf-8",
         "UV_PYTHON_DOWNLOADS": "never",
     }
-    managed = None if no_managed else managed_python_dir()
+    managed = None if no_managed else trusted_managed_python()
     environment.update(managed_python_env(tmp_path, managed=managed))
     return environment
 
@@ -1116,8 +1117,9 @@ _ENTRY_REPORTING_PYTHON = """import sys
 
 print("python:" + sys.executable)
 """
-#: uv's refusal when only-managed finds nothing (measured with uv 0.13.0 and 0.13.3).
-_NO_MANAGED_PYTHON = "No interpreter found in virtual environments or managed installations"
+#: uv's refusal when `uv python find --system --python-preference only-managed` finds nothing, which an
+#: elevated run passes on (measured with uv 0.13.0).
+_NO_MANAGED_PYTHON = "No interpreter found in managed installations"
 
 
 def _python_runner(
@@ -1157,7 +1159,7 @@ def _reported_python(result: subprocess.CompletedProcess[str]) -> str | None:
 
 
 def _needs_managed_python() -> Path:
-    managed = managed_python_dir()
+    managed = trusted_managed_python()
     if managed is None:
         pytest.skip("this host has no uv-managed Python (and the test must not download one)")
     return managed
@@ -1260,9 +1262,12 @@ def test_the_uv_command_line_carries_only_managed_exactly_as_root(
     assert result.returncode == 0, result.stdout + result.stderr
     argv = record.read_text(encoding="utf-8").splitlines()
     if as_root:
-        managed = ["--python-preference", "only-managed", "--project", "/", "--directory", "/"]
-        assert argv[:8] == ["run", "--no-project", *managed], argv
-        assert argv[8].startswith("/") and argv[8].endswith("/" + SHIM_MODULE), argv
+        python = str(uv.parent / "python")
+        managed = ["--python-preference", "only-managed", "--python", python, "--project", "/", "--directory", "/"]
+        assert argv[:10] == ["run", "--no-project", *managed], argv
+        assert argv[10].startswith("/") and argv[10].endswith("/" + SHIM_MODULE), argv
+        found = [line for line in Path(f"{record}.python").read_text(encoding="utf-8").splitlines() if ":" not in line]
+        assert found == ["python", "find", "--directory", "/", "--system", "--python-preference", "only-managed"], found
     else:
         assert argv[:2] == ["run", "--no-project"], argv
         assert "--python-preference" not in argv and "--project" not in argv, argv
@@ -1351,6 +1356,33 @@ def test_as_root_the_managed_python_dir_is_the_accounts_own(
             assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
 
 
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_the_python_is_found_for_the_scripts_requires_python(tmp_path: Path, as_root: bool) -> None:
+    """[A1]: uv run only warns when --python names an interpreter outside the script's requires-python,
+    so a root run asks uv python find for one that matches; not root, uv run reads the block itself."""
+    entry = tmp_path / "which_python.py"
+    entry.write_text('# /// script\n# requires-python = ">=3.10,<4"\n# ///\nprint("never run")\n')
+    runner = _pack_sh(entry, tmp_path / "which_python.sh", as_root=as_root)
+    text = runner.read_text(encoding="utf-8").replace(
+        _TRUSTED_UIDS, f"PWSHPY_TRUSTED_UIDS='0 {tmp_path.stat().st_uid}'\n"
+    )
+    runner.write_text(text, encoding="utf-8", newline="\n")
+    leaf = tmp_path / "rec" / "bin"
+    leaf.mkdir(parents=True)
+    record = tmp_path / "argv.txt"
+    uv = write_recording_uv(leaf, record)
+    leaf.chmod(0o755)
+    (tmp_path / "rec").chmod(0o755)
+    result = _run_in(["sh"], runner, "--pwshpy-uv", str(uv), env=_trust_env(tmp_path), cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    found = Path(f"{record}.python")
+    if as_root:
+        calls = [line for line in found.read_text(encoding="utf-8").splitlines() if ":" not in line]
+        assert calls[-1] == ">=3.10,<4", calls
+    else:
+        assert not found.exists()
+
+
 # --- [57] as root uv starts in / and the shim returns to the caller's directory -------------------------
 # uv probes a .venv in its working directory and every directory above, and under only-managed it even
 # RUNS the script on that venv's python (measured with uv 0.13.0), so a root run started from a
@@ -1394,6 +1426,60 @@ def test_as_root_a_venv_above_the_working_directory_never_runs(
     reported = _reported_cwd(result)
     assert reported is not None and reported.samefile(work), result.stdout
     assert f"argv:{arguments!r}" in result.stdout, result.stdout
+
+
+#: The runner's uv anchor, and a test's stand-in for it (one counted substitution).
+_ANCHOR = "PWSHPY_ANCHOR=/\n"
+
+
+def _with_anchor(runner: Path, anchor: Path) -> None:
+    """Make ``runner`` start uv in ``anchor`` instead of /: no test can plant a .venv above /."""
+    text = runner.read_text(encoding="utf-8")
+    assert text.count(_ANCHOR) == 1
+    runner.write_text(text.replace(_ANCHOR, f"PWSHPY_ANCHOR='{anchor}'\n"), encoding="utf-8", newline="\n")
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize(("as_root", "planted_runs"), [(True, False), (False, True)], ids=["root", "not-root-control"])
+def test_as_root_a_venv_above_the_anchor_never_runs(
+    tmp_path: Path, shell_id: str, shell: list[str], as_root: bool, planted_runs: bool
+) -> None:
+    """[A1]: uv probes a .venv in its working directory and EVERY directory above it, so a .venv above
+    the anchor would run as root; a root run names the interpreter outright. The control, not root and
+    started in the anchor itself, shows the plant is reachable."""
+    _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=as_root, source=_ENTRY_REPORTING_CWD)
+    marker = tmp_path / "planted-venv-ran.txt"
+    write_planted_venv(tmp_path / "anchor-parent" / ".venv", marker)
+    anchor = tmp_path / "anchor-parent" / "anchor"
+    anchor.mkdir()
+    _with_anchor(runner, anchor)
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=_trust_env(tmp_path, uv.parent), cwd=anchor)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.is_file() is planted_runs, result.stdout + result.stderr
+    reported = _reported_cwd(result)
+    assert reported is not None and reported.samefile(anchor), result.stdout
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize(("as_root", "refused"), [(True, True), (False, False)], ids=["root", "not-root-control"])
+def test_as_root_a_managed_python_another_account_can_modify_is_refused(
+    tmp_path: Path, shell_id: str, shell: list[str], as_root: bool, refused: bool
+) -> None:
+    """[A1]: the Python uv found must pass the same check as uv itself; a directory above it that every
+    account can write refuses it as root (exit 127, the script never runs). The control runs it."""
+    _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=as_root)
+    environment = _trust_env(tmp_path, uv.parent)
+    data_home(tmp_path).chmod(0o777)
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    if refused:
+        assert result.returncode == 127, result.stdout + result.stderr
+        assert "refusing the Python uv found at" in result.stderr, result.stderr
+        assert _reported_python(result) is None, result.stdout
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _reported_python(result) is not None, result.stdout
 
 
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root"])

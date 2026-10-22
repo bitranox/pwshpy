@@ -18,6 +18,7 @@ Contents:
     * :func:`write_local_wheel` - a dependency-free wheel uv installs without the network.
     * :func:`write_recording_uv` - a ``uv`` double that records its argv and the variables it got.
     * :func:`managed_python_dir` - the host's uv-managed Python directory, when one holds an install.
+    * :func:`trusted_managed_python` - that directory, or a copy of one install an elevated run may trust.
     * :func:`interpreter_probe_env` - a uv search confined to one test (fresh cache, no downloads).
     * :func:`managed_python_env` - name uv's managed-Python directory so an elevated run finds it too.
     * :func:`data_home` - the data directory a test makes an elevated runner believe is its account's.
@@ -26,12 +27,14 @@ Contents:
 
 from __future__ import annotations
 
+import atexit
 import functools
 import os
 import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -342,6 +345,37 @@ def managed_python_dir() -> Path | None:
     return path if directory.returncode == 0 and path.is_dir() else None
 
 
+@functools.lru_cache(maxsize=1)
+def trusted_managed_python() -> Path | None:
+    """A managed-Python directory an elevated run's trust walk accepts, or None when the host has none.
+
+    An elevated run refuses an interpreter whose file or any directory above it another account can
+    modify ([93]). On Windows the host's own directory (under the profile) passes. On POSIX uv creates
+    it with the account's umask, which is group-writable on a host with per-user groups, so this
+    copies the install uv would pick into a fresh directory with group and other write removed, once
+    per test session (about 100 MB), and deletes it at exit. Read only for the host's own directory.
+
+    Example:
+        >>> found = trusted_managed_python()
+        >>> found is None or found.is_dir()
+        True
+    """
+    managed = managed_python_dir()
+    uv = shutil.which("uv")
+    if managed is None or uv is None or sys.platform == "win32":
+        return managed
+    found = _ask_uv(uv, "python", "find", "--no-project", "--python-preference", "only-managed")
+    install = Path(found.stdout.strip()).resolve().parents[1]
+    root = Path(tempfile.mkdtemp(prefix="pwshpy-managed-python-"))
+    atexit.register(shutil.rmtree, root, ignore_errors=True)
+    shutil.copytree(install, root / install.name, symlinks=True)
+    for directory, _subdirectories, files in os.walk(root):
+        for path in (Path(directory), *(Path(directory) / name for name in files)):
+            if not path.is_symlink():
+                path.chmod(path.stat().st_mode & ~0o022)
+    return root
+
+
 def _ask_uv(uv: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     """Run ``uv arguments`` with downloads off, no interpreter variables, outside any project."""
     # UV_PYTHON_INSTALL_DIR stays: a run that isolates uv's managed Pythons (a CT, a CI job) names
@@ -413,6 +447,10 @@ def managed_python_env(scratch: Path, *, managed: Path | None) -> dict[str, str]
     """
     install = data_home(scratch) / "uv" / "python"
     install.parent.mkdir(parents=True, exist_ok=True)
+    # Whatever the umask: an elevated run refuses an interpreter below a directory another account
+    # (the group, on a host with per-user groups) can modify.
+    for directory in (install.parent.parent, install.parent):
+        directory.chmod(directory.stat().st_mode & ~0o022)
     if install.is_symlink():
         install.unlink()
     elif install.is_dir():
@@ -463,6 +501,7 @@ __all__ = [
     "RUNNING_AS_ROOT",
     "SH_DATA_HOME_LOOKUP",
     "data_home",
+    "trusted_managed_python",
     "interpreter_probe_env",
     "link_tools",
     "managed_python_dir",

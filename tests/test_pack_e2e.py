@@ -33,11 +33,12 @@ from elevation_doubles import (
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
     RUNNING_AS_ROOT,
+    data_home,
     interpreter_probe_env,
     link_tools,
-    managed_python_dir,
     managed_python_env,
     owned_by_another_account,
+    trusted_managed_python,
     with_data_home,
     write_fake_sudo,
     write_local_wheel,
@@ -1852,8 +1853,9 @@ _ENTRY_REPORTING_PYTHON = """import sys
 
 print("python:" + sys.executable)
 """
-#: uv's refusal when only-managed finds nothing (measured with uv 0.13.0 and 0.13.3).
-_NO_MANAGED_PYTHON = "No interpreter found in virtual environments or managed installations"
+#: uv's refusal when `uv python find --system --python-preference only-managed` finds nothing, which an
+#: elevated run passes on (measured with uv 0.13.0).
+_NO_MANAGED_PYTHON = "No interpreter found in managed installations"
 #: The line the runner prints for each interpreter variable an elevated run drops.
 _VARIABLE_DROPPED = "pwshpy: ignoring {name}"
 
@@ -1895,7 +1897,7 @@ def _clean_cwd(tmp_path: Path) -> Path:
 
 
 def _needs_managed_python() -> Path:
-    managed = managed_python_dir()
+    managed = trusted_managed_python()
     if managed is None:
         pytest.skip("this host has no uv-managed Python (and the test must not download one)")
     return managed
@@ -2024,9 +2026,12 @@ def test_the_uv_command_line_carries_only_managed_exactly_when_elevated(tmp_path
     result = _run_with_path(tmp_path, runner, "-PwshPyUv", str(uv), path_first=[], cwd=_clean_cwd(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     argv = record.read_text(encoding="utf-8").splitlines()
-    managed = ["--python-preference", "only-managed", "--project", "/", "--directory", "/"]
+    python = str(uv.parent / "python")
+    managed = ["--python-preference", "only-managed", "--python", python, "--project", "/", "--directory", "/"]
     if elevated == "$true":
-        assert argv[:8] == ["run", "--no-project", *managed], argv
+        assert argv[:10] == ["run", "--no-project", *managed], argv
+        found = [line for line in Path(f"{record}.python").read_text(encoding="utf-8").splitlines() if ":" not in line]
+        assert found == ["python", "find", "--system", "--python-preference", "only-managed", "--directory", "/"], found
     else:
         assert argv[:2] == ["run", "--no-project"], argv
         assert "--python-preference" not in argv and "--project" not in argv, argv
@@ -2198,6 +2203,75 @@ def test_an_elevated_run_never_executes_a_venv_above_the_working_directory(
     assert marker.is_file() is planted_runs, result.stdout + result.stderr
     reported = _reported_cwd(result)
     assert reported is not None and reported.samefile(work), result.stdout
+
+
+#: The runner's anchor function, which a test answers with a directory of its own.
+_ANCHOR_FUNCTION = "function Get-PwshPyAnchorDirectory {"
+
+
+def _with_anchor(runner: Path, anchor: Path) -> None:
+    """Make ``runner`` start uv in ``anchor``: no test can plant a .venv above System32 or /."""
+    text = runner.read_text(encoding="utf-8")
+    assert text.count(_ANCHOR_FUNCTION) == 1
+    literal = "'" + str(anchor).replace("'", "''") + "'"
+    stand_in = f"{_ANCHOR_FUNCTION}\n    return {literal}\n}}\n\nfunction Get-PwshPyAnchorDirectoryOnHost {{"
+    runner.write_text(text.replace(_ANCHOR_FUNCTION, stand_in), encoding="utf-8")
+
+
+@pytest.mark.local_only
+@pytest.mark.parametrize(
+    ("elevated", "planted_runs"),
+    [pytest.param("$true", False, id="elevated"), pytest.param("$false", True, id="not-elevated-control")],
+)
+def test_an_elevated_run_never_executes_a_venv_above_the_anchor(
+    tmp_path: Path, elevated: str, planted_runs: bool
+) -> None:
+    """[A1]: uv probes a .venv in its working directory and EVERY directory above it, so a .venv above
+    the anchor (C:\\.venv above System32, creatable by any authenticated user) would run elevated; an
+    elevated run names the interpreter outright. The control, unelevated and started in the anchor
+    itself, shows the plant is reachable.
+    """
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated=elevated, source=_ENTRY_REPORTING_CWD)
+    marker = tmp_path / "planted-venv-ran.txt"
+    write_planted_venv(tmp_path / "anchor-parent" / ".venv", marker)
+    anchor = tmp_path / "anchor-parent" / "anchor"
+    anchor.mkdir()
+    _with_anchor(runner, anchor)
+    probe = interpreter_probe_env(tmp_path, managed=managed)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=anchor)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.is_file() is planted_runs, result.stdout + result.stderr
+    reported = _reported_cwd(result)
+    assert reported is not None and reported.samefile(anchor), result.stdout
+
+
+@pytest.mark.local_only
+@pytest.mark.parametrize(
+    ("elevated", "refused"),
+    [pytest.param("$true", True, id="elevated"), pytest.param("$false", False, id="not-elevated-control")],
+)
+def test_an_elevated_run_refuses_a_managed_python_another_account_can_modify(
+    tmp_path: Path, elevated: str, refused: bool
+) -> None:
+    """[A1]: the Python uv found must pass the same check as uv itself; a directory above it that Users
+    (Windows) or every account (POSIX) may modify refuses it (exit 127, the script never runs). The
+    control runs it."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated=elevated)
+    probe = interpreter_probe_env(tmp_path, managed=managed)
+    if sys.platform == "win32":
+        _icacls(data_home(tmp_path), "/grant", f"{_SID_USERS}:(OI)(CI)M")
+    else:
+        data_home(tmp_path).chmod(0o777)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))
+    if refused:
+        assert result.returncode == 127, result.stdout + result.stderr
+        assert "refusing the Python uv found at" in result.stderr, result.stderr
+        assert _reported_python(result) is None, result.stdout
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _reported_python(result) is not None, result.stdout
 
 
 @pytest.mark.local_only

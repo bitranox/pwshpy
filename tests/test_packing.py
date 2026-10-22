@@ -20,6 +20,7 @@ from pwshpy.domain.packing import (
     candidate_relative_paths,
     chunk_base64,
     classify_import,
+    extract_requires_python,
     extract_script_metadata,
     iter_import_candidates,
     render_posix_runner,
@@ -31,12 +32,12 @@ from pwshpy.domain.packing import (
 _FULL_TEMPLATE = (
     "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|"
     "@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@|@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@|"
-    "@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_RELATIVE@@"
+    "@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_RELATIVE@@|@@PWSHPY_PYTHON_REQUEST@@"
 )
 
 _SH_TEMPLATE = (
     "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@|"
-    "@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@|@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_ANCHORED@@"
+    "@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@|@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_ANCHORED@@|@@PWSHPY_PYTHON_REQUEST@@"
 )
 
 
@@ -169,6 +170,7 @@ def test_render_runner_substitutes_every_placeholder() -> None:
             entry="tool.py",
             uv_args=["--with", "rich"],
             file_hashes=[FileDigest("ff", "tool.py")],
+            python_request=">=3.11",
         ),
     )
     assert "@@PWSHPY" not in rendered
@@ -182,6 +184,7 @@ def test_render_runner_substitutes_every_placeholder() -> None:
         "PWSHPY_PACK_ARGV",
         "PWSHPY_PACK_CWD",
         "'',''",
+        "'>=3.11'",
     ]
 
 
@@ -216,10 +219,12 @@ def test_render_posix_runner_substitutes_its_placeholders() -> None:
             entry="tool.py",
             uv_args=["--with", "rich"],
             file_hashes=[FileDigest("ff", "tool.py")],
+            python_request=">=3.11",
         ),
     )
     assert "@@PWSHPY" not in rendered
-    payload, sha, entry, uv_args, hashes, shim, argv_env, cwd_env, anchored = rendered.split("|")
+    payload, sha, entry, uv_args, hashes, shim, argv_env, cwd_env, anchored, request = rendered.split("|")
+    assert shlex.split(request) == [">=3.11"]
     assert [payload, sha, shim, argv_env, cwd_env] == [
         "Ym9keQ==",
         "ab12",
@@ -403,3 +408,32 @@ def test_only_with_values_are_re_anchored_in_both_runners() -> None:
     (anchored,) = shlex.split(sh[8])
     assert anchored == "'--with' ''\"$PWSHPY_CALLER_PREFIX\"'./x.whl' '--with' 'rich'"
     assert _sh_uv_args(sh[3]) == ["--with", "./x.whl", "--with", "rich"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("block", "expected"),
+    [
+        ('# /// script\n# requires-python = ">=3.11,<3.14"\n# ///\n', ">=3.11,<3.14"),
+        ("# /// script\n# requires-python = '>=3.12'  # a comment\n# ///\n", ">=3.12"),
+        ('# /// script\n# dependencies = ["rich"]\n# ///\n', ""),
+        ('# /// script\n# [tool.x]\n# requires-python = ">=3.12"\n# ///\n', ""),
+        ("", ""),
+    ],
+    ids=["basic-string", "literal-string-and-comment", "absent", "inside-a-table", "no-block"],
+)
+def test_requires_python_is_read_from_the_top_level_of_the_block(block: str, expected: str) -> None:
+    """[A1]: the request an elevated run hands uv python find is the block's own requires-python."""
+    assert extract_requires_python(block) == expected
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "line",
+    ['requires-python = ">=3.11; rm -rf /"', "requires-python = 3.11", 'requires-python = """>=3.11"""'],
+    ids=["shell-characters", "not-a-string", "multi-line-string"],
+)
+def test_a_requires_python_that_is_not_a_plain_specifier_string_is_refused(line: str) -> None:
+    """[A1]: the value travels into both runners and onto uv's command line; anything odd is refused."""
+    with pytest.raises(PackError, match="requires-python"):
+        extract_requires_python(f"# /// script\n# {line}\n# ///\n")

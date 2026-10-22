@@ -68,6 +68,8 @@ $PwshPyCwdEnv = '@@PWSHPY_CWD_ENV@@'
 # Per uv arg, the relative path an elevated run (which starts uv in another directory) puts the
 # caller's directory in front of: '' for a value left as it is. Parallel to $PwshPyUvArgs.
 $PwshPyUvArgsRelative = @(@@PWSHPY_UV_ARGS_RELATIVE@@)
+# The packed script's requires-python ('' for none): the request an elevated run hands `uv python find`.
+$PwshPyPythonRequest = @@PWSHPY_PYTHON_REQUEST@@
 
 $PwshPyFileHashes = @'
 @@PWSHPY_FILE_HASHES@@
@@ -657,16 +659,85 @@ function Get-PwshPyAnchorDirectory {
 }
 
 function Get-PwshPyManagedPythonOption {
-    # The uv options an elevated run adds: only a uv-managed Python; project discovery (the
-    # .python-version and uv.toml uv would otherwise read from the packed script's directory and
-    # every directory above it, the cache, which a non-administrator may be able to write) moved to
-    # the anchor; and uv itself started there (--directory), because uv probes a .venv in its working
-    # directory and every one above, and under only-managed even runs the script on that venv's
-    # python (measured with uv 0.13.0), so a caller's directory another account can write would
-    # choose the interpreter. The generated shim changes back to the caller's directory before the
-    # script runs.
+    param([string] $Python)
+
+    # The uv options an elevated run adds: only a uv-managed Python, named outright (--python, see
+    # Resolve-PwshPyManagedPython); project discovery (the .python-version and uv.toml uv would
+    # otherwise read from the packed script's directory and every directory above it, the cache,
+    # which a non-administrator may be able to write) moved to the anchor; and uv itself started
+    # there (--directory), so nothing in the caller's directory is read either. The generated shim
+    # changes back to the caller's directory before the script runs.
     $anchor = Get-PwshPyAnchorDirectory
-    return @('--python-preference', 'only-managed', '--project', $anchor, '--directory', $anchor)
+    return @('--python-preference', 'only-managed', '--python', $Python, '--project', $anchor, '--directory', $anchor)
+}
+
+function Invoke-PwshPyUvPython {
+    param([string] $Uv, [string[]] $Arguments)
+
+    # Runs `uv python <Arguments>` started in the anchor, with the packed script's requires-python as
+    # the request when it has one. Returns its exit code, its stdout (trimmed) and its stderr, which
+    # is kept in a file rather than shown: an elevated child's console window is never seen, so the
+    # caller hands it to Write-PwshPyNotice or Write-PwshPyFailure. With $ErrorActionPreference at
+    # 'Stop', Windows PowerShell 5.1 would stop at the first line a native program writes to a
+    # redirected stderr, so the call runs under 'Continue'.
+    $words = @('python') + $Arguments + @('--directory', (Get-PwshPyAnchorDirectory))
+    if ($PwshPyPythonRequest) { $words += $PwshPyPythonRequest }
+    $stderr = [IO.Path]::GetTempFileName()
+    $saved = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $stdout = @(. (ConvertTo-PwshPyNativeCall -FilePath $Uv -ArgumentList $words -StderrPath $stderr))
+        $code = $LASTEXITCODE
+        $text = [IO.File]::ReadAllText($stderr)
+    } finally {
+        $ErrorActionPreference = $saved
+        Remove-Item -LiteralPath $stderr -Force -ErrorAction SilentlyContinue
+    }
+    return @{ Code = $code; Out = ((@($stdout) | ForEach-Object { [string]$_ }) -join "`n").Trim(); Err = $text.TrimEnd() }
+}
+
+function Resolve-PwshPyManagedPython {
+    param([string] $Uv)
+
+    # The uv-managed Python an elevated run hands `uv run --python`; exits when there is none it may
+    # run. uv run probes a .venv in its working directory and EVERY directory above it, and under
+    # only-managed even runs the script on that venv's python (measured with uv 0.13.0), so neither
+    # the caller's directory nor any ancestor of the anchor may decide: C:\ lets any authenticated
+    # user create C:\.venv above System32. `uv python find --system` probes no .venv at all, and
+    # `--python <path>` stops uv run probing. None found: installed the way uv run would download one
+    # (not when UV_PYTHON_DOWNLOADS is never or manual, where uv run would not either), then found
+    # again. The path must pass the same check as uv itself.
+    $find = @('find', '--system', '--python-preference', 'only-managed')
+    $found = Invoke-PwshPyUvPython -Uv $Uv -Arguments $find
+    if ($found.Code -ne 0) {
+        if (@('never', 'manual') -contains [string]$env:UV_PYTHON_DOWNLOADS) {
+            Write-PwshPyFailure $found.Err
+            exit $found.Code
+        }
+        # --no-bin and --no-registry: uv run's own download neither links a pythonX.Y into
+        # ~/.local/bin nor registers the install in the Windows registry, so neither does this.
+        $install = @('install', '--no-bin')
+        if ($PwshPyOnWindows) { $install += '--no-registry' }
+        $installed = Invoke-PwshPyUvPython -Uv $Uv -Arguments $install
+        if ($installed.Err) { Write-PwshPyNotice $installed.Err }
+        if ($installed.Code -ne 0) { exit $installed.Code }
+        $found = Invoke-PwshPyUvPython -Uv $Uv -Arguments $find
+        if ($found.Code -ne 0) {
+            Write-PwshPyFailure $found.Err
+            exit $found.Code
+        }
+    }
+    $python = $found.Out
+    if (-not (Test-PwshPyAbsolutePath -Path $python)) {
+        Write-PwshPyFailure "pwshpy: uv named no absolute path for its Python: $python"
+        exit 70
+    }
+    $why = Get-PwshPyUvDistrust -Path $python
+    if ($why) {
+        Write-PwshPyFailure "pwshpy: refusing the Python uv found at ${python}: $why (an elevated run only runs a Python no other account can modify)"
+        exit 127
+    }
+    return $python
 }
 
 function Get-PwshPyAnchoredUvArg {
@@ -1034,9 +1105,17 @@ $PwshPyPrepare = {
         exit 127
     }
 
-    # Asked here, while a root run on POSIX still runs its helpers from the fixed PATH, and inside the
-    # elevated child's guard, so a failure is relayed.
-    if ($PwshPyElevatedRun) { $PwshPyDataHome = Get-PwshPyAccountDataHome }
+    # Elevated: the interpreter, decided here, while a root run on POSIX still runs its helpers (the
+    # passwd lookup, the ls the path check reads) from the fixed PATH, and inside the elevated child's
+    # guard, so a failure is relayed. UV_PYTHON_INSTALL_DIR is named outright after the caller's own
+    # choice was dropped: left to itself uv would look in the data home APPDATA (Windows) or
+    # XDG_DATA_HOME (POSIX) names, which is the caller's to set too.
+    if ($PwshPyElevatedRun) {
+        Clear-PwshPyInterpreterVariable
+        $PwshPyDataHome = Get-PwshPyAccountDataHome
+        Set-Item -LiteralPath 'Env:UV_PYTHON_INSTALL_DIR' -Value (Join-Path (Join-Path $PwshPyDataHome 'uv') 'python')
+        $PwshPyPython = Resolve-PwshPyManagedPython -Uv $PwshPyUv
+    }
 }
 
 if ($PwshPyRelay) {
@@ -1081,11 +1160,7 @@ if ($PwshPyRootPath) { $env:PATH = $PwshPyCallerPath }
 # PWSHPY_PACK_CACHE) is made absolute first, or it would resolve against the anchor.
 $PwshPyRunArgs = @('run', '--no-project')
 if ($PwshPyElevatedRun) {
-    $PwshPyRunArgs += Get-PwshPyManagedPythonOption
-    Clear-PwshPyInterpreterVariable
-    # Named outright after the caller's own choice was dropped: left to itself uv would look in the
-    # data home APPDATA (Windows) or XDG_DATA_HOME (POSIX) names, which is the caller's to set too.
-    Set-Item -LiteralPath 'Env:UV_PYTHON_INSTALL_DIR' -Value (Join-Path (Join-Path $PwshPyDataHome 'uv') 'python')
+    $PwshPyRunArgs += Get-PwshPyManagedPythonOption -Python $PwshPyPython
     $PwshPyCallerCwd = Get-PwshPyCallerDirectory
     $PwshPyRunArgs += Get-PwshPyAnchoredUvArg -CallerDirectory $PwshPyCallerCwd
     $PwshPyTarget = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PwshPyTarget)

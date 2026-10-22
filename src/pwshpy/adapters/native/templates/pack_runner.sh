@@ -94,6 +94,8 @@ PWSHPY_FILE_HASHES=@@PWSHPY_FILE_HASHES@@
 # uv.toml in it or above it can be planted by another account. Named once so every uv call a root
 # run makes uses the same one.
 PWSHPY_ANCHOR=/
+# The packed script's requires-python ('' for none): the request a root run hands `uv python find`.
+PWSHPY_PYTHON_REQUEST=@@PWSHPY_PYTHON_REQUEST@@
 
 # The base64 payload, as a heredoc so a very long blob needs no shell quoting.
 pwshpy_payload_b64() {
@@ -563,6 +565,47 @@ pwshpy_account_data_home() {
     return 1
 }
 
+# Runs `uv python $1 ...` started in the anchor, with the packed script's requires-python as the
+# request when it has one, so the Python found or installed is one the script accepts.
+pwshpy_uv_python() {
+    _up_command=$1
+    shift
+    if [ -n "$PWSHPY_PYTHON_REQUEST" ]; then
+        "$PWSHPY_UV" python "$_up_command" --directory "$PWSHPY_ANCHOR" "$@" "$PWSHPY_PYTHON_REQUEST"
+    else
+        "$PWSHPY_UV" python "$_up_command" --directory "$PWSHPY_ANCHOR" "$@"
+    fi
+}
+
+# Sets PWSHPY_PYTHON to the uv-managed Python a root run hands `uv run --python`, or exits. uv run
+# probes a .venv in its working directory and EVERY directory above it, and under only-managed even
+# runs the script on that venv's python (measured with uv 0.13.0), so neither the caller's directory
+# nor any ancestor of the anchor may decide; `uv python find --system` probes no .venv at all, and
+# `--python <path>` stops uv run probing. None found: installed the way uv run would download one
+# (not when UV_PYTHON_DOWNLOADS is never or manual, where uv run would not either), then found again.
+# The path must pass the same check as uv itself: root owns it and every directory it passes through.
+pwshpy_resolve_managed_python() {
+    if PWSHPY_PYTHON=$(pwshpy_uv_python find --system --python-preference only-managed); then
+        :
+    else
+        _rp_status=$?
+        case ${UV_PYTHON_DOWNLOADS:-} in
+            never | manual) exit "$_rp_status" ;;
+        esac
+        # --no-bin: uv run's own download links no pythonX.Y into ~/.local/bin, so neither does this.
+        pwshpy_uv_python install --no-bin >&2 || exit $?
+        PWSHPY_PYTHON=$(pwshpy_uv_python find --system --python-preference only-managed) || exit $?
+    fi
+    case $PWSHPY_PYTHON in
+        /*) ;;
+        *) pwshpy_die "uv named no absolute path for its Python: $PWSHPY_PYTHON" 70 ;;
+    esac
+    _rp_why=$(pwshpy_uv_distrust "$PWSHPY_PYTHON")
+    if [ -n "$_rp_why" ]; then
+        pwshpy_die "refusing the Python uv found at $PWSHPY_PYTHON: $_rp_why (as root only a Python no other account can modify is run)" 127
+    fi
+}
+
 # Sets PWSHPY_CALLER_CWD to the physical working directory, a trailing newline in its name included
 # (command substitution would strip it, so a sentinel character follows and is removed again).
 pwshpy_caller_cwd() {
@@ -769,10 +812,6 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     esac
     set -- "$PWSHPY_CACHE/$PWSHPY_SHIM" "$@"
     eval "set -- $PWSHPY_UV_ARGS_ANCHORED_RAW \"\$@\""
-    # The packed script runs with the PATH its caller gave: the fixed one was only for this runner's
-    # own helpers.
-    PATH=$PWSHPY_CALLER_PATH
-    export PATH
     pwshpy_drop_interpreter_variables
     export "@@PWSHPY_CWD_ENV@@=$PWSHPY_CALLER_CWD"
     # The shim keeps its own arguments only when no out-of-band argument vector is set; one inherited
@@ -782,7 +821,14 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # data home XDG_DATA_HOME names, which is the caller's to set too.
     UV_PYTHON_INSTALL_DIR=$PWSHPY_DATA_HOME/uv/python
     export UV_PYTHON_INSTALL_DIR
-    set -- --python-preference only-managed --project "$PWSHPY_ANCHOR" --directory "$PWSHPY_ANCHOR" "$@"
+    # While the helpers still come from the fixed PATH: the check of the Python's path runs ls.
+    pwshpy_resolve_managed_python
+    # The packed script runs with the PATH its caller gave: the fixed one was only for this runner's
+    # own helpers.
+    PATH=$PWSHPY_CALLER_PATH
+    export PATH
+    set -- --python-preference only-managed --python "$PWSHPY_PYTHON" \
+        --project "$PWSHPY_ANCHOR" --directory "$PWSHPY_ANCHOR" "$@"
 else
     set -- "$PWSHPY_CACHE/$PWSHPY_ENTRY" "$@"
     eval "set -- $PWSHPY_UV_ARGS_RAW \"\$@\""

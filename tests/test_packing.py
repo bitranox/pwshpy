@@ -251,3 +251,32 @@ def test_posix_uv_args_survive_the_assignment_and_the_eval_literally(value: str)
         RunnerContent(payload_b64="x", payload_sha256="y", entry="e", uv_args=["--with", value]),
     )
     assert _sh_uv_args(rendered.split("|")[3]) == ["--with", value]
+
+
+#: The characters PowerShell reads as a single quote: the ASCII one and four typographic ones
+#: (measured with pwsh 7.6: each ends an unescaped single-quoted literal). By code point, so no
+#: typographic character is typed into this file.
+_POWERSHELL_QUOTES = (0x27, 0x2018, 0x2019, 0x201A, 0x201B)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("code_point", _POWERSHELL_QUOTES, ids=[f"U+{c:04X}" for c in _POWERSHELL_QUOTES])
+def test_every_powershell_quote_in_a_uv_arg_is_doubled(code_point: int) -> None:
+    """[61]: a quote PowerShell recognises is doubled, the way EscapeSingleQuotedStringContent does it."""
+    quote = chr(code_point)
+    rendered = render_runner(
+        _FULL_TEMPLATE,
+        RunnerContent(payload_b64="x", payload_sha256="y", entry="e", uv_args=[f"a{quote}b"]),
+    )
+    assert rendered.split("|")[3] == f"'a{quote}{quote}b'"
+
+
+@pytest.mark.os_agnostic
+def test_a_prime_is_not_a_powershell_quote() -> None:
+    """[61]: only the five quote characters are doubled; a look-alike such as U+2032 stays single."""
+    prime = chr(0x2032)
+    rendered = render_runner(
+        _FULL_TEMPLATE,
+        RunnerContent(payload_b64="x", payload_sha256="y", entry="e", uv_args=[f"a{prime}b"]),
+    )
+    assert rendered.split("|")[3] == f"'a{prime}b'"

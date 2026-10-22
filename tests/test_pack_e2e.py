@@ -1959,3 +1959,63 @@ def test_the_uv_command_line_carries_only_managed_exactly_when_elevated(tmp_path
     else:
         assert argv[:2] == ["run", "--no-project"], argv
         assert "--python-preference" not in argv and "--project" not in argv, argv
+
+
+# --- [61] [62] values the generated .ps1 carries as literals ----------------------------------------
+# PowerShell ends a single-quoted literal at any of five quote characters, the typographic ones
+# included, so a value holding one must be escaped where the packer writes it or the runner does not
+# parse. These read a literal back out of a generated runner without running it.
+
+#: Parses the runner (any parse error is reported), evaluates the right-hand side of one assignment
+#: alone, and prints each value as UTF-16 code units, so a non-ASCII value survives any console code
+#: page and Windows PowerShell 5.1 alike.
+_READ_LITERAL = """param([string] $Path, [string] $Name)
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+if ($errors.Count -gt 0) { [Console]::Out.WriteLine('parse-error:' + $errors[0].Message); exit 3 }
+$found = $ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+        $node.Left.VariablePath.UserPath -eq $Name
+}, $true)
+if (-not $found) { [Console]::Out.WriteLine('no-assignment'); exit 4 }
+foreach ($value in @(& ([scriptblock]::Create($found.Right.Extent.Text)))) {
+    [Console]::Out.WriteLine('value:' + ((([int[]][char[]][string]$value)) -join ','))
+}
+"""
+
+#: Every quote character PowerShell reads as a single quote, plus a prime it does not, by code point.
+_QUOTES_AND_A_PRIME = "".join(chr(c) for c in (0x27, 0x2018, 0x2019, 0x201A, 0x201B, 0x2032))
+
+
+def _literal_values(tmp_path: Path, runner: Path, name: str) -> list[str]:
+    """The values the runner's ``$<name> = ...`` assignment holds, read without running the runner."""
+    assert _PWSH is not None
+    reader = tmp_path / "read_literal.ps1"
+    reader.write_text(_READ_LITERAL, encoding="utf-8")
+    result = subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(reader), str(runner), name],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    values: list[str] = []
+    for line in result.stdout.splitlines():
+        if line.startswith("value:"):
+            units = [int(unit) for unit in line[6:].split(",") if unit]
+            values.append("".join(map(chr, units)).encode("utf-16-le", "surrogatepass").decode("utf-16-le"))
+    return values
+
+
+def test_a_with_value_holding_typographic_quotes_parses_and_survives(tmp_path: Path) -> None:
+    """[61]: the generated .ps1 parses, and $PwshPyUvArgs holds the --with value exactly as packed."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('hi')\n")
+    spec = f"pkg{_QUOTES_AND_A_PRIME}x"
+    runner = Path(pack_script(entry, options=PackOptions(with_packages=[spec])).output_path)
+    assert _literal_values(tmp_path, runner, "PwshPyUvArgs") == ["--with", spec]

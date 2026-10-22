@@ -120,6 +120,12 @@ ARGV_ENV_VAR = "PWSHPY_PACK_ARGV"
 #: argument would encode to an empty blob, indistinguishable from "no arguments at all".
 ARGV_ENCODING_TAG = "v1"
 
+#: The characters PowerShell reads as a single quote inside a single-quoted literal: the ASCII one
+#: and the typographic U+2018, U+2019, U+201A and U+201B (measured with pwsh 7.6 and Windows
+#: PowerShell 5.1; a look-alike such as the prime U+2032 is not one). By code point, so no
+#: typographic character sits in this source.
+_POWERSHELL_QUOTES = frozenset(chr(code) for code in (0x27, 0x2018, 0x2019, 0x201A, 0x201B))
+
 #: Placeholders the runner template exposes for substitution.  Distinctive enough that
 #: they cannot occur in hand-written PowerShell by accident.
 _PLACEHOLDERS = (
@@ -399,10 +405,7 @@ def render_runner(template: str, content: RunnerContent) -> str:
 
 
 def _powershell_string_array(values: Sequence[str]) -> str:
-    """Render values as a PowerShell single-quoted list, doubling embedded single quotes.
-
-    Single-quoted PowerShell strings are literal - no ``$`` expansion, no backtick escapes -
-    so the only character needing care is the quote itself.
+    """Render values as a PowerShell single-quoted list, each through :func:`_powershell_literal`.
 
     Example:
         >>> _powershell_string_array(["--with", "it's"])
@@ -410,7 +413,26 @@ def _powershell_string_array(values: Sequence[str]) -> str:
         >>> _powershell_string_array([])
         ''
     """
-    return ",".join("'" + value.replace("'", "''") + "'" for value in values)
+    return ",".join(_powershell_literal(value) for value in values)
+
+
+def _powershell_literal(value: str) -> str:
+    """Quote ``value`` as one PowerShell single-quoted literal, every quote character doubled.
+
+    A single-quoted PowerShell string is literal - no ``$`` expansion, no backtick escapes - so
+    only a quote character needs care, and PowerShell reads five as one: the ASCII quote and the
+    typographic U+2018 to U+201B. Doubling only the ASCII one left a typographic quote to end the
+    literal early (the runner then failed to parse, or, with an even number of them, parsed into a
+    different value). This is what ``CodeGeneration.EscapeSingleQuotedStringContent`` does, which
+    the runner itself uses at run time, so the two always agree.
+
+    Example:
+        >>> _powershell_literal("it's")
+        "'it''s'"
+        >>> _powershell_literal("a" + chr(0x2019) + "b") == "'a" + chr(0x2019) * 2 + "b'"
+        True
+    """
+    return "'" + "".join(char * 2 if char in _POWERSHELL_QUOTES else char for char in value) + "'"
 
 
 def render_posix_runner(template: str, content: RunnerContent) -> str:

@@ -10,10 +10,12 @@ Contents:
     * :func:`to_task_run_level` / :func:`com_date_to_datetime` / :func:`to_task_result` -
       Task Scheduler principal run level, COM dates and ``LastTaskResult``.
     * :func:`to_integrity_level` - mandatory-label RID -> :class:`IntegrityLevel`.
+    * :func:`skip_or_raise` - the lenient/strict contract for an item a listing cannot read.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 import socket
 from datetime import datetime, timezone
@@ -34,6 +36,7 @@ from ...domain.enums import (
     TaskState,
     TransportProtocol,
 )
+from ...domain.errors import NativeCallError
 
 
 def epoch_to_datetime(value: float | None) -> datetime | None:
@@ -497,6 +500,36 @@ def to_ace_type(ace_type: int) -> AceType:
     return AceType.DENY if ace_type in _DENY_ACE_TYPES else AceType.ALLOW
 
 
+def skip_or_raise(what: str, exc: Exception, *, strict: bool, log: logging.Logger) -> None:
+    """Raise NativeCallError naming ``what`` under ``strict``; otherwise log a WARNING on ``log``.
+
+    The one contract every read listing applies to an item it cannot read (a folder, a task, a
+    unit): the lenient default still skips it, so a non-elevated caller lists what it CAN read,
+    but never silently - a skipped item reads exactly like "no such item" to a caller that looks
+    it up, so the log says what was not read and why. ``log`` is the calling adapter's own module
+    logger, so the warning carries that adapter's name, not this module's.
+
+    Args:
+        what: Names the item and the read that failed, e.g. ``"cannot load service unit 'x'"``.
+        exc: The failure; chained as the cause of the raised error.
+        strict: True raises; False logs and returns, letting the caller skip the item.
+        log: The logger the WARNING goes to.
+
+    Raises:
+        NativeCallError: Under ``strict``, as ``"<what>: <exc>"``.
+
+    Example:
+        >>> try:
+        ...     skip_or_raise("cannot read 'x'", OSError("denied"), strict=True, log=logging.getLogger("demo"))
+        ... except NativeCallError as exc:
+        ...     print(exc)
+        cannot read 'x': denied
+    """
+    if strict:
+        raise NativeCallError(f"{what}: {exc}") from exc
+    log.warning("skipped (pass strict=True to raise instead) - %s: %s", what, exc)
+
+
 __all__ = [
     "com_date_to_datetime",
     "epoch_to_datetime",
@@ -504,6 +537,7 @@ __all__ = [
     "from_service_start_type",
     "normalize_registry_data",
     "parse_event_time",
+    "skip_or_raise",
     "to_ace_type",
     "to_address_family",
     "to_connection_state",

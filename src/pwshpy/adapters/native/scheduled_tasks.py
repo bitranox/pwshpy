@@ -23,7 +23,7 @@ from typing import Any
 
 from ...domain.errors import NativeCallError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
-from .marshal import to_task_state
+from .marshal import skip_or_raise, to_task_state
 from .task_readback import read_task_extras
 
 logger = logging.getLogger(__name__)
@@ -71,18 +71,6 @@ def _to_task_info(task: Any, folder_path: str) -> ScheduledTaskInfo:
     )
 
 
-def _skip_or_raise(what: str, exc: Exception, *, strict: bool) -> None:
-    """Raise NativeCallError naming ``what`` under ``strict``; otherwise log a WARNING and return.
-
-    The lenient walk still skips (a non-elevated caller must be able to list the tree it CAN
-    read), but never silently: a skipped item reads exactly like "no such task" to a caller
-    that looks a task up, so the log has to say what was not read and why.
-    """
-    if strict:
-        raise NativeCallError(f"{what}: {exc}") from exc
-    logger.warning("skipped (pass strict=True to raise instead) - %s: %s", what, exc)
-
-
 def _task_label(task: Any, index: int, folder_path: str) -> str:
     """The task's full path for a message, or its position in the folder when even its name is unreadable."""
     position = f"#{index} in folder '{folder_path}'"
@@ -101,7 +89,7 @@ def _read_task(tasks: Any, index: int, folder_path: str, *, strict: bool) -> Sch
         task = tasks.Item(index)
         return _to_task_info(task, folder_path)
     except Exception as exc:  # a protected/corrupt task definition
-        _skip_or_raise(f"cannot read task {_task_label(task, index, folder_path)}", exc, strict=strict)
+        skip_or_raise(f"cannot read task {_task_label(task, index, folder_path)}", exc, strict=strict, log=logger)
         return None
 
 
@@ -111,7 +99,7 @@ def _folder_tasks(folder: Any, folder_path: str, *, strict: bool) -> Iterator[Sc
         tasks = folder.GetTasks(_TASK_ENUM_HIDDEN)
         count = int(tasks.Count)
     except Exception as exc:  # the folder denies listing its tasks
-        _skip_or_raise(f"cannot list the tasks in folder '{folder_path}'", exc, strict=strict)
+        skip_or_raise(f"cannot list the tasks in folder '{folder_path}'", exc, strict=strict, log=logger)
         return
     for index in range(1, count + 1):
         info = _read_task(tasks, index, folder_path, strict=strict)
@@ -125,14 +113,14 @@ def _subfolders(folder: Any, folder_path: str, *, strict: bool) -> Iterator[tupl
         subfolders = folder.GetFolders(0)
         count = int(subfolders.Count)
     except Exception as exc:  # the folder denies listing its subfolders
-        _skip_or_raise(f"cannot list the subfolders of folder '{folder_path}'", exc, strict=strict)
+        skip_or_raise(f"cannot list the subfolders of folder '{folder_path}'", exc, strict=strict, log=logger)
         return
     for index in range(1, count + 1):
         try:
             child = subfolders.Item(index)
             child_path = _folder_path(child)
         except Exception as exc:  # one subfolder handle cannot be opened
-            _skip_or_raise(f"cannot open subfolder #{index} of folder '{folder_path}'", exc, strict=strict)
+            skip_or_raise(f"cannot open subfolder #{index} of folder '{folder_path}'", exc, strict=strict, log=logger)
             continue
         yield child, child_path
 

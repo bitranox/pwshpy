@@ -56,6 +56,7 @@ from ...domain.errors import ConfigurationError, NativeCallError, PlatformUnsupp
 from ...domain.records import ScheduledTaskInfo
 from ...domain.scheduling import BootTrigger, DailyTrigger, OnceTrigger, TaskPrincipal, TaskTrigger
 from . import systemd_dbus as _dbus
+from .marshal import skip_or_raise
 
 logger = logging.getLogger(__name__)
 
@@ -337,17 +338,6 @@ def _timer_task(
     )
 
 
-def _skip_or_raise(what: str, exc: NativeCallError, *, strict: bool) -> None:
-    """Raise NativeCallError naming ``what`` under ``strict``; otherwise log a WARNING and return.
-
-    The default listing still skips what it cannot read, but never silently: a skipped timer
-    reads exactly like "no such task" to a caller that looks a task up.
-    """
-    if strict:
-        raise NativeCallError(f"{what}: {exc}") from exc
-    logger.warning("skipped (pass strict=True to raise instead) - %s: %s", what, exc)
-
-
 def _timer_files(bus: _dbus.Bus, *, strict: bool) -> list[tuple[str, str]]:
     """Every ``.timer`` unit file as (unit name, UnitFileState); [] when no listing answers.
 
@@ -357,7 +347,9 @@ def _timer_files(bus: _dbus.Bus, *, strict: bool) -> list[tuple[str, str]]:
     try:
         return _dbus.unit_files(bus, ".timer")
     except NativeCallError as exc:
-        _skip_or_raise("cannot list the timer unit files, so no unloaded timer is listed", exc, strict=strict)
+        skip_or_raise(
+            "cannot list the timer unit files, so no unloaded timer is listed", exc, strict=strict, log=logger
+        )
         return []
 
 
@@ -366,7 +358,7 @@ def _timer_file_path(bus: _dbus.Bus, name: str, *, strict: bool) -> str | None:
     try:
         return _dbus.load_unit(bus, name)
     except NativeCallError as exc:
-        _skip_or_raise(f"cannot load timer unit '{name}'", exc, strict=strict)
+        skip_or_raise(f"cannot load timer unit '{name}'", exc, strict=strict, log=logger)
         return None
 
 

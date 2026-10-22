@@ -77,6 +77,8 @@ class _FakeWin32Service:
         self.closed += 1
 
     def QueryServiceStatus(self, handle: Any) -> tuple[int, ...]:
+        if self.raise_on == "query":
+            raise OSError(6, "The handle is invalid.")
         self._advance_pending()
         return (0x10, self.state, 0x3, 0, 0, 0, 0)
 
@@ -202,6 +204,18 @@ def test_native_failure_wrapped_in_native_call_error(
     fake.raise_on = "start"
     _use(monkeypatch, fake)
     with pytest.raises(NativeCallError):
+        controller.start("Svc")
+
+
+@pytest.mark.os_agnostic
+def test_a_failed_status_query_is_native_call_error(
+    monkeypatch: pytest.MonkeyPatch, controller: NativeServiceController
+) -> None:
+    """[B1]: QueryServiceStatus failing while a verb waits surfaces as NativeCallError, not a raw OSError."""
+    fake = _FakeWin32Service(state=_FakeWin32Service.SERVICE_STOPPED)
+    fake.raise_on = "query"
+    _use(monkeypatch, fake)
+    with pytest.raises(NativeCallError, match="handle is invalid"):
         controller.start("Svc")
 
 

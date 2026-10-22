@@ -64,8 +64,15 @@ def _open_service(win32service: Any, scm: Any, name: str, access: int) -> Any:
 
 
 def _current_state(win32service: Any, handle: Any) -> int:
-    """Return the service's current win32 ``SERVICE_*`` state id."""
-    return int(win32service.QueryServiceStatus(handle)[1])
+    """Return the service's current win32 ``SERVICE_*`` state id.
+
+    Raises:
+        NativeCallError: ``QueryServiceStatus`` failed (a handle closed under it, access revoked).
+    """
+    try:
+        return int(win32service.QueryServiceStatus(handle)[1])
+    except Exception as exc:
+        raise NativeCallError(str(exc) or "cannot query the service status") from exc
 
 
 def _wait_for_state(win32service: Any, handle: Any, target: int, timeout: float) -> None:

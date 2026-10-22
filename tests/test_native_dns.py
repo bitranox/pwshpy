@@ -1,4 +1,4 @@
-"""native DNS resolver over stdlib socket — portable, hermetic (localhost)."""
+"""native DNS resolver over stdlib socket - portable, hermetic (localhost)."""
 
 from __future__ import annotations
 

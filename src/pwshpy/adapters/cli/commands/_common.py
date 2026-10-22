@@ -1,9 +1,9 @@
 """Shared helpers for record-listing CLI commands (processes, connections, ...).
 
 Contents:
-    * :func:`resolve_format` — map the mutually-exclusive output flags to a format.
-    * :func:`parse_pairs` — parse repeatable ``KEY=VALUE`` / ``Name: value`` options.
-    * :data:`TIMEOUT_RANGE` — the ``--timeout`` range the facade accepts.
+    * :func:`resolve_format` - map the mutually-exclusive output flags to a format.
+    * :func:`parse_pairs` - parse repeatable ``KEY=VALUE`` / ``Name: value`` options.
+    * :data:`TIMEOUT_RANGE` - the ``--timeout`` range the facade accepts.
 """
 
 from __future__ import annotations

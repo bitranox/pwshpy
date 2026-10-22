@@ -1129,11 +1129,12 @@ def _python_runner(
     source: str = _ENTRY_REPORTING_PYTHON,
     with_packages: Sequence[str] = (),
     real_data_home: bool = False,
+    entry_name: str = "which_python.py",
 ) -> tuple[Path, Path]:
     """A which-python .sh runner (root probe forced when ``as_root``) and a uv it trusts, in a tree this
-    test owns that counts as root's. ``source`` replaces the packed script; ``real_data_home`` as for
-    :func:`_force_probe`."""
-    entry = tmp_path / "which_python.py"
+    test owns that counts as root's. ``source`` replaces the packed script, ``entry_name`` names it;
+    ``real_data_home`` as for :func:`_force_probe`."""
+    entry = tmp_path / entry_name
     entry.write_text(source)
     runner = _pack_sh(
         entry,
@@ -1575,3 +1576,19 @@ def test_an_entry_and_a_data_file_named_with_a_quote_run_and_round_trip(
     info = _run(shell, runner, "--pwshpy-info", env=_env(tmp_path))
     assert "entry      : it's.py" in info.stdout, info.stdout
     assert unpack_script(runner, tmp_path / "out").entry == "it's.py"
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_an_entry_named_with_a_quote_runs_through_the_shim(
+    tmp_path: Path, shell_id: str, shell: list[str]
+) -> None:
+    """[A5]: as root uv runs the generated shim, which names the entry as a Python string literal, so
+    it's.py must survive that path too, the caller's directory and arguments included."""
+    _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=True, source=_ENTRY_REPORTING_CWD, entry_name="it's.py")
+    work = _work_dir(tmp_path)
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", "a b", env=_trust_env(tmp_path, uv.parent), cwd=work)
+    assert result.returncode == 0, result.stdout + result.stderr
+    reported = _reported_cwd(result)
+    assert reported is not None and reported.samefile(work), result.stdout
+    assert "argv:['a b']" in result.stdout, result.stdout

@@ -1122,12 +1122,58 @@ $PwshPyPrepare = {
     }
 }
 
+# --- run --------------------------------------------------------------------------------
+# The argument vector goes out of band: PowerShell 5.1 re-quotes arguments on their way to
+# a native executable (empty strings vanish, embedded quotes are mangled) and only 7.3 fixed
+# it. Base64 per argument sidesteps the quoting layer entirely, so the packed script sees
+# exactly what the caller typed on every host.
+
+# The argument vector, the target and the uv arguments, built inside the same guard as the preparation
+# above: a failure here (resolving the target, reading the working directory, setting the variables
+# the shim reads) in an elevated child would otherwise print only in its own window, which closes at
+# once.
+$PwshPyPrepareRun = {
+    $PwshPyEncoded = @('v1')
+    foreach ($argument in $PwshPyForward) {
+        $PwshPyEncoded += [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$argument))
+    }
+    $env:PwshPyArgvPlaceholder = $null
+    Set-Item -Path ('Env:' + $PwshPyArgvEnv) -Value ($PwshPyEncoded -join '|')
+
+    $PwshPyTarget = Join-Path $PwshPyCacheDir $PwshPyShim
+    # The packed script runs with the PATH its caller gave; the fixed one was only for the runner's own
+    # helpers.
+    if ($PwshPyRootPath) { $env:PATH = $PwshPyCallerPath }
+
+    # uv picks the interpreter, and runs every one it considers to ask its version, so a python planted
+    # in a PATH directory another account can write would run elevated. Elevated, uv considers only the
+    # Pythons it manages (user decision), downloading one on first use unless downloads are switched off,
+    # and starts in the anchor directory; the shim is told where to change back to. Everything uv is
+    # handed that the caller gave relative to its own directory (a --with path, a relative
+    # PWSHPY_PACK_CACHE) is made absolute first, or it would resolve against the anchor.
+    $PwshPyRunArgs = @('run', '--no-project')
+    if ($PwshPyElevatedRun) {
+        $PwshPyRunArgs += Get-PwshPyManagedPythonOption -Python $PwshPyPython
+        $PwshPyCallerCwd = Get-PwshPyCallerDirectory
+        $PwshPyRunArgs += Get-PwshPyAnchoredUvArg -CallerDirectory $PwshPyCallerCwd
+        $PwshPyTarget = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PwshPyTarget)
+        Set-Item -LiteralPath ('Env:' + $PwshPyCwdEnv) -Value $PwshPyCallerCwd
+    } else {
+        $PwshPyRunArgs += $PwshPyUvArgs
+        # Only an elevated run changes directory; one inherited from the caller's environment must not
+        # move an unelevated script.
+        if (Test-Path -LiteralPath ('Env:' + $PwshPyCwdEnv)) { Remove-Item -LiteralPath ('Env:' + $PwshPyCwdEnv) }
+    }
+    $PwshPyRunArgs += $PwshPyTarget
+}
+
 if ($PwshPyRelay) {
     try {
         # Created first, so a child that fails from here on has a file to say why in; the run
         # below truncates it again for the script's own stderr.
         [IO.File]::WriteAllText("$PwshPyRelay.err", '')
         . $PwshPyPrepare
+        . $PwshPyPrepareRun
     } catch {
         # 70 (EX_SOFTWARE), so a caller can tell "the runner never started the script" from
         # PowerShell's generic 1; the stderr line covers a script that itself exits 70.
@@ -1136,46 +1182,8 @@ if ($PwshPyRelay) {
     }
 } else {
     . $PwshPyPrepare
+    . $PwshPyPrepareRun
 }
-
-# --- run --------------------------------------------------------------------------------
-# The argument vector goes out of band: PowerShell 5.1 re-quotes arguments on their way to
-# a native executable (empty strings vanish, embedded quotes are mangled) and only 7.3 fixed
-# it. Base64 per argument sidesteps the quoting layer entirely, so the packed script sees
-# exactly what the caller typed on every host.
-
-$PwshPyEncoded = @('v1')
-foreach ($argument in $PwshPyForward) {
-    $PwshPyEncoded += [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$argument))
-}
-$env:PwshPyArgvPlaceholder = $null
-Set-Item -Path ('Env:' + $PwshPyArgvEnv) -Value ($PwshPyEncoded -join '|')
-
-$PwshPyTarget = Join-Path $PwshPyCacheDir $PwshPyShim
-# The packed script runs with the PATH its caller gave; the fixed one was only for the runner's own
-# helpers.
-if ($PwshPyRootPath) { $env:PATH = $PwshPyCallerPath }
-
-# uv picks the interpreter, and runs every one it considers to ask its version, so a python planted
-# in a PATH directory another account can write would run elevated. Elevated, uv considers only the
-# Pythons it manages (user decision), downloading one on first use unless downloads are switched off,
-# and starts in the anchor directory; the shim is told where to change back to. Everything uv is
-# handed that the caller gave relative to its own directory (a --with path, a relative
-# PWSHPY_PACK_CACHE) is made absolute first, or it would resolve against the anchor.
-$PwshPyRunArgs = @('run', '--no-project')
-if ($PwshPyElevatedRun) {
-    $PwshPyRunArgs += Get-PwshPyManagedPythonOption -Python $PwshPyPython
-    $PwshPyCallerCwd = Get-PwshPyCallerDirectory
-    $PwshPyRunArgs += Get-PwshPyAnchoredUvArg -CallerDirectory $PwshPyCallerCwd
-    $PwshPyTarget = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PwshPyTarget)
-    Set-Item -LiteralPath ('Env:' + $PwshPyCwdEnv) -Value $PwshPyCallerCwd
-} else {
-    $PwshPyRunArgs += $PwshPyUvArgs
-    # Only an elevated run changes directory; one inherited from the caller's environment must not
-    # move an unelevated script.
-    if (Test-Path -LiteralPath ('Env:' + $PwshPyCwdEnv)) { Remove-Item -LiteralPath ('Env:' + $PwshPyCwdEnv) }
-}
-$PwshPyRunArgs += $PwshPyTarget
 
 if ($PwshPyRelay) {
     # Elevated child: stream to the relay files the parent replays, then hand back the code.

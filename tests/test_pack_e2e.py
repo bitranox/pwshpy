@@ -772,6 +772,29 @@ def test_an_elevated_child_whose_cache_cannot_be_created_relays_its_error(tmp_pa
     assert "produced no output" not in result.stderr, result.stderr
 
 
+#: The first step of the run preparation (argument vector, target, uv arguments, working directory),
+#: which a test makes fail on purpose.
+_RUN_PREPARATION_STEP = "$PwshPyTarget = Join-Path $PwshPyCacheDir $PwshPyShim"
+
+
+def test_an_elevated_child_that_fails_preparing_the_run_relays_its_error(tmp_path: Path) -> None:
+    """[A5]: a failure after the uv lookup but before uv starts (resolving the target, reading the
+    working directory, setting the variables the shim reads) is relayed like any earlier one: exit 70,
+    the fixed line, and the reason, rather than PowerShell's generic 1 in a window that closes."""
+    manifest = pack_script(_project(tmp_path))
+    runner = Path(manifest.output_path)
+    text = runner.read_text(encoding="utf-8")
+    assert text.count(_RUN_PREPARATION_STEP) == 1
+    runner.write_text(
+        text.replace(_RUN_PREPARATION_STEP, _RUN_PREPARATION_STEP + "; throw 'injected run-preparation failure'"),
+        encoding="utf-8",
+    )
+    result = _run_whole_runner_elevated(tmp_path, runner, "plain", env=_isolated_cache(tmp_path))
+    assert result.returncode == _EARLY_FAILURE_EXIT, result.stderr
+    assert _EARLY_FAILURE_LINE in result.stderr, result.stderr
+    assert "injected run-preparation failure" in result.stderr, result.stderr
+
+
 def test_an_elevated_child_that_runs_the_script_relays_its_output_and_code(tmp_path: Path) -> None:
     """Control: the same stand-in reaches uv run, so its output and the script's own code come back."""
     manifest = pack_script(_project(tmp_path, exit_code=4))
@@ -2178,22 +2201,25 @@ def test_an_elevated_run_reads_no_uv_configuration_file(
 ) -> None:
     """[A2] (user decision: ignore all uv config): a uv.toml can name a cache directory, an index or a
     Python download mirror, so an elevated run passes --no-config to every uv call. The planted config
-    names a cache directory; the control shows uv reads it. System scope: XDG_CONFIG_DIRS (POSIX) or
-    PROGRAMDATA (Windows); user scope: XDG_CONFIG_HOME (POSIX) or APPDATA (Windows, which the probe
-    environment already points at the test's data home).
+    names a cache directory; the control shows uv reads it. System scope: XDG_CONFIG_DIRS/uv (POSIX), or
+    on Windows %SYSTEMDRIVE%\\ProgramData\\uv, which is where uv 0.13 looks (measured: PROGRAMDATA and
+    ALLUSERSPROFILE change nothing). User scope: XDG_CONFIG_HOME/uv (POSIX), or APPDATA\\uv (Windows,
+    which the probe environment already points at the test's data home).
     """
     managed = _needs_managed_python()
     runner, head = _python_runner(tmp_path, elevated=elevated)
     probe = interpreter_probe_env(tmp_path, managed=managed)
     probe.pop("UV_CACHE_DIR")
     planted_cache = tmp_path / "planted-cache"
-    if sys.platform == "win32" and scope == "user":
-        config_root = data_home(tmp_path)
+    config_base = tmp_path / f"config-{scope}"
+    if sys.platform != "win32":
+        probe["XDG_CONFIG_DIRS" if scope == "system" else "XDG_CONFIG_HOME"] = str(config_base)
+        config_root = config_base
+    elif scope == "system":
+        probe["SYSTEMDRIVE"] = str(config_base)
+        config_root = config_base / "ProgramData"
     else:
-        config_root = tmp_path / f"config-{scope}"
-        variables = {"system": "PROGRAMDATA", "user": "APPDATA"} if sys.platform == "win32" else {}
-        posix = {"system": "XDG_CONFIG_DIRS", "user": "XDG_CONFIG_HOME"}
-        probe[variables.get(scope, posix[scope])] = str(config_root)
+        config_root = data_home(tmp_path)
     (config_root / "uv").mkdir(parents=True, exist_ok=True)
     (config_root / "uv" / "uv.toml").write_text(f"cache-dir = '{planted_cache}'\n", encoding="utf-8")
     result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))

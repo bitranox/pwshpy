@@ -362,14 +362,14 @@ pwshpy_ancestor_distrust() {
     return 0
 }
 
-# Prints why the uv at "$1" may not run as root, or nothing when it may. Walks the path one
-# component at a time from /, resolving each symlink where it is met (readlink without -f, which
-# older macOS lacks), so every real directory the path passes through is judged, the ones that
-# hold a link included: whoever can rename any of them, or repoint a link, decides what runs. A
-# link's own mode means nothing, so only its owner is judged. Reported in order: a link whose owner
-# fails (at once), the directory holding uv, the first ancestor that fails, then the file. A relative path is refused: it names
-# whatever the working directory holds. A directory symlink such as /bin -> usr/bin on a merged-/usr
-# system is resolved like any other link.
+# Prints why the program at "$1" (a uv, or the Python uv found) may not run as root, or nothing when
+# it may. Walks the path one component at a time from /, resolving each symlink where it is met
+# (readlink without -f, which older macOS lacks), so every real directory the path passes through is
+# judged, the ones that hold a link included: whoever can rename any of them, or repoint a link,
+# decides what runs. A link's own mode means nothing, so only its owner is judged. Reported in order:
+# a link whose owner fails (at once), the directory holding the program, the first ancestor that
+# fails, then the file. A relative path is refused: it names whatever the working directory holds. A
+# directory symlink such as /bin -> usr/bin on a merged-/usr system is resolved like any other link.
 pwshpy_uv_distrust() {
     case $1 in
         /*) ;;
@@ -517,10 +517,11 @@ pwshpy_find_uv() {
 # (user decision on [59]). A root run drops each one that is set, naming it on stderr; identical to
 # the .ps1 runner.
 pwshpy_drop_interpreter_variables() {
+    _iv_why="as root only a uv-managed Python from the running account's own data directory runs"
     for _iv in UV_PYTHON VIRTUAL_ENV CONDA_PREFIX UV_MANAGED_PYTHON UV_NO_MANAGED_PYTHON \
         UV_PYTHON_INSTALL_DIR UV_CONFIG_FILE UV_PYTHON_INSTALL_MIRROR UV_PYTHON_DOWNLOADS_JSON_URL; do
         if eval "[ -n \"\${$_iv+set}\" ]"; then
-            printf '%s\n' "pwshpy: ignoring $_iv: as root only a uv-managed Python from the running account's own data directory runs" >&2
+            printf '%s\n' "pwshpy: ignoring $_iv: $_iv_why" >&2
             unset "$_iv"
         fi
     done
@@ -537,9 +538,10 @@ pwshpy_drop_interpreter_variables() {
 
 # Prints the data directory of the account this run is (uv keeps its managed Pythons in
 # <it>/uv/python), from the home the passwd database records: as root $HOME and XDG_DATA_HOME are
-# whatever the caller or the service that started it set (sudo keeps HOME on some systems). getent asks every name service (Linux), id -P is the BSD and
-# macOS form, and /etc/passwd itself lists root everywhere; all three come from the fixed helper PATH,
-# and an entry counts only when its uid field is the euid. The home is the second-to-last field in
+# whatever the caller or the service that started it set (sudo keeps HOME on some systems). getent
+# asks every name service (Linux), id -P is the BSD and macOS form, and /etc/passwd itself lists root
+# everywhere; all three come from the fixed helper PATH, and an entry counts only when its uid field
+# is the euid. The home is the second-to-last field in
 # both the 7-field passwd and the 10-field master.passwd form id -P prints. No absolute answer fails
 # the call: a guessed directory would be one the caller could create.
 pwshpy_account_data_home() {
@@ -603,7 +605,8 @@ pwshpy_resolve_managed_python() {
     esac
     _rp_why=$(pwshpy_uv_distrust "$PWSHPY_PYTHON")
     if [ -n "$_rp_why" ]; then
-        pwshpy_die "refusing the Python uv found at $PWSHPY_PYTHON: $_rp_why (as root only a Python no other account can modify is run)" 127
+        _rp_why="$_rp_why (as root only a Python no other account can modify is run)"
+        pwshpy_die "refusing the Python uv found at $PWSHPY_PYTHON: $_rp_why" 127
     fi
 }
 
@@ -760,7 +763,10 @@ fi
 # What to say when no usable uv is left: as root, also how to provide one the trust rule accepts.
 PWSHPY_UV_HINT="Install it from https://astral.sh/uv"
 if [ "$PWSHPY_AS_ROOT" = "1" ]; then
-    PWSHPY_UV_HINT="As root only a uv no other account can modify is run: install uv where only root can write (root's own ~/.local/bin, the installer's default), or take group and other write off the directory named above (chmod go-w); a --pwshpy-uv pin must pass the same check"
+    PWSHPY_UV_HINT="As root only a uv no other account can modify is run: install uv where only root can write"
+    PWSHPY_UV_HINT="$PWSHPY_UV_HINT (root's own ~/.local/bin, the installer's default), or take group and other"
+    PWSHPY_UV_HINT="$PWSHPY_UV_HINT write off the directory named above (chmod go-w); a --pwshpy-uv pin must pass"
+    PWSHPY_UV_HINT="$PWSHPY_UV_HINT the same check"
 fi
 
 if [ -n "$PWSHPY_UV_PIN" ]; then
@@ -771,7 +777,8 @@ if [ -n "$PWSHPY_UV_PIN" ]; then
     if [ "$PWSHPY_AS_ROOT" = "1" ]; then
         PWSHPY_PIN_WHY=$(pwshpy_uv_distrust "$PWSHPY_UV_PIN")
         if [ -n "$PWSHPY_PIN_WHY" ]; then
-            printf '%s\n' "pwshpy: refusing the uv given with --pwshpy-uv: $PWSHPY_UV_PIN: $PWSHPY_PIN_WHY. $PWSHPY_UV_HINT" >&2
+            printf '%s: %s. %s\n' "pwshpy: refusing the uv given with --pwshpy-uv: $PWSHPY_UV_PIN" \
+                "$PWSHPY_PIN_WHY" "$PWSHPY_UV_HINT" >&2
             exit 127
         fi
     fi
@@ -803,8 +810,8 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # @@PWSHPY_CWD_ENV@@) before the entry runs; every path the caller gave relative to that
     # directory (a --with path, a relative PWSHPY_PACK_CACHE) is made absolute first.
     # Asked while the helpers still come from the fixed PATH.
-    PWSHPY_DATA_HOME=$(pwshpy_account_data_home) ||
-        pwshpy_die "cannot read the home directory of uid $(pwshpy_euid) from the passwd database" 70
+    PWSHPY_DATA_HOME=$(pwshpy_account_data_home) \
+        || pwshpy_die "cannot read the home directory of uid $(pwshpy_euid) from the passwd database" 70
     pwshpy_caller_cwd
     PWSHPY_CALLER_PREFIX=${PWSHPY_CALLER_CWD%/}/
     case $PWSHPY_CACHE in

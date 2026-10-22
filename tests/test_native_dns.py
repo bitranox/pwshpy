@@ -9,7 +9,7 @@ import pytest
 import pwshpy.adapters.native.dns as dns_module
 from pwshpy.adapters.native import resolve
 from pwshpy.domain.enums import AddressFamily
-from pwshpy.domain.errors import NativeCallError
+from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
 from pwshpy.domain.records import DnsRecord
 
 
@@ -54,12 +54,13 @@ def test_resolve_with_timeout_happy_path() -> None:
 
 @pytest.mark.os_agnostic
 def test_resolve_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A lookup slower than the timeout raises NativeCallError (mentioning the timeout)."""
+    """[D1]: a lookup slower than the timeout raises OperationTimeoutError (a NativeCallError) carrying the limit."""
 
     def _slow_getaddrinfo(*_args: object, **_kwargs: object) -> list[object]:
         time.sleep(2.0)
         return []
 
     monkeypatch.setattr(dns_module.socket, "getaddrinfo", _slow_getaddrinfo)
-    with pytest.raises(NativeCallError, match="timed out"):
+    with pytest.raises(OperationTimeoutError, match="timed out") as caught:
         list(resolve("slow.example.", timeout=0.05))
+    assert caught.value.timeout == 0.05

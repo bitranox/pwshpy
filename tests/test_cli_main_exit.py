@@ -11,13 +11,16 @@ itself, as a console script does, with the services replaced at the composition 
 from __future__ import annotations
 
 import dataclasses
+import subprocess
 import sys
+import time
 from typing import TYPE_CHECKING, Any
 
 import click
 import pytest
 from lib_layered_config import Config
 
+import pwshpy.adapters.native.dns as dns_module
 from pwshpy.adapters.cli.main import main
 from pwshpy.composition import AppServices, build_testing
 
@@ -141,3 +144,32 @@ def test_a_successful_command_exits_0(capsys: pytest.CaptureFixture[str]) -> Non
 
     assert exit_code == 0
     assert "pwshpy" in capsys.readouterr().out
+
+
+@pytest.mark.os_agnostic
+def test_a_timed_out_wait_process_exits_110_through_main(capsys: pytest.CaptureFixture[str]) -> None:
+    """[D1]: wait_process --timeout raises OperationTimeoutError, so it exits 110 like every timeout (was 1)."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert main(["wait_process", "--timeout", "0.5", str(child.pid)], services_factory=_services({})) == 110
+    finally:
+        child.kill()
+        child.wait()
+    assert "OperationTimeoutError" in capsys.readouterr().err
+
+
+@pytest.mark.os_agnostic
+def test_a_timed_out_resolve_dns_name_exits_110_through_main(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """[D1]: resolve_dns_name --timeout raises OperationTimeoutError, so it exits 110 (was 1)."""
+
+    def _slow_getaddrinfo(*_args: object, **_kwargs: object) -> list[object]:
+        time.sleep(2.0)
+        return []
+
+    # The OS resolver is the external edge: no test can make a real lookup reliably slow.
+    monkeypatch.setattr(dns_module.socket, "getaddrinfo", _slow_getaddrinfo)
+    argv = ["resolve_dns_name", "--timeout", "0.05", "slow.example."]
+    assert main(argv, services_factory=_services({})) == 110
+    assert "OperationTimeoutError" in capsys.readouterr().err

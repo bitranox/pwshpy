@@ -20,7 +20,7 @@ import threading
 from collections.abc import Iterator
 from typing import Any
 
-from ...domain.errors import NativeCallError
+from ...domain.errors import NativeCallError, OperationTimeoutError
 from ...domain.records import DnsRecord
 from .marshal import to_address_family
 
@@ -29,8 +29,9 @@ def _resolve_addrinfo(name: str, timeout: float | None) -> list[Any]:
     """Return ``getaddrinfo`` results for ``name``, bounded by ``timeout`` if given.
 
     Raises:
-        NativeCallError: On resolution failure (wraps ``socket.gaierror``) or when
-            ``timeout`` elapses before the lookup completes.
+        NativeCallError: On resolution failure (wraps ``socket.gaierror``).
+        OperationTimeoutError: When ``timeout`` elapses before the lookup completes (the lookup's
+            thread is abandoned; it ends when the OS resolver returns).
     """
     if timeout is None:
         try:
@@ -51,7 +52,7 @@ def _resolve_addrinfo(name: str, timeout: float | None) -> list[Any]:
     thread.start()
     thread.join(timeout)
     if thread.is_alive():
-        raise NativeCallError(f"DNS resolution for {name!r} timed out after {timeout}s")
+        raise OperationTimeoutError(f"DNS resolution for {name!r} timed out after {timeout}s", timeout=timeout)
     if errors:
         raise NativeCallError(f"DNS resolution failed for {name!r}: {errors[0]}") from errors[0]
     return results[0]
@@ -66,7 +67,8 @@ def resolve(name: str, *, timeout: float | None = None) -> Iterator[DnsRecord]:
             resolver's own timeout.
 
     Raises:
-        NativeCallError: If the name cannot be resolved or ``timeout`` elapses.
+        NativeCallError: If the name cannot be resolved.
+        OperationTimeoutError: If ``timeout`` elapses first (a ``NativeCallError`` too).
 
     Example:
         >>> records = list(resolve("localhost", timeout=5.0))

@@ -106,8 +106,10 @@ class OperationTimeoutError(NativeCallError):
     out of time from one that could not start at all: catch it before
     ``NativeCallError``. Raised by ``ps.exec(timeout=...)`` (the child, or with
     ``wait_tree`` its whole tree, is killed), ``ps.get_windows_update`` (the search
-    child is killed) and a service start/stop/restart that has not settled (the
-    control WAS issued). The ``pwshpy`` CLI exits 110 (``ETIMEDOUT``) for it.
+    child is killed), a service start/stop/restart that has not settled (the
+    control WAS issued), ``ps.wait_process(timeout=...)`` (the process keeps
+    running) and ``ps.resolve_dns_name(timeout=...)`` (the lookup is abandoned).
+    The ``pwshpy`` CLI exits 110 (``ETIMEDOUT``) for it.
 
     Args:
         message: The human-readable description.

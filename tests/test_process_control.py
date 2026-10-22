@@ -17,7 +17,7 @@ import pytest
 
 import pwshpy.adapters.native.process_control as pcmod
 from pwshpy.adapters.native.process_control import NativeProcessControl
-from pwshpy.domain.errors import NativeCallError, PlatformUnsupportedError
+from pwshpy.domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
 
 _SLEEP = [sys.executable, "-c", "import time; time.sleep(30)"]
 
@@ -48,11 +48,13 @@ def test_stop_missing_process_raises() -> None:
 
 @pytest.mark.os_agnostic
 def test_wait_timeout_raises() -> None:
-    """wait_process raises NativeCallError when the process outlives the timeout."""
+    """[D1]: wait_process raises OperationTimeoutError (a NativeCallError) carrying the limit when the
+    process outlives the timeout, like every other call that waits."""
     child = subprocess.Popen(_SLEEP)  # noqa: S603 - fixed argv, disposable child
     try:
-        with pytest.raises(NativeCallError):
+        with pytest.raises(OperationTimeoutError) as caught:
             NativeProcessControl().wait_process(child.pid, timeout=0.5)
+        assert caught.value.timeout == 0.5
     finally:
         child.kill()
         child.wait()

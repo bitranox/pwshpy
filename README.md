@@ -292,7 +292,8 @@ ps.register_scheduled_task(
 A script can branch on the exit code without parsing stderr: **77** means an elevation was declined
 (`pwshpy --elevate`, a packed runner's `-PwshPyElevate` / `--pwshpy-elevate`), **110** means a
 timeout (`exec --timeout`, a service start, stop or restart that did not settle,
-`get_windows_update`), and the packed runners add 64, 70 and 127. The full table is in the
+`get_windows_update`, `wait_process --timeout`, `resolve_dns_name --timeout`), and the packed
+runners add 64, 70 and 127. The full table is in the
 [CLI Reference](docs/cli-reference.md#exit-codes).
 
 ## The costly part: it stays true

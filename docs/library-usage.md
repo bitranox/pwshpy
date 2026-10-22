@@ -310,7 +310,9 @@ rather than guessed at) and an `index` the file does not hold all raise `NativeC
 ## Deadlines and long waits
 
 Every call that waits takes a `timeout` in seconds, and running out of it raises
-`OperationTimeoutError` (its `.timeout` holds the limit). It subclasses `NativeCallError`, so catch it
+`OperationTimeoutError` (its `.timeout` holds the limit), with two exceptions: `ps.run` (.NET) has
+no timeout and reports a failure as `PowerShellError`, and `ps.elevate(wait=True)` waits for the
+elevated child without a limit. `OperationTimeoutError` subclasses `NativeCallError`, so catch it
 first to tell "ran out of time" from "refused" or "could not start":
 
 ```python
@@ -337,6 +339,9 @@ except NativeCallError as exc:
   [Power Tools](power-tools.md#waiting-for-the-whole-process-tree-wait_treetrue-like-start-process--wait).
   On macOS (and any POSIX system other than Linux) `wait_tree=True` starts the program in a new
   session, so it has no controlling terminal.
+- **Processes and names:** `wait_process(pid, timeout=...)` raises it when the process is still
+  running at the deadline (the process is left running), and `resolve_dns_name(name, timeout=...)`
+  when the lookup has not answered (the lookup is abandoned and ends when the OS resolver returns).
 - **Windows Update:** `get_windows_update(criteria=..., timeout=300.0)` runs the search in a child
   process that is killed when the time is up. The search starts on the first iteration and
   returns its whole result before the first record, so `.take(n)` does not shorten it.

@@ -147,8 +147,9 @@ Every failure raises a `PwshPyError` subclass; catch a subclass before its paren
 
 - `NativeCallError` - an OS call failed, `.check()` saw a nonzero exit, or a `strict=True` listing
   hit an item it cannot read. Its subclasses: `OperationTimeoutError` (`.timeout` holds the limit:
-  `exec(timeout=)`, a service start/stop/restart that did not settle - the control WAS issued - and
-  `get_windows_update`) and `ElevationDeclinedError` (the UAC prompt or sudo's password refused).
+  `exec(timeout=)`, a service start/stop/restart that did not settle - the control WAS issued -,
+  `get_windows_update`, `wait_process(timeout=)` and `resolve_dns_name(timeout=)`) and
+  `ElevationDeclinedError` (the UAC prompt or sudo's password refused).
   A control the OS refuses (a service stop denied, a missing executable) is the plain
   `NativeCallError`: `except OperationTimeoutError` first, then `except NativeCallError`.
 - `ElevationRequiredError` (`require_elevation()`), `PlatformUnsupportedError` (no analog on this OS),

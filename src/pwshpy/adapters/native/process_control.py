@@ -16,7 +16,7 @@ from typing import Any
 
 import psutil as _psutil_module  # pyright: ignore[reportMissingTypeStubs]
 
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
 
 _psutil: Any = _psutil_module
 _NO_SUCH_PROCESS: type[BaseException] = _psutil.NoSuchProcess
@@ -49,8 +49,11 @@ class NativeProcessControl:
 
         A PID that is already absent counts as exited (its code is unknowable, so ``None``);
         this makes ``stop_process`` then ``wait_process`` race-free - the OS may reap the
-        process between the two calls. Raises :class:`~pwshpy.domain.errors.NativeCallError`
-        only if a still-running process does not exit within ``timeout`` seconds.
+        process between the two calls.
+
+        Raises:
+            OperationTimeoutError: A still-running process did not exit within ``timeout``
+                seconds (a :class:`~pwshpy.domain.errors.NativeCallError`, carrying the limit).
         """
         try:
             proc = _psutil.Process(pid)
@@ -59,7 +62,9 @@ class NativeProcessControl:
         try:
             code = proc.wait(timeout)
         except _TIMEOUT_EXPIRED as exc:
-            raise NativeCallError(f"PID {pid} did not exit within {timeout}s") from exc
+            # psutil raises TimeoutExpired only when a limit was given, so the 0.0 is never reported.
+            limit = 0.0 if timeout is None else float(timeout)
+            raise OperationTimeoutError(f"PID {pid} did not exit within {timeout}s", timeout=limit) from exc
         except _NO_SUCH_PROCESS:
             return None  # reaped mid-wait
         return None if code is None else int(code)

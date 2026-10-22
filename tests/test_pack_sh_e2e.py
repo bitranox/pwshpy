@@ -453,13 +453,23 @@ sys.exit(0)
 
 
 def _root_only_writable(path: Path) -> bool:
-    """Whether root owns ``path`` and its directory and nobody else may write either."""
+    """Whether the runner's root rule accepts ``path`` (not a symlink, no POSIX ACL checked here).
+
+    Root owns the file and its directory and neither has group or other write; every directory
+    above is root-owned and has neither unless it is sticky.
+    """
+    if path.is_symlink():
+        return False
     for item in (path, path.parent):
         info = item.stat()
-        group_writable_by_others = bool(info.st_mode & 0o020) and info.st_gid != 0
-        if info.st_uid != 0 or info.st_mode & 0o002 or group_writable_by_others:
+        if info.st_uid != 0 or info.st_mode & 0o022:
             return False
-    return not path.is_symlink()
+    for ancestor in path.parent.resolve().parents:
+        info = ancestor.stat()
+        sticky = bool(info.st_mode & 0o1000)
+        if info.st_uid != 0 or (info.st_mode & 0o022 and not sticky):
+            return False
+    return True
 
 
 _needs_trusted_system_uv = pytest.mark.skipif(
@@ -482,13 +492,18 @@ def _planted_uv(tmp_path: Path, name: str = "planted-bin") -> Path:
 
 
 #: The runner's root probe for the trust rule, and what a forced-root runner has in its place.
-_ROOT_PROBE = ('if [ "$(id -u)" = "0" ]; then\n    PWSHPY_AS_ROOT=1', "if true; then\n    PWSHPY_AS_ROOT=1")
+_ROOT_PROBE = ('if [ "$(pwshpy_euid)" = "0" ]; then\n    PWSHPY_AS_ROOT=1', "if true; then\n    PWSHPY_AS_ROOT=1")
+#: The runner's trusted owners (root alone), and the list a test widens it to so its own files can
+#: stand in for root-owned ones: no unprivileged test can create those.
+_TRUSTED_UIDS = "PWSHPY_TRUSTED_UIDS=0\n"
 
 
-def _trust_runner(tmp_path: Path, *, hide_system_uv: bool, as_root: bool = False) -> Path:
+def _trust_runner(tmp_path: Path, *, hide_system_uv: bool, as_root: bool = False, trust_my_uid: bool = False) -> Path:
     """A packed which-uv script, its fixed /usr/local/bin/uv probe hidden, its root probe forced.
 
-    Both are exact, counted substitutions; the rest is the shipped runner.
+    ``trust_my_uid`` also counts this test's own uid as root for ownership, so a directory layout
+    the test builds can pass or fail on everything BUT its owner (group, other, sticky, ACL,
+    ancestors). All are exact, counted substitutions; the rest is the shipped runner.
     """
     entry = tmp_path / "which_uv.py"
     entry.write_text(_ENTRY_REPORTING_UV)
@@ -500,6 +515,9 @@ def _trust_runner(tmp_path: Path, *, hide_system_uv: bool, as_root: bool = False
     if as_root:
         assert text.count(_ROOT_PROBE[0]) == 1
         text = text.replace(*_ROOT_PROBE)
+    if trust_my_uid:
+        assert text.count(_TRUSTED_UIDS) == 1
+        text = text.replace(_TRUSTED_UIDS, f"PWSHPY_TRUSTED_UIDS='0 {tmp_path.stat().st_uid}'\n")
     runner.write_text(text, encoding="utf-8", newline="\n")
     return runner
 
@@ -660,3 +678,210 @@ def test_elevate_forwards_the_pinned_uv(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert _reported_uv(result) == str(planted), result.stdout + result.stderr
     assert (tmp_path / "sudo-calls.txt").exists(), "the runner never relaunched through sudo"
+
+
+# --- root runs: helpers, ancestors, ACLs, group write (fix round 2) ----------------------------
+
+
+def _marker_tool(directory: Path, name: str, marker: Path, *, body: str) -> None:
+    """A tool double that records it ran (appends its name to ``marker``) and then does ``body``."""
+    tool = directory / name
+    tool.write_text(f'#!/bin/sh\necho {name} >> "{marker}"\n{body}\n', encoding="utf-8", newline="\n")
+    tool.chmod(0o755)
+
+
+def _real(name: str) -> str:
+    found = shutil.which(name, path="/usr/bin:/bin")
+    assert found is not None, name
+    return found
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_planted_helpers_on_path_never_run(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """[87]: as root the runner runs ls, readlink, tar, base64 only from the fixed system dirs.
+
+    A world-writable directory first on PATH holds a uv (a symlink, so readlink is asked), an ls
+    that lists every path as root-owned 0755, and recording tar/base64/readlink doubles. None may
+    run, and the uv stays refused. (busybox ash runs its own applets whatever PATH says, so it
+    passes this either way; sh, dash and bash are the ones the fix is for.)
+    """
+    planted = _planted_uv(tmp_path)
+    (planted.parent / "uv-real").write_bytes(planted.read_bytes())
+    (planted.parent / "uv-real").chmod(0o755)
+    planted.unlink()
+    planted.symlink_to("uv-real")
+    marker = tmp_path / "ran.txt"
+    _marker_tool(planted.parent, "ls", marker, body="echo 'drwxr-xr-x 2 0 0 4096 Jan  1 00:00 x'")
+    for name in ("tar", "base64", "readlink"):
+        _marker_tool(planted.parent, name, marker, body=f'exec "{_real(name)}" "$@"')
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True)
+    result = _run(shell, runner, "--pwshpy-no-install-uv", env=_trust_env(tmp_path, planted.parent))
+    assert not marker.exists(), f"planted helpers ran as root: {marker.read_text()}"
+    assert _reported_uv(result) is None, result.stdout + result.stderr
+    assert result.returncode == 127, result.stdout + result.stderr
+    # The link is this user's, which the walk meets (and refuses) before the world-writable directory.
+    assert (
+        f"{_UV_SKIPPED} {planted}: the symlink {planted} is owned by uid {planted.lstat().st_uid}, not root"
+        in result.stderr
+    )
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_the_root_probe_never_asks_a_planted_id(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """A planted id first on PATH is never asked: answering "not root" would switch the rule off."""
+    marker = tmp_path / "ran.txt"
+    fake = tmp_path / "fake-bin"
+    fake.mkdir()
+    _marker_tool(fake, "id", marker, body="echo 0")
+    runner = _trust_runner(tmp_path, hide_system_uv=True)
+    result = _run(shell, runner, env=_trust_env(tmp_path, fake, Path(_UV or "uv").parent))
+    assert not marker.exists(), "the runner asked the planted id"
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _UV_SKIPPED not in result.stderr, result.stderr
+
+
+def _own_tree(tmp_path: Path, *, ancestor_mode: int, leaf_mode: int = 0o755) -> Path:
+    """tmp/anc (``ancestor_mode``) / bin (``leaf_mode``) / uv - all owned by this test's uid."""
+    ancestor = tmp_path / "anc"
+    ancestor.mkdir()
+    leaf = ancestor / "bin"
+    leaf.mkdir()
+    uv = _uv_stand_in_at(leaf)
+    leaf.chmod(leaf_mode)
+    ancestor.chmod(ancestor_mode)
+    return uv
+
+
+def _uv_stand_in_at(directory: Path) -> Path:
+    wrapper = directory / "uv"
+    wrapper.write_text(
+        f'#!/bin/sh\nPWSHPY_TEST_UV="$0"\nexport PWSHPY_TEST_UV\nexec "{_UV}" "$@"\n', encoding="utf-8", newline="\n"
+    )
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize(
+    ("ancestor_mode", "reason"),
+    [
+        pytest.param(0o777, "is writable by every account and not sticky", id="other-write"),
+        pytest.param(0o775, "is writable by group {gid} and not sticky", id="group-write"),
+    ],
+)
+def test_as_root_a_swappable_ancestor_refuses_the_uv(
+    tmp_path: Path, shell_id: str, shell: list[str], ancestor_mode: int, reason: str
+) -> None:
+    """A locked leaf under an ancestor others can write (no sticky bit) is refused: they could rename
+    the leaf away and put another in its place between the check and the exec."""
+    uv = _own_tree(tmp_path, ancestor_mode=ancestor_mode)
+    ancestor = uv.parent.parent
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True, trust_my_uid=True)
+    result = _run(shell, runner, "--pwshpy-no-install-uv", env=_trust_env(tmp_path, uv.parent))
+    assert result.returncode == 127, result.stdout + result.stderr
+    expected = f"{_UV_SKIPPED} {uv}: its ancestor {ancestor} " + reason.format(gid=ancestor.stat().st_gid)
+    assert expected in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize("ancestor_mode", [0o755, 0o1777], ids=["locked", "sticky-world-writable"])
+def test_as_root_a_uv_under_trusted_ancestors_runs(
+    tmp_path: Path, shell_id: str, shell: list[str], ancestor_mode: int
+) -> None:
+    """Positive control for the PATH search: a locked leaf under locked or sticky ancestors runs."""
+    uv = _own_tree(tmp_path, ancestor_mode=ancestor_mode)
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True, trust_my_uid=True)
+    result = _run(shell, runner, "--pwshpy-no-install-uv", env=_trust_env(tmp_path, uv.parent))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _reported_uv(result) == str(uv), result.stdout + result.stderr
+    assert _UV_SKIPPED not in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_a_symlinked_path_directory_is_resolved(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """A PATH entry that is a directory symlink is followed, not judged by the link's own mode."""
+    uv = _own_tree(tmp_path, ancestor_mode=0o755)
+    link = tmp_path / "linked-bin"
+    link.symlink_to(uv.parent)
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True, trust_my_uid=True)
+    result = _run(shell, runner, "--pwshpy-no-install-uv", env=_trust_env(tmp_path, link))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _reported_uv(result) == str(link / "uv"), result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_group_write_is_refused_for_any_group(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """Group write on the directory holding uv is refused, whatever the group (here this user's)."""
+    uv = _own_tree(tmp_path, ancestor_mode=0o755, leaf_mode=0o775)
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True, trust_my_uid=True)
+    result = _run(shell, runner, "--pwshpy-no-install-uv", env=_trust_env(tmp_path, uv.parent))
+    assert result.returncode == 127, result.stdout + result.stderr
+    gid = uv.parent.stat().st_gid
+    assert f"{_UV_SKIPPED} {uv}: its directory {uv.parent} is writable by group {gid}" in result.stderr
+
+
+_GROUP0_WRITABLE = Path("/usr/local/bin")
+
+
+@pytest.mark.skipif(
+    not (
+        _SYSTEM_WIDE_UV.is_file()
+        and _GROUP0_WRITABLE.stat().st_uid == 0
+        and _GROUP0_WRITABLE.stat().st_gid == 0
+        and _GROUP0_WRITABLE.stat().st_mode & 0o020
+    ),
+    reason=f"needs {_SYSTEM_WIDE_UV} in a root:root group-writable {_GROUP0_WRITABLE}",
+)
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_group_write_by_group_0_is_refused(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """Group 0 gets no allowance any more: members of a root group are not all root."""
+    runner = _trust_runner(tmp_path, hide_system_uv=False, as_root=True)
+    result = _run(shell, runner, "--pwshpy-uv", str(_SYSTEM_WIDE_UV), env=_trust_env(tmp_path))
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert f"its directory {_GROUP0_WRITABLE} is writable by group 0" in result.stderr, result.stderr
+
+
+def _acl_dir(path: Path) -> Path | None:
+    """A 0755 directory of this user's with a named-user write ACL, or None where ACLs are unsupported."""
+    path.mkdir()
+    path.chmod(0o755)
+    setfacl = shutil.which("setfacl")
+    if setfacl is None:
+        return None
+    done = subprocess.run([setfacl, "-m", "u:65534:rwx", str(path)], capture_output=True, check=False)  # noqa: S603
+    return path if done.returncode == 0 else None
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_a_directory_with_a_write_acl_is_refused(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """A named-user write ACL refuses the uv: as '+' where ls shows it, as the mask's group write on busybox."""
+    acl = _acl_dir(tmp_path / "acl-bin")
+    if acl is None:
+        pytest.skip("setfacl is missing or this filesystem has no POSIX ACLs")
+    uv = _uv_stand_in_at(acl)
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True, trust_my_uid=True)
+    result = _run(shell, runner, "--pwshpy-no-install-uv", env=_trust_env(tmp_path, acl))
+    assert result.returncode == 127, result.stdout + result.stderr
+    reasons = (f"its directory {acl} carries an ACL", f"its directory {acl} is writable by group {acl.stat().st_gid}")
+    line = next((x for x in result.stderr.splitlines() if x.startswith(f"{_UV_SKIPPED} {uv}:")), "")
+    if shell_id == "busybox-ash":
+        assert any(reason in line for reason in reasons), result.stderr
+    else:
+        assert reasons[0] in line, result.stderr
+
+
+@pytest.mark.skipif(
+    not (Path("/bin").is_symlink() and Path("/usr/bin/python3").exists()),
+    reason="needs a merged-/usr host (/bin -> usr/bin) with /usr/bin/python3",
+)
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_a_pin_through_merged_usr_is_accepted(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """/bin/python3 passes the /bin -> usr/bin link and python3's own link and is accepted, then run.
+
+    python3 stands in for uv and fails on the file ``run``; the refusal message must be absent.
+    """
+    runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=True)
+    result = _run(shell, runner, "--pwshpy-no-install-uv", "--pwshpy-uv", "/bin/python3", env=_trust_env(tmp_path))
+    assert _PIN_REFUSED not in result.stderr, result.stderr
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "can't open file" in result.stderr, result.stderr

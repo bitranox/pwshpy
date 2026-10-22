@@ -218,8 +218,9 @@ packed sources (`-o DIR`, `--force`) so a pack can be edited and packed again. S
 `-PwshPyClean` / `--pwshpy-clean`, `-PwshPyNoInstallUv` / `--pwshpy-no-install-uv`,
 `-PwshPyElevate` / `--pwshpy-elevate`, `-PwshPyUv PATH` / `--pwshpy-uv PATH`). Run elevated (an
 administrator token, SYSTEM or root) a runner only executes a `uv` that no account other than the
-running one, SYSTEM and Administrators can modify, skipping any other with a `pwshpy: skipping uv at`
-line on stderr; an untrusted `-PwshPyUv` / `--pwshpy-uv` path is refused with exit 127, and a
+running one, SYSTEM, Administrators, LOCAL SERVICE, NETWORK SERVICE and TrustedInstaller can modify,
+in its own directory or any directory above (on POSIX: root alone), skipping any other with a
+`pwshpy: skipping uv at` line on stderr; an untrusted `-PwshPyUv` / `--pwshpy-uv` path is refused with exit 127, and a
 relative one is a usage error (exit 64).
 
 Exit code 77 (`EX_NOPERM`) means an elevation was refused or declined: `pwshpy --elevate`, a `.sh`

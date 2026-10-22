@@ -959,21 +959,6 @@ def _private_dir(path: Path) -> Path:
     return path
 
 
-def _admin_only_dir(path: Path) -> Path:
-    """A directory only SYSTEM and Administrators can change (Users may read and run), owned by Administrators."""
-    path.mkdir(parents=True)
-    _icacls(
-        path,
-        "/inheritance:r",
-        "/grant:r",
-        f"{_SID_ADMINISTRATORS}:(OI)(CI)F",
-        f"{_SID_SYSTEM}:(OI)(CI)F",
-        f"{_SID_USERS}:(OI)(CI)RX",
-    )
-    _icacls(path, "/setowner", _SID_ADMINISTRATORS)
-    return path
-
-
 def _user_writable_dir(path: Path, *, sid: str = _SID_USERS[1:]) -> Path:
     """A directory ``sid`` (every member of Users by default) may modify: the planted-uv situation.
 
@@ -1014,13 +999,23 @@ def _uv_stand_in(directory: Path) -> Path:
 
 
 def _root_only_writable(path: Path) -> bool:
-    """Whether a POSIX file and its directory are owned by root and writable by nobody else."""
+    """Whether the runner's root rule accepts ``path`` (not a symlink, no POSIX ACL checked here).
+
+    Root owns the file and its directory and neither has group or other write; every directory
+    above is root-owned and has neither unless it is sticky.
+    """
+    if path.is_symlink():
+        return False
     for item in (path, path.parent):
         info = item.stat()
-        group_writable_by_others = bool(info.st_mode & 0o020) and info.st_gid != 0
-        if info.st_uid != 0 or info.st_mode & 0o002 or group_writable_by_others:
+        if info.st_uid != 0 or info.st_mode & 0o022:
             return False
-    return not path.is_symlink()
+    for ancestor in path.parent.resolve().parents:
+        info = ancestor.stat()
+        sticky = bool(info.st_mode & 0o1000)
+        if info.st_uid != 0 or (info.st_mode & 0o022 and not sticky):
+            return False
+    return True
 
 
 def _trusted_uv(tmp_path: Path) -> Path | None:
@@ -1037,15 +1032,27 @@ def _trusted_uv(tmp_path: Path) -> Path | None:
     return None
 
 
-def _elevation_stand_in(runner: Path, output: Path, *, elevated: str, running_sid: str | None = None) -> Path:
+#: The runner's POSIX trusted owners (root alone); a test widens it so its own files stand in for
+#: root-owned ones, which no unprivileged test can create.
+_TRUSTED_UIDS = "$PwshPyTrustedUids = @('0')"
+
+
+def _elevation_stand_in(
+    runner: Path, output: Path, *, elevated: str, running_sid: str | None = None, trust_my_uid: bool = False
+) -> Path:
     """The whole runner with its elevation probe answering ``elevated`` (a PowerShell expression).
 
     One exact substitution and nothing else, so the uv lookup, the pin and the run are the shipped
     code. Without -PwshPyElevate nothing relaunches, so this probes the uv trust rule alone.
     ``running_sid`` also makes the runner believe it runs as that SID ('S-1-5-18' stands in for a
-    SYSTEM scheduled task, which no test can start without changing the host).
+    SYSTEM scheduled task, which no test can start without changing the host). ``trust_my_uid``
+    (POSIX) counts this test's uid as root for ownership, so a layout the test builds can pass or
+    fail on everything but its owner.
     """
     text = runner.read_text(encoding="utf-8")
+    if trust_my_uid and sys.platform != "win32":
+        assert text.count(_TRUSTED_UIDS) == 1
+        text = text.replace(_TRUSTED_UIDS, f"$PwshPyTrustedUids = @('0', '{os.getuid()}')")
     probes = [("function Test-PwshPyElevated {", elevated, "Test-PwshPyElevatedOnHost")]
     if running_sid is not None:
         probes.append(("function Get-PwshPyRunningUserSid {", f"'{running_sid}'", "Get-PwshPyRunningUserSidOnHost"))
@@ -1087,11 +1094,13 @@ def _same(reported: Path | None, expected: Path) -> bool:
     return reported is not None and reported.exists() and reported.samefile(expected)
 
 
-def _trust_runner(tmp_path: Path, *, elevated: str) -> Path:
+def _trust_runner(tmp_path: Path, *, elevated: str, trust_my_uid: bool = False) -> Path:
     entry = tmp_path / "which_uv.py"
     entry.write_text(_ENTRY_REPORTING_UV)
     manifest = pack_script(entry)
-    return _elevation_stand_in(Path(manifest.output_path), tmp_path / "trust_stand_in.ps1", elevated=elevated)
+    return _elevation_stand_in(
+        Path(manifest.output_path), tmp_path / "trust_stand_in.ps1", elevated=elevated, trust_my_uid=trust_my_uid
+    )
 
 
 _needs_a_trusted_uv = "this host cannot provide a uv an elevated run may trust (see _trusted_uv)"
@@ -1185,33 +1194,36 @@ def test_an_elevated_run_refuses_a_uv_a_broad_group_can_modify(tmp_path: Path, g
 @pytest.mark.os_windows
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs")
 def test_as_system_the_strict_rule_is_unchanged(tmp_path: Path) -> None:
-    """Running as SYSTEM, a logged-on account's own uv is refused; an admin-only one still runs.
+    """Running as SYSTEM, a logged-on account's own uv is refused; a uv only SYSTEM's peers control runs.
 
     The runner's identity probe answers S-1-5-18 here (starting a real SYSTEM task would change the
     host); since SYSTEM is already trusted, the running account adds nothing to the trusted set.
+    Everything under this account's profile is therefore refused (the account owns the profile), so
+    the positive case pins a system binary: whoami.exe stands in for uv, is accepted, and fails on
+    the argument ``run`` with its own exit code 1.
     """
     user_sid = _current_user_sid()
     own = _private_dir(tmp_path / "own-bin")
     own_uv = _copy_uv(own)
     for item in (own, own_uv):
         _icacls(item, "/setowner", f"*{user_sid}")
-    path_first = [own]
-    admin_uv: Path | None = None
-    if _windows_elevated():  # only an elevated test can hand a directory to Administrators
-        admin_dir = _admin_only_dir(tmp_path / "admin-bin")
-        admin_uv = _copy_uv(admin_dir)
-        _icacls(admin_uv, "/setowner", _SID_ADMINISTRATORS)
-        path_first.append(admin_dir)
     entry = tmp_path / "which_uv.py"
     entry.write_text(_ENTRY_REPORTING_UV)
     manifest = pack_script(entry)
     runner = _elevation_stand_in(
         Path(manifest.output_path), tmp_path / "system_stand_in.ps1", elevated="$true", running_sid="S-1-5-18"
     )
-    result = _run_with_path(tmp_path, runner, path_first=path_first)
-    assert f"its directory {own} is owned by {user_sid}" in _skip_line(result, own_uv), result.stderr
-    if admin_uv is not None:
-        assert _same(_reported_uv(result), admin_uv), result.stdout + result.stderr
+    searched = _run_with_path(tmp_path, runner, path_first=[own])
+    assert f"its directory {own} is owned by {user_sid}" in _skip_line(searched, own_uv), searched.stderr
+    assert not _skip_line(searched, own_uv).endswith("not root"), searched.stderr
+    # PATH beyond own-bin is this host's, so a uv elsewhere might still pass; the account's own did not run.
+    assert not _same(_reported_uv(searched), own_uv), searched.stdout + searched.stderr
+    system_root = Path(os.environ.get("SYSTEMROOT", r"C:\Windows"))
+    whoami = system_root / "System32" / "whoami.exe"
+    pinned = _run_with_path(tmp_path, runner, "-PwshPyUv", str(whoami), path_first=[own])
+    assert _PIN_REFUSED not in pinned.stderr, pinned.stderr
+    assert pinned.returncode == 1, pinned.stdout + pinned.stderr
+    assert _reported_uv(pinned) is None, pinned.stdout
 
 
 @pytest.mark.local_only
@@ -1323,3 +1335,186 @@ def test_the_elevated_child_keeps_the_pin_and_relays_what_it_skipped(tmp_path: P
     assert searched.returncode == 0, searched.stdout + searched.stderr
     assert _same(_reported_uv(searched), trusted), searched.stdout + searched.stderr
     assert _skip_line(searched, planted), searched.stderr
+
+
+# --- round 2: ancestors, a planted ls / id, POSIX root PATH ------------------------------------
+
+_WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs")
+_POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes and root")
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+def test_an_elevated_run_refuses_a_locked_uv_under_a_deletable_ancestor(tmp_path: Path) -> None:
+    """A locked leaf under an ancestor Users may modify (Delete, DeleteChild) is refused.
+
+    Users could rename the locked directory away and put their own in its place between the check
+    and the exec, so the lock on the leaf is worth nothing (like a Tools folder under the C: root
+    that inherits the root's Modify grant).
+    """
+    deletable = _user_writable_dir(tmp_path / "deletable")
+    locked = _private_dir(deletable / "locked-bin")
+    uv = _copy_uv(locked)
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[locked])
+    assert f"its ancestor {deletable} lets {_SID_USERS[1:]} change it" in _skip_line(result, uv), result.stderr
+    assert not _same(_reported_uv(result), uv), result.stdout + result.stderr
+
+
+#: Judges directories with the artefact's own walk: each one gets a file name that does not exist,
+#: so a directory and every ancestor that pass leave only the missing file's unreadable ACL.
+_DIRECTORY_TRUST_PROBE = r"""
+param([string] $Artefact, [string] $RunningSid)
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Artefact, [ref]$tokens, [ref]$errors)
+$language = 'System.Management.Automation.Language'
+$functions = $ast.FindAll({ param($n) $n -is ("$language.FunctionDefinitionAst" -as [type]) }, $false)
+foreach ($definition in $functions) { . ([ScriptBlock]::Create($definition.Extent.Text)) }
+$wanted = '^\$PwshPy(TrustedSids|FileWriteRights|DirectoryWriteRights|AncestorWriteRights|TrustedUids)$'
+$assignments = $ast.FindAll({
+    param($n)
+    $n -is ("$language.AssignmentStatementAst" -as [type]) -and $n.Left.Extent.Text -match $wanted
+}, $false)
+foreach ($assignment in $assignments) { . ([ScriptBlock]::Create($assignment.Extent.Text)) }
+$PwshPyOnWindows = $true
+$PwshPyRelay = ''
+if ($RunningSid) { $script:ForcedSid = $RunningSid; function Get-PwshPyRunningUserSid { return $script:ForcedSid } }
+$systemProfile = Join-Path $env:SystemRoot 'System32\config\systemprofile'
+foreach ($directory in @($env:USERPROFILE, $env:LOCALAPPDATA, $systemProfile)) {
+    Write-Output ($directory + '|' + (Get-PwshPyUvDistrust -Path (Join-Path $directory 'pwshpy-x12-absent.exe')))
+}
+"""
+
+
+def _directory_trust(tmp_path: Path, *, running_sid: str = "") -> dict[str, str]:
+    assert _PWSH is not None
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    manifest = pack_script(_project(tmp_path))
+    probe = tmp_path / "directory_trust.ps1"
+    probe.write_text(_DIRECTORY_TRUST_PROBE, encoding="utf-8")
+    result = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(probe), str(manifest.output_path), running_sid],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return dict(line.split("|", 1) for line in result.stdout.splitlines() if "|" in line)
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+def test_the_profile_and_the_system_profile_pass_the_ancestor_walk(tmp_path: Path) -> None:
+    """Under the running-account rule a per-user profile and SYSTEM's profile are trusted, ancestors included.
+
+    Only the probe's absent file is left to fail; under SYSTEM the user's profile is refused.
+    """
+    verdicts = _directory_trust(tmp_path)
+    assert len(verdicts) == 3, verdicts
+    for directory, why in verdicts.items():
+        assert why.startswith("the ACL of ") and "pwshpy-x12-absent.exe" in why, (directory, why)
+    as_system = _directory_trust(tmp_path / "system", running_sid="S-1-5-18")
+    profile = os.environ["USERPROFILE"]
+    assert "is owned by" in as_system[profile] or " lets " in as_system[profile], as_system
+    system_profile = next(key for key in as_system if key.lower().endswith("systemprofile"))
+    assert as_system[system_profile].startswith("the ACL of "), as_system
+
+
+def _marker_double(directory: Path, name: str, marker: Path, body: str) -> None:
+    tool = directory / name
+    tool.write_text(f'#!/bin/sh\necho {name} >> "{marker}"\n{body}\n', encoding="utf-8", newline="\n")
+    tool.chmod(0o755)
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_an_elevated_posix_run_never_runs_a_planted_ls(tmp_path: Path) -> None:
+    """As root the .ps1 lists modes with the ls from the fixed system dirs, never one planted on PATH.
+
+    The planted ls claims every path is root-owned 0755; trusting it would accept the planted uv.
+    """
+    planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
+    marker = tmp_path / "ran.txt"
+    _marker_double(planted.parent, "ls", marker, "echo 'drwxr-xr-x 2 0 0 4096 Jan  1 00:00 x'")
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[planted.parent])
+    assert not marker.exists(), "the planted ls ran"
+    assert not _same(_reported_uv(result), planted), result.stdout + result.stderr
+    assert "is writable by every account" in _skip_line(result, planted), result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_the_posix_root_probe_never_asks_a_planted_id(tmp_path: Path) -> None:
+    """The .ps1's euid comes from an id at a fixed path: a planted id answering 1000 would switch the rule off."""
+    marker = tmp_path / "ran.txt"
+    fake = tmp_path / "fake-bin"
+    fake.mkdir()
+    _marker_double(fake, "id", marker, "echo 0")
+    entry = tmp_path / "which_uv.py"
+    entry.write_text(_ENTRY_REPORTING_UV)
+    manifest = pack_script(entry)
+    result = _run_with_path(tmp_path, Path(manifest.output_path), path_first=[fake, Path(_UV or "uv").parent])
+    assert not marker.exists(), "the runner asked the planted id"
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _own_posix_tree(tmp_path: Path, *, ancestor_mode: int) -> Path:
+    ancestor = tmp_path / "anc"
+    ancestor.mkdir()
+    leaf = ancestor / "bin"
+    leaf.mkdir()
+    uv = _uv_stand_in(leaf)
+    leaf.chmod(0o755)
+    ancestor.chmod(ancestor_mode)
+    return uv
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize(
+    ("ancestor_mode", "refused"),
+    [
+        pytest.param(0o777, "is writable by every account and not sticky", id="other-write"),
+        pytest.param(0o775, "is writable by group", id="group-write"),
+        pytest.param(0o1777, "", id="sticky"),
+        pytest.param(0o755, "", id="locked"),
+    ],
+)
+def test_an_elevated_posix_run_judges_every_ancestor(tmp_path: Path, ancestor_mode: int, refused: str) -> None:
+    """A locked leaf under a writable, non-sticky ancestor is refused; locked or sticky ancestors pass."""
+    uv = _own_posix_tree(tmp_path, ancestor_mode=ancestor_mode)
+    runner = _trust_runner(tmp_path, elevated="$true", trust_my_uid=True)
+    result = _run_with_path(tmp_path, runner, path_first=[uv.parent])
+    if refused:
+        assert f"its ancestor {uv.parent.parent} {refused}" in _skip_line(result, uv), result.stderr
+        assert not _same(_reported_uv(result), uv), result.stdout + result.stderr
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _same(_reported_uv(result), uv), result.stdout + result.stderr
+        assert not _skip_line(result, uv), result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.skipif(
+    not (Path("/bin").is_symlink() and Path("/usr/bin/python3").exists()),
+    reason="needs a merged-/usr host (/bin -> usr/bin) with /usr/bin/python3",
+)
+def test_an_elevated_posix_pin_through_merged_usr_is_accepted(tmp_path: Path) -> None:
+    """/bin/python3 resolves through /bin -> usr/bin and python3's own link and is accepted, then run."""
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, "-PwshPyUv", "/bin/python3", path_first=[])
+    assert _PIN_REFUSED not in result.stderr, result.stderr
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "can't open file" in result.stderr, result.stderr

@@ -286,25 +286,39 @@ Details worth knowing:
 - **An elevated run only runs a uv no other account can modify.** Run with an administrator token,
   as SYSTEM (a scheduled task) or as root, the runner executes uv with those rights, so a `uv` that
   another account can replace would hand that account the machine. What decides is who can write
-  the binary, not where it was found: every `uv` on `PATH` (in order) and every fixed install
-  location is accepted only when neither the file nor the directory holding it is owned by, or
-  writable by, any account other than the running one, SYSTEM, Administrators, LOCAL SERVICE,
-  NETWORK SERVICE or TrustedInstaller. Users, Authenticated Users, Everyone or another user holding
-  write access refuses it. Accounts are judged by SID, the running one taken from the process
-  token, so a German `Administratoren` reads the same; the rights that count are write, append,
-  delete, change permissions and take ownership (on the directory also adding or removing
-  entries). So an elevated administrator's own per-user or winget `uv` keeps working, and under
-  SYSTEM the running account adds nothing: a `uv` planted in a machine-`PATH` directory that
-  non-administrators can write is refused. On POSIX the running account is root, so root must own
-  both, nobody else may write them, group write counts only for group 0, and a mode carrying an
-  ACL (`+`) is refused because `ls` cannot say who it lets write. A symlink is followed one hop at
-  a time and every hop's directory is judged too. A refused `uv` is skipped with a
-  `pwshpy: skipping uv at <path>: <reason>` line on stderr and the next one is tried; an elevated
-  `.ps1` child relays those lines to the parent. A `-PwshPyUv` / `--pwshpy-uv` path is used as
-  given when not elevated; elevated it must pass the same check or the run stops with
-  `pwshpy: refusing the uv given with ...` and exit 127, without searching further. Not elevated,
-  nothing changes: the first `uv` on `PATH` runs. Accepted residual risk: a process already running
-  as the same account could swap that account's `uv` before the elevated run starts.
+  the binary and the directories above it, not where it was found: every `uv` on `PATH` (in order)
+  and every fixed install location is judged, and the trusted accounts are the running one,
+  SYSTEM, Administrators, LOCAL SERVICE, NETWORK SERVICE and TrustedInstaller (by SID, the running
+  one taken from the process token, so a German `Administratoren` reads the same). The file and
+  the directory holding it must be owned by a trusted account and grant no other account write,
+  append, delete, change permissions or take ownership (on the directory also adding or removing
+  entries). Every directory above, up to the root, must be owned by a trusted account and grant no
+  other account delete, delete-child, change permissions or take ownership, the rights that would
+  let it rename the directory below away and put its own in place; adding entries is harmless
+  there (`C:\` grants Authenticated Users create-folder). Users, Authenticated Users, Everyone or
+  another user holding such a right refuses the `uv`. So an elevated administrator's own per-user
+  or winget `uv` keeps working, a locked `C:\Tools\bin` under a `C:\Tools` that inherits
+  Authenticated Users Modify is refused, and under SYSTEM the running account adds nothing: a `uv`
+  planted in a machine-`PATH` directory that non-administrators can write is refused. On POSIX the
+  running account is root: root owns the file, its directory and every directory above; the file
+  and its directory allow no group or other write at all (group 0 included); a directory above may
+  be group or world writable only with the sticky bit (`/tmp`), which stops anyone but an entry's
+  owner from renaming it; and an ACL is refused wherever it shows (`+` from GNU `ls`; on macOS,
+  where `@` takes that column, `ls -le` is asked; busybox shows neither, but on Linux an ACL that
+  grants write shows as group write through its mask). Every symlink on the way (the `uv` itself, a
+  `PATH` entry, `/bin -> usr/bin` on a merged-`/usr` system) is resolved where it is met, its owner
+  judged and the directories it leads through judged like the rest. As root on POSIX the runner
+  also runs its own helpers (`ls`, `id`, `tar`, `base64`, `sha256sum`, the installer's `curl` and
+  `sh`, ...) only from `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, never from
+  the `PATH` it was given, and asks the euid of an `id` at a fixed path; the caller's `PATH` is
+  still searched for `uv` (each hit judged) and handed back to the packed script. A refused `uv`
+  is skipped with a `pwshpy: skipping uv at <path>: <reason>` line on stderr and the next one is
+  tried; an elevated `.ps1` child relays those lines to the parent. A `-PwshPyUv` / `--pwshpy-uv`
+  path is used as given when not elevated; elevated it must pass the same check or the run stops
+  with `pwshpy: refusing the uv given with ...` and exit 127, without searching further. Not
+  elevated, nothing changes: the first `uv` on `PATH` runs. Accepted residual risk: a process
+  already running as the same account could swap that account's `uv`, before the elevated run
+  starts or between its check and its exec; no other account can.
 - **Self-elevation keeps working.** A packed script calling `ps.elevate()` re-execs the extracted
   entry with the environment uv already built, so it elevates exactly as it would unpacked.
 - **The cache is verified before every run** against per-file hashes embedded in the artefact, and

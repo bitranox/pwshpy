@@ -22,13 +22,42 @@
 #     --pwshpy-elevate       relaunch under sudo first; exit 77 if sudo refuses
 #     --pwshpy-uv PATH       run the uv at this absolute path instead of searching for one
 #
-# Run as root, it only runs a uv that root owns and no other account can modify (the file and every
-# directory holding it); any other uv it finds is skipped with a line on stderr, and a --pwshpy-uv
-# path that fails the check is refused with exit code 127.
+# Run as root, it only runs a uv that root owns and no other account can modify (the file, the
+# directory holding it, and every directory above that); any other uv it finds is skipped with a
+# line on stderr, and a --pwshpy-uv path that fails the check is refused with exit code 127. As root
+# it also runs its own helpers (ls, tar, base64, ...) only from the fixed system directories, never
+# from the PATH it was given.
 #
 # Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
 set -eu
+
+# --- root: helpers from fixed system directories --------------------------------------------
+# As root every helper this runner calls (ls, readlink, tar, base64, sha256sum, rm, mkdir, cut,
+# openssl, ...) runs with full rights, so none may come from the PATH the caller handed over: a
+# directory on it that another account can write would decide what they are, before the uv check
+# below could say anything. The euid is asked of an id at a fixed path for the same reason; only a
+# system with id in none of them (none known) falls back to the PATH lookup. The caller's PATH is
+# kept: the uv search still walks it, judging each candidate, and the packed script gets it back.
+pwshpy_euid() {
+    for _e in /usr/bin/id /bin/id /run/current-system/sw/bin/id; do
+        if [ -x "$_e" ]; then
+            "$_e" -u
+            return 0
+        fi
+    done
+    id -u
+}
+
+PWSHPY_CALLER_PATH=${PATH:-}
+PWSHPY_AS_ROOT=0
+if [ "$(pwshpy_euid)" = "0" ]; then
+    PWSHPY_AS_ROOT=1
+fi
+if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
+fi
 
 PWSHPY_ENTRY='@@PWSHPY_ENTRY@@'
 PWSHPY_SHA='@@PWSHPY_PAYLOAD_SHA256@@'
@@ -203,73 +232,186 @@ pwshpy_unpack_locked() {
 
 # As root the uv found here runs with full rights, so a uv another account can replace would hand
 # that account root: where it was found (PATH, a fixed location) proves nothing, who can write it
-# does. Prints why "$1" may not run as root, or nothing when it may: root owns it, group 0 or no
-# group may write it, and nobody else may. Group 0 is accepted because its members are root
-# equivalents on every system this targets; any other writable group is not. A mode with an ACL
-# ('+') is refused outright, because its group bits then show the ACL mask, not who may write.
-pwshpy_path_distrust() {
-    _pd_ls=$(ls -ldn "$1" 2>/dev/null) || {
-        printf '%s' "$1 cannot be inspected"
-        return 0
-    }
-    # IFS pinned for this read alone: a caller splitting on another IFS (the PATH walk splits on
-    # ':') would otherwise cut the listing at the colon in its time of day.
-    IFS=' ' read -r _pd_mode _ _pd_uid _pd_gid _ <<__PWSHPY_LS__
-$_pd_ls
+# does. The accounts trusted to own what root runs: root alone (a test seam widens this list).
+PWSHPY_TRUSTED_UIDS=0
+
+# Sets PWSHPY_ST_MODE / PWSHPY_ST_UID / PWSHPY_ST_GID from ls -ldn, the one listing every POSIX
+# system has (stat's flags differ between GNU, BSD and busybox). IFS is pinned for the read alone:
+# a caller splitting on ':' would otherwise cut the listing at the colon in its time of day.
+pwshpy_stat() {
+    _st_ls=$(ls -ldn "$1" 2>/dev/null) || return 1
+    IFS=' ' read -r PWSHPY_ST_MODE _ PWSHPY_ST_UID PWSHPY_ST_GID _ <<__PWSHPY_LS__
+$_st_ls
 __PWSHPY_LS__
-    case $_pd_mode in
-        ??????????+*) printf '%s' "$1 carries an ACL" ;;
-        ????????w*) printf '%s' "$1 is writable by every account" ;;
-        *)
-            if [ "$_pd_uid" != "0" ]; then
-                printf '%s' "$1 is owned by uid $_pd_uid, not root"
-            elif [ "$_pd_gid" != "0" ]; then
-                case $_pd_mode in ?????w*) printf '%s' "$1 is writable by group $_pd_gid" ;; esac
+    return 0
+}
+
+# Whether the path last given to pwshpy_stat ("$1") carries an ACL. GNU ls marks one with '+';
+# macOS puts '@' (extended attributes) in that column instead, hiding a '+', so there the ACL
+# itself is asked for: ls -e prints one line per entry below the file's own. busybox ls marks
+# neither, which is why no group write is accepted at all: on Linux an ACL granting anyone write
+# shows as group write through its mask.
+pwshpy_has_acl() {
+    case $PWSHPY_ST_MODE in
+        ??????????+*) return 0 ;;
+        ??????????@*)
+            # ls on purpose: it is the one tool that prints a macOS ACL.
+            # shellcheck disable=SC2012
+            if [ -n "$(ls -lde "$1" 2>/dev/null | sed -n '2p')" ]; then
+                return 0
             fi
             ;;
+    esac
+    return 1
+}
+
+pwshpy_trusted_uid() {
+    case " $PWSHPY_TRUSTED_UIDS " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+# Prints why "$1" (the uv file, or the directory holding it) may not be what root runs, or nothing:
+# root owns it, it has no ACL, and neither its group nor anyone else may write it.
+pwshpy_leaf_distrust() {
+    if ! pwshpy_stat "$1"; then
+        printf '%s' "$1 cannot be inspected"
+        return 0
+    fi
+    if pwshpy_has_acl "$1"; then
+        printf '%s' "$1 carries an ACL"
+        return 0
+    fi
+    case $PWSHPY_ST_MODE in
+        ????????w*)
+            printf '%s' "$1 is writable by every account"
+            return 0
+            ;;
+        ?????w*)
+            printf '%s' "$1 is writable by group $PWSHPY_ST_GID"
+            return 0
+            ;;
+    esac
+    if ! pwshpy_trusted_uid "$PWSHPY_ST_UID"; then
+        printf '%s' "$1 is owned by uid $PWSHPY_ST_UID, not root"
+    fi
+    return 0
+}
+
+# Prints why the directory "$1", ABOVE the one holding uv, lets another account swap what lies
+# below it (rename an entry away and put another in its place), or nothing. Root must own it and
+# it may carry no ACL; group or other write is accepted only with the sticky bit (/tmp), which
+# lets nobody but an entry's owner rename or delete it.
+pwshpy_ancestor_distrust() {
+    if ! pwshpy_stat "$1"; then
+        printf '%s' "$1 cannot be inspected"
+        return 0
+    fi
+    if pwshpy_has_acl "$1"; then
+        printf '%s' "$1 carries an ACL"
+        return 0
+    fi
+    if ! pwshpy_trusted_uid "$PWSHPY_ST_UID"; then
+        printf '%s' "$1 is owned by uid $PWSHPY_ST_UID, not root"
+        return 0
+    fi
+    case $PWSHPY_ST_MODE in
+        ?????????[tT]*) ;;
+        ????????w*) printf '%s' "$1 is writable by every account and not sticky" ;;
+        ?????w*) printf '%s' "$1 is writable by group $PWSHPY_ST_GID and not sticky" ;;
     esac
     return 0
 }
 
-# Prints why the uv at "$1" may not run as root, or nothing when it may. Judges the directory
-# holding it, then follows a symlink one hop at a time (readlink without -f, which older macOS
-# lacks) and judges each hop's directory, then the file the chain ends at: whoever can rewrite a
-# link, or the directory holding one, decides what runs as much as whoever can write the target.
-# A relative path is refused: it names whatever the working directory holds.
+# Prints why the uv at "$1" may not run as root, or nothing when it may. Walks the path one
+# component at a time from /, resolving each symlink where it is met (readlink without -f, which
+# older macOS lacks), so every real directory the path passes through is judged, the ones that
+# hold a link included: whoever can rename any of them, or repoint a link, decides what runs. A
+# link's own mode means nothing, so only its owner is judged. Reported in order: a link whose owner
+# fails (at once), the directory holding uv, the first ancestor that fails, then the file. A relative path is refused: it names
+# whatever the working directory holds. A directory symlink such as /bin -> usr/bin on a merged-/usr
+# system is resolved like any other link.
 pwshpy_uv_distrust() {
-    _ud_path=$1
-    _ud_hops=0
-    while :; do
-        case $_ud_path in
-            /*) ;;
+    case $1 in
+        /*) ;;
+        *)
+            printf '%s' "$1 is not an absolute path"
+            return 0
+            ;;
+    esac
+    _w_cur=
+    _w_next=
+    _w_rest=${1#/}
+    _w_hops=0
+    _w_ancestor=$(pwshpy_ancestor_distrust /)
+    while [ -n "$_w_rest" ]; do
+        case $_w_rest in
+            */*)
+                _w_comp=${_w_rest%%/*}
+                _w_rest=${_w_rest#*/}
+                ;;
             *)
-                printf '%s' "$_ud_path is not an absolute path"
-                return 0
+                _w_comp=$_w_rest
+                _w_rest=
                 ;;
         esac
-        _ud_dir=${_ud_path%/*}
-        [ -n "$_ud_dir" ] || _ud_dir=/
-        _ud_why=$(pwshpy_path_distrust "$_ud_dir")
-        if [ -n "$_ud_why" ]; then
-            printf '%s' "its directory $_ud_why"
-            return 0
-        fi
-        [ -L "$_ud_path" ] || break
-        _ud_hops=$((_ud_hops + 1))
-        if [ "$_ud_hops" -gt 40 ]; then
-            printf '%s' "$1 is a chain of more than 40 symlinks"
-            return 0
-        fi
-        _ud_target=$(readlink "$_ud_path") || {
-            printf '%s' "the symlink $_ud_path cannot be read"
-            return 0
-        }
-        case $_ud_target in
-            /*) _ud_path=$_ud_target ;;
-            *) _ud_path=$_ud_dir/$_ud_target ;;
+        case $_w_comp in
+            '' | .) continue ;;
+            ..)
+                _w_cur=${_w_cur%/*}
+                continue
+                ;;
         esac
+        _w_next=$_w_cur/$_w_comp
+        if [ -L "$_w_next" ]; then
+            _w_hops=$((_w_hops + 1))
+            if [ "$_w_hops" -gt 40 ]; then
+                printf '%s' "$1 passes more than 40 symlinks"
+                return 0
+            fi
+            if ! pwshpy_stat "$_w_next"; then
+                printf '%s' "the symlink $_w_next cannot be inspected"
+                return 0
+            fi
+            if ! pwshpy_trusted_uid "$PWSHPY_ST_UID"; then
+                printf '%s' "the symlink $_w_next is owned by uid $PWSHPY_ST_UID, not root"
+                return 0
+            fi
+            _w_target=$(readlink "$_w_next") || {
+                printf '%s' "the symlink $_w_next cannot be read"
+                return 0
+            }
+            case $_w_target in
+                /*)
+                    _w_cur=
+                    _w_target=${_w_target#/}
+                    ;;
+            esac
+            if [ -n "$_w_rest" ]; then
+                _w_rest=$_w_target/$_w_rest
+            else
+                _w_rest=$_w_target
+            fi
+            continue
+        fi
+        # The last component is the file itself; everything before it is a directory on the way.
+        [ -n "$_w_rest" ] || break
+        _w_cur=$_w_next
+        if [ -z "$_w_ancestor" ]; then
+            _w_ancestor=$(pwshpy_ancestor_distrust "$_w_cur")
+        fi
     done
-    pwshpy_path_distrust "$_ud_path"
+    _w_why=$(pwshpy_leaf_distrust "${_w_cur:-/}")
+    if [ -n "$_w_why" ]; then
+        printf '%s' "its directory $_w_why"
+        return 0
+    fi
+    if [ -n "$_w_ancestor" ]; then
+        printf '%s' "its ancestor $_w_ancestor"
+        return 0
+    fi
+    pwshpy_leaf_distrust "$_w_next"
     return 0
 }
 
@@ -303,7 +445,8 @@ pwshpy_find_uv() {
         _fu_oldifs=$IFS
         IFS=:
         set -f
-        for _fu_dir in $PATH; do
+        # The caller's PATH, not the fixed one this root run executes its helpers from.
+        for _fu_dir in $PWSHPY_CALLER_PATH; do
             # The list is split once, up front; the body runs with the caller's IFS and globbing.
             IFS=$_fu_oldifs
             set +f
@@ -337,8 +480,14 @@ pwshpy_install_uv() {
     else
         pwshpy_die "need curl or wget to install uv" 127
     fi
-    PATH="$HOME/.local/bin:$PATH"
-    export PATH
+    # As root the helpers keep their fixed PATH; the new uv's directory joins the caller's PATH,
+    # which the uv search walks and the packed script gets back.
+    if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+        PWSHPY_CALLER_PATH="$HOME/.local/bin:$PWSHPY_CALLER_PATH"
+    else
+        PATH="$HOME/.local/bin:$PATH"
+        export PATH
+    fi
 }
 
 pwshpy_write_manifest() {
@@ -428,7 +577,7 @@ fi
 # No sudo at all is a missing tool (127), not a refusal.
 # Relaunch through /bin/sh rather than exec-ing "$0": a packed file is usually not executable.
 # The explicit -- keeps the script's own arguments from being parsed as wrapper switches again.
-if [ "$PWSHPY_WANT_ELEVATE" = "1" ] && [ "$(id -u)" != "0" ]; then
+if [ "$PWSHPY_WANT_ELEVATE" = "1" ] && [ "$PWSHPY_AS_ROOT" != "1" ]; then
     if ! command -v sudo >/dev/null 2>&1; then
         printf '%s\n' "pwshpy: sudo not found; cannot elevate" >&2
         exit 127
@@ -451,12 +600,6 @@ if [ "$PWSHPY_WANT_ELEVATE" = "1" ] && [ "$(id -u)" != "0" ]; then
     exec sudo /bin/sh "$0" $PWSHPY_FWD "$@"
 fi
 
-# Asked once, after any relaunch: the trust rule below applies to whatever runs as root, sudo or not.
-PWSHPY_AS_ROOT=0
-if [ "$(id -u)" = "0" ]; then
-    PWSHPY_AS_ROOT=1
-fi
-
 # --- unpack -----------------------------------------------------------------------------
 
 if [ "$PWSHPY_CLEAN" = "1" ]; then
@@ -471,7 +614,7 @@ fi
 # What to say when no usable uv is left: as root, also how to provide one the trust rule accepts.
 PWSHPY_UV_HINT="Install it from https://astral.sh/uv"
 if [ "$PWSHPY_AS_ROOT" = "1" ]; then
-    PWSHPY_UV_HINT="As root only a uv owned by root that no other account can modify is run: install one there (for example under /usr/local/bin) or pass --pwshpy-uv PATH"
+    PWSHPY_UV_HINT="As root only a uv no other account can modify is run: install one where only root can write (root owns it and every directory above it, none writable by a group or other accounts) or pass --pwshpy-uv PATH"
 fi
 
 if [ -n "$PWSHPY_UV_PIN" ]; then
@@ -504,4 +647,10 @@ fi
 
 set -- "$PWSHPY_CACHE/$PWSHPY_ENTRY" "$@"
 eval "set -- $PWSHPY_UV_ARGS_RAW \"\$@\""
+# The packed script runs with the PATH its caller gave, root or not: the fixed one was only for this
+# runner's own helpers. (Which interpreter uv picks from that PATH is uv's own lookup.)
+if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+    PATH=$PWSHPY_CALLER_PATH
+    export PATH
+fi
 exec "$PWSHPY_UV" run --no-project "$@"

@@ -35,9 +35,11 @@
     Run elevated (an administrator token, SYSTEM, or root), it only runs a uv that no other
     account can modify: neither the file nor the directory holding it may be owned by, or grant
     write access to, any account other than the running one, SYSTEM, Administrators, LOCAL
-    SERVICE, NETWORK SERVICE or TrustedInstaller (on POSIX: root must own both, and nobody else
-    may write them). Any other uv it finds is skipped with a line on stderr, and a -PwshPyUv path
-    that fails the check is refused with exit code 127.
+    SERVICE, NETWORK SERVICE or TrustedInstaller, and no directory above may let another account
+    delete, rename or take it over (on POSIX: root must own all of them, and nobody else may write
+    them; a directory above may be writable only with the sticky bit). Any other uv it finds is
+    skipped with a line on stderr, and a -PwshPyUv path that fails the check is refused with exit
+    code 127. As root on POSIX it runs its own helpers only from the fixed system directories.
 
     Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -194,6 +196,16 @@ $PwshPyTrustedSids = @(
 # GenericWrite are the unmapped forms an ACE may still carry. Read and execute rights are harmless.
 $PwshPyFileWriteRights = 0x2 -bor 0x4 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
 $PwshPyDirectoryWriteRights = $PwshPyFileWriteRights -bor 0x40
+# Above the directory holding uv, only the rights that let their holder rename an entry away and put
+# another in its place: delete the directory itself or its children (Delete, DeleteSubdirectoriesAndFiles),
+# or take it over (WriteDAC, WriteOwner, GenericAll). Adding entries is harmless there, which matters:
+# C:\ grants Authenticated Users AppendData (create folders) on itself.
+$PwshPyAncestorWriteRights = 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000
+# POSIX: the accounts trusted to own what root runs, by uid: root alone.
+$PwshPyTrustedUids = @('0')
+# POSIX: the PATH a root run executes its own helpers (ls, id, the uv installer's curl and sh) from;
+# the caller's PATH may hold a directory another account can write.
+$PwshPyFixedPath = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
 function Get-PwshPyRunningUserSid {
     # The account this process runs as, from its token: USERNAME can be set by anyone, and under
@@ -219,10 +231,10 @@ function Test-PwshPyAbsolutePath {
 }
 
 function Get-PwshPyAclDistrust {
-    param([string] $Path, [bool] $Directory)
+    param([string] $Path, [int] $Rights)
 
-    # Returns why another account could change $Path, or '' when none can. The owner counts as a
-    # writer whatever the ACL says, because an owner may always rewrite the ACL.
+    # Returns why another account could change $Path through any of $Rights, or '' when none can.
+    # The owner counts as a writer whatever the ACL says, because an owner may always rewrite it.
     $trusted = Get-PwshPyTrustedSid
     try {
         $acl = Get-Acl -LiteralPath $Path
@@ -233,7 +245,6 @@ function Get-PwshPyAclDistrust {
     $owner = $acl.GetOwner($sidType)
     $ownerSid = if ($owner) { $owner.Value } else { 'an unknown account' }
     if ($trusted -notcontains $ownerSid) { return "$Path is owned by $ownerSid, neither the running account nor an administrative one" }
-    $dangerous = if ($Directory) { $PwshPyDirectoryWriteRights } else { $PwshPyFileWriteRights }
     foreach ($rule in $acl.GetAccessRules($true, $true, $sidType)) {
         if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
         # An inherit-only entry applies to children created later, not to this object.
@@ -242,65 +253,156 @@ function Get-PwshPyAclDistrust {
         # CREATOR OWNER and OWNER RIGHTS stand for the owner, already judged above.
         if ($sid -eq 'S-1-3-0' -or $sid -eq 'S-1-3-4') { continue }
         if ($trusted -contains $sid) { continue }
-        if (([int]$rule.FileSystemRights) -band $dangerous) {
+        if (([int]$rule.FileSystemRights) -band $Rights) {
             return "$Path lets $sid change it ($($rule.FileSystemRights))"
         }
     }
     return ''
 }
 
-function Get-PwshPyModeDistrust {
+function Get-PwshPyListing {
     param([string] $Path)
 
-    # POSIX: root must own $Path, nobody else may write it, and group write counts only for group 0,
-    # whose members are root equivalents. A mode with an ACL ('+') is refused outright: its group
-    # bits then show the ACL mask, not who may write. ls -ldn because it is on every POSIX system
-    # (stat's flags differ between GNU, BSD and busybox).
+    # POSIX: mode, uid and gid of $Path itself (a symlink is not followed) from ls -ldn, the one
+    # listing every POSIX system has (stat's flags differ between GNU, BSD and busybox). A root run
+    # resolves ls from its fixed PATH, so the listing cannot come from a planted ls.
     $ls = Get-Command ls -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $ls) { return "$Path cannot be inspected (no ls)" }
+    if (-not $ls) { return $null }
     try {
         $listing = & $ls.Source -ldn $Path 2>$null
     } catch {
         $listing = $null
     }
-    if ($LASTEXITCODE -ne 0 -or -not $listing) { return "$Path cannot be inspected" }
+    if ($LASTEXITCODE -ne 0 -or -not $listing) { return $null }
     $fields = ([string](@($listing)[0])).Trim() -split '\s+'
-    $mode = $fields[0]
-    if ($mode.Length -gt 10 -and $mode[10] -eq [char]'+') { return "$Path carries an ACL" }
+    $acl = $false
+    if ($fields[0].Length -gt 10 -and $fields[0][10] -eq [char]'+') { $acl = $true }
+    if ($fields[0].Length -gt 10 -and $fields[0][10] -eq [char]'@') {
+        # macOS puts '@' (extended attributes) where '+' would mark an ACL, hiding it, so ask for the
+        # ACL itself: ls -e prints one line per entry below the file's own line.
+        $acl = @(& $ls.Source -lde $Path 2>$null).Count -gt 1
+    }
+    return @{ Mode = $fields[0]; Uid = $fields[2]; Gid = $fields[3]; Acl = $acl }
+}
+
+function Get-PwshPyModeDistrust {
+    param([string] $Path, [bool] $Ancestor)
+
+    # POSIX: why $Path may not be on the way to what root runs, or ''. The file and the directory
+    # holding it: root owns it, no ACL, no group or other write (busybox ls never shows '+', but on
+    # Linux an ACL granting anyone write shows as group write through its mask). An ancestor: root
+    # owns it and no ACL; group or other write only with the sticky bit (/tmp), which lets nobody
+    # but an entry's owner rename or delete it.
+    $entry = Get-PwshPyListing -Path $Path
+    if (-not $entry) { return "$Path cannot be inspected" }
+    $mode = $entry.Mode
+    if ($entry.Acl) { return "$Path carries an ACL" }
+    if ($Ancestor) {
+        if ($PwshPyTrustedUids -notcontains $entry.Uid) { return "$Path is owned by uid $($entry.Uid), not root" }
+        if ($mode[9] -eq [char]'t' -or $mode[9] -eq [char]'T') { return '' }
+        if ($mode[8] -eq [char]'w') { return "$Path is writable by every account and not sticky" }
+        if ($mode[5] -eq [char]'w') { return "$Path is writable by group $($entry.Gid) and not sticky" }
+        return ''
+    }
     if ($mode[8] -eq [char]'w') { return "$Path is writable by every account" }
-    if ($fields[2] -ne '0') { return "$Path is owned by uid $($fields[2]), not root" }
-    if ($fields[3] -ne '0' -and $mode[5] -eq [char]'w') { return "$Path is writable by group $($fields[3])" }
+    if ($mode[5] -eq [char]'w') { return "$Path is writable by group $($entry.Gid)" }
+    if ($PwshPyTrustedUids -notcontains $entry.Uid) { return "$Path is owned by uid $($entry.Uid), not root" }
     return ''
+}
+
+function Get-PwshPyLeafDistrust {
+    param([string] $Path, [bool] $Directory)
+
+    if (-not $PwshPyOnWindows) { return (Get-PwshPyModeDistrust -Path $Path -Ancestor $false) }
+    $rights = if ($Directory) { $PwshPyDirectoryWriteRights } else { $PwshPyFileWriteRights }
+    return (Get-PwshPyAclDistrust -Path $Path -Rights $rights)
+}
+
+function Get-PwshPyAncestorDistrust {
+    param([string] $Path)
+
+    if (-not $PwshPyOnWindows) { return (Get-PwshPyModeDistrust -Path $Path -Ancestor $true) }
+    return (Get-PwshPyAclDistrust -Path $Path -Rights $PwshPyAncestorWriteRights)
+}
+
+function Get-PwshPyLinkDistrust {
+    param([string] $Path)
+
+    # Who could repoint the link $Path. POSIX: its own mode means nothing, so only its owner (the
+    # directory holding it is judged as an ancestor). Windows: the rights that delete or take over
+    # the link object.
+    if ($PwshPyOnWindows) { return (Get-PwshPyAclDistrust -Path $Path -Rights $PwshPyAncestorWriteRights) }
+    $entry = Get-PwshPyListing -Path $Path
+    if (-not $entry) { return "the symlink $Path cannot be inspected" }
+    if ($PwshPyTrustedUids -notcontains $entry.Uid) { return "the symlink $Path is owned by uid $($entry.Uid), not root" }
+    return ''
+}
+
+function Split-PwshPyPath {
+    param([string] $Path)
+
+    # The components below the root, separators of either kind.
+    return @(($Path.Substring([IO.Path]::GetPathRoot($Path).Length) -split '[\\/]') | Where-Object { $_ })
 }
 
 function Get-PwshPyUvDistrust {
     param([string] $Path)
 
-    # Returns why an elevated run must not execute the uv at $Path, or '' when it may. Judges the
-    # directory holding it, then follows a symlink one hop at a time, judging each hop's directory,
-    # and finally the file the chain ends at: whoever can rewrite a link's directory decides what
-    # runs as much as whoever can write the target.
-    $current = $Path
-    for ($hop = 0; $hop -le 40; $hop++) {
-        if (-not (Test-PwshPyAbsolutePath -Path $current)) { return "$current is not an absolute path" }
-        $directory = [IO.Path]::GetDirectoryName($current)
-        if ($directory) {
-            $why = if ($PwshPyOnWindows) { Get-PwshPyAclDistrust -Path $directory -Directory $true } else { Get-PwshPyModeDistrust -Path $directory }
-            if ($why) { return "its directory $why" }
+    # Returns why an elevated run must not execute the uv at $Path, or '' when it may. Walks the
+    # path one component at a time from its root, resolving each symlink or junction where it is
+    # met, so every real directory the path passes through is judged, the ones holding a link
+    # included: whoever can rename any of them, or repoint a link, decides what runs. Reported in
+    # order: a link that fails (at once), the directory holding uv, the first ancestor that fails,
+    # then the file. A directory link on the way (/bin -> usr/bin on a merged-/usr system) is
+    # resolved like any other.
+    if (-not (Test-PwshPyAbsolutePath -Path $Path)) { return "$Path is not an absolute path" }
+    if ($PwshPyOnWindows) { $Path = $Path.Replace('/', '\') }
+    $current = [IO.Path]::GetPathRoot($Path)
+    $rest = New-Object System.Collections.Generic.List[string]
+    $rest.AddRange([string[]](Split-PwshPyPath -Path $Path))
+    $ancestor = Get-PwshPyAncestorDistrust -Path $current
+    $next = $null
+    $hops = 0
+    while ($rest.Count -gt 0) {
+        $component = $rest[0]
+        $rest.RemoveAt(0)
+        if ($component -eq '.') { continue }
+        if ($component -eq '..') {
+            $parent = [IO.Path]::GetDirectoryName($current)
+            if ($parent) { $current = $parent }
+            continue
         }
-        $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
-        if ($null -eq $item) { return "$current cannot be inspected" }
-        if ([string]$item.LinkType -ne 'SymbolicLink') {
-            if ($PwshPyOnWindows) { return (Get-PwshPyAclDistrust -Path $current -Directory $false) }
-            return (Get-PwshPyModeDistrust -Path $current)
+        $next = Join-Path $current $component
+        $item = Get-Item -LiteralPath $next -Force -ErrorAction SilentlyContinue
+        $linkType = if ($item) { [string]$item.LinkType } else { '' }
+        if ($linkType -eq 'SymbolicLink' -or $linkType -eq 'Junction') {
+            $hops++
+            if ($hops -gt 40) { return "$Path passes more than 40 symlinks" }
+            $why = Get-PwshPyLinkDistrust -Path $next
+            if ($why) { return $why }
+            # Target is a string on PowerShell 7 and a one-element array on 5.1; a junction's may
+            # carry the NT prefix.
+            $target = ([string](@($item.Target)[0])) -replace '^\\\?\?\\', ''
+            if (-not $target) { return "the symlink $next cannot be read" }
+            if (Test-PwshPyAbsolutePath -Path $target) {
+                if ($PwshPyOnWindows) { $target = $target.Replace('/', '\') }
+                $root = [IO.Path]::GetPathRoot($target)
+                if ($root -ne [IO.Path]::GetPathRoot($current) -and -not $ancestor) { $ancestor = Get-PwshPyAncestorDistrust -Path $root }
+                $current = $root
+            }
+            $rest.InsertRange(0, [string[]](Split-PwshPyPath -Path $target))
+            continue
         }
-        # Target is a string on PowerShell 7 and a one-element array on 5.1.
-        $target = [string](@($item.Target)[0])
-        if (-not $target) { return "the symlink $current cannot be read" }
-        if (-not (Test-PwshPyAbsolutePath -Path $target)) { $target = Join-Path $directory $target }
-        $current = $target
+        # The last component is the file itself; everything before it is a directory on the way.
+        if ($rest.Count -eq 0) { break }
+        $current = $next
+        if (-not $ancestor) { $ancestor = Get-PwshPyAncestorDistrust -Path $current }
     }
-    return "$Path is a chain of more than 40 symlinks"
+    if (-not $next) { return "$Path names no file" }
+    $why = Get-PwshPyLeafDistrust -Path $current -Directory $true
+    if ($why) { return "its directory $why" }
+    if ($ancestor) { return "its ancestor $ancestor" }
+    return (Get-PwshPyLeafDistrust -Path $next -Directory $false)
 }
 
 function Write-PwshPyNotice {
@@ -355,7 +457,19 @@ function Get-PwshPyUvPath {
     # Not elevated: the first uv on PATH, then the fixed install locations. Elevated: EVERY uv on
     # PATH in order, then the fixed locations, the first that passes the trust rule - a planted uv
     # early on PATH must not hide a trusted one later on it.
-    $found = @(Get-Command uv -CommandType Application -ErrorAction SilentlyContinue)
+    if ($Elevated -and -not $PwshPyOnWindows) {
+        # A root run executes its helpers from the fixed PATH, so the caller's PATH is walked by
+        # hand: every directory it names is a candidate, judged like any other.
+        foreach ($directory in ($PwshPyCallerPath -split [IO.Path]::PathSeparator)) {
+            # An empty entry means the working directory; spelled 'uv' it is refused as relative.
+            $candidate = if ($directory) { Join-Path $directory 'uv' } else { 'uv' }
+            if (-not (Get-Command -Name $candidate -CommandType Application -ErrorAction SilentlyContinue)) { continue }
+            if (Test-PwshPyUvAcceptable -Candidate $candidate) { return $candidate }
+        }
+        $found = @()
+    } else {
+        $found = @(Get-Command uv -CommandType Application -ErrorAction SilentlyContinue)
+    }
     foreach ($hit in $found) {
         if (-not $Elevated) { return $hit.Source }
         if (Test-PwshPyUvAcceptable -Candidate $hit.Source) { return $hit.Source }
@@ -388,7 +502,10 @@ function Install-PwshPyUv {
     } else {
         & /bin/sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh || wget -qO- https://astral.sh/uv/install.sh | sh'
         if ($LASTEXITCODE -ne 0) { throw "the uv installer failed with exit code $LASTEXITCODE" }
-        $env:PATH = (Join-Path $HOME '.local/bin') + [IO.Path]::PathSeparator + $env:PATH
+        # A root run keeps its fixed PATH for helpers; the new uv's directory joins the caller's PATH,
+        # which the uv search walks and the packed script gets back.
+        $script:PwshPyCallerPath = (Join-Path $HOME '.local/bin') + [IO.Path]::PathSeparator + $script:PwshPyCallerPath
+        if (-not $PwshPyRootPath) { $env:PATH = $script:PwshPyCallerPath }
     }
 }
 
@@ -398,7 +515,17 @@ function Test-PwshPyElevated {
         $principal = New-Object Security.Principal.WindowsPrincipal($identity)
         return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     }
-    return ((& id -u) -eq '0')
+    return ((Get-PwshPyEuid) -eq '0')
+}
+
+function Get-PwshPyEuid {
+    # POSIX: the effective uid from an id at a fixed path. Not through PATH: a planted id first on
+    # it could answer "not root" for a root run and switch the uv trust rule off. Only a system with
+    # id in none of these (none known) falls back to the PATH lookup.
+    foreach ($id in @('/usr/bin/id', '/bin/id', '/run/current-system/sw/bin/id')) {
+        if (Test-Path -LiteralPath $id -PathType Leaf) { return ([string](& $id -u)).Trim() }
+    }
+    return ([string](& id -u)).Trim()
 }
 
 function Get-PwshPyHostPath {
@@ -647,6 +774,18 @@ $PwshPyPrepare = {
         exit (Invoke-PwshPyElevated -ForwardArgs (@($PwshPyRelaunchSwitches.ToArray()) + $PwshPyForward))
     }
 
+    # Asked after any relaunch: the trust rule applies to whatever runs elevated, UAC, SYSTEM
+    # (a scheduled task) or root alike. As root on POSIX every helper the runner calls (ls, the uv
+    # installer's curl and sh) runs with full rights, so from here on they come from fixed system
+    # directories, not from the PATH the caller handed over; that PATH is kept for the uv search
+    # and handed back to the packed script. Windows needs no such reset: the runner calls no
+    # external program there except uv and its own PowerShell, both by full path.
+    $PwshPyElevatedRun = Test-PwshPyElevated
+    # Script scope by name: Get-PwshPyUvPath, Install-PwshPyUv and the run below read it.
+    $script:PwshPyCallerPath = $env:PATH
+    $PwshPyRootPath = $PwshPyElevatedRun -and -not $PwshPyOnWindows
+    if ($PwshPyRootPath) { $env:PATH = $PwshPyFixedPath }
+
     # --- unpack -----------------------------------------------------------------------------
 
     if ($PwshPyClean -and (Test-Path -LiteralPath $PwshPyCacheDir)) {
@@ -658,13 +797,10 @@ $PwshPyPrepare = {
 
     # --- uv ---------------------------------------------------------------------------------
 
-    # Asked after any relaunch: the trust rule applies to whatever runs elevated, UAC, SYSTEM
-    # (a scheduled task) or root alike.
-    $PwshPyElevatedRun = Test-PwshPyElevated
     if ($PwshPyOnWindows) {
-        $PwshPyUvHint = 'An elevated run only runs a uv no account but this one, SYSTEM and Administrators can modify: install one in this account''s profile or where only administrators can write (for example under C:\Program Files), or pass -PwshPyUv <path>.'
+        $PwshPyUvHint = 'An elevated run only runs a uv no account but this one, SYSTEM, Administrators, LOCAL SERVICE, NETWORK SERVICE and TrustedInstaller can modify, in its own directory or any directory above: install one in this account''s profile or where only administrators can write (for example under C:\Program Files), or pass -PwshPyUv <path>.'
     } else {
-        $PwshPyUvHint = 'As root only a uv owned by root that no other account can modify is run: install one there (for example under /usr/local/bin) or pass -PwshPyUv <path>.'
+        $PwshPyUvHint = 'As root only a uv no other account can modify is run: install one where only root can write (root owns it and every directory above it, none writable by a group or other accounts) or pass -PwshPyUv <path>.'
     }
 
     if ($PwshPyUvPin) {
@@ -743,6 +879,9 @@ $env:PwshPyArgvPlaceholder = $null
 Set-Item -Path ('Env:' + $PwshPyArgvEnv) -Value ($PwshPyEncoded -join '|')
 
 $PwshPyTarget = Join-Path $PwshPyCacheDir $PwshPyShim
+# The packed script runs with the PATH its caller gave; the fixed one was only for the runner's own
+# helpers. (Which interpreter uv picks from that PATH is uv's own lookup.)
+if ($PwshPyRootPath) { $env:PATH = $PwshPyCallerPath }
 
 if ($PwshPyRelay) {
     # Elevated child: stream to the relay files the parent replays, then hand back the code.

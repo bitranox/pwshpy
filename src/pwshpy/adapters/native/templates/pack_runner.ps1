@@ -44,9 +44,10 @@
     directory (the RoamingAppData known folder on Windows, <home from the passwd
     database>/.local/share on POSIX; downloaded on first use unless UV_PYTHON_DOWNLOADS is never or
     manual), found with `uv python find --system` and handed to uv run as --python after the same
-    check as uv itself, so no .venv anywhere is ever run; that directory passes the same check
-    before uv searches it (uv runs every Python it finds there), or the run exits 127; uv starts in
-    a directory only administrators can write (/ on POSIX, System32 on Windows), and the script
+    check as uv itself, so no .venv anywhere is ever run; that directory, and every file and
+    directory below it, passes the same check before uv searches it (uv runs every Python it finds
+    there), or the run exits 127; uv starts in a directory only administrators can write (/ on
+    POSIX, System32 on Windows), and the script
     itself still runs in your directory. Every uv call an elevated run makes reads no uv.toml
     (--no-config). UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX, UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON,
     UV_PYTHON_INSTALL_DIR, UV_CONFIG_FILE, UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL,
@@ -278,15 +279,20 @@ function Test-PwshPyAbsolutePath {
 }
 
 function Get-PwshPyAclDistrust {
-    param([string] $Path, [int] $Rights)
+    param([string] $Path, [int] $Rights, [object] $Security = $null)
 
     # Returns why another account could change $Path through any of $Rights, or '' when none can.
     # The owner counts as a writer whatever the ACL says, because an owner may always rewrite it.
+    # $Security is the path's security descriptor when the caller already read it (the tree walk, see
+    # Get-PwshPyPythonTreeDistrust); otherwise it is read here.
     $trusted = Get-PwshPyTrustedSid
-    try {
-        $acl = Get-Acl -LiteralPath $Path
-    } catch {
-        return "the ACL of $Path cannot be read ($($_.Exception.Message))"
+    $acl = $Security
+    if ($null -eq $acl) {
+        try {
+            $acl = Get-Acl -LiteralPath $Path
+        } catch {
+            return "the ACL of $Path cannot be read ($($_.Exception.Message))"
+        }
     }
     $sidType = [Security.Principal.SecurityIdentifier]
     $owner = $acl.GetOwner($sidType)
@@ -360,11 +366,11 @@ function Get-PwshPyModeDistrust {
 }
 
 function Get-PwshPyLeafDistrust {
-    param([string] $Path, [bool] $Directory)
+    param([string] $Path, [bool] $Directory, [object] $Security = $null)
 
     if (-not $PwshPyOnWindows) { return (Get-PwshPyModeDistrust -Path $Path -Ancestor $false) }
     $rights = if ($Directory) { $PwshPyDirectoryWriteRights } else { $PwshPyFileWriteRights }
-    return (Get-PwshPyAclDistrust -Path $Path -Rights $rights)
+    return (Get-PwshPyAclDistrust -Path $Path -Rights $rights -Security $Security)
 }
 
 function Get-PwshPyAncestorDistrust {
@@ -724,9 +730,118 @@ function Invoke-PwshPyUvPython {
 function Get-PwshPyPythonRemedy {
     # What an elevated run that refused a managed-Python path tells the caller to do about it.
     if ($PwshPyOnWindows) {
-        return 'take every other account''s write access off the path named above (only the running account, SYSTEM and Administrators may change it), or remove it and install the Python again elevated (uv python install)'
+        return 'take every other account''s write access off the path named above (only the running account, SYSTEM and Administrators may change it), or remove uv''s managed-Python directory and install the Python again elevated (uv python install)'
     }
-    return 'make the directory named above root''s alone (chown root, then chmod go-w on it), or remove it and install the Python again as root (uv python install)'
+    return 'make the path named above root''s alone (chown root, then chmod go-w on it, with -R for a directory), or remove uv''s managed-Python directory and install the Python again as root (uv python install)'
+}
+
+function Get-PwshPyPosixTreeDistrust {
+    param([string] $Path)
+
+    # POSIX half of Get-PwshPyPythonTreeDistrust, identical to the .sh runner's
+    # pwshpy_python_tree_distrust: one find for the modes and owners, one batched ls for the ACLs (with
+    # ACL lines where ls -e prints them, macOS and BSD), both from the fixed helper PATH. A regular
+    # file named .lock is exempt from the write check: uv creates its lock file mode 0666 (measured with
+    # uv 0.13) and only ever locks it, and no interpreter imports or runs a file of that name.
+    $find = Get-Command find -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $ls = Get-Command ls -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $find -or -not $ls) { return "the entries below $Path cannot be listed (no find or ls)" }
+    # The trailing slash makes find enter the directory when $Path is a symlink to it.
+    $top = $Path.TrimEnd('/') + '/'
+    $owners = New-Object System.Collections.Generic.List[string]
+    foreach ($uid in $PwshPyTrustedUids) { $owners.AddRange([string[]]@('!', '-user', [string]$uid)) }
+    $words = @($top, '(', '-type', 'l') + $owners.ToArray() + @(')', '-o', '(', '!', '-type', 'l', '(') + $owners.ToArray()
+    $words += @('-o', '(', '(', '-perm', '-0002', '-o', '-perm', '-0020', ')', '!', '(', '-type', 'f', '-name', '.lock', ')', ')', ')', ')', '-print')
+    $hits = @(. (ConvertTo-PwshPyNativeCall -FilePath $find.Source -ArgumentList $words -StderrPath '/dev/null'))
+    if ($LASTEXITCODE -ne 0) { return "the entries below $Path cannot be listed" }
+    if ($hits.Count -gt 0) {
+        $hit = [string]$hits[0]
+        $item = Get-Item -LiteralPath $hit -Force -ErrorAction SilentlyContinue
+        $why = if ($item -and $item.LinkType) { Get-PwshPyLinkDistrust -Path $hit } else { Get-PwshPyLeafDistrust -Path $hit -Directory $true }
+        if ($why) { return $why }
+        return "$hit can be modified by another account"
+    }
+    # ls -e lists a file's ACL entries below it on macOS and BSD; GNU ls has no -e and marks an ACL with
+    # '+' instead.
+    $listOption = '-ldn'
+    $null = @(. (ConvertTo-PwshPyNativeCall -FilePath $ls.Source -ArgumentList @('-lde', '/') -StdoutPath '/dev/null' -StderrPath '/dev/null'))
+    if ($LASTEXITCODE -eq 0) { $listOption = '-lden' }
+    $listing = @(. (ConvertTo-PwshPyNativeCall -FilePath $find.Source -ArgumentList @($top, '!', '-type', 'l', '-exec', $ls.Source, $listOption, '{}', '+') -StderrPath '/dev/null'))
+    if ($LASTEXITCODE -ne 0) { return "the entries below $Path cannot be listed" }
+    $acl = $false
+    foreach ($line in $listing) {
+        $text = [string]$line
+        if ($text -match '^\s*[0-9]+: ' -or ($text.Length -gt 10 -and $text[10] -eq [char]'+')) { $acl = $true; break }
+    }
+    if (-not $acl) { return '' }
+    # Which one, for the message: only now, entry by entry.
+    foreach ($entry in @(. (ConvertTo-PwshPyNativeCall -FilePath $find.Source -ArgumentList @($top, '!', '-type', 'l', '-print') -StderrPath '/dev/null'))) {
+        $listed = Get-PwshPyListing -Path ([string]$entry)
+        if ($listed -and $listed.Acl) { return "$entry carries an ACL" }
+    }
+    return "an entry below $Path carries an ACL"
+}
+
+function Read-PwshPySecurity {
+    param([IO.FileSystemInfo] $Item)
+
+    # The owner and the DACL of $Item, read through .NET rather than Get-Acl: measured on vm-pydev-win,
+    # about 0.7 ms an entry against Get-Acl's 1.6 ms, which over a tree of thousands is the difference.
+    # On PowerShell 7 (.NET Core) the method is an extension, called as the static it is.
+    $sections = [Security.AccessControl.AccessControlSections]'Access, Owner'
+    if ($PSVersionTable.PSEdition -ne 'Core') { return $Item.GetAccessControl($sections) }
+    if ($Item -is [IO.DirectoryInfo]) { return [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]$Item, $sections) }
+    return [IO.FileSystemAclExtensions]::GetAccessControl([IO.FileInfo]$Item, $sections)
+}
+
+function Get-PwshPyWindowsTreeDistrust {
+    param([string] $Path)
+
+    # Windows half of Get-PwshPyPythonTreeDistrust: every entry below $Path judged with the rights of
+    # its kind (Get-PwshPyLeafDistrust), a link (symlink or junction) as the link object it is
+    # (Get-PwshPyLinkDistrust) and never followed: its target inside the directory is judged where it
+    # lies. uv's lock file inherits the directory's ACL here (measured with uv 0.13), so unlike POSIX
+    # no entry is exempt. Measured on vm-pydev-win: about 1.7 s for one install (2,541 entries) under
+    # both PowerShells, 7.5 s (pwsh 7) to 11.3 s (5.1) for five.
+    $stack = New-Object System.Collections.Generic.Stack[IO.DirectoryInfo]
+    $stack.Push((New-Object IO.DirectoryInfo $Path))
+    while ($stack.Count -gt 0) {
+        $directory = $stack.Pop()
+        try {
+            $children = @($directory.GetFileSystemInfos())
+        } catch {
+            return "the entries below $Path cannot be listed ($($_.Exception.Message))"
+        }
+        foreach ($child in $children) {
+            if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                $why = Get-PwshPyLinkDistrust -Path $child.FullName
+            } else {
+                $isDirectory = $child -is [IO.DirectoryInfo]
+                try {
+                    $security = Read-PwshPySecurity -Item $child
+                } catch {
+                    return "the ACL of $($child.FullName) cannot be read ($($_.Exception.Message))"
+                }
+                $why = Get-PwshPyLeafDistrust -Path $child.FullName -Directory $isDirectory -Security $security
+                if ($isDirectory) { $stack.Push([IO.DirectoryInfo]$child) }
+            }
+            if ($why) { return $why }
+        }
+    }
+    return ''
+}
+
+function Get-PwshPyPythonTreeDistrust {
+    param([string] $Path)
+
+    # Why an entry below uv's managed-Python directory $Path (which exists) may not be run or read
+    # elevated, or ''. `uv python find` runs every install it considers there, and each interpreter
+    # reads its own standard library and site-packages as it starts (a .pth there runs code), so a file
+    # or directory another account can modify anywhere below is as bad as the directory itself
+    # (measured with uv 0.13: a .pth in a writable install's site-packages ran before any later check).
+    # Each entry is judged like the directory holding uv; identical to the .sh runner on POSIX.
+    if ($PwshPyOnWindows) { return (Get-PwshPyWindowsTreeDistrust -Path $Path) }
+    return (Get-PwshPyPosixTreeDistrust -Path $Path)
 }
 
 function Get-PwshPyPythonDirDistrust {
@@ -736,16 +851,22 @@ function Get-PwshPyPythonDirDistrust {
     # EXECUTES every interpreter it considers there to ask its version, so a .pth planted in one's
     # site-packages would run elevated before any check of the path uv answers (measured with uv
     # 0.13): the directory is judged before uv starts, as a uv is, itself and every directory above
-    # it. One that does not exist yet is judged by the nearest one that does, where
-    # `uv python install` will create it.
+    # it, and then everything below it (Get-PwshPyPythonTreeDistrust). One that does not exist yet is
+    # judged by the nearest one that does, where `uv python install` will create it; it holds no
+    # install yet.
     $directory = $Path
     while (-not (Test-Path -LiteralPath $directory)) {
         $parent = [IO.Path]::GetDirectoryName($directory)
         if (-not $parent) { break }
         $directory = $parent
     }
-    if ($directory -eq [IO.Path]::GetPathRoot($directory)) { return (Get-PwshPyLeafDistrust -Path $directory -Directory $true) }
-    return (Get-PwshPyUvDistrust -Path $directory -Directory $true)
+    if ($directory -eq [IO.Path]::GetPathRoot($directory)) {
+        $why = Get-PwshPyLeafDistrust -Path $directory -Directory $true
+    } else {
+        $why = Get-PwshPyUvDistrust -Path $directory -Directory $true
+    }
+    if ($why -or $directory -ne $Path) { return $why }
+    return (Get-PwshPyPythonTreeDistrust -Path $Path)
 }
 
 function Resolve-PwshPyManagedPython {
@@ -1190,7 +1311,7 @@ $PwshPyPrepare = {
         # The directory before uv searches it: uv runs every Python it finds there.
         $PwshPyPythonDirWhy = Get-PwshPyPythonDirDistrust -Path $env:UV_PYTHON_INSTALL_DIR
         if ($PwshPyPythonDirWhy) {
-            Write-PwshPyFailure "pwshpy: refusing uv's managed-Python directory $($env:UV_PYTHON_INSTALL_DIR): $PwshPyPythonDirWhy (an elevated run lets uv search only a directory no other account can modify): $(Get-PwshPyPythonRemedy)"
+            Write-PwshPyFailure "pwshpy: refusing uv's managed-Python directory $($env:UV_PYTHON_INSTALL_DIR): $PwshPyPythonDirWhy (an elevated run lets uv search only a directory no other account can modify, nor anything below it): $(Get-PwshPyPythonRemedy)"
             exit 127
         }
         # Script scope by name: the run preparation, a block of its own, reads it.

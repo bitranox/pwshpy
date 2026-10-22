@@ -31,8 +31,9 @@
 # UV_PYTHON_DOWNLOADS is never or manual), found with `uv python find --system` and handed to uv run
 # as --python, after the same check as uv itself, so no .venv anywhere is ever run (the script
 # itself still runs in your directory). That directory passes the same check before uv searches it
-# (uv runs every Python it finds there); one another account can modify is refused with exit code
-# 127. Every uv call it makes as root reads no uv.toml (--no-config). UV_PYTHON, VIRTUAL_ENV,
+# (uv runs every Python it finds there), and so does every file and directory below it (a regular
+# file named .lock aside, mode only); one another account can modify is refused with exit code 127.
+# Every uv call it makes as root reads no uv.toml (--no-config). UV_PYTHON, VIRTUAL_ENV,
 # CONDA_PREFIX, UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON, UV_PYTHON_INSTALL_DIR, UV_CONFIG_FILE,
 # UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL, PYTHONHOME, PYTHONPATH, PYTHONUSERBASE,
 # UV_INDEX_URL, UV_DEFAULT_INDEX, UV_INDEX, UV_EXTRA_INDEX_URL, UV_FIND_LINKS, UV_INSECURE_HOST,
@@ -592,15 +593,83 @@ pwshpy_account_data_home() {
 }
 
 # What a root run that refused a managed-Python path tells the caller to do about it.
-PWSHPY_PYTHON_REMEDY="make the directory named above root's alone (chown root, then chmod go-w on it), or remove it"
-PWSHPY_PYTHON_REMEDY="$PWSHPY_PYTHON_REMEDY and install the Python again as root (uv python install)"
+PWSHPY_PYTHON_REMEDY="make the path named above root's alone (chown root, then chmod go-w on it, with -R for a"
+PWSHPY_PYTHON_REMEDY="$PWSHPY_PYTHON_REMEDY directory), or remove uv's managed-Python directory and install the Python"
+PWSHPY_PYTHON_REMEDY="$PWSHPY_PYTHON_REMEDY again as root (uv python install)"
+
+# What pwshpy_python_tree_distrust's listings print when find itself failed: no path find prints
+# (they all start with the directory given) and no ls line (they start with the mode) looks like it.
+PWSHPY_WALK_FAILED="pwshpy-walk-failed"
+
+# Prints why an entry below uv's managed-Python directory "$1" (which exists) may not be run or read
+# as root, or nothing. `uv python find` runs every install it considers there, and each interpreter
+# reads its own standard library and site-packages as it starts (a .pth there runs code), so a file or
+# directory another account can modify anywhere below is as bad as the directory itself (measured with
+# uv 0.13: a .pth in a writable install's site-packages ran as root before any later check). Each entry
+# is judged like the directory holding uv: root owns it, neither its group nor anyone else may write
+# it, and it carries no ACL; a symlink by its owner alone (its own mode means nothing, and its target
+# inside the directory is judged where it lies). A regular file named .lock is the one exception to the
+# write check: uv creates its lock file mode 0666 (measured with uv 0.13) and only ever locks it, and no
+# interpreter imports or runs a file of that name. One find for the modes and owners, one batched ls
+# for the ACLs (with ACL lines where ls -e prints them, macOS and BSD): about 0.8 s for 85,640 entries
+# (15 installs) on a Linux host, a fraction of that for the one or two installs of a normal directory.
+pwshpy_python_tree_distrust() {
+    _pt_root=$1
+    set --
+    for _pt_uid in $PWSHPY_TRUSTED_UIDS; do
+        set -- "$@" ! -user "$_pt_uid"
+    done
+    # The trailing slash makes find enter the directory when "$1" is a symlink to it. The whole output is
+    # read (sed, not head): find killed by a closed pipe would print nothing on a host where SIGPIPE is
+    # ignored, and its failure is the one answer that must not be missed.
+    _pt_hit=$({ find "$_pt_root/" \( -type l "$@" \) -o \( ! -type l \( "$@" -o \( \( -perm -0002 -o -perm -0020 \) \
+        ! \( -type f -name .lock \) \) \) \) -print 2>/dev/null || printf '%s\n' "$PWSHPY_WALK_FAILED"; } | sed -n 1p)
+    if [ "$_pt_hit" = "$PWSHPY_WALK_FAILED" ]; then
+        printf '%s' "the entries below $_pt_root cannot be listed"
+        return 0
+    fi
+    if [ -n "$_pt_hit" ]; then
+        if [ -L "$_pt_hit" ] && pwshpy_stat "$_pt_hit"; then
+            printf '%s' "the symlink $_pt_hit is owned by uid $PWSHPY_ST_UID, not root"
+            return 0
+        fi
+        _pt_why=$(pwshpy_leaf_distrust "$_pt_hit")
+        printf '%s' "${_pt_why:-$_pt_hit can be modified by another account}"
+        return 0
+    fi
+    # ls -e lists a file's ACL entries below it on macOS and BSD; GNU ls has no -e and marks an ACL with
+    # '+' instead (busybox: -e is the full date, and it marks nothing, see pwshpy_has_acl).
+    _pt_list=-ldn
+    if ls -lde / >/dev/null 2>&1; then
+        _pt_list=-lden
+    fi
+    _pt_acl=$({ find "$_pt_root/" ! -type l -exec ls "$_pt_list" {} + 2>/dev/null \
+        || printf '%s\n' "$PWSHPY_WALK_FAILED"; } | awk -v failed="$PWSHPY_WALK_FAILED" '
+        $0 == failed { lost = 1 }
+        /^ *[0-9]+: / || substr($1, 11, 1) == "+" { acl = 1 }
+        END { if (lost) print "lost"; else if (acl) print "acl" }')
+    case $_pt_acl in
+        lost) printf '%s' "the entries below $_pt_root cannot be listed" ;;
+        acl)
+            # Which one, for the message: only now, entry by entry.
+            _pt_named=$(find "$_pt_root/" ! -type l -print 2>/dev/null | while IFS= read -r _pt_path; do
+                if pwshpy_stat "$_pt_path" && pwshpy_has_acl "$_pt_path"; then
+                    printf '%s' "$_pt_path carries an ACL"
+                    break
+                fi
+            done)
+            printf '%s' "${_pt_named:-an entry below $_pt_root carries an ACL}"
+            ;;
+    esac
+    return 0
+}
 
 # Prints why uv's managed-Python directory "$1" may not be searched as root, or nothing. `uv python
 # find` EXECUTES every interpreter it considers there to ask its version, so a .pth planted in one's
 # site-packages would run as root before any check of the path uv answers (measured with uv 0.13):
-# the directory is judged before uv starts, as a uv is, itself and every directory above it. One
-# that does not exist yet is judged by the nearest one that does, where `uv python install` will
-# create it.
+# the directory is judged before uv starts, as a uv is, itself and every directory above it, and then
+# everything below it (pwshpy_python_tree_distrust). One that does not exist yet is judged by the
+# nearest one that does, where `uv python install` will create it; it holds no install yet.
 pwshpy_python_dir_distrust() {
     _pd_dir=$1
     while [ ! -e "$_pd_dir" ] && [ ! -L "$_pd_dir" ]; do
@@ -608,10 +677,15 @@ pwshpy_python_dir_distrust() {
         [ -n "$_pd_dir" ] || _pd_dir=/
     done
     if [ "$_pd_dir" = / ]; then
-        pwshpy_leaf_distrust /
+        _pd_why=$(pwshpy_leaf_distrust /)
     else
-        pwshpy_uv_distrust "$_pd_dir"
+        _pd_why=$(pwshpy_uv_distrust "$_pd_dir")
     fi
+    if [ -n "$_pd_why" ] || [ "$_pd_dir" != "$1" ]; then
+        printf '%s' "$_pd_why"
+        return 0
+    fi
+    pwshpy_python_tree_distrust "$1"
 }
 
 # Runs `uv python $1 ...` started in the anchor and reading no uv.toml (--no-config, see the run
@@ -879,7 +953,7 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     PWSHPY_PYTHON_DIR_WHY=$(pwshpy_python_dir_distrust "$UV_PYTHON_INSTALL_DIR")
     if [ -n "$PWSHPY_PYTHON_DIR_WHY" ]; then
         PWSHPY_PYTHON_DIR_WHY="$PWSHPY_PYTHON_DIR_WHY (as root uv searches only a directory no other account can"
-        PWSHPY_PYTHON_DIR_WHY="$PWSHPY_PYTHON_DIR_WHY modify): $PWSHPY_PYTHON_REMEDY"
+        PWSHPY_PYTHON_DIR_WHY="$PWSHPY_PYTHON_DIR_WHY modify, nor anything below it): $PWSHPY_PYTHON_REMEDY"
         pwshpy_die "refusing uv's managed-Python directory $UV_PYTHON_INSTALL_DIR: $PWSHPY_PYTHON_DIR_WHY" 127
     fi
     pwshpy_resolve_managed_python

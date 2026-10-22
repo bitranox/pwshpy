@@ -1621,7 +1621,8 @@ def test_as_root_an_untrusted_managed_python_dir_is_refused_before_uv_runs_a_pyt
     """[X21 P1]: `uv python find` EXECUTES every interpreter it considers in uv's managed-Python
     directory, so a .pth planted there ran as root before the found path was judged. The directory is
     now judged before uv starts: every account may write it, the run exits 127 and the plant never
-    runs. The control, the same root run with the directory left trusted, runs the plant."""
+    runs. The control, the same root run with the directory left trusted, runs the plant (the installs
+    below it: test_as_root_a_python_whose_install_another_account_can_modify_is_refused)."""
     runner, uv = _python_runner(tmp_path, as_root=True)
     marker = tmp_path / "planted-pth-ran.txt"
     environment, planted = _planted_python_env(tmp_path, uv.parent, marker)
@@ -1638,22 +1639,103 @@ def test_as_root_an_untrusted_managed_python_dir_is_refused_before_uv_runs_a_pyt
     assert _reported_python(result) is not None, result.stdout
 
 
+def _open_below(planted: Path, where: str) -> Path:
+    """Make one entry below the planted managed-Python directory writable by every account; its path."""
+    (install,) = [child for child in planted.iterdir() if child.is_dir()]
+    (site_packages,) = install.glob("lib/python3*/site-packages")
+    target = {
+        "install-dir": install,
+        "site-packages-dir": site_packages,
+        "planted-file": site_packages / "pwshpy_planted.pth",
+    }[where]
+    # A copy of a hard-linked file of its own, so the mode change reaches no shared file.
+    if target.is_file():
+        text = target.read_bytes()
+        target.unlink()
+        target.write_bytes(text)
+    target.chmod(0o777 if target.is_dir() else 0o666)
+    return target
+
+
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize(
+    "where",
+    ["install-dir", "site-packages-dir", "planted-file", "trusted-control", "uvs-lock-file-control"],
+    ids=lambda where: where,
+)
 def test_as_root_a_python_whose_install_another_account_can_modify_is_refused(
+    tmp_path: Path, shell_id: str, shell: list[str], where: str
+) -> None:
+    """[A1], [X22 W1]: an install inside a trusted managed-Python directory that every account can
+    modify (the install, its site-packages, one file in it) is refused before uv runs any Python
+    (exit 127, naming the entry and the remedy): `uv python find` runs every install it considers,
+    so a .pth planted there ran as root before the post-find check (measured on 1.6.0rc). The planted
+    marker stays absent. The control, the same tree left trusted, runs the plant and the script; so
+    does a tree holding the lock file uv itself creates mode 0666, which is only ever locked."""
+    runner, uv = _python_runner(tmp_path, as_root=True)
+    marker = tmp_path / "planted-pth-ran.txt"
+    environment, planted = _planted_python_env(tmp_path, uv.parent, marker)
+    if where == "uvs-lock-file-control":
+        (planted / ".lock").touch()
+        (planted / ".lock").chmod(0o666)
+    target = None if where.endswith("-control") else _open_below(planted, where)
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    if target is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert marker.is_file(), "the control never ran the planted .pth: " + result.stderr
+        assert _reported_python(result) is not None, result.stdout
+        return
+    assert not marker.exists(), "uv ran a Python from the modifiable install as root: " + marker.read_text()
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert _PYTHON_DIR_REFUSED in result.stderr and _PYTHON_REMEDY in result.stderr, result.stderr
+    assert f"{target.name} is writable by every account" in result.stderr, result.stderr
+    assert _reported_python(result) is None, result.stdout
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_the_found_python_is_still_judged_after_the_directory_check(
     tmp_path: Path, shell_id: str, shell: list[str]
 ) -> None:
-    """[A1]: the Python uv found must still pass the same check as uv itself, inside a trusted
-    managed-Python directory too: an install every account can write refuses it (exit 127, the
-    script never runs), and the refusal names the remedy."""
+    """[A1]: the Python uv found passes the same check as uv itself, a second line of defence behind
+    the directory check (which this test takes as passed, its subject being the later one): an install
+    every account can write refuses it (exit 127, the script never runs) and names the remedy."""
     runner, uv = _python_runner(tmp_path, as_root=True)
+    runner.write_text(without_python_dir_check(runner.read_text(encoding="utf-8"), powershell=False), encoding="utf-8")
     environment, planted = _planted_python_env(tmp_path, uv.parent, tmp_path / "planted-pth-ran.txt")
-    (install,) = [child for child in planted.iterdir() if child.is_dir()]
-    install.chmod(0o777)
+    _open_below(planted, "install-dir")
     result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
     assert result.returncode == 127, result.stdout + result.stderr
     assert "refusing the Python uv found at" in result.stderr and _PYTHON_REMEDY in result.stderr, result.stderr
     assert _PYTHON_DIR_REFUSED not in result.stderr, result.stderr
     assert _reported_python(result) is None, result.stdout
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize("acl", ["u:65534:rwx", "u:65534:r-x"], ids=["write-acl", "read-acl"])
+def test_as_root_an_acl_below_the_managed_python_dir_is_refused(
+    tmp_path: Path, shell_id: str, shell: list[str], acl: str
+) -> None:
+    """[X22 W1]: an ACL on an entry below the managed-Python directory refuses it before uv runs any
+    Python, as it refuses a uv: a write ACL shows as the mask's group write everywhere, any ACL as '+'
+    where ls marks one (busybox's ls marks none, so there only the write ACL can be seen)."""
+    setfacl = shutil.which("setfacl")
+    if setfacl is None:
+        pytest.skip("setfacl is missing")
+    if shell_id == "busybox-ash" and acl.endswith("r-x"):
+        pytest.skip("busybox ls marks no ACL; only one granting write is visible there, as group write")
+    runner, uv = _python_runner(tmp_path, as_root=True)
+    marker = tmp_path / "planted-pth-ran.txt"
+    environment, planted = _planted_python_env(tmp_path, uv.parent, marker)
+    (site_packages,) = planted.glob("*/lib/python3*/site-packages")
+    if subprocess.run([setfacl, "-m", acl, str(site_packages)], capture_output=True, check=False).returncode:  # noqa: S603
+        pytest.skip("this filesystem has no POSIX ACLs")
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert not marker.exists(), "uv ran a Python below an ACL as root: " + marker.read_text()
+    assert result.returncode == 127, result.stdout + result.stderr
+    # Named below the directory the run was given (a link to the planted one), so by its tail.
+    named = site_packages.relative_to(planted).as_posix()
+    reasons = (f"{named} carries an ACL", f"{named} is writable by group")
+    assert any(reason in result.stderr for reason in reasons), result.stderr
 
 
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root"])

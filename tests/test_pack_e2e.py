@@ -2462,7 +2462,8 @@ def test_an_untrusted_managed_python_dir_is_refused_before_uv_runs_a_python_in_i
     directory, so a .pth planted there ran elevated before the found path was judged. The directory
     is now judged before uv starts: when Users (Windows) or every account (POSIX) may modify it, the
     run exits 127 and the plant never runs. The control, the same elevated run with the directory
-    left trusted, runs the plant."""
+    left trusted, runs the plant (the installs below it:
+    test_an_elevated_run_refuses_a_python_whose_install_another_account_can_modify)."""
     runner, head = _python_runner(tmp_path, elevated="$true")
     marker = tmp_path / "planted-pth-ran.txt"
     probe, planted = _planted_python_probe(tmp_path, marker)
@@ -2479,20 +2480,103 @@ def test_an_untrusted_managed_python_dir_is_refused_before_uv_runs_a_python_in_i
     assert _reported_python(result) is not None, result.stdout
 
 
-@pytest.mark.local_only
-def test_an_elevated_run_refuses_a_python_whose_install_another_account_can_modify(tmp_path: Path) -> None:
-    """[A1]: the Python uv found must still pass the same check as uv itself, inside a trusted
-    managed-Python directory too: an install Users (Windows) or every account (POSIX) may modify
-    refuses it (exit 127, the script never runs), and the refusal names the remedy."""
-    runner, head = _python_runner(tmp_path, elevated="$true")
-    probe, planted = _planted_python_probe(tmp_path, tmp_path / "planted-pth-ran.txt")
+def _open_below(planted: Path, where: str) -> Path:
+    """Let every account modify one entry below the planted managed-Python directory; its path.
+
+    The install's files are hard links to shared ones (on Windows to the host's own managed Python),
+    and a hard link shares its file's ACL and mode, so a file is replaced by a copy of its own first.
+    """
     (install,) = [child for child in planted.iterdir() if child.is_dir()]
-    _open_to_other_accounts(install)
+    (site_packages,) = [*install.glob("lib/python3*/site-packages"), *install.glob("Lib/site-packages")]
+    target = {
+        "install-dir": install,
+        "site-packages-dir": site_packages,
+        "planted-file": site_packages / "pwshpy_planted.pth",
+    }[where]
+    if target.is_file():
+        text = target.read_bytes()
+        target.unlink()
+        target.write_bytes(text)
+    if sys.platform == "win32":
+        _icacls(target, "/grant", f"{_SID_USERS}:(M)")
+    else:
+        target.chmod(0o777 if target.is_dir() else 0o666)
+    return target
+
+
+@pytest.mark.local_only
+@pytest.mark.parametrize(
+    "where",
+    ["install-dir", "site-packages-dir", "planted-file", "trusted-control", "uvs-lock-file-control"],
+    ids=lambda where: where,
+)
+def test_an_elevated_run_refuses_a_python_whose_install_another_account_can_modify(tmp_path: Path, where: str) -> None:
+    """[A1], [X22 W1]: an install inside a trusted managed-Python directory that Users (Windows) or every
+    account (POSIX) may modify (the install, its site-packages, one file in it) is refused before uv runs
+    any Python (exit 127, naming the entry and the remedy): `uv python find` runs every install it
+    considers, so a .pth planted there ran elevated before the post-find check (measured on 1.6.0rc).
+    The planted marker stays absent. The control, the same tree left trusted, runs the plant and the
+    script; so does a tree holding a world-writable lock file where uv keeps its own (POSIX: uv creates
+    it mode 0666 and only ever locks it)."""
+    runner, head = _python_runner(tmp_path, elevated="$true")
+    marker = tmp_path / "planted-pth-ran.txt"
+    probe, planted = _planted_python_probe(tmp_path, marker)
+    if where == "uvs-lock-file-control":
+        (planted / ".lock").touch()
+        if sys.platform != "win32":
+            (planted / ".lock").chmod(0o666)
+    target = None if where.endswith("-control") else _open_below(planted, where)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))
+    if target is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert marker.is_file(), "the control never ran the planted .pth: " + result.stderr
+        assert _reported_python(result) is not None, result.stdout
+        return
+    assert not marker.exists(), "uv ran a Python from the modifiable install elevated: " + marker.read_text()
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert _PYTHON_DIR_REFUSED in result.stderr and _PYTHON_REMEDY in result.stderr, result.stderr
+    assert target.name in result.stderr, result.stderr
+    assert _reported_python(result) is None, result.stdout
+
+
+@pytest.mark.local_only
+def test_an_elevated_run_still_judges_the_found_python_after_the_directory_check(tmp_path: Path) -> None:
+    """[A1]: the Python uv found passes the same check as uv itself, a second line of defence behind
+    the directory check (which this test takes as passed, its subject being the later one): an install
+    Users (Windows) or every account (POSIX) may modify refuses it (exit 127, the script never runs)
+    and names the remedy."""
+    runner, head = _python_runner(tmp_path, elevated="$true")
+    runner.write_text(without_python_dir_check(runner.read_text(encoding="utf-8"), powershell=True), encoding="utf-8")
+    probe, planted = _planted_python_probe(tmp_path, tmp_path / "planted-pth-ran.txt")
+    _open_below(planted, "install-dir")
     result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))
     assert result.returncode == 127, result.stdout + result.stderr
     assert "refusing the Python uv found at" in result.stderr and _PYTHON_REMEDY in result.stderr, result.stderr
     assert _PYTHON_DIR_REFUSED not in result.stderr, result.stderr
     assert _reported_python(result) is None, result.stdout
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_an_elevated_posix_run_refuses_an_acl_below_the_managed_python_dir(tmp_path: Path) -> None:
+    """[X22 W1]: an ACL on an entry below the managed-Python directory refuses it before uv runs any
+    Python, as it refuses a uv; a read-only one too, so the '+' ls marks is what is read (a write ACL
+    would show as the mask's group write)."""
+    setfacl = shutil.which("setfacl")
+    if setfacl is None:
+        pytest.skip("setfacl is missing")
+    runner, head = _python_runner(tmp_path, elevated="$true")
+    marker = tmp_path / "planted-pth-ran.txt"
+    probe, planted = _planted_python_probe(tmp_path, marker)
+    (site_packages,) = planted.glob("*/lib/python3*/site-packages")
+    done = subprocess.run([setfacl, "-m", "u:65534:r-x", str(site_packages)], capture_output=True, check=False)  # noqa: S603
+    if done.returncode:
+        pytest.skip("this filesystem has no POSIX ACLs")
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))
+    assert not marker.exists(), "uv ran a Python below an ACL elevated: " + marker.read_text()
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert f"{site_packages.relative_to(planted).as_posix()} carries an ACL" in result.stderr, result.stderr
 
 
 @pytest.mark.local_only

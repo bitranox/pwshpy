@@ -420,6 +420,9 @@ def write_site_plant(site_packages: Path, marker: Path) -> Path:
     plant = site_packages / "pwshpy_planted.pth"
     line = f"import pathlib; pathlib.Path({str(marker)!r}).open('a', encoding='utf-8').write('ran\\n')\n"
     plant.write_text(line, encoding="utf-8")
+    # Whatever the umask: an elevated run refuses a managed-Python tree holding a file another account
+    # (the group, on a host with per-user groups) can modify, and a control must leave it trusted.
+    plant.chmod(0o644)
     return plant
 
 

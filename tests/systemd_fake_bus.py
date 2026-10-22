@@ -72,6 +72,11 @@ class FakeConn:
     loads them from the new file (systemd's unit-cache retry, ``manager_unit_cache_should_retry_load``,
     which applies to a not-found unit only, never to a masked one).
 
+    ``pending`` names units whose unit file a controller is about to write: systemd knows nothing of
+    them until the controller's own daemon-reload (the first ``Reload`` verb), so before it
+    ``LoadUnit`` answers ``not-found`` and ``GetUnitFileState`` fails, as for any unknown name; from
+    it on they behave as configured.
+
     ``refused_loads`` names units whose ``LoadUnit`` call itself fails with a D-Bus error (an
     invalid name, a refused or broken bus call) - unlike a not-found unit, which systemd answers.
     ``refused_reads`` names (unit, property) pairs whose ``Properties.Get`` fails with a D-Bus
@@ -105,6 +110,7 @@ class FakeConn:
         walks: dict[str, list[str]] | None = None,
         refused_loads: frozenset[str] = frozenset(),
         refused_reads: frozenset[tuple[str, str]] = frozenset(),
+        pending: frozenset[str] = frozenset(),
     ) -> None:
         self._units = units  # (name, description, active_state)
         self._props = props
@@ -121,6 +127,7 @@ class FakeConn:
         self._walking: dict[str, list[str]] = {}  # unit -> ActiveStates still ahead of it
         self._known = {unit for unit, _iface, _prop in props} | set(unit_files) | set(unloaded)
         self._not_found: set[str] = set()  # names LoadUnit answered with a not-found object
+        self._pending = set(pending)  # unknown to systemd until the first Reload
         self.verbs: list[str] = []
         self.methods: list[str] = []  # every method sent, in order (to count round trips)
         self.closed = False
@@ -153,17 +160,21 @@ class FakeConn:
         self._unloaded.discard(name)  # loaded from its unit file
         if name in self._appeared and self._load_states.get(name) == "not-found":
             self._load_states[name] = "loaded"  # the unit-cache retry finds the file written since
-        if name not in self._known:
+        if name not in self._known or name in self._pending:
             self._not_found.add(name)  # systemd still answers: a "not-found" unit object
         return Reply((f"/u/{name}",))
 
     def _get_unit_file_state(self, msg: Message) -> Reply:
         (name,) = msg.body
         state = self._file_states.get(name, "enabled")
-        return Reply((state,)) if name in self._unit_files else Reply(("no unit file",), error=True)
+        known = name in self._unit_files and name not in self._pending
+        return Reply((state,)) if known else Reply(("no unit file",), error=True)
 
     def _verb(self, msg: Message) -> Reply:
         self.verbs.append(msg.method)
+        if msg.method == "Reload":  # the controller's daemon-reload: the files it wrote now load
+            self._not_found -= self._pending
+            self._pending.clear()
         if msg.method in self._failing:
             return Reply(("failed",), error=True)
         if msg.method in self._walks:

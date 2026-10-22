@@ -44,6 +44,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import logging
+import re
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -51,6 +52,7 @@ from typing import Any, NamedTuple, cast
 
 from pydantic import ValidationError
 
+from ... import __init__conf__
 from ...domain.enums import TaskRunLevel, TaskState, WellKnownSid
 from ...domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
@@ -62,6 +64,20 @@ logger = logging.getLogger(__name__)
 
 _ROOT = "/"  # systemd timers are a flat namespace; task_path is this neutral root (no folder tree)
 _UNIT_DIR = Path("/etc/systemd/system")  # where pwshpy writes its own units (system scope, needs root)
+#: The [Unit] key that marks a unit file as one pwshpy wrote; its value is the pwshpy version that
+#: wrote it. systemd ignores a key starting with "X-" without a warning (systemd.unit(5); measured with
+#: systemd-analyze verify on 259, where an unknown key without the prefix warns).
+OWNERSHIP_KEY = "X-PwshPy"
+
+#: The characters systemd allows in a unit name prefix (systemd.unit(5), "Description"): ASCII
+#: letters, digits, ":", "-", "_", "." and a backslash. A backslash never reaches it (base_name reads
+#: it as a folder separator), and "@" is left out on purpose: it makes a template or instance unit, which
+#: pwshpy does not register.
+_UNIT_NAME_PREFIX = re.compile(r"[A-Za-z0-9:_.\-]+")
+
+#: The longest unit name systemd accepts, suffix included: UNIT_NAME_MAX is 256 with the NUL
+#: (src/basic/unit-name.h; measured on systemd 259: 255 characters load, 256 are "not valid").
+_UNIT_NAME_MAX = 255
 
 # Run-info sentinels, read on a container host with busctl; re-checked on a root Linux VM in Task 6.
 _USEC_INFINITY = 2**64 - 1  # systemd's USEC_INFINITY: "never elapses"
@@ -435,6 +451,38 @@ def base_name(task_path: str) -> str:
     return name
 
 
+def unit_base(task_path: str) -> str:
+    """The unit base name of ``task_path`` (:func:`base_name`), refused unless systemd would accept it.
+
+    Checked before anything is written or sent: systemd refuses such a name only on the bus, after the
+    file is on disk, and a name with a space or an empty one read back as a plausible task.
+
+    Raises:
+        ConfigurationError: The name is empty, holds a character outside :data:`_UNIT_NAME_PREFIX`
+            (an "@" included), or is longer than systemd allows with its ``.service`` suffix.
+
+    Example:
+        >>> unit_base("/tasks/backup.timer")
+        'backup'
+        >>> unit_base("My Backup")
+        Traceback (most recent call last):
+        ...
+        pwshpy.domain.errors.ConfigurationError: 'My Backup' is not a systemd unit name: ...
+    """
+    base = base_name(task_path)
+    if not _UNIT_NAME_PREFIX.fullmatch(base):
+        raise ConfigurationError(
+            f"{base!r} is not a systemd unit name: use ASCII letters, digits, ':', '-', '_' and '.' only "
+            "('@' would make a template or instance unit)."
+        )
+    if len(base) + len(".service") > _UNIT_NAME_MAX:
+        raise ConfigurationError(
+            f"{base[:40]!r}... is too long for a systemd unit name: at most "
+            f"{_UNIT_NAME_MAX - len('.service')} characters (systemd allows {_UNIT_NAME_MAX} with the suffix)."
+        )
+    return base
+
+
 def _single_line(text: str, field: str) -> str:
     """``text`` unchanged, or ConfigurationError when it holds a line break or NUL.
 
@@ -468,10 +516,32 @@ def service_unit(program: str, arguments: str, description: str, *, user: str | 
     arguments = _unit_value(arguments, "arguments")
     exec_line = program if not arguments else f"{program} {arguments}"
     user_line = f"User={user}\n" if user is not None else ""
-    return (
-        f"[Unit]\nDescription={_unit_value(description, 'description') or 'pwshpy task'}\n\n"
-        f"[Service]\nType=oneshot\n{user_line}ExecStart={exec_line}\n"
-    )
+    return f"{_unit_head(description)}[Service]\nType=oneshot\n{user_line}ExecStart={exec_line}\n"
+
+
+def _unit_head(description: str) -> str:
+    """The [Unit] section every unit pwshpy writes: its description and the ownership key."""
+    described = _unit_value(description, "description") or "pwshpy task"
+    return f"[Unit]\nDescription={described}\n{OWNERSHIP_KEY}={__init__conf__.version}\n\n"
+
+
+def is_pwshpy_unit(text: str) -> bool:
+    """Whether unit-file ``text`` carries :data:`OWNERSHIP_KEY` in its [Unit] section.
+
+    Example:
+        >>> is_pwshpy_unit("[Unit]\\nX-PwshPy=1.6.0\\n\\n[Service]\\nExecStart=/bin/true\\n")
+        True
+        >>> is_pwshpy_unit("[Service]\\nX-PwshPy=1.6.0\\n")
+        False
+    """
+    section = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+        elif section == "Unit" and line.split("=", 1)[0].strip() == OWNERSHIP_KEY and "=" in line:
+            return True
+    return False
 
 
 def _utc(at: datetime) -> datetime:
@@ -514,7 +584,7 @@ def timer_unit(base: str, description: str, triggers: Sequence[TaskTrigger]) -> 
     lines = "".join(f"{_timer_line(t)}\n" for t in triggers)
     unit = _single_line(base, "task_path")
     return (
-        f"[Unit]\nDescription={_unit_value(description, 'description') or 'pwshpy task'}\n\n"
+        f"{_unit_head(description)}"
         f"[Timer]\n{lines}AccuracySec=1s\nUnit={unit}.service\n\n[Install]\nWantedBy=timers.target\n"
     )
 
@@ -581,6 +651,41 @@ def _monotonic_bases(bus: _dbus.Bus, timer: str) -> list[str] | None:
     return [str(entry[0]) for entry in entries]
 
 
+def _owned_unit_file(unit: str) -> bool:
+    """Whether ``/etc/systemd/system/<unit>`` is a file pwshpy wrote; False when there is none.
+
+    Raises:
+        NativeCallError: A file (or link) is there that pwshpy did not write (no :data:`OWNERSHIP_KEY`
+            in its [Unit] section), or it cannot be read: ownership that cannot be read is no
+            ownership, so the caller leaves it alone.
+    """
+    path = _UNIT_DIR / unit
+    if not path.exists() and not path.is_symlink():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise NativeCallError(f"cannot read {path} to tell whether pwshpy wrote it: {exc}") from exc
+    if not is_pwshpy_unit(text):
+        raise NativeCallError(
+            f"{path} was not written by pwshpy (no {OWNERSHIP_KEY}= in its [Unit] section); it is left as it is."
+        )
+    return True
+
+
+def _require_free_or_owned(bus: _dbus.Bus, unit: str) -> None:
+    """Refuse to write ``unit`` unless pwshpy wrote the file already or systemd knows no such unit.
+
+    A unit without a file under /etc (a vendor unit under /lib, a runtime or masked one) would be
+    shadowed by the file register writes, and a vendor ``.timer`` of the same name would trigger the
+    new service. :func:`systemd_dbus.load_unit` raises when systemd gives no answer: refused then too.
+    """
+    if _owned_unit_file(unit):
+        return
+    if _dbus.load_unit(bus, unit) is not None:
+        raise NativeCallError(f"systemd already has a unit {unit!r}, not written by pwshpy; it is left as it is.")
+
+
 def _has_timer(bus: _dbus.Bus, base: str) -> bool:
     """Whether ``base`` names a scheduled (``.timer``) task rather than a plain on-demand service."""
     return _dbus.unit_file_state(bus, f"{base}.timer") is not None or (_UNIT_DIR / f"{base}.timer").exists()
@@ -610,7 +715,10 @@ class SystemdScheduledTaskController:
         """Create a oneshot ``.service`` and, with triggers, an enabled ``.timer``; return the task.
 
         Registering over an existing task replaces it (its old ``.timer`` is stopped first and
-        removed when ``triggers`` is empty), like Task Scheduler's create-or-update.
+        removed when ``triggers`` is empty), like Task Scheduler's create-or-update, but only a task
+        pwshpy registered: each unit file it writes carries :data:`OWNERSHIP_KEY`, and a unit of the
+        same name that pwshpy did not write (a file in ``/etc/systemd/system`` without the key, or one
+        systemd has from anywhere else) is refused before anything is written.
 
         Args:
             task_path: The task identifier; reduced to the unit base name (:func:`base_name`).
@@ -626,9 +734,10 @@ class SystemdScheduledTaskController:
         Raises:
             PlatformUnsupportedError: the principal or a trigger has no systemd analog
                 (:func:`linux_user`, :func:`timer_unit`, :func:`arms_on_register`).
-            ConfigurationError: ``task_path``, ``program``, ``arguments`` or ``description``
-                holds a line break.
-            NativeCallError: a unit file could not be written or a D-Bus call failed.
+            ConfigurationError: ``task_path`` is no valid systemd unit name (:func:`unit_base`), or
+                ``program``, ``arguments`` or ``description`` holds a line break.
+            NativeCallError: a unit of the same name exists that pwshpy did not write, a unit file
+                could not be read or written, or a D-Bus call failed.
 
         Example:
             >>> SystemdScheduledTaskController().register(
@@ -638,7 +747,7 @@ class SystemdScheduledTaskController:
             ...
             pwshpy.domain.errors.PlatformUnsupportedError: on Linux a principal is a decimal uid ...
         """
-        base = _single_line(base_name(task_path), "task_path")
+        base = unit_base(task_path)
         # Validate and render everything first: a refusal must not leave a half-written task or cost a bus.
         service_text = service_unit(program, arguments, description, user=linux_user(principal or TaskPrincipal()))
         timer_text = timer_unit(base, description, triggers) if triggers else None
@@ -647,6 +756,8 @@ class SystemdScheduledTaskController:
         timer_file = _UNIT_DIR / timer
         bus = _dbus.open_bus()
         try:
+            for unit in (f"{base}.service", timer):  # before anything is stopped or written
+                _require_free_or_owned(bus, unit)
             if timer_file.exists():  # a previous registration: stop its schedule before replacing it
                 self._retire_timer(bus, timer, remove=timer_text is None)
             self._write(_UNIT_DIR / f"{base}.service", service_text)
@@ -693,26 +804,40 @@ class SystemdScheduledTaskController:
         cls._remove(path)
 
     def unregister(self, task_path: str) -> None:
-        """Stop and delete a task's units (only the files pwshpy could have written, under /etc)."""
-        base = base_name(task_path)
+        """Stop and delete a task's units, only those pwshpy wrote (under /etc, with :data:`OWNERSHIP_KEY`).
+
+        Nothing is stopped, disabled or deleted unless a unit file pwshpy wrote is there: a vendor
+        unit of the same name stays running and enabled.
+
+        Raises:
+            ConfigurationError: ``task_path`` is no valid systemd unit name (:func:`unit_base`).
+            NativeCallError: no such task (pwshpy wrote neither unit), a unit file of that name that
+                pwshpy did not write or cannot read is there, or a D-Bus call failed.
+        """
+        base = unit_base(task_path)
+        service, timer = f"{base}.service", f"{base}.timer"
+        owned = {unit: _owned_unit_file(unit) for unit in (timer, service)}  # refuses a foreign file first
+        if not any(owned.values()):
+            raise NativeCallError(f"no such task {base!r}: pwshpy wrote no {service} or {timer} under {_UNIT_DIR}.")
         bus = _dbus.open_bus()
         try:
-            self._retire_timer(bus, f"{base}.timer", remove=True)
-            service = f"{base}.service"
-            with contextlib.suppress(NativeCallError):  # not loaded / already gone -> nothing to stop
-                _dbus.call(bus, "StopUnit", "ss", (service, "replace"))
-            self._remove(_UNIT_DIR / service)
+            if owned[timer]:
+                self._retire_timer(bus, timer, remove=True)
+            if owned[service]:
+                with contextlib.suppress(NativeCallError):  # not loaded / already gone -> nothing to stop
+                    _dbus.call(bus, "StopUnit", "ss", (service, "replace"))
+                self._remove(_UNIT_DIR / service)
             _dbus.call(bus, "Reload")
         finally:
             bus.conn.close()
 
     def run(self, task_path: str) -> None:
         """Run the task now: start its ``.service`` (like Start-ScheduledTask, on demand)."""
-        self._start_stop(base_name(task_path), "StartUnit")
+        self._start_stop(unit_base(task_path), "StartUnit")
 
     def stop(self, task_path: str) -> None:
         """Stop the task's running ``.service`` (like Stop-ScheduledTask)."""
-        self._start_stop(base_name(task_path), "StopUnit")
+        self._start_stop(unit_base(task_path), "StopUnit")
 
     def enable(self, task_path: str) -> ScheduledTaskInfo:
         """Arm a task's ``.timer`` so it runs on schedule (like Enable-ScheduledTask).
@@ -726,7 +851,7 @@ class SystemdScheduledTaskController:
             NativeCallError: the task is on-demand (no ``.timer``) or its timer is static (no
                 ``[Install]`` section), or a D-Bus call failed.
         """
-        base = base_name(task_path)
+        base = unit_base(task_path)
         timer = f"{base}.timer"
         bus = _dbus.open_bus()
         try:
@@ -747,7 +872,7 @@ class SystemdScheduledTaskController:
             NativeCallError: the task is on-demand (no ``.timer``) or its timer is static (no
                 ``[Install]`` section) - refused before anything is stopped - or a D-Bus call failed.
         """
-        base = base_name(task_path)
+        base = unit_base(task_path)
         bus = _dbus.open_bus()
         try:
             self._require_timer(bus, base, "disable")
@@ -816,7 +941,9 @@ class SystemdScheduledTaskController:
 __all__ = [
     "SystemdScheduledTaskController",
     "arms_on_register",
+    "OWNERSHIP_KEY",
     "base_name",
+    "is_pwshpy_unit",
     "iter_timers",
     "latest_usec",
     "linux_user",
@@ -829,5 +956,6 @@ __all__ = [
     "timer_task_state",
     "timer_to_task_state",
     "timer_unit",
+    "unit_base",
     "usec_to_datetime",
 ]

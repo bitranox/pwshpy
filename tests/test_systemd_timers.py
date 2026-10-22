@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from elevation_doubles import RUNNING_AS_ROOT
 from systemd_fake_bus import Address, FakeConn, FakeCore, use_bus
 
 from pwshpy.adapters.native import systemd_dbus, systemd_timers
@@ -431,7 +432,8 @@ def test_controller_info_timer_task(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_controller_info_on_demand_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """An on-demand service: last run is its own last start, the result its exit, nothing scheduled."""
     props = {**_service_props("adhoc.service", code=1, status=0, started=_T0), ("adhoc.service", _SERVICE, "User"): ""}
-    conn = FakeConn([], props, unloaded=frozenset({"adhoc.service"}))  # a finished oneshot is unloaded
+    # A finished oneshot is unloaded; before register writes it, systemd knows no such unit.
+    conn = FakeConn([], props, unloaded=frozenset({"adhoc.service"}), pending=frozenset({"adhoc.service"}))
     use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)  # filesystem edge: never write /etc here
     info = SystemdScheduledTaskController().register("adhoc", program="/bin/true")
@@ -440,8 +442,16 @@ def test_controller_info_on_demand_task(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert info.last_run_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
     assert info.last_task_result == 0  # ran and succeeded, never folded into None
     assert info.next_run_time is None
-    assert conn.methods.count("LoadUnit") == 1  # the service, once, for every field
+    # Two for the ownership check (neither unit may exist yet), then the service once for every field.
+    assert conn.methods.count("LoadUnit") == 3
     assert conn.methods.count("GetUnit") == 0
+
+
+#: The head of a unit file pwshpy wrote: its [Unit] section carries the ownership key.
+_OWNED = f"[Unit]\nDescription=pwshpy task\n{systemd_timers.OWNERSHIP_KEY}=test\n\n"
+
+#: A task's two unit names, unknown to systemd until register writes them and reloads.
+_NEW_JOB = frozenset({"job.service", "job.timer"})
 
 
 def _job_props(base: str, *, user: str) -> dict[tuple[str, str, str], Any]:
@@ -461,7 +471,7 @@ def test_register_with_a_calendar_trigger_writes_and_arms_a_timer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A uid principal lands as User=, the trigger as a .timer that is enabled AND started now."""
-    conn = FakeConn([], _job_props("job", user="1000"), frozenset({"job.timer"}))
+    conn = FakeConn([], _job_props("job", user="1000"), frozenset({"job.timer"}), pending=_NEW_JOB)
     use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)  # filesystem edge: never write /etc here
     info = SystemdScheduledTaskController().register(
@@ -473,7 +483,8 @@ def test_register_with_a_calendar_trigger_writes_and_arms_a_timer(
     assert conn.verbs == ["Reload", "EnableUnitFiles", "Reload", "StartUnit"]
     assert (info.user_id, info.enabled, info.state) == ("1000", True, TaskState.READY)
     assert info.next_run_time == datetime(2023, 11, 14, 23, 13, 20, tzinfo=timezone.utc)
-    assert conn.methods.count("LoadUnit") == 2  # one for the timer, one for its service
+    # Two for the ownership check (neither unit may exist yet), then one each for the read-back.
+    assert conn.methods.count("LoadUnit") == 4
     assert conn.methods.count("GetUnit") == 0
     assert conn.closed is True
 
@@ -489,7 +500,13 @@ def test_register_with_a_boot_trigger_enables_but_does_not_start(
         ("boot.timer", systemd_dbus.UNIT_IFACE, "Description"): "pwshpy task",
     }
     # Enabled but never started, neither unit is loaded: GetUnit would read every field as a default.
-    conn = FakeConn([], props, frozenset({"boot.timer"}), unloaded=frozenset({"boot.timer", "boot.service"}))
+    conn = FakeConn(
+        [],
+        props,
+        frozenset({"boot.timer"}),
+        unloaded=frozenset({"boot.timer", "boot.service"}),
+        pending=frozenset({"boot.timer", "boot.service"}),
+    )
     use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
     info = SystemdScheduledTaskController().register(
@@ -541,9 +558,9 @@ def test_register_refuses_a_line_break_before_writing_or_connecting(
 @pytest.mark.os_agnostic
 def test_register_without_triggers_retires_a_previous_timer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Re-registering as on demand replaces the task (like CREATE_OR_UPDATE): the old .timer goes."""
-    (tmp_path / "job.timer").write_text("[Timer]\nOnBootSec=1s\n", encoding="utf-8")
+    (tmp_path / "job.timer").write_text(_OWNED + "[Timer]\nOnBootSec=1s\n", encoding="utf-8")
     props = {**_service_props("job.service", code=0, status=0, started=0), ("job.service", _SERVICE, "User"): ""}
-    conn = FakeConn([], props)
+    conn = FakeConn([], props, pending=frozenset({"job.service"}))
     use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
     info = SystemdScheduledTaskController().register("job", program="/bin/true")
@@ -556,8 +573,8 @@ def test_register_without_triggers_retires_a_previous_timer(monkeypatch: pytest.
 @pytest.mark.os_agnostic
 def test_register_with_triggers_stops_the_previous_timer_first(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A re-registered timer is stopped before its file is rewritten, so the old schedule cannot fire."""
-    (tmp_path / "job.timer").write_text("[Timer]\nOnCalendar=daily\n", encoding="utf-8")
-    conn = FakeConn([], _job_props("job", user=""), frozenset({"job.timer"}))
+    (tmp_path / "job.timer").write_text(_OWNED + "[Timer]\nOnCalendar=daily\n", encoding="utf-8")
+    conn = FakeConn([], _job_props("job", user=""), frozenset({"job.timer"}), pending=frozenset({"job.service"}))
     use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
     SystemdScheduledTaskController().register("job", program="/bin/true", triggers=[OnceTrigger(at=_AT)])
@@ -569,7 +586,7 @@ def test_register_with_triggers_stops_the_previous_timer_first(monkeypatch: pyte
 def test_unregister_disables_the_timer_before_deleting_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """unregister drops the timers.target.wants link too, so no dangling enablement is left behind."""
     for unit in ("job.timer", "job.service"):
-        (tmp_path / unit).write_text("", encoding="utf-8")
+        (tmp_path / unit).write_text(_OWNED, encoding="utf-8")
     conn = FakeConn([], {})
     use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
@@ -605,19 +622,21 @@ def test_live_read_reports_run_info() -> None:
 
 
 @pytest.mark.os_agnostic
-def test_unregister_never_disables_a_timer_it_did_not_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A same-named vendor timer (no file under /etc) is not disabled: pwshpy owns only its own units."""
-    conn = FakeConn([], {})
+def test_unregister_touches_nothing_it_did_not_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """[C1]: a same-named vendor unit (no file under /etc) is neither stopped nor disabled: with no
+    unit pwshpy wrote there is no such task, and nothing is sent to systemd at all."""
+    conn = FakeConn([], {}, frozenset({"apt-daily.timer", "apt-daily.service"}))
     use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
-    SystemdScheduledTaskController().unregister("apt-daily")
-    assert "DisableUnitFiles" not in conn.verbs
+    with pytest.raises(NativeCallError, match="no such task"):
+        SystemdScheduledTaskController().unregister("apt-daily")
+    assert conn.verbs == []
 
 
 @pytest.mark.os_agnostic
 def test_unregister_keeps_the_timer_file_when_disabling_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A real DisableUnitFiles failure raises before the file goes, so the wants link never dangles."""
-    (tmp_path / "job.timer").write_text("", encoding="utf-8")
+    (tmp_path / "job.timer").write_text(_OWNED, encoding="utf-8")
     conn = FakeConn([], {}, failing=frozenset({"DisableUnitFiles"}))
     use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
@@ -628,14 +647,24 @@ def test_unregister_keeps_the_timer_file_when_disabling_fails(monkeypatch: pytes
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.skipif(
+    sys.platform == "win32" or RUNNING_AS_ROOT,
+    reason="needs a directory whose entries this process cannot delete: modes do not bind root; Windows ignores them",
+)
 def test_unregister_wraps_a_failed_delete(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A unit file that cannot be deleted is a NativeCallError, not a raw OSError."""
-    (tmp_path / "job.timer").mkdir()  # unlink() on a directory raises IsADirectoryError
+    units = tmp_path / "units"
+    units.mkdir()
+    (units / "job.service").write_text(_OWNED, encoding="utf-8")
     conn = FakeConn([], {})
     use_bus(monkeypatch, conn)
-    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
-    with pytest.raises(NativeCallError, match="cannot delete unit"):
-        SystemdScheduledTaskController().unregister("job")
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", units)
+    units.chmod(0o555)  # its entries can be read but not deleted
+    try:
+        with pytest.raises(NativeCallError, match="cannot delete unit"):
+            SystemdScheduledTaskController().unregister("job")
+    finally:
+        units.chmod(0o755)
 
 
 def _enable_props(base: str, monotonic: list[tuple[str, int, int]] | None) -> dict[tuple[str, str, str], Any]:
@@ -1049,3 +1078,158 @@ def test_iter_timers_skips_a_stale_timer_file(monkeypatch: pytest.MonkeyPatch, c
     )
     use_bus(monkeypatch, conn)
     assert list(iter_timers(strict=strict)) == []
+
+
+# --- [C1] unit names systemd accepts, and units pwshpy owns -------------------------------------------
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "task_path",
+    ["My Backup", "/", "", "job@instance", "j" + chr(0xF6) + "b", "a" * 248],
+    ids=["space", "empty-after-the-folder", "empty", "template-or-instance", "non-ascii", "one-past-the-limit"],
+)
+@pytest.mark.parametrize("verb", ["register", "unregister"])
+def test_a_name_systemd_would_not_accept_is_refused_before_anything(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, task_path: str, verb: str
+) -> None:
+    """[C1]: an invalid unit name was written and read back as a plausible task; now it is refused
+    before a file is written or the bus is opened (systemd 259 refuses "My Backup.service", and a
+    name of 256 characters with its suffix)."""
+    conn = FakeConn([], {})
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    controller = SystemdScheduledTaskController()
+    with pytest.raises(ConfigurationError, match="unit name"):
+        if verb == "register":
+            controller.register(task_path, program="/bin/true")
+        else:
+            controller.unregister(task_path)
+    assert list(tmp_path.iterdir()) == []
+    assert conn.methods == []
+
+
+@pytest.mark.os_agnostic
+def test_the_longest_name_systemd_accepts_registers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """[C1]: 247 characters plus ".service" is systemd's 255 (UNIT_NAME_MAX 256 includes the NUL)."""
+    base = "a" * 247
+    props = {
+        **_service_props(f"{base}.service", code=0, status=0, started=0),
+        (f"{base}.service", _SERVICE, "User"): "",
+    }
+    conn = FakeConn([], props, pending=frozenset({f"{base}.service"}))
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    SystemdScheduledTaskController().register(base, program="/bin/true")
+    assert (tmp_path / f"{base}.service").is_file()
+
+
+def _unit_section(text: str) -> list[str]:
+    """The lines of a unit file's [Unit] section."""
+    section = text.split("\n\n", 1)[0].splitlines()
+    assert section[0] == "[Unit]", text
+    return section[1:]
+
+
+@pytest.mark.os_agnostic
+def test_register_stamps_both_units_with_the_ownership_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """[C1]: every unit pwshpy writes carries X-PwshPy= in [Unit], which systemd ignores (an X- key,
+    systemd.unit(5); measured silent with systemd-analyze verify on 259) and pwshpy reads back."""
+    conn = FakeConn([], _job_props("job", user=""), frozenset({"job.timer"}), pending=_NEW_JOB)
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    SystemdScheduledTaskController().register("job", program="/bin/true", triggers=[OnceTrigger(at=_AT)])
+    for unit in ("job.service", "job.timer"):
+        lines = _unit_section((tmp_path / unit).read_text(encoding="utf-8"))
+        assert any(line.startswith(f"{systemd_timers.OWNERSHIP_KEY}=") for line in lines), (unit, lines)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("unit", ["job.service", "job.timer"])
+def test_register_never_overwrites_a_unit_it_did_not_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unit: str
+) -> None:
+    """[C1]: an admin's /etc/systemd/system/<name> without the ownership key is left exactly as it
+    was, and nothing is sent to systemd."""
+    foreign = "[Unit]\nDescription=the admin's own\n\n[Service]\nExecStart=/usr/sbin/nginx\n"
+    (tmp_path / unit).write_text(foreign, encoding="utf-8")
+    conn = FakeConn([], {}, pending=_NEW_JOB - {unit})
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(NativeCallError, match="not written by pwshpy"):
+        SystemdScheduledTaskController().register("job", program="/bin/true", triggers=[OnceTrigger(at=_AT)])
+    assert (tmp_path / unit).read_text(encoding="utf-8") == foreign
+    assert sorted(path.name for path in tmp_path.iterdir()) == [unit]
+    assert conn.verbs == []
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("unit", ["nginx.service", "nginx.timer"])
+def test_register_never_shadows_a_unit_systemd_already_has(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unit: str
+) -> None:
+    """[C1]: a vendor unit under /lib has no file in /etc to judge; systemd knowing the name is enough
+    to refuse, since a file in /etc would shadow it (and a vendor .timer would trigger our service)."""
+    conn = FakeConn([], {}, frozenset({unit}), file_dirs={unit: "/lib/systemd/system"})
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(NativeCallError, match="not written by pwshpy"):
+        SystemdScheduledTaskController().register("nginx", program="/bin/true")
+    assert list(tmp_path.iterdir()) == []
+    assert conn.verbs == []
+
+
+@pytest.mark.os_agnostic
+def test_register_refuses_when_systemd_cannot_say_whether_the_name_is_taken(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[C1]: a probe that gets no answer takes the strict branch: nothing is written."""
+    conn = FakeConn([], {}, refused_loads=frozenset({"job.service"}))
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(NativeCallError):
+        SystemdScheduledTaskController().register("job", program="/bin/true")
+    assert list(tmp_path.iterdir()) == []
+    assert conn.verbs == []
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("unit", ["job.service", "job.timer"])
+def test_unregister_never_deletes_a_unit_it_did_not_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unit: str
+) -> None:
+    """[C1]: an /etc unit without the ownership key is neither stopped, disabled nor deleted."""
+    foreign = "[Unit]\nDescription=the admin's own\n\n[Service]\nExecStart=/usr/sbin/nginx\n"
+    (tmp_path / unit).write_text(foreign, encoding="utf-8")
+    conn = FakeConn([], {})
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(NativeCallError, match="not written by pwshpy"):
+        SystemdScheduledTaskController().unregister("job")
+    assert (tmp_path / unit).read_text(encoding="utf-8") == foreign
+    assert conn.verbs == []
+
+
+@pytest.mark.os_agnostic
+def test_unregister_refuses_a_unit_file_it_cannot_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """[C1]: ownership that cannot be read is not ownership: nothing is touched."""
+    (tmp_path / "job.service").mkdir()  # reading a directory fails
+    conn = FakeConn([], {})
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(NativeCallError, match="cannot read"):
+        SystemdScheduledTaskController().unregister("job")
+    assert (tmp_path / "job.service").is_dir()
+    assert conn.verbs == []
+
+
+@pytest.mark.os_agnostic
+def test_unregister_removes_an_on_demand_task_it_wrote(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """[C1] control: a marked .service alone (an on-demand task) is stopped and deleted."""
+    (tmp_path / "job.service").write_text(_OWNED + "[Service]\nType=oneshot\nExecStart=/bin/true\n", encoding="utf-8")
+    conn = FakeConn([], {})
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    SystemdScheduledTaskController().unregister("job")
+    assert list(tmp_path.iterdir()) == []
+    assert conn.verbs == ["StopUnit", "Reload"]

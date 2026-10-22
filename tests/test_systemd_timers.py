@@ -33,6 +33,7 @@ from pwshpy.adapters.native.systemd_timers import (
     timer_task_state,
     timer_to_task_state,
     timer_unit,
+    unit_base,
     usec_to_datetime,
 )
 from pwshpy.domain.enums import TaskLogonType, TaskRunLevel, TaskState
@@ -1334,15 +1335,98 @@ def test_a_listed_instance_timer_can_be_run_stopped_enabled_and_disabled(
 @pytest.mark.parametrize("verb", ["run", "stop", "enable", "disable"])
 @pytest.mark.parametrize(
     ("task_path", "match"),
-    [("scrub@", "template"), ("scrub@.timer", "template"), ("@rpool", "unit name"), ("a b@c", "unit name")],
-    ids=["bare-template", "template-timer", "empty-prefix", "space-in-prefix"],
+    [
+        ("scrub@", "template"),
+        ("scrub@.timer", "template"),
+        ("@rpool", "unit name"),
+        ("a b@c", "unit name"),
+        ("a@b c", "instance"),
+        ("a@b%c", "instance"),
+    ],
+    ids=["bare-template", "template-timer", "empty-prefix", "space-in-prefix", "space-in-instance", "percent-in-instance"],
 )
 def test_a_template_or_invalid_instance_name_is_refused_before_the_bus(
     monkeypatch: pytest.MonkeyPatch, verb: str, task_path: str, match: str
 ) -> None:
-    """[X21 L2]: a bare template (empty instance) is no unit to act on; an empty prefix is no name."""
+    """[X21 L2]: a bare template (empty instance) is no unit to act on; an empty prefix is no name.
+    [X22 T1]: a character systemd does not allow in an instance is refused too (the instance check)."""
     conn = FakeConn([], {})
     use_bus(monkeypatch, conn)
     with pytest.raises(ConfigurationError, match=match):
         getattr(SystemdScheduledTaskController(), verb)(task_path)
     assert conn.methods == []
+
+
+# --- [X22 T1] systemd's \xNN escapes are part of a unit name, not a folder separator ----------------
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "timer",
+    [r"zfs-scrub-monthly@my\x2dpool.timer", r"backup\x2dnightly.timer", r"scrub@a\x5cb\x2dc.timer"],
+    ids=["escaped-instance", "escaped-prefix", "escaped-backslash-in-instance"],
+)
+def test_a_listed_escaped_timer_is_addressed_by_its_exact_unit_name(monkeypatch: pytest.MonkeyPatch, timer: str) -> None:
+    """[X22 T1]: base_name read the backslash of systemd's \\xNN escape as a folder separator, so the
+    verbs sent a listed ``zfs-scrub-monthly@my\\x2dpool.timer`` to ``x2dpool``. Every unit name on the
+    bus is now the listed one, escape included."""
+    conn = _instance_conn(timer)
+    use_bus(monkeypatch, conn)
+    (listed,) = list(iter_timers())
+    base = timer[: -len(".timer")]
+    assert listed.task_name == base
+    controller = SystemdScheduledTaskController()
+    controller.run(listed.task_name)
+    controller.stop(listed.task_name)
+    controller.enable(listed.task_name)
+    controller.disable(listed.task_name)
+    service, armed = f"{base}.service", f"{base}.timer"
+    assert conn.calls == [
+        ("StartUnit", (service, "replace")),
+        ("StopUnit", (service, "replace")),
+        ("EnableUnitFiles", ([armed], False, False)),
+        ("Reload", ()),
+        ("StartUnit", (armed, "replace")),
+        ("StopUnit", (armed, "replace")),
+        ("DisableUnitFiles", ([armed], False)),
+        ("Reload", ()),
+    ]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("task_path", "expected"),
+    [(r"\tasks\backup.timer", "backup"), ("/tasks/backup", "backup"), (r"\tasks\x2dname", r"tasks\x2dname")],
+    ids=["windows-folder", "posix-folder", "escape-after-a-folder"],
+)
+def test_a_folder_is_dropped_at_a_slash_or_a_backslash_that_starts_no_escape(task_path: str, expected: str) -> None:
+    """[X22 T1]: the Windows folder form ``\\Folder\\Name`` stays a folder; only ``\\xNN`` is kept."""
+    assert base_name(task_path) == expected
+
+
+@pytest.mark.os_agnostic
+def test_register_still_refuses_an_escaped_name() -> None:
+    """[X22 T1]: register and unregister keep the strict grammar: an escape is no name pwshpy writes."""
+    with pytest.raises(ConfigurationError, match="not a systemd unit name"):
+        unit_base(r"backup\x2dnightly")
+
+
+# --- [X22 M-L1] control characters in the arguments and the description ---------------------------
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("field", ["arguments", "description"])
+@pytest.mark.parametrize("char", ["\t", "\x01", "\x1b", "\x7f"], ids=["tab", "soh", "escape", "delete"])
+def test_service_unit_refuses_a_control_character_in_the_arguments_and_the_description(field: str, char: str) -> None:
+    """[X22 M-L1]: systemd.service(5) allows no control character in a command line, and the
+    description is written in the same line format; only line breaks and NUL were refused."""
+    values = {"arguments": "", "description": "", field: f"a{char}b"}
+    with pytest.raises(ConfigurationError, match=f"{field} must not contain a control character"):
+        service_unit("/bin/true", values["arguments"], values["description"])
+
+
+@pytest.mark.os_agnostic
+def test_timer_unit_refuses_a_control_character_in_the_description() -> None:
+    """[X22 M-L1]: the timer's description is refused like the service's."""
+    with pytest.raises(ConfigurationError, match="description must not contain a control character"):
+        timer_unit("job", "d\x1bx", [OnceTrigger(at=_AT)])

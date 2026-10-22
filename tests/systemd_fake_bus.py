@@ -129,6 +129,7 @@ class FakeConn:
         self._not_found: set[str] = set()  # names LoadUnit answered with a not-found object
         self._pending = set(pending)  # unknown to systemd until the first Reload
         self.verbs: list[str] = []
+        self.calls: list[tuple[str, tuple[Any, ...]]] = []  # each verb with its body (the unit names sent)
         self.methods: list[str] = []  # every method sent, in order (to count round trips)
         self.closed = False
 
@@ -172,6 +173,7 @@ class FakeConn:
 
     def _verb(self, msg: Message) -> Reply:
         self.verbs.append(msg.method)
+        self.calls.append((msg.method, tuple(msg.body)))
         if msg.method == "Reload":  # the controller's daemon-reload: the files it wrote now load
             self._not_found -= self._pending
             self._pending.clear()

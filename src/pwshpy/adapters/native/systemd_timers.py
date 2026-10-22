@@ -70,15 +70,28 @@ _UNIT_DIR = Path("/etc/systemd/system")  # where pwshpy writes its own units (sy
 OWNERSHIP_KEY = "X-PwshPy"
 
 #: The characters systemd allows in a unit name prefix (systemd.unit(5), "Description"): ASCII
-#: letters, digits, ":", "-", "_", "." and a backslash. A backslash never reaches it (base_name reads
-#: it as a folder separator), and "@" is left out on purpose: it makes a template or instance unit, which
-#: pwshpy does not register.
+#: letters, digits, ":", "-", "_", "." and a backslash. The names pwshpy registers leave out the
+#: backslash (it reaches a name only as an escape, see :data:`_UNIT_NAME_ESCAPE`) and "@" on purpose:
+#: "@" makes a template or instance unit, which pwshpy does not register.
 _UNIT_NAME_PREFIX = re.compile(r"[A-Za-z0-9:_.\-]+")
 
-#: The characters systemd allows in an instance name (after the first "@"): the prefix characters
-#: plus "@" itself (systemd's unit_instance_is_valid; ``systemd-escape`` turns "/" into "-", so
-#: ``btrfs-scrub@-.timer`` is the instance for "/").
-_UNIT_NAME_INSTANCE = re.compile(r"[A-Za-z0-9:_.\-@]+")
+#: systemd's escape for a character a unit name cannot hold (systemd.unit(5), "String Escaping for
+#: Inclusion in Unit Names"; ``systemd-escape``): a backslash, "x" and two hex digits, such as ``\x2d``
+#: for "-" in ``zfs-scrub-monthly@my\x2dpool``.
+_UNIT_NAME_ESCAPE = r"\\x[0-9A-Fa-f]{2}"
+
+#: A folder separator in a task path: "/", or a backslash that does not start an escape. The
+#: backslash form is the Windows one (``\Folder\Name``), which a portable script may pass on Linux.
+_FOLDER_SEPARATOR = re.compile(r"/|\\(?!x[0-9A-Fa-f]{2})")
+
+#: A unit name prefix as systemd may list it: the prefix characters or escapes (a backslash only as
+#: part of one, the only form that survives :func:`base_name`).
+_LISTED_UNIT_NAME_PREFIX = re.compile(rf"(?:[A-Za-z0-9:_.\-]|{_UNIT_NAME_ESCAPE})+")
+
+#: The characters systemd allows in an instance name (after the first "@"): the prefix characters,
+#: escapes included, plus "@" itself (systemd's unit_instance_is_valid; ``systemd-escape`` turns "/"
+#: into "-", so ``btrfs-scrub@-.timer`` is the instance for "/").
+_UNIT_NAME_INSTANCE = re.compile(rf"(?:[A-Za-z0-9:_.\-@]|{_UNIT_NAME_ESCAPE})+")
 
 #: The longest unit name systemd accepts, suffix included: UNIT_NAME_MAX is 256 with the NUL
 #: (src/basic/unit-name.h; measured on systemd 259: 255 characters load, 256 are "not valid").
@@ -448,8 +461,16 @@ def iter_timers(folder_path: str = _ROOT, *, strict: bool = False) -> Iterator[S
 
 
 def base_name(task_path: str) -> str:
-    """Reduce a task identifier to its systemd unit base name (drop any folder and .timer/.service)."""
-    name = task_path.strip().replace("\\", "/").rsplit("/", 1)[-1]
+    """Reduce a task identifier to its systemd unit base name (drop any folder and .timer/.service).
+
+    A folder ends at "/" or at a backslash, except a backslash that starts systemd's ``\\xNN`` escape,
+    which is part of the name (:data:`_FOLDER_SEPARATOR`).
+
+    Example:
+        >>> base_name(r"\\tasks\\backup.timer"), base_name(r"/zfs-scrub-monthly@my\\x2dpool.timer")
+        ('backup', 'zfs-scrub-monthly@my\\\\x2dpool')
+    """
+    name = _FOLDER_SEPARATOR.split(task_path.strip())[-1]
     for suffix in (".timer", ".service"):
         if name.endswith(suffix):
             return name[: -len(suffix)]
@@ -487,18 +508,21 @@ def existing_unit_base(task_path: str) -> str:
     """The unit base name of a task to act on (run, stop, enable, disable), in systemd's full grammar.
 
     Unlike :func:`unit_base` (register and unregister, which write and delete files), an instance
-    name is accepted: ``get_scheduled_task`` lists instance timers such as
-    ``zfs-scrub-monthly@rpool.timer``, and the verbs that write nothing must reach them, as they did
-    in 1.5.2. A bare template (``name@``, an empty instance) is no unit systemd can start.
+    name and systemd's ``\\xNN`` escapes are accepted: ``get_scheduled_task`` lists instance timers
+    such as ``zfs-scrub-monthly@rpool.timer`` or ``zfs-scrub-monthly@my\\x2dpool.timer``, and the
+    verbs that write no unit file must reach them, as they did in 1.5.2 for the unescaped ones. A bare
+    template (``name@``, an empty instance) is no unit systemd can start.
 
     Raises:
         ConfigurationError: The prefix (before the first "@") is empty or holds a character outside
-            :data:`_UNIT_NAME_PREFIX`, the instance is empty (a template) or holds a character outside
-            :data:`_UNIT_NAME_INSTANCE`, or the name is longer than systemd allows.
+            :data:`_LISTED_UNIT_NAME_PREFIX`, the instance is empty (a template) or holds a character
+            outside :data:`_UNIT_NAME_INSTANCE`, or the name is longer than systemd allows.
 
     Example:
         >>> existing_unit_base("zfs-scrub-monthly@rpool.timer")
         'zfs-scrub-monthly@rpool'
+        >>> existing_unit_base(r"zfs-scrub-monthly@my\\x2dpool.timer")
+        'zfs-scrub-monthly@my\\\\x2dpool'
         >>> existing_unit_base("scrub@")
         Traceback (most recent call last):
         ...
@@ -506,13 +530,13 @@ def existing_unit_base(task_path: str) -> str:
     """
     base = base_name(task_path)
     prefix, at, instance = base.partition("@")
-    if not at:
-        return unit_base(task_path)
-    if not _UNIT_NAME_PREFIX.fullmatch(prefix):
+    if not _LISTED_UNIT_NAME_PREFIX.fullmatch(prefix):
         raise ConfigurationError(
-            f"{base!r} is not a systemd unit name: the part before '@' must be non-empty ASCII letters, "
-            "digits, ':', '-', '_' and '.'."
+            f"{base!r} is not a systemd unit name: the part before any '@' must be non-empty ASCII letters, "
+            "digits, ':', '-', '_', '.' and \\xNN escapes."
         )
+    if not at:
+        return _within_unit_name_max(base)
     if not instance:
         raise ConfigurationError(
             f"{base!r} is a template, not a unit: name one of its instances ({prefix}@<instance>)."
@@ -520,7 +544,7 @@ def existing_unit_base(task_path: str) -> str:
     if not _UNIT_NAME_INSTANCE.fullmatch(instance):
         raise ConfigurationError(
             f"{base!r} is not a systemd unit name: the instance after '@' may hold ASCII letters, digits, "
-            "':', '-', '_', '.' and '@' only."
+            "':', '-', '_', '.', '@' and \\xNN escapes only."
         )
     return _within_unit_name_max(base)
 
@@ -535,15 +559,23 @@ def _within_unit_name_max(base: str) -> str:
     return base
 
 
+#: An ASCII control character (C0 or DEL), which systemd does not allow in a command line.
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def _single_line(text: str, field: str) -> str:
-    """``text`` unchanged, or ConfigurationError when it holds a line break or NUL.
+    """``text`` unchanged, or ConfigurationError when it holds a line break, NUL or other control character.
 
     A unit file is line-oriented, so a newline in a value starts a new directive (``User=0``,
-    ``ExecStartPre=``); refusing is the only safe answer - there is no escape for it. The value
-    itself is not echoed: arguments may carry a secret.
+    ``ExecStartPre=``); refusing is the only safe answer - there is no escape for it. The other control
+    characters (a tab, an escape, DEL) systemd.service(5) does not allow in a command line, and the
+    description and the arguments share that line format, so they are refused too. The value itself is
+    not echoed: arguments may carry a secret.
     """
     if "\n" in text or "\r" in text or "\0" in text:
         raise ConfigurationError(f"{field} must not contain a line break or NUL: it would inject unit-file directives.")
+    if _CONTROL_CHARACTER.search(text):
+        raise ConfigurationError(f"{field} must not contain a control character: systemd does not allow one.")
     return text
 
 
@@ -559,9 +591,6 @@ def _unit_value(text: str, field: str) -> str:
 #: not keep one literal (``ExecStart="|a/bin/true"`` verifies clean on 259).
 _EXEC_PREFIXES = frozenset("@-:+!|")
 
-#: An ASCII control character (C0 or DEL), which systemd does not allow in a command line.
-_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
-
 
 def _exec_program(program: str) -> str:
     """``program`` as ExecStart='s first word: refused with a leading prefix, else double-quoted.
@@ -574,12 +603,11 @@ def _exec_program(program: str) -> str:
         ConfigurationError: ``program`` is empty, holds a line break or another control character,
             is a lone ``;``, or starts with a prefix.
     """
+    # A line break or another control character is refused by _unit_value (systemd.service(5): "control
+    # characters are not allowed" in a command line).
     program = _unit_value(program, "program")
     if not program:
         raise ConfigurationError("program must not be empty: it is the executable ExecStart= runs.")
-    if _CONTROL_CHARACTER.search(program):
-        # systemd.service(5): "control characters are not allowed" in a command line.
-        raise ConfigurationError("program must not contain a control character: systemd does not allow one.")
     if program == ";":
         # A standalone ';' separates command lines in ExecStart=, so it never names an executable.
         raise ConfigurationError("program must not be ';': systemd reads it as a command-line separator.")
@@ -599,8 +627,8 @@ def service_unit(program: str, arguments: str, description: str, *, user: str | 
     systemd splits and unquotes them with its own rules and expands ``$VAR``, as documented.
 
     Raises:
-        ConfigurationError: ``program``, ``arguments`` or ``description`` holds a line break, or
-            ``program`` is empty or starts with an ExecStart= prefix.
+        ConfigurationError: ``program``, ``arguments`` or ``description`` holds a line break or
+            another control character, or ``program`` is empty or starts with an ExecStart= prefix.
 
     Example:
         >>> "User=1000" in service_unit("/bin/true", "", "d", user="1000")
@@ -671,7 +699,7 @@ def timer_unit(base: str, description: str, triggers: Sequence[TaskTrigger]) -> 
 
     Raises:
         PlatformUnsupportedError: a logon trigger, or a daily trigger with ``every_days`` > 1.
-        ConfigurationError: ``base`` or ``description`` holds a line break.
+        ConfigurationError: ``base`` or ``description`` holds a line break or another control character.
 
     Example:
         >>> "OnBootSec=90s" in timer_unit("job", "", [BootTrigger(delay=timedelta(seconds=90))])

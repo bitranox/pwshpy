@@ -77,45 +77,15 @@ r.stdout, r.stderr  # captured text
 r.check()  # raises NativeCallError on a nonzero exit (opt-in "stop on error")
 ```
 
-A run that outlives `timeout=` is killed and raises `OperationTimeoutError` (its `.timeout` holds the
-limit), a subclass of the `NativeCallError` a missing or unstartable program raises: catch
-`OperationTimeoutError` first to tell the two apart.
+A run that outlives `timeout=` is killed and raises `OperationTimeoutError` (its `.timeout` holds
+the limit), a subclass of the `NativeCallError` a missing or unstartable program raises: catch
+`OperationTimeoutError` first to tell the two apart. The output the program wrote before it was
+killed is not returned; the error carries the message and `.timeout` only. A program that runs and
+exits nonzero is no error: the result holds its `exit_code` until you call `.check()`.
 
 CLI: `pwshpy exec -- git status` (put the program after `--` so its flags are not parsed by pwshpy).
 A run that hits `--timeout` exits 110 (ETIMEDOUT) with an `OperationTimeoutError` line on stderr; a
 program that cannot start exits 1.
-
-## Windows Update search that cannot hang forever
-
-`IUpdateSearcher.Search` is a synchronous COM call that can sit for 25+ minutes (measured against
-an empty update datastore), and nothing inside the process can interrupt it. `ps.get_windows_update`
-runs the search in a child process and kills it once `timeout` seconds pass:
-
-```python
-from pwshpy import OperationTimeoutError, ps
-
-if __name__ == "__main__":  # required: the search child re-imports this script
-    try:
-        pending = ps.get_windows_update(timeout=600).to_list()  # IsInstalled=0 and Type='Software'
-    except OperationTimeoutError as exc:
-        print(f"gave up after {exc.timeout}s")
-```
-
-Read-only: only `Search` is called, never Download or Install. `criteria=` takes any WUA search
-string (`"IsInstalled=1"` lists what is installed). The timeout must be in `(0, 2147483]` seconds
-(`ValueError` otherwise, at the call); the search itself starts when the pipeline is first iterated.
-A timed-out search raises `OperationTimeoutError` (its `.timeout` holds the limit), a subclass of the
-`NativeCallError` a Windows Update agent failure raises (its HRESULT is in the message): catch
-`OperationTimeoutError` first to tell the two apart.
-
-The child is started with the `spawn` method on every OS, which re-imports the calling script in
-the child. A script that calls `get_windows_update` at module level without an
-`if __name__ == "__main__":` guard therefore fails in the child at bootstrap, reported at once as
-`NativeCallError` ("worker exited without a result"); put the call under the guard (the `pwshpy`
-CLI already does).
-
-CLI: `pwshpy get_windows_update --timeout 600 --jsonl`; a timeout prints one `timed out` line on
-stderr and exits **110** (ETIMEDOUT).
 
 ### Waiting for the whole process tree (`wait_tree=True`, like `Start-Process -Wait`)
 
@@ -154,6 +124,41 @@ Output: stdout and stderr are captured as on the default path, including whateve
 write to the pipes they inherited, until the tree is gone. A process outside the tree (the
 "Not waited for" column) may still hold those pipes; the result is then returned about two
 seconds after the tree exited, with the output read up to that point.
+
+## Windows Update search that cannot hang forever
+
+`IUpdateSearcher.Search` is a synchronous COM call that can sit for 25+ minutes (measured against
+an empty update datastore), and nothing inside the process can interrupt it. `ps.get_windows_update`
+runs the search in a child process and kills it once `timeout` seconds pass:
+
+```python
+from pwshpy import OperationTimeoutError, ps
+
+if __name__ == "__main__":  # required: the search child re-imports this script
+    try:
+        pending = ps.get_windows_update(timeout=600).to_list()  # IsInstalled=0 and Type='Software'
+    except OperationTimeoutError as exc:
+        print(f"gave up after {exc.timeout}s")
+```
+
+Read-only: only `Search` is called, never Download or Install. `criteria=` takes any WUA search
+string and is passed to `IUpdateSearcher.Search` verbatim (`"IsInstalled=1"` lists what is
+installed; a malformed string is the agent's error, raised as `NativeCallError` with its HRESULT).
+The timeout must be in `(0, 2147483]` seconds (`ValueError` otherwise, at the call). The search
+starts when the pipeline is first iterated, and it is not streamed: the agent returns the whole
+result before the first record is yielded, so `.take(n)` or `.first()` does not make it shorter.
+A timed-out search raises `OperationTimeoutError` (its `.timeout` holds the limit), a subclass of the
+`NativeCallError` a Windows Update agent failure raises (its HRESULT is in the message): catch
+`OperationTimeoutError` first to tell the two apart.
+
+The child is started with the `spawn` method on every OS, which re-imports the calling script in
+the child. A script that calls `get_windows_update` at module level without an
+`if __name__ == "__main__":` guard therefore fails in the child at bootstrap, reported at once as
+`NativeCallError` ("worker exited without a result"); put the call under the guard (the `pwshpy`
+CLI already does).
+
+CLI: `pwshpy get_windows_update --timeout 600 --jsonl`; a timeout prints one `timed out` line on
+stderr and exits **110** (ETIMEDOUT).
 
 ## Predictable, memory-bounded file I/O
 
@@ -284,13 +289,16 @@ Details worth knowing:
   its list of packed file names.
 - **The `.ps1`'s `-PwshPyElevate` child on Windows is a fresh process.** UAC builds its environment
   from your profile, so variables set only in the calling shell (`PWSHPY_PACK_CACHE` among them) do
-  not reach it. It is started as `powershell.exe -ExecutionPolicy Bypass -File runner.ps1 ...`, so
-  the `-Name:Value` caveat above applies to the elevated run even when you called the runner from a
-  PowerShell prompt. Its own console window closes when it exits, so everything it has to say
+  not reach it. It is started with the PowerShell that runs the runner (`powershell.exe` under
+  Windows PowerShell 5.1, `pwsh.exe` under pwsh 7) as `-NoProfile -ExecutionPolicy Bypass -File
+  runner.ps1 ...`, so the `-Name:Value` caveat above applies to the elevated run even when you
+  called the runner from a PowerShell prompt. Its own console window closes when it exits, so everything it has to say
   comes back through the parent: the script's stdout and stderr on the parent's stdout and stderr,
-  and an error it hits before the script starts (a corrupt payload, a cache it cannot write, a
-  failed `uv` install) as a `pwshpy: the elevated child failed before running the script: <error>`
-  line on stderr with exit code 70. Only a child stopped before it can run a line of the runner (a
+  and an error it hits before the script starts (a corrupt payload, a cache it cannot write, an
+  error the `uv` installer throws) as a `pwshpy: the elevated child failed before running the
+  script: <error>` line on stderr with exit code 70. A `uv` that is still missing or refused after
+  that exits 127, as in a direct run, and a script that itself exits 70 gives the same code: the
+  stderr line is what tells them apart. Only a child stopped before it can run a line of the runner (a
   Group Policy execution policy, a closed window) leaves nothing to relay; then the parent prints a
   `pwshpy: the elevated child produced no output` line and exits with the child's code.
 - **An elevated run only runs a uv no other account can modify.** Run with an administrator token,
@@ -355,9 +363,12 @@ Details worth knowing:
   in your directory: uv runs the generated shim, which changes back to it first, or stops with
   `pwshpy pack: cannot return to the working directory <dir>` and exit code 70 when the elevated
   account cannot enter it (a root-squashed NFS export). What you gave relative to your directory is
-  made absolute before uv starts elsewhere: a relative `PWSHPY_PACK_CACHE`, and a `--with` value that
-  names a relative path (`./x.whl`, `dist/x.whl`, `x.whl`, `name @ ./x`; a `file:` URL is not
-  rewritten). And `UV_PYTHON`, `VIRTUAL_ENV`, `CONDA_PREFIX`, `UV_MANAGED_PYTHON`,
+  made absolute before uv starts elsewhere: a relative `PWSHPY_PACK_CACHE`, and a `--with` value
+  that names one relative path: `./x.whl`, `../x`, `dist/x.whl`, a bare distribution file name
+  (`x.whl`, `x.tar.gz`) and `name @ ./x` (any form holding a directory separator). Not rewritten, so
+  in an elevated run they still resolve against uv's starting directory: a comma-separated list
+  (only its first entry is prefixed), `name @ dir` with a bare directory name, and a `file:` URL.
+  Give such a value as an absolute path, one `--with` per entry. And `UV_PYTHON`, `VIRTUAL_ENV`, `CONDA_PREFIX`, `UV_MANAGED_PYTHON`,
   `UV_NO_MANAGED_PYTHON`, `UV_PYTHON_INSTALL_DIR`, `UV_CONFIG_FILE`, `UV_PYTHON_INSTALL_MIRROR` and
   `UV_PYTHON_DOWNLOADS_JSON_URL` are dropped from uv's environment, each with a `pwshpy: ignoring
   <NAME>` line on stderr: the first five name an interpreter, the last four move where uv's managed

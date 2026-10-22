@@ -17,18 +17,19 @@ native read commands return typed records through the lazy pipeline (`.where` / 
 
 ## Processes & system  *(portable)*
 
-| PowerShell                                 | pwshpy - Python (API)                                                    | pwshpy - CLI                                            |
-|--------------------------------------------|--------------------------------------------------------------------------|---------------------------------------------------------|
-| `Get-Process`                              | `ps.get_process()`                                                       | `pwshpy get_process`                                    |
-| `Get-Uptime`                               | `ps.get_uptime()`                                                        | `pwshpy get_uptime`                                     |
-| `Get-ChildItem Env:` / `$env:X`            | `ps.environment()`                                                       | `pwshpy env`                                            |
-| `Get-ComputerInfo`                         | `ps.get_computer_info()`                                                 | `pwshpy get_computer_info`                              |
-| `whoami /user`                             | `ps.get_current_identity()`                                              | `pwshpy get_current_identity`                           |
-| `Get-Hotfix`                               | `ps.get_hotfix()`  *(Windows)*                                           | `pwshpy get_hotfix`                                     |
-| `Get-WindowsImage -ImagePath P [-Index N]` | `ps.get_windows_image("P", index=None)`                                  | `pwshpy get_windows_image P [--index N]`                |
-| `Stop-Process -Id N`                       | `ps.stop_process(N, force=False)`  *(mutating)*                          | `pwshpy stop_process N [-f]`                            |
-| `Wait-Process -Id N`                       | `ps.wait_process(N, timeout=None)`                                       | `pwshpy wait_process N`                                 |
-| `Restart-Computer` / `Stop-Computer`       | `ps.restart_computer()` / `ps.stop_computer()`  *(Windows, destructive)* | `pwshpy restart_computer --yes` / `stop_computer --yes` |
+| PowerShell                                                          | pwshpy - Python (API)                                                      | pwshpy - CLI                                             |
+|---------------------------------------------------------------------|----------------------------------------------------------------------------|----------------------------------------------------------|
+| `Get-Process`                                                       | `ps.get_process()`                                                         | `pwshpy get_process`                                     |
+| `Get-Uptime`                                                        | `ps.get_uptime()`                                                          | `pwshpy get_uptime`                                      |
+| `Get-ChildItem Env:` / `$env:X`                                     | `ps.environment()`                                                         | `pwshpy env`                                             |
+| `Get-ComputerInfo`                                                  | `ps.get_computer_info()`                                                   | `pwshpy get_computer_info`                               |
+| `whoami /user`                                                      | `ps.get_current_identity()`                                                | `pwshpy get_current_identity`                            |
+| `Get-Hotfix`                                                        | `ps.get_hotfix()`  *(Windows)*                                             | `pwshpy get_hotfix`                                      |
+| `Get-WindowsImage -ImagePath P [-Index N]`                          | `ps.get_windows_image("P", index=None)`                                    | `pwshpy get_windows_image P [--index N]`                 |
+| `IUpdateSearcher.Search(C)` / `Get-WindowsUpdate` (PSWindowsUpdate) | `ps.get_windows_update(criteria=C, timeout=300.0)`  *(Windows, read-only)* | `pwshpy get_windows_update [--criteria C] [--timeout S]` |
+| `Stop-Process -Id N`                                                | `ps.stop_process(N, force=False)`  *(mutating)*                            | `pwshpy stop_process N [-f]`                             |
+| `Wait-Process -Id N`                                                | `ps.wait_process(N, timeout=None)`                                         | `pwshpy wait_process N`                                  |
+| `Restart-Computer` / `Stop-Computer`                                | `ps.restart_computer()` / `ps.stop_computer()`  *(Windows, destructive)*   | `pwshpy restart_computer --yes` / `stop_computer --yes`  |
 
 Filtering: in Python use `.where(predicate)` (or a plain `for`/`if`); on the CLI pipe `--jsonl` to `jq`.
 `Get-EventLog` (the classic API) is covered by `ps.get_win_event` (Get-WinEvent). `restart_computer` /
@@ -38,6 +39,14 @@ and the effective uid on POSIX, never `USERNAME`, which names the computer accou
 `get_windows_image` with an index the file does not hold raises `NativeCallError` (the CLI exits
 non-zero with a message on stderr); an index below 1 is refused at the
 call (`ValueError`, CLI usage error).
+`get_windows_update` searches Windows Update in a child process killed after `timeout` seconds
+(`OperationTimeoutError`, CLI exit 110); it never downloads or installs, `criteria` goes to the
+agent verbatim, and the result arrives whole on the first iteration (`.take(n)` does not shorten the
+search). A script calling it needs an `if __name__ == "__main__":` guard, because the search child
+re-imports it.
+`get_process` keeps psutil's names, so two Windows pseudo-processes differ from `Get-Process`:
+`MemCompression` (`Get-Process`: `Memory Compression`) and PID 0 `System Idle Process`
+(`Get-Process`: `Idle`).
 
 ## Networking  *(portable)*
 
@@ -104,14 +113,15 @@ way. A control the service or systemd refuses raises the plain `NativeCallError`
 after it, typically `StopPending`, without waiting - for a service that sits in Stop Pending
 (Windows Update's `wuauserv`) where `Stop-Service` would never return.
 
-| PowerShell                                   | pwshpy - Python (API)                             | pwshpy - CLI                      |
-|----------------------------------------------|---------------------------------------------------|-----------------------------------|
-| `Get-Service`                                | `ps.get_service()`  *(portable)*                  | `pwshpy get_service`              |
-| `Start-Service -Name N`                      | `ps.start_service("N", timeout=30.0)`             | `pwshpy start_service N`          |
-| `Stop-Service -Name N`                       | `ps.stop_service("N", timeout=30.0)`              | `pwshpy stop_service N`           |
-| `Stop-Service -Name N -NoWait`               | `ps.stop_service("N", wait=False)`                | `pwshpy stop_service --no-wait N` |
-| `Restart-Service -Name N`                    | `ps.restart_service("N", timeout=30.0)`           | `pwshpy restart_service N`        |
-| `Set-Service -Name N -StartupType Automatic` | `ps.set_service("N", ServiceStartType.AUTOMATIC)` | `pwshpy set_service N Automatic`  |
+| PowerShell                                       | pwshpy - Python (API)                             | pwshpy - CLI                      |
+|--------------------------------------------------|---------------------------------------------------|-----------------------------------|
+| `Get-Service`                                    | `ps.get_service()`  *(portable)*                  | `pwshpy get_service`              |
+| *(fail on an unreadable service, never skip it)* | `ps.get_service(strict=True)`                     | `pwshpy get_service --strict`     |
+| `Start-Service -Name N`                          | `ps.start_service("N", timeout=30.0)`             | `pwshpy start_service N`          |
+| `Stop-Service -Name N`                           | `ps.stop_service("N", timeout=30.0)`              | `pwshpy stop_service N`           |
+| `Stop-Service -Name N -NoWait`                   | `ps.stop_service("N", wait=False)`                | `pwshpy stop_service --no-wait N` |
+| `Restart-Service -Name N`                        | `ps.restart_service("N", timeout=30.0)`           | `pwshpy restart_service N`        |
+| `Set-Service -Name N -StartupType Automatic`     | `ps.set_service("N", ServiceStartType.AUTOMATIC)` | `pwshpy set_service N Automatic`  |
 
 ## Event log  *(read: portable; clear: Windows)*
 
@@ -143,11 +153,14 @@ a static oneshot). A principal is a SID on Windows and a decimal uid on Linux, n
 name. Logon triggers, `every_days` above 1 and a logon type are Windows-only, and with no principal
 a task runs as the interactive caller on Windows but as root on Linux; the full mapping is in
 [Library & Pipeline](docs/library-usage.md#scheduled-tasks-principal-run-level-and-triggers).
-Mutation needs admin (Windows) / root (Linux, system units).
+Mutation needs admin (Windows) / root (Linux, system units). A listing skips, with a logged
+WARNING, a folder, task or unit the caller cannot read; `strict=True` (CLI `--strict`) raises
+`NativeCallError` naming it instead, for when "not listed" must mean "does not exist".
 
 | PowerShell                                                                                              | pwshpy - Python (API)                                                            | pwshpy - CLI                                                  |
 |---------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|---------------------------------------------------------------|
 | `Get-ScheduledTask`                                                                                     | `ps.get_scheduled_task(folder_path="\\")`                                        | `pwshpy get_scheduled_task`                                   |
+| *(fail on an unreadable task, never skip it)*                                                           | `ps.get_scheduled_task(strict=True)`                                             | `pwshpy get_scheduled_task --strict`                          |
 | `Register-ScheduledTask -TaskName T -Action (New-ScheduledTaskAction -Execute P -Argument A)`           | `ps.register_scheduled_task("\\T", program="P", arguments="A", description="D")` | `pwshpy register_scheduled_task \T --program P --arguments A` |
 | `Register-ScheduledTask ... -Principal (New-ScheduledTaskPrincipal -UserId S-1-5-18 -RunLevel Highest)` | `principal=TaskPrincipal.system()`                                               | `--run-as local_system --run-level highest`                   |
 | `New-ScheduledTaskPrincipal -UserId SID -LogonType S4U`                                                 | `principal=TaskPrincipal(user_id="SID", logon_type=TaskLogonType.S4U)`           | `--run-as SID --logon-type s4u`                               |
@@ -223,7 +236,11 @@ The secret is a `SecretStr`: masked in repr / JSON / logs; read it with `.secret
 ## Elevation  *(portable)*
 
 All three are portable: the admin check is the Windows token / POSIX euid; the relaunch is
-Windows UAC or a POSIX `sudo` re-exec (argv + cwd forwarded, no-op when already elevated).
+Windows UAC or a POSIX `sudo` re-exec (argv + cwd forwarded, no-op when already elevated). A refused
+prompt raises `ElevationDeclinedError` (a `NativeCallError` subclass); `pwshpy --elevate` and the
+packed runners' `-PwshPyElevate` / `--pwshpy-elevate` exit 77 with a `pwshpy: elevation declined`
+line on stderr. `ps.get_current_identity()` (`whoami /user`) reads who the process runs as from its
+token.
 
 | PowerShell                                                          | pwshpy - Python (API)                                                         | pwshpy - CLI                    |
 |---------------------------------------------------------------------|-------------------------------------------------------------------------------|---------------------------------|
@@ -248,7 +265,8 @@ Always UTF-8, no BOM, LF by default - the same bytes on every OS (no `Out-File` 
 | `Start-Process -Wait` (waits for the whole tree) | `ps.exec(argv, wait_tree=True)`                                    | `pwshpy exec --wait-tree -- prog args` |
 
 `argv` is a LIST (no shell, no quoting hell); `.exit_code` is always set, `.stderr` is data,
-`.check()` raises on nonzero. `wait_tree=True` also waits for every process the program started
+`.check()` raises `NativeCallError` on nonzero. A run that outlives `timeout` is killed and raises
+`OperationTimeoutError` (CLI `--timeout`, exit 110); the output written so far is not returned. `wait_tree=True` also waits for every process the program started
 (see [Power tools](docs/power-tools.md#psexec---run-a-program-without-the-quoting--lastexitcode-traps)).
 
 ## Shipping a script to a machine without Python  *(portable)*
@@ -267,7 +285,11 @@ Pick the format for the target: a `.ps1` for Windows PowerShell 5.1 / pwsh 7, or
 POSIX `/bin/sh` (not only bash - dash, busybox ash, macOS `sh`, ...)**. The format auto-detects from
 the `-o` suffix, or force it with `--format ps1|sh` (API: `PackOptions(format=RunnerFormat.SH)`).
 Both pack and unpack are pure Python, so you can build a `.sh` on Windows and a `.ps1` on Linux, and
-`unpack` reads either format on either OS.
+`unpack` reads either format on either OS. An elevated run (administrator, SYSTEM or root) only runs
+a `uv` no other account can modify and only a uv-managed Python; `-PwshPyUv PATH` /
+`--pwshpy-uv PATH` pins the `uv` to run. The runner's own exit codes (64, 70, 77, 127) are listed in
+[CLI Reference](docs/cli-reference.md#exit-codes); the trust rule in
+[Power Tools](docs/power-tools.md#ship-a-script-as-one-file---pspack_script).
 
 ## Web requests  *(portable)*
 
@@ -342,7 +364,7 @@ These have **no purpose-built typed native command** in pwshpy yet:
   `get_net_ip_address`), `Get-NetRoute`, `Get-DnsClientServerAddress`.
 - **Module-only cmdlets:** ActiveDirectory (`Get-ADUser`, ...), Exchange, Azure (`Az.*`), and any
   other module's cmdlets - pwshpy ships typed **.NET convenience wrappers** for the common ones
-  (see below); they delegate to the real module cmdlet and need the `[full]` extra plus that module
+  (see above); they delegate to the real module cmdlet and need the `[full]` extra plus that module
   installed.
 
 **You are not blocked, though.** With the `[full]` extra, **every one of these runs at full

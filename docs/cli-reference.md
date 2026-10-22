@@ -26,9 +26,10 @@ the pipe decodes it as UTF-8 even from a cp1252 Windows console. The JSON that `
 
 At a terminal the human table fits the terminal's width and may shorten long cells. Piped or
 redirected (`pwshpy env | grep PATH`, `> out.txt`), it is as wide as its content instead, up to
-8192 columns, so no cell is cut: every value is whole, and a value without line breaks stays on
-one line. A table wider than 8192 columns folds its long values onto further lines rather than
-dropping characters (use `--jsonl` to keep such a value on one line). An explicit `COLUMNS` in
+8192 columns, so no cell is cut: every value is whole, and a value without line breaks stays on one
+line. A table wider than 8192 columns folds its long values onto further lines rather than dropping
+characters, breaking a value that holds spaces at a space. The table is for reading: use `--jsonl`
+when a script needs a value's exact bytes. An explicit `COLUMNS` in
 the environment still sets the width in both cases.
 
 **Everywhere** - one binding on Windows, macOS and Linux:
@@ -45,6 +46,11 @@ the environment still sets the width in both cases.
 | `pwshpy get_net_adapter`        | network interfaces            | psutil                                 |
 | `pwshpy get_computer_info`      | machine summary               | stdlib/psutil                          |
 | `pwshpy get_windows_image PATH` | images inside a WIM file      | stdlib + defusedxml (WIM header + XML) |
+
+`get_process` names a process as psutil does, so two Windows pseudo-processes differ from
+`Get-Process`: the memory compression store is `MemCompression` (`Get-Process`:
+`Memory Compression`) and PID 0 is `System Idle Process` (`Get-Process`: `Idle`). Every other name
+matches `Get-Process`'s `ProcessName`, `.exe` stripped.
 
 `get_windows_image PATH [--index N]` reads the WIM header and its XML resource directly, so it
 lists the images of a `.wim` (or a split `.swm` part) on any OS without DISM. An image file whose XML
@@ -232,6 +238,30 @@ an arbitrary script; `cmdlet NAME -p KEY=VALUE` runs one cmdlet with safely-boun
 module shortcuts `get_ad_user` / `get_ad_group` / `get_ad_computer` / `get_mailbox` / `get_az_vm` /
 `get_az_resource_group` are fixed-cmdlet `cmdlet`s (same `-p` params, `--streams` for all six streams)
 for the AD / Exchange / Azure long tail. Anything else is `pwshpy cmdlet Verb-Noun -p KEY=VALUE`.
+
+## Exit codes
+
+The `pwshpy` command and the packed runners share one set of exit codes, so a caller can tell a
+refusal, a timeout and a missing tool from an ordinary failure without parsing stderr. Each error
+also writes one `ErrorName: message` line (or a `pwshpy: ...` line from a runner) to stderr.
+
+| Code | Meaning                                                                                                                                                                                                                                                                                    | Raised by                                                                        |
+|------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
+| 0    | success                                                                                                                                                                                                                                                                                    | every command                                                                    |
+| 1    | a failure: a `PwshPyError` (`NativeCallError`, `PlatformUnsupportedError`, `ConfigurationError`, ...), including a missing `sudo` behind `pwshpy --elevate`                                                                                                                                | every command                                                                    |
+| 2    | a usage error: an unknown option, a value out of range (`--index 0`), an offset-less `--at` time                                                                                                                                                                                           | every command (click)                                                            |
+| 22   | a value the command accepted but the call refused (`ValueError`), e.g. `get_windows_update --timeout nan`                                                                                                                                                                                  | every command                                                                    |
+| 64   | a relative `-PwshPyUv` / `--pwshpy-uv` path                                                                                                                                                                                                                                                | packed runners                                                                   |
+| 70   | the runner failed before it ran the script: the elevated `.ps1` child (relayed with a `pwshpy: the elevated child failed before running the script` line), or an elevated run that cannot return to the caller's working directory (`pwshpy pack: cannot return to the working directory`) | packed runners                                                                   |
+| 77   | an elevation was refused or declined (`ElevationDeclinedError`), with a `pwshpy: elevation declined` line on stderr                                                                                                                                                                        | `pwshpy --elevate`, `-PwshPyElevate`, `--pwshpy-elevate`                         |
+| 110  | a timeout (`OperationTimeoutError`, ETIMEDOUT): `exec --timeout`, a service start, stop or restart that did not settle, `get_windows_update --timeout`                                                                                                                                     | `exec`, `start_service`, `stop_service`, `restart_service`, `get_windows_update` |
+| 127  | a missing or untrusted tool: no `uv` and `-PwshPyNoInstallUv` / `--pwshpy-no-install-uv`, no `uv` an elevated run can trust, a refused `-PwshPyUv` pin, or no `sudo` for `-PwshPyElevate` / `--pwshpy-elevate` on POSIX                                                                    | packed runners                                                                   |
+
+Any other exception that reaches the CLI keeps `lib_cli_exit_tools`' errno mapping
+(`FileNotFoundError` 2, `PermissionError` 13 on POSIX and 5 on Windows). A runner otherwise exits
+with the packed script's own code, so a script that itself exits 70, 77 or 127 gives the same number:
+the runner's stderr line is what tells them apart. `pwshpy is-elevated` exits 0 when elevated and 1
+when not.
 
 ## Configuration commands
 

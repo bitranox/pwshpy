@@ -144,8 +144,9 @@ ps.pack_script("setup.py")  # -> setup.ps1: one file that installs uv, unpacks, 
 
 Services, the event log, scheduled tasks, local accounts, ACLs, the credential vault, and the
 elevation *relaunch* all run natively on both Windows and Linux, verified on a real box on each. The
-only subsystems that stay Windows-only are the ones with no honest Linux analog - the registry and
-CIM/WMI (the [portability roadmap](docs/portability-roadmap.md) has the reasoning). The ambition is
+only subsystems that stay Windows-only are the ones with no honest Linux analog - the registry,
+CIM/WMI, hotfixes and the Windows Update search (the [portability roadmap](docs/portability-roadmap.md)
+has the reasoning). The ambition is
 deliberately dull and rather large: one setup script, every machine.
 
 ## The same task, with and without the landmines
@@ -237,6 +238,63 @@ per-record `write_records` - so memory stays flat whether the log holds twenty e
 million. Streaming is the default, not something you have to remember. (The full memory model lives
 in [Library & Pipeline](docs/library-usage.md).)
 
+## More of the surface, in one line each
+
+Each of these is one call in Python and one command on the CLI. [COMMANDS.md](COMMANDS.md) has the
+full cmdlet-by-cmdlet table.
+
+```bash
+# Get-WindowsImage without DISM, on any OS: the images inside a .wim (or a split .swm part)
+pwshpy get_windows_image install.wim --jsonl
+pwshpy get_windows_image install.wim --index 6
+
+# a Windows Update search that cannot hang: read-only, killed after --timeout (then exit 110)
+pwshpy get_windows_update --timeout 600 --jsonl
+
+# a scheduled task with a principal, a run level and triggers (Task Scheduler or systemd timers)
+pwshpy register_scheduled_task '\Maintenance\NightlyBackup' --program 'C:\Tools\backup.exe' \
+    --run-as local_system --run-level highest --daily 2026-11-01T03:00:00+01:00 --at-boot
+
+# Stop-Service -NoWait: issue the stop and return at once (typically StopPending)
+pwshpy stop_service --no-wait wuauserv
+
+# Start-Process -Wait: wait for the installer AND every process it started, kill the tree on timeout
+pwshpy exec --wait-tree --timeout 3600 -- setup.exe /quiet
+
+# whoami /user, read from the process token (never from USERNAME)
+pwshpy get_current_identity --jsonl
+
+# "not listed" must mean "does not exist": fail on a task it cannot read instead of skipping it
+pwshpy get_scheduled_task --strict --jsonl
+```
+
+The same in Python:
+
+```python
+from datetime import datetime, timedelta, timezone
+
+from pwshpy import BootTrigger, DailyTrigger, OperationTimeoutError, TaskPrincipal, ps
+
+images = ps.get_windows_image("install.wim").to_list()  # typed WindowsImage records
+ps.stop_service("wuauserv", wait=False)  # returns the state right after the stop
+try:
+    ps.exec(["setup.exe", "/quiet"], wait_tree=True, timeout=3600).check()
+except OperationTimeoutError as exc:  # the whole tree was killed
+    print(f"setup still running after {exc.timeout}s")
+ps.register_scheduled_task(
+    "\\Maintenance\\NightlyBackup",
+    program="C:\\Tools\\backup.exe",
+    principal=TaskPrincipal.system(),  # SYSTEM, elevated
+    triggers=[DailyTrigger(at=datetime(2026, 11, 1, 3, tzinfo=timezone(timedelta(hours=1)))), BootTrigger()],
+)
+```
+
+A script can branch on the exit code without parsing stderr: **77** means an elevation was declined
+(`pwshpy --elevate`, a packed runner's `-PwshPyElevate` / `--pwshpy-elevate`), **110** means a
+timeout (`exec --timeout`, a service start, stop or restart that did not settle,
+`get_windows_update`), and the packed runners add 64, 70 and 127. The full table is in the
+[CLI Reference](docs/cli-reference.md#exit-codes).
+
 ## The costly part: it stays true
 
 Claims are cheap, so here is the receipt. Every native read command is pinned by an oracle test that
@@ -251,9 +309,9 @@ green across Linux / macOS / Windows and CPython 3.10 through 3.15.
 Read it like a short book:
 
 1. **[Quick Start](docs/quickstart.md)** - install and the first five commands.
-2. **[Library & Pipeline](docs/library-usage.md)** - typed records, the lazy pipeline, the memory model.
-3. **[Power Tools](docs/power-tools.md)** - self-elevation, `exec`, predictable file I/O, credentials, script packing, .NET binding.
-4. **[CLI Reference](docs/cli-reference.md)** - the full command surface and configuration commands.
+2. **[Library & Pipeline](docs/library-usage.md)** - typed records, the lazy pipeline, the memory model, scheduled tasks, Windows images, deadlines and timeouts, the error types.
+3. **[Power Tools](docs/power-tools.md)** - self-elevation, who-am-I, `exec` (timeouts, waiting for a whole process tree), the Windows Update search, predictable file I/O, credentials, script packing, .NET binding.
+4. **[CLI Reference](docs/cli-reference.md)** - the full command surface, the exit codes and the configuration commands.
 5. **[Backends & Platforms](docs/backends-and-platforms.md)** - native vs .NET, OS support, Python baseline, status.
 6. **[Porting from PowerShell](COMMANDS.md)** - the cmdlet-by-cmdlet translation table.
 

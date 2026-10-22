@@ -11,7 +11,8 @@ win32 / wmi / winreg / psutil / stdlib socket bindings. Fast, no .NET. This is t
 common cmdlets.
 
 - The **portable subset** (psutil + stdlib socket / os.environ) works on every OS: processes,
-  connections, disks, uptime, resolve, test-connection, env, network adapters, computer info.
+  connections, disks, uptime, resolve, test-connection, env, network adapters, computer info, the
+  current identity, and the images of a WIM file (`get_windows_image` reads the file itself, no DISM).
 - The **portable native subsystems** dispatch by OS - win32 on Windows, an honest Linux backend
   on Linux: services (systemd D-Bus), event log (journald), scheduled tasks (systemd timers),
   local accounts (pwd / grp / shadow-utils), ACLs (POSIX ACL xattr) - read and mutating verbs.
@@ -23,8 +24,8 @@ common cmdlets.
   Windows and as root on Linux, and logon triggers, every-N-days daily triggers and logon types are
   Windows-only (the full table is in
   [Library & Pipeline](library-usage.md#scheduled-tasks-principal-run-level-and-triggers)).
-- Only three are **Windows-only**, having no honest Linux analog: the registry (Linux config is
-  files), CIM/WMI, and hotfixes.
+- Only four are **Windows-only**, having no honest Linux analog: the registry (Linux config is
+  files), CIM/WMI, hotfixes and the Windows Update search.
 
 ## .NET (hosts PowerShell 7.6 in-process)
 
@@ -38,8 +39,8 @@ clear `FeatureUnavailableError` and loads no .NET.
 - **Linux / macOS:** the portable native subset, the portable native subsystems on their Linux
   backends (systemd, journald, pwd/grp, POSIX ACL, Secret Service, sudo), and .NET when `[full]`
   and the .NET 10 runtime are present.
-- **Windows:** the same surface on win32 backends, plus the three Windows-only subsystems
-  (registry, CIM/WMI, hotfixes), and .NET.
+- **Windows:** the same surface on win32 backends, plus the four Windows-only subsystems
+  (registry, CIM/WMI, hotfixes, Windows Update search), and .NET.
 - **Every OS:** the portable power tools `ps.exec`, `ps.write_text` / `ps.write_text_stream` /
   `ps.write_records`, `ps.get_content_lines`, `ps.download_file`, `ps.is_elevated`, and
   `ps.get_credential`.
@@ -60,6 +61,7 @@ core on Linux for a fast loop; Windows remains the authoritative integration tar
 backends and real .NET, since neither installs on Linux.
 
 Making services, event log, scheduled tasks, local accounts, ACLs, elevation relaunch and the
-credential store portable to Linux is **done** - each dispatches by OS. Only the registry, CIM/WMI
-and hotfixes remain Windows-only, deliberately: they have no honest Linux equivalent. The
+credential store portable to Linux is **done** - each dispatches by OS. Only the registry, CIM/WMI,
+hotfixes and the Windows Update search remain Windows-only, deliberately: they have no honest Linux
+equivalent. The
 [portability roadmap](portability-roadmap.md) tracks the detail.

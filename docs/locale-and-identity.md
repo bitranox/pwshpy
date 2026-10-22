@@ -22,15 +22,17 @@ pwshpy therefore never exposes a localized string as a stable value:
   `message`) are carried as-is for display, but are never a match key and are
   never asserted against a literal in a test.
 
-What `EventLogEntry.message` holds on Windows: the event's message text exactly as
+What `EventLogEntry.message` holds on Windows: the event's message text as
 `Get-WinEvent` shows it in `Message`, in the provider's language resource for the
 host's UI language.  pwshpy renders it through the provider's publisher metadata
 (opened once per provider for each stream and closed when the stream ends), the
 same way the cmdlet does.  It is `None` - never an error text standing in for the
 message - when the provider has no publisher metadata on this machine (an
 uninstalled or manifest-less provider), when the provider's table has no message
-for that event, or when the message has no resource for the current locale; those
-are the cases in which `Get-WinEvent` reports no `Message` either.  On Linux it is
+for that event, or when the message has no resource for the current locale; those are the cases in
+which `Get-WinEvent` reports no `Message` either. One case differs: a message whose inserts the
+provider cannot resolve (`EvtFormatMessage` errors 15029 and 15030) is `None` in pwshpy, where
+`Get-WinEvent` shows the partial text it could format.  On Linux it is
 the journal entry's `MESSAGE` field.
 
 The pwsh oracles compare on locale-invariant bases: a .NET enum's `.ToString()`
@@ -74,6 +76,12 @@ admins = ps.get_acl(path).where(lambda e: e.trustee_sid == WellKnownSid.ADMINIST
 admins = ps.get_acl(path).where(lambda e: e.trustee_name == "Administrators")
 ```
 
-`EventLogEntry.user_id` already follows this: it is the raw SID from the event
-XML (`S-1-5-18`), not a resolved name.  The `WellKnownSid` enum and the ACL /
-local-account records land with those subsystems.
+`EventLogEntry.user_id` follows this too: it is the raw SID from the event XML (`S-1-5-18`), not a
+resolved name.
+
+The same rule holds where a caller NAMES a principal. A scheduled task's
+`TaskPrincipal(user_id=...)` and `LogonTrigger(user_id=...)` take a SID (or a `WellKnownSid` member)
+on Windows and a decimal uid on Linux; an account name is refused rather than resolved, because the
+same name means a different account, or none, on another locale. The CLI's
+`register_scheduled_task --run-as` takes a SID, a uid or a `WellKnownSid` name in any case
+(`local_system`), never an account name.

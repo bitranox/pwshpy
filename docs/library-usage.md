@@ -32,11 +32,30 @@ for conn in ps.get_net_tcp_connection():
 addresses = [record.address for record in ps.resolve_dns_name("example.com")]
 ```
 
-Records include `ProcessInfo`, `NetConnection`, `DiskUsage`, `SystemUptime`, `DnsRecord`,
-`ConnectionTest`, `EnvVar`, and the Windows set (`ServiceInfo`, `RegistryValue`, `EventLogEntry`,
-`CimInstance`, `ScheduledTaskInfo`, `LocalUser`, `LocalGroup`, `AclEntry`, `Hotfix`, ...). They
-serialize to JSON directly (`record.to_dict()`), and enum fields carry canonical English values
-regardless of the host locale.
+Records include `ProcessInfo`, `NetConnection`, `NetAdapter`, `NetIpAddress`, `DiskUsage`,
+`SystemUptime`, `DnsRecord`, `ConnectionTest`, `EnvVar`, `FileSystemItem`, `ComputerInfo`,
+`CurrentIdentity`, `WindowsImage`, `ProcessResult` (from `ps.exec`), the portable admin set
+(`ServiceInfo`, `EventLogEntry`, `ScheduledTaskInfo`, `LocalUser`, `LocalGroup`, `AclEntry`,
+`Credential`) and the Windows set (`RegistryValue`, `RegistryKey`, `CimInstance`, `Hotfix`,
+`WindowsUpdate`, ...). They serialize to JSON directly (`record.to_dict()`), and enum fields carry
+canonical values regardless of the host locale.
+
+Compare an enum field with its member, never with a display string. All are exported from `pwshpy`:
+`ProcessStatus` (psutil's lowercase values, `running`), `ConnectionState` (`LISTEN`),
+`TransportProtocol`, `AddressFamily`, `ServiceState` (`Running`), `ServiceStartType`, `ServiceKind`,
+`EventLevel` (`Error`), `TaskState`, `TaskRunLevel`, `TaskLogonType`, `RegistryHive`,
+`RegistryValueType`, `AceType`, `WellKnownSid` (the SID strings, `S-1-5-18`), `IntegrityLevel`,
+`ImageArchitecture` and `RunnerFormat`. In JSON an enum field is its value, so a `jq` filter on
+`--jsonl` output compares `.status == "Running"` for a service and `.status == "running"` for a
+process.
+
+### Process names
+
+`ps.get_process()` names each process as psutil does. On Windows two pseudo-processes are named
+differently from `Get-Process`: the kernel's memory compression store is `MemCompression`
+(`Get-Process`: `Memory Compression`) and PID 0 is `System Idle Process` (`Get-Process`: `Idle`).
+Every other name matches `Get-Process`'s `ProcessName` (psutil's `.exe` is stripped). Match by
+`pid` where it matters.
 
 ## The pipeline
 
@@ -249,11 +268,102 @@ On Windows the listing drops no service (`EnumServicesStatusEx` returns them all
 its default and the service stays listed; services systemd reports as not-found or masked (and
 stopped), aliases, templates and stale unit files are no services in either mode.
 
+## Windows images: `get_windows_image`
+
+`ps.get_windows_image(path, *, index=None)` lists the images inside a `.wim` (or a split `.swm` part),
+like `Get-WindowsImage -ImagePath`. It reads the file's header and XML resource itself, so it works
+on any OS with no DISM and no mounting:
+
+```python
+from pwshpy import ImageArchitecture, ps
+
+for image in ps.get_windows_image("install.wim"):
+    print(image.index, image.name, image.architecture.value, image.version)
+
+pro = ps.get_windows_image("install.wim", index=6).first()  # like -Index 6; stops reading after it
+x64 = ps.get_windows_image("install.wim").where(lambda i: i.architecture is ImageArchitecture.X64).to_list()
+```
+
+Each record is a `WindowsImage`: `index`, `name`, `description`, `edition_id`, `installation_type`,
+`architecture`, `version` (`MAJOR.MINOR.BUILD.SPBUILD`), `build`, `sp_build`, `languages`,
+`default_language` and `size_bytes`. Nothing is opened until the pipeline is consumed, so an
+unreadable file, a file that is not a WIM, a compressed XML resource (resource flag 0x04, refused
+rather than guessed at) and an `index` the file does not hold all raise `NativeCallError` then. An
+`index` below 1 raises `ValueError` at the call.
+
+## Deadlines and long waits
+
+Every call that waits takes a `timeout` in seconds, and running out of it raises
+`OperationTimeoutError` (its `.timeout` holds the limit). It subclasses `NativeCallError`, so catch it
+first to tell "ran out of time" from "refused" or "could not start":
+
+```python
+from pwshpy import NativeCallError, OperationTimeoutError, ps
+
+try:
+    ps.stop_service("wuauserv", timeout=60)
+except OperationTimeoutError as exc:
+    print(f"still stopping after {exc.timeout}s")  # the stop WAS issued; the service is on its way
+except NativeCallError as exc:
+    print(f"refused: {exc}")
+```
+
+- **Services:** `start_service`, `stop_service` and `restart_service` wait until the service settles
+  (default 30 s) and raise `OperationTimeoutError` after the control was issued, on Windows and
+  Linux alike. `stop_service(name, wait=False)` issues the stop and returns the state right after
+  it, typically `StopPending`, for a service that takes long to stop.
+- **Programs:** `exec(argv, timeout=...)` kills the program when the time is up; the output it wrote
+  so far is not returned. `exec(argv, wait_tree=True)` waits, like `Start-Process -Wait`, until the
+  program and every process it started have exited, and `timeout` then covers and kills the whole
+  tree. What counts as the tree on each OS is in
+  [Power Tools](power-tools.md#waiting-for-the-whole-process-tree-wait_treetrue-like-start-process--wait).
+- **Windows Update:** `get_windows_update(criteria=..., timeout=300.0)` runs the search in a child
+  process that is killed when the time is up. The search starts on the first iteration and
+  returns its whole result before the first record, so `.take(n)` does not shorten it.
+
+The Windows Update search child is started with the `spawn` method, which re-imports the script that
+called it. A script that uses `get_windows_update` must therefore keep its top level under a
+`__main__` guard; without one the child fails at bootstrap and the call raises `NativeCallError`
+("worker exited without a result"):
+
+```python
+from pwshpy import ps
+
+
+def main() -> None:
+    for update in ps.get_windows_update(timeout=600):
+        print(update.kb_article_ids, update.title)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+On the CLI a timeout exits 110 (see [CLI Reference](cli-reference.md#exit-codes)).
+
 ## Errors
 
-Every failure across both backends raises a subclass of `PwshPyError`: `NativeCallError` (a wrapped
-native/OS failure), `PowerShellError` (a .NET error record), `FeatureUnavailableError` (a .NET
-call without the `[full]` extra), `PlatformUnsupportedError` (a Windows-only call off Windows, or a
-scheduled-task input the running OS has no analog for), and `ConfigurationError`. No
-terminating-vs-non-terminating distinction, no `-ErrorAction Stop` to remember, no silently
-swallowed error.
+Every failure across both backends raises a subclass of `PwshPyError`, all exported from `pwshpy`:
+
+- `NativeCallError` - a wrapped native/OS failure, a `strict=True` listing that cannot read an item,
+  or `ProcessResult.check()` on a nonzero exit.
+  - `OperationTimeoutError` - a call ran out of its `timeout` (`.timeout` holds the limit).
+  - `ElevationDeclinedError` - the UAC prompt or sudo's password was refused by `ps.elevate()`.
+- `ElevationRequiredError` - `ps.require_elevation()` in a process that is not elevated.
+- `PowerShellError` - a .NET error record.
+- `FeatureUnavailableError` - a .NET call without the `[full]` extra.
+- `PlatformUnsupportedError` - a Windows-only call off Windows, or a scheduled-task input the running
+  OS has no analog for.
+- `ConfigurationError` - invalid configuration, or scheduled-task inputs that contradict each other.
+- `PackError` - a script could not be packed or unpacked.
+
+No terminating-vs-non-terminating distinction, no `-ErrorAction Stop` to remember, no silently
+swallowed error. Catch a subclass before its parent (`OperationTimeoutError` and
+`ElevationDeclinedError` before `NativeCallError`).
+
+## Building your own facade
+
+`ps` is `build_ps()`, built once at import: `build_ps()` returns a fresh `Ps` facade wired with the
+same native adapters. The CLI's own helpers are exported too: `get_config()` returns the layered
+configuration the CLI reads (see [CONFIG.md](../CONFIG.md)), and `print_info()` prints the package
+metadata `pwshpy info` shows.

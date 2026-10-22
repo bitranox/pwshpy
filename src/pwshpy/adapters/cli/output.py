@@ -21,7 +21,8 @@ a person or a text tool, not JSON.
 The human table fits a terminal's width. Piped or redirected it is sized to its content up to
 ``_MAX_PIPED_WIDTH`` columns, so no cell is cut: every value is whole, a value without line
 breaks stays on one line, and content wider than the ceiling folds onto further lines rather than
-losing characters. An explicit ``COLUMNS`` still sets the width either way.
+losing characters. An explicit ``COLUMNS`` still sets the width either way. Every cell prints its
+value literally: a value that looks like rich markup or an emoji code is shown as it is.
 
 Contents:
     * :class:`RecordFormat` - human / json / jsonl selector.
@@ -43,6 +44,7 @@ import orjson
 from rich.console import Console
 from rich.measure import Measurement
 from rich.table import Table
+from rich.text import Text
 
 from ...domain.records import PSRecord
 
@@ -185,9 +187,23 @@ def _write_json_array(records: Iterable[PSRecord]) -> None:
     out.flush()
 
 
-def _cell(value: object) -> str:
-    """Render one record field as a table cell (``None`` -> empty string)."""
-    return "" if value is None else str(value)
+def _cell(value: object) -> Text:
+    """Render one record field as a literal table cell (``None`` -> empty text).
+
+    A ``str`` cell is parsed by rich as console markup and emoji codes, so a record value was
+    treated as instructions: ``a[/]b`` raised MarkupError and failed the command, ``[bold]x[/bold]``
+    lost its tags, ``:smile:`` became an emoji and ``C:\\[x]`` lost its backslash. A ``Text`` is
+    printed exactly as given, and the table measures exactly the characters it prints, so the
+    piped-width sizing stays right. ``rich.markup.escape()`` was rejected: it covers markup only,
+    so emoji codes would still be replaced.
+
+    Example:
+        >>> _cell("a[/]b").plain
+        'a[/]b'
+        >>> _cell(None).plain
+        ''
+    """
+    return Text("" if value is None else str(value))
 
 
 def _stdout_is_terminal() -> bool:

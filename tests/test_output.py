@@ -264,3 +264,54 @@ def test_piped_table_never_cuts_a_neighbour_of_a_folded_value(
     joined = "".join("".join(line.split()).replace("\u2502", "") for line in lines)
     assert neighbour in joined
     assert "\u2026" not in joined
+
+
+# --- human table renders record values literally, never as rich markup ([88]) ---------------------
+
+#: Values rich would otherwise read as console markup, an emoji code or a markup escape. Each must
+#: come out byte for byte: a closing tag with nothing to close crashed the table (exit 1), the
+#: others silently printed something other than the value (a lost tag, an emoji, a lost backslash).
+_MARKUP_LIKE_VALUES = [
+    "a[/]b",
+    "[bold]abc[/bold]",
+    "[red]alert[/red]",
+    "[link=https://example.invalid/x]click[/link]",
+    ":thumbs_up: :smile:",
+    "C:\\[x]\\y",
+]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("value", _MARKUP_LIKE_VALUES)
+def test_env_table_prints_a_markup_like_value_verbatim(
+    value: str,
+    cli_runner: CliRunner,
+    production_factory: Callable[[], AppServices],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``pwshpy env`` exits 0 and shows a value that looks like rich markup exactly as it is."""
+    monkeypatch.delenv("COLUMNS", raising=False)
+    monkeypatch.setenv("ZZPWSHPY_X16_PROBE", value)
+    lines = [line for line in _invoke_env_table(cli_runner, production_factory).splitlines() if "ZZPWSHPY_X16" in line]
+    assert len(lines) == 1
+    assert value in lines[0]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("value", _MARKUP_LIKE_VALUES)
+def test_human_table_renders_a_markup_like_value_verbatim(value: str, capsys: pytest.CaptureFixture[str]) -> None:
+    """The renderer itself keeps every character of a markup-like cell value."""
+    emit([EnvVar(name="PROBE", value=value)], RecordFormat.HUMAN)
+    assert value in capsys.readouterr().out
+
+
+@pytest.mark.os_agnostic
+def test_piped_table_sizes_a_markup_like_value_by_its_literal_width(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured as literal text, a long markup-like value is whole on one line, never cut or wrapped."""
+    monkeypatch.delenv("COLUMNS", raising=False)
+    value = "[link=https://example.invalid/" + _LONG_VALUE + "]" + _LONG_VALUE + "[/link]"
+    lines = _emit_piped_table(capsys, [EnvVar(name="LINKISH", value=value), EnvVar(name="A", value="1")])
+    assert sum(value in line for line in lines) == 1

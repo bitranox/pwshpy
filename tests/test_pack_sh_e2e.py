@@ -34,6 +34,7 @@ from elevation_doubles import (
     link_tools,
     managed_python_env,
     owned_by_another_account,
+    session_uv_cache,
     trusted_managed_python,
     with_data_home,
     write_fake_sudo,
@@ -136,6 +137,8 @@ def _env(tmp_path: Path) -> dict[str, str]:
     child["PATH"] = os.pathsep.join([str(Path(_UV or "uv").parent), child.get("PATH", "")])
     # Never a Python download into a real user directory ([92]): uv uses what is installed.
     child["UV_PYTHON_DOWNLOADS"] = "never"
+    # Nor a script environment in the real user's uv cache ([93]).
+    child["UV_CACHE_DIR"] = str(session_uv_cache())
     return child
 
 
@@ -1403,6 +1406,10 @@ def test_as_root_the_python_is_found_for_the_scripts_requires_python(tmp_path: P
         assert not found.exists()
 
 
+#: A key uv refuses to parse: a uv.toml holding it fails every uv call that reads it (exit 2, naming it).
+_PLANTED_UV_KEY = "pwshpy-planted-key"
+
+
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
 @pytest.mark.parametrize("scope", ["system", "user"])
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
@@ -1410,20 +1417,22 @@ def test_as_root_no_uv_configuration_file_is_read(
     tmp_path: Path, shell_id: str, shell: list[str], scope: str, as_root: bool
 ) -> None:
     """[A2] (user decision: ignore all uv config): a uv.toml can name a cache directory, an index or a
-    Python download mirror, so a root run passes --no-config to every uv call. The planted config names
-    a cache directory; the control shows uv reads it (system: XDG_CONFIG_DIRS, user: XDG_CONFIG_HOME)."""
+    Python download mirror, so a root run passes --no-config to every uv call. The planted config holds
+    a key uv refuses, so reading it fails the run with no side effect; the control shows uv reads it
+    (system: XDG_CONFIG_DIRS, user: XDG_CONFIG_HOME)."""
     _needs_managed_python()
     runner, uv = _python_runner(tmp_path, as_root=as_root)
-    planted_cache = tmp_path / "planted-cache"
     config_root = tmp_path / f"config-{scope}"
     (config_root / "uv").mkdir(parents=True)
-    (config_root / "uv" / "uv.toml").write_text(f"cache-dir = '{planted_cache}'\n", encoding="utf-8")
+    (config_root / "uv" / "uv.toml").write_text(f"{_PLANTED_UV_KEY} = 1\n", encoding="utf-8")
     variable = "XDG_CONFIG_DIRS" if scope == "system" else "XDG_CONFIG_HOME"
     environment = {**_trust_env(tmp_path, uv.parent), variable: str(config_root)}
     result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
-    assert result.returncode == 0, result.stdout + result.stderr
-    # Not root (the control), uv reads it and the planted cache directory appears.
-    assert planted_cache.exists() is not as_root, result.stdout + result.stderr
+    if as_root:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _PLANTED_UV_KEY not in result.stderr, result.stderr
+    else:
+        assert result.returncode == 2 and _PLANTED_UV_KEY in result.stderr, result.stdout + result.stderr
 
 
 # --- [57] as root uv starts in / and the shim returns to the caller's directory -------------------------

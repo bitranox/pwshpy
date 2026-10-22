@@ -38,6 +38,7 @@ from elevation_doubles import (
     link_tools,
     managed_python_env,
     owned_by_another_account,
+    session_uv_cache,
     trusted_managed_python,
     with_data_home,
     write_fake_sudo,
@@ -133,6 +134,8 @@ def _run(runner: Path, *arguments: str, env: dict[str, str] | None = None) -> su
     child_env["PYTHONIOENCODING"] = "utf-8"
     # Never a Python download into a real user directory ([92]): uv uses what is installed.
     child_env["UV_PYTHON_DOWNLOADS"] = "never"
+    # Nor a script environment in the real user's uv cache ([93]), unless the test names its own.
+    child_env.setdefault("UV_CACHE_DIR", str(session_uv_cache()))
     runner = _as_this_invoker(runner, arguments)
     return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
         [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), _NEVER_INSTALL_UV, *arguments],
@@ -1172,6 +1175,8 @@ def _run_with_path(
     if f"{_STAND_IN_PROBE}$true" in runner.read_text(encoding="utf-8") and "UV_PYTHON_INSTALL_DIR" not in (env or {}):
         child_env.update(managed_python_env(tmp_path, managed=_needs_managed_python()))
     child_env.update(env or {})
+    # Never the real user's uv cache ([93]), unless the test names its own.
+    child_env.setdefault("UV_CACHE_DIR", str(session_uv_cache()))
     child_env.pop("PWSHPY_TEST_UV", None)
     child_env["PATH"] = os.pathsep.join([*map(str, path_first), os.environ.get("PATH", "")])
     return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
@@ -2190,6 +2195,10 @@ def test_the_windows_data_home_is_the_known_folder_not_appdata(tmp_path: Path) -
     assert lines["answer"] == lines["known"], lines
 
 
+#: A key uv refuses to parse: a uv.toml holding it fails every uv call that reads it (exit 2, naming it).
+_PLANTED_UV_KEY = "pwshpy-planted-key"
+
+
 @pytest.mark.local_only
 @pytest.mark.parametrize("scope", ["system", "user"])
 @pytest.mark.parametrize(
@@ -2201,16 +2210,15 @@ def test_an_elevated_run_reads_no_uv_configuration_file(
 ) -> None:
     """[A2] (user decision: ignore all uv config): a uv.toml can name a cache directory, an index or a
     Python download mirror, so an elevated run passes --no-config to every uv call. The planted config
-    names a cache directory; the control shows uv reads it. System scope: XDG_CONFIG_DIRS/uv (POSIX), or
-    on Windows %SYSTEMDRIVE%\\ProgramData\\uv, which is where uv 0.13 looks (measured: PROGRAMDATA and
-    ALLUSERSPROFILE change nothing). User scope: XDG_CONFIG_HOME/uv (POSIX), or APPDATA\\uv (Windows,
-    which the probe environment already points at the test's data home).
+    holds a key uv refuses, so reading it fails the run with no side effect; the control shows uv reads
+    it. System scope: XDG_CONFIG_DIRS/uv (POSIX), or on Windows %SYSTEMDRIVE%\\ProgramData\\uv, which is
+    where uv 0.13 looks (measured: PROGRAMDATA and ALLUSERSPROFILE change nothing). User scope:
+    XDG_CONFIG_HOME/uv (POSIX), or APPDATA\\uv (Windows, which the probe environment already points at
+    the test's data home).
     """
     managed = _needs_managed_python()
     runner, head = _python_runner(tmp_path, elevated=elevated)
     probe = interpreter_probe_env(tmp_path, managed=managed)
-    probe.pop("UV_CACHE_DIR")
-    planted_cache = tmp_path / "planted-cache"
     config_base = tmp_path / f"config-{scope}"
     if sys.platform != "win32":
         probe["XDG_CONFIG_DIRS" if scope == "system" else "XDG_CONFIG_HOME"] = str(config_base)
@@ -2221,10 +2229,13 @@ def test_an_elevated_run_reads_no_uv_configuration_file(
     else:
         config_root = data_home(tmp_path)
     (config_root / "uv").mkdir(parents=True, exist_ok=True)
-    (config_root / "uv" / "uv.toml").write_text(f"cache-dir = '{planted_cache}'\n", encoding="utf-8")
+    (config_root / "uv" / "uv.toml").write_text(f"{_PLANTED_UV_KEY} = 1\n", encoding="utf-8")
     result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))
+    if config_read:
+        assert result.returncode == 2 and _PLANTED_UV_KEY in result.stderr, result.stdout + result.stderr
+        return
     assert result.returncode == 0, result.stdout + result.stderr
-    assert planted_cache.exists() is config_read, result.stdout + result.stderr
+    assert _PLANTED_UV_KEY not in result.stderr, result.stderr
 
 
 # --- [57] an elevated run starts uv in a directory only administrators can write -------------------

@@ -20,6 +20,7 @@ Contents:
     * :func:`managed_python_dir` - the host's uv-managed Python directory, when one holds an install.
     * :func:`trusted_managed_python` - that directory, or a copy of one install an elevated run may trust.
     * :func:`interpreter_probe_env` - a uv search confined to one test (fresh cache, no downloads).
+    * :func:`session_uv_cache` - a uv cache directory for the whole test session, never a real user's.
     * :func:`managed_python_env` - name uv's managed-Python directory so an elevated run finds it too.
     * :func:`data_home` - the data directory a test makes an elevated runner believe is its account's.
     * :func:`with_data_home` - a runner whose account data-home lookup answers :func:`data_home`.
@@ -396,6 +397,23 @@ def _ask_uv(uv: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+@functools.lru_cache(maxsize=1)
+def session_uv_cache() -> Path:
+    """A uv cache directory shared by the whole test session and deleted at exit.
+
+    A packed run that names no UV_CACHE_DIR would build its script environments in the cache of
+    whoever runs the suite. One directory for the session, not one per test: the deliberate cowsay
+    fetch and the local wheels then resolve once.
+
+    Example:
+        >>> session_uv_cache().is_dir()
+        True
+    """
+    root = Path(tempfile.mkdtemp(prefix="pwshpy-uv-cache-"))
+    atexit.register(shutil.rmtree, root, ignore_errors=True)
+    return root
+
+
 def interpreter_probe_env(scratch: Path, *, managed: Path | None) -> dict[str, str]:
     """Variables that confine uv's interpreter search to one test: a fresh cache, downloads off.
 
@@ -507,6 +525,7 @@ __all__ = [
     "managed_python_dir",
     "managed_python_env",
     "owned_by_another_account",
+    "session_uv_cache",
     "with_data_home",
     "write_fake_sudo",
     "write_planted_environment",

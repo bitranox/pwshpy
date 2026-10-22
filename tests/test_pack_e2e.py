@@ -186,8 +186,12 @@ def _project(root: Path, *, exit_code: int = 0) -> Path:
 
 
 def _isolated_cache(tmp_path: Path) -> dict[str, str]:
-    """Point the runner's extraction cache at a temp dir so tests never touch the real one."""
-    return {"PWSHPY_PACK_CACHE": str(tmp_path / "cache")}
+    """Point the runner's extraction cache and uv's cache at temp dirs so tests never touch the real ones.
+
+    ``UV_CACHE_DIR`` too: a run given only this mapping (the whole-runner stand-ins, the concurrent
+    cold start) would otherwise build its script environment in the real user's uv cache ([93]).
+    """
+    return {"PWSHPY_PACK_CACHE": str(tmp_path / "cache"), "UV_CACHE_DIR": str(session_uv_cache())}
 
 
 def _has_passwordless_sudo() -> bool:

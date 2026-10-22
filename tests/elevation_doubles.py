@@ -338,7 +338,7 @@ def managed_python_dir() -> Path | None:
     uv = shutil.which("uv")
     if uv is None:
         return None
-    found = _ask_uv(uv, "python", "find", "--no-project", "--python-preference", "only-managed")
+    found = _ask_uv(uv, *_FIND_MANAGED)
     if found.returncode != 0:
         return None
     directory = _ask_uv(uv, "python", "dir")
@@ -365,7 +365,7 @@ def trusted_managed_python() -> Path | None:
     uv = shutil.which("uv")
     if managed is None or uv is None or sys.platform == "win32":
         return managed
-    found = _ask_uv(uv, "python", "find", "--no-project", "--python-preference", "only-managed")
+    found = _ask_uv(uv, *_FIND_MANAGED)
     install = Path(found.stdout.strip()).resolve().parents[1]
     root = Path(tempfile.mkdtemp(prefix="pwshpy-managed-python-"))
     atexit.register(shutil.rmtree, root, ignore_errors=True)
@@ -375,6 +375,11 @@ def trusted_managed_python() -> Path | None:
             if not path.is_symlink():
                 path.chmod(path.stat().st_mode & ~0o022)
     return root
+
+
+#: How the helpers ask uv for a managed Python: as an elevated run does (``--system``), so the answer is
+#: an install uv manages, never a ``.venv`` near uv's directory or an active environment.
+_FIND_MANAGED = ("python", "find", "--system", "--no-project", "--python-preference", "only-managed")
 
 
 def _ask_uv(uv: str, *arguments: str) -> subprocess.CompletedProcess[str]:

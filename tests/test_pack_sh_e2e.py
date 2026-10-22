@@ -1601,3 +1601,31 @@ def test_as_root_an_entry_named_with_a_quote_runs_through_the_shim(
     reported = _reported_cwd(result)
     assert reported is not None and reported.samefile(work), result.stdout
     assert "argv:['a b']" in result.stdout, result.stdout
+
+
+#: The start of a root run's uv options; the control below removes --no-config from it.
+_ROOT_RUN_OPTIONS = "set -- --no-config --python-preference only-managed"
+
+
+@pytest.mark.parametrize("no_config", [True, False], ids=["root", "root-without-no-config-control"])
+def test_as_root_a_uv_toml_directory_above_the_anchor_changes_nothing(tmp_path: Path, no_config: bool) -> None:
+    """[A2]: uv run --project reads a uv.toml from the project directory and every one above it unless
+    --no-config, so a DIRECTORY named uv.toml there (any account can create C:\\uv.toml above System32)
+    failed every elevated run; now it changes nothing. The control, the same root run with --no-config
+    taken off its uv run, fails on it: the plant is reachable."""
+    _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=True)
+    (tmp_path / "anchor-parent" / "uv.toml").mkdir(parents=True)
+    anchor = tmp_path / "anchor-parent" / "anchor"
+    anchor.mkdir()
+    _with_anchor(runner, anchor)
+    if not no_config:
+        text = runner.read_text(encoding="utf-8")
+        assert text.count(_ROOT_RUN_OPTIONS) == 1
+        runner.write_text(text.replace(_ROOT_RUN_OPTIONS, "set -- --python-preference only-managed"), encoding="utf-8")
+    result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=_trust_env(tmp_path, uv.parent), cwd=anchor)
+    if no_config:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _reported_python(result) is not None, result.stdout
+    else:
+        assert result.returncode == 2 and "uv.toml" in result.stderr, result.stdout + result.stderr

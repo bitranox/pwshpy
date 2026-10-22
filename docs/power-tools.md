@@ -341,44 +341,57 @@ Details worth knowing:
   `uv` on `PATH` runs. Accepted residual risk: a process already running as the same account could
   swap that account's `uv`, before the elevated run starts or between its check and its exec; no
   other account can.
-- **An elevated run only runs a Python uv manages.** uv picks the interpreter the script runs on,
-  and it executes every interpreter it considers to ask its version, so a `python` planted in a
-  `PATH` directory another account can write would run with the elevated rights. Elevated (an
-  administrator token, SYSTEM, or root, decided exactly as for the `uv` check above), the runner
-  calls `uv run --python-preference only-managed`, so uv looks only at the Pythons it installed
-  itself (under the running account's own profile: `%APPDATA%\uv\python`, `~/.local/share/uv/python`).
-  A machine with none gets one on the first elevated run: uv downloads a CPython build (a few tens
-  of megabytes) by itself, unless uv's Python downloads are switched off
-  (`UV_PYTHON_DOWNLOADS=never`, `python-downloads = "never"`), in which case uv stops with `No
-  interpreter found in virtual environments or managed installations` and a hint naming the
-  setting; `uv python install` as the elevated account provides one ahead of time. That first
-  download (about 36 MiB, unpacked to about 100 MB) is also why the first elevated run is slow, and
-  why it fails on a machine without network access. More ways to name an interpreter outright
-  would beat that flag, and an elevated run closes each. uv probes a `.venv` in its working
-  directory and every directory above, and under `only-managed` it even runs the script on that
-  venv's `python` (measured with uv 0.13), so uv is started in `/` on POSIX or `System32` on Windows
-  (`--directory`), directories only administrators can write, and looks up the `.python-version`
-  and `uv.toml` it would read from the script's directory upwards (the cache, which
-  `PWSHPY_PACK_CACHE` can put anywhere) from there too (`--project`). The packed script still runs
-  in your directory: uv runs the generated shim, which changes back to it first, or stops with
-  `pwshpy pack: cannot return to the working directory <dir>` and exit code 70 when the elevated
-  account cannot enter it (a root-squashed NFS export). What you gave relative to your directory is
-  made absolute before uv starts elsewhere: a relative `PWSHPY_PACK_CACHE`, and a `--with` value
-  that names one relative path: `./x.whl`, `../x`, `dist/x.whl`, a bare distribution file name
-  (`x.whl`, `x.tar.gz`) and `name @ ./x` (any form holding a directory separator). Not rewritten, so
-  in an elevated run they still resolve against uv's starting directory: a comma-separated list
-  (only its first entry is prefixed), `name @ dir` with a bare directory name, and a `file:` URL.
-  Give such a value as an absolute path, one `--with` per entry. And `UV_PYTHON`, `VIRTUAL_ENV`, `CONDA_PREFIX`, `UV_MANAGED_PYTHON`,
-  `UV_NO_MANAGED_PYTHON`, `UV_PYTHON_INSTALL_DIR`, `UV_CONFIG_FILE`, `UV_PYTHON_INSTALL_MIRROR` and
-  `UV_PYTHON_DOWNLOADS_JSON_URL` are dropped from uv's environment, each with a `pwshpy: ignoring
-  <NAME>` line on stderr: the first five name an interpreter, the last four move where uv's managed
-  Pythons live or come from, so an administrator who points elevated runs at a custom install
-  directory or download mirror on purpose has to set that in uv's own system-wide configuration.
-  One denial of service remains on Windows: starting in `System32`, uv also reads a `uv.toml` from
-  each directory above it, so any account can create a folder named `C:\uv.toml` and make every
-  elevated `.ps1` run fail (it cannot change what runs). Not elevated, nothing changes: uv starts in
-  your directory with your environment, and the `.sh` runs the entry itself. The `-PwshPyUv` /
-  `--pwshpy-uv` pin is unaffected: it chooses the `uv`, not the Python.
+- **An elevated run only runs a Python uv manages, named to uv outright.** uv picks the interpreter
+  the script runs on, and it executes every interpreter it considers to ask its version, so a
+  `python` planted in a `PATH` directory another account can write would run with the elevated
+  rights; and `uv run` probes a `.venv` in its working directory and EVERY directory above it, and
+  under `--python-preference only-managed` even runs the script on that venv's `python` (measured
+  with uv 0.13). Elevated (an administrator token, SYSTEM, or root, decided exactly as for the `uv`
+  check above), the runner therefore resolves the interpreter itself before the run: `uv python find
+  --system --python-preference only-managed`, which probes no `.venv` at all, with the packed
+  script's `requires-python` as the request (read from its PEP 723 block when packing; `uv run` would
+  only warn about an interpreter outside it). uv's managed Pythons are the ones in the running
+  account's own data directory, which the runner names to uv itself (`UV_PYTHON_INSTALL_DIR`):
+  `<RoamingAppData>\uv\python` on Windows, the RoamingAppData known folder of the running token, and
+  `<home>/.local/share/uv/python` on POSIX, the home the passwd database records for the euid (asked
+  of `getent`, `id -P` or `/etc/passwd` in the fixed helper directories; no answer stops the run with
+  exit code 70), whatever `APPDATA`, `HOME` or `XDG_DATA_HOME` say. A machine with none gets one on
+  the first elevated run: the runner calls `uv python install --no-bin` (plus `--no-registry` on
+  Windows), which downloads a CPython build (about 36 MiB, unpacked to about 100 MB, hence a slow
+  first run and a failure without network access), unless `UV_PYTHON_DOWNLOADS` is `never` or
+  `manual`, in which case the run stops with uv's own `No interpreter found in managed installations`
+  and its exit code 2; `uv python install` as the elevated account provides one ahead of time. The
+  path uv found must pass the same check as `uv` itself (see above, the directories above it
+  included), or the run stops with `refusing the Python uv found at <path>: <reason>` and exit code 127. The run is then
+  `uv run --no-config --python-preference only-managed --python <that path>`, started in `/` on POSIX
+  or `System32` on Windows (`--directory`, `--project`), so the `.python-version` uv would read from
+  the script's directory upwards (the cache, which `PWSHPY_PACK_CACHE` can put anywhere) and every
+  `.venv` above the caller's directory or above `System32` (any authenticated user can create
+  `C:\.venv`) are never consulted. `--no-config`, on every uv call an elevated run makes (`uv run`,
+  `uv python find`, `uv python install`), means no `uv.toml` is read at all: not the system-wide one
+  (`%SYSTEMDRIVE%\ProgramData\uv\uv.toml` on Windows, `/etc/uv/uv.toml` or one under
+  `XDG_CONFIG_DIRS` on POSIX), not the user's, and not one above the starting directory, since any of
+  them could name a cache directory, a package index or a Python download mirror. An elevated run uses
+  uv's defaults plus the runner's own flags (user decision); a custom install directory or download
+  mirror cannot be configured for it. A directory named `C:\uv.toml` therefore no longer stops
+  elevated `.ps1` runs. The packed script still runs in your directory: uv runs the generated shim,
+  which changes back to it first, or stops with `pwshpy pack: cannot return to the working directory
+  <dir>` and exit code 70 when the elevated account cannot enter it (a root-squashed NFS export). What
+  you gave relative to your directory is made absolute before uv starts elsewhere: a relative
+  `PWSHPY_PACK_CACHE`, and a `--with` value that names one relative path: `./x.whl`, `../x`,
+  `dist/x.whl`, a bare distribution file name (`x.whl`, `x.tar.gz`) and `name @ ./x` (any form
+  holding a directory separator). Not rewritten, so in an elevated run they still resolve against
+  uv's starting directory: a comma-separated list (only its first entry is prefixed), `name @ dir`
+  with a bare directory name, and a `file:` URL. Give such a value as an absolute path, one `--with`
+  per entry. Dropped from the environment, each with a `pwshpy: ignoring <NAME>` line on stderr:
+  `UV_PYTHON`, `VIRTUAL_ENV`, `CONDA_PREFIX`, `UV_MANAGED_PYTHON` and `UV_NO_MANAGED_PYTHON` (they
+  name an interpreter), `UV_PYTHON_INSTALL_DIR`, `UV_CONFIG_FILE`, `UV_PYTHON_INSTALL_MIRROR` and
+  `UV_PYTHON_DOWNLOADS_JSON_URL` (they move where uv's managed Pythons live or come from), and
+  `PYTHONHOME` and `PYTHONPATH`, which the interpreter itself reads (another standard library, the
+  caller's directories ahead of it), so the packed script does not see them either. Not elevated,
+  nothing changes: uv starts in your directory with your environment and configuration, and the
+  `.sh` runs the entry itself. The `-PwshPyUv` / `--pwshpy-uv` pin is unaffected: it chooses the
+  `uv`, not the Python.
 - **Any file name packs.** The entry name and every packed file name land in the runner as quoted
   literals, so `it's.py`, a typographic quote, `$`, a backtick or a space in a name, or in a `--with`
   value, reaches the runner and uv as given. Refused at pack time, with the reason: a name holding a
@@ -389,9 +402,13 @@ Details worth knowing:
 - **Self-elevation keeps working.** A packed script calling `ps.elevate()` re-execs the extracted
   entry with the environment uv already built, so it elevates exactly as it would unpacked.
 - **The cache is verified before every run** against per-file hashes embedded in the artefact, and
-  re-extracted on any mismatch - a cache directory that may later be executed elevated must not be
-  tamperable between runs. Both runners serialize a cold-cache extraction with an atomic lock
-  (`FileShare.None` on Windows, a lock file created under `noclobber` on POSIX), so two concurrent first runs never race.
+  re-extracted on any mismatch, so a file changed since an earlier run is replaced before uv starts.
+  That check reads each file once; it does not stop an account that can write the cache directory
+  from changing a file between the check and uv reading it, and an elevated run does not judge who
+  can write the cache directory itself. For an elevated run, keep the cache (`PWSHPY_PACK_CACHE`, or
+  the default per-user cache directory) where only the elevated account can write. Both runners
+  serialize a cold-cache extraction with an atomic lock (`FileShare.None` on Windows, a lock file
+  created under `noclobber` on POSIX), so two concurrent first runs never race.
 - **Packing is deterministic**: identical sources produce identical bytes (the `.sh` tar is built
   with fixed mtime/mode/order), so the payload hash is a stable cache key and two builds are
   comparable.

@@ -40,12 +40,16 @@
     them; a directory above may be writable only with the sticky bit). Any other uv it finds is
     skipped with a line on stderr, and a -PwshPyUv path that fails the check is refused with exit
     code 127. As root on POSIX it runs its own helpers only from the fixed system directories.
-    Elevated, the script runs only on a Python uv manages (downloaded on first use unless uv's
-    Python downloads are switched off), and uv starts in a directory only administrators can write
-    (/ on POSIX, System32 on Windows), so no .venv in or above your directory is ever run; the
-    script itself still runs in your directory. UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX,
+    Elevated, the script runs only on a Python uv manages in the running account's own data
+    directory (the RoamingAppData known folder on Windows, <home from the passwd database>/.local/share
+    on POSIX; downloaded on first use unless UV_PYTHON_DOWNLOADS is never or manual), found with
+    `uv python find --system` and handed to uv run as --python after the same check as uv itself,
+    so no .venv anywhere is ever run; uv starts in a directory only administrators can write (/ on
+    POSIX, System32 on Windows), and the script itself still runs in your directory. Every uv call
+    an elevated run makes reads no uv.toml (--no-config). UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX,
     UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON, UV_PYTHON_INSTALL_DIR, UV_CONFIG_FILE,
-    UV_PYTHON_INSTALL_MIRROR and UV_PYTHON_DOWNLOADS_JSON_URL are ignored, each with a line on stderr.
+    UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL, PYTHONHOME and PYTHONPATH are ignored,
+    each with a line on stderr.
 
     Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -1146,11 +1150,11 @@ $PwshPyPrepareRun = {
     if ($PwshPyRootPath) { $env:PATH = $PwshPyCallerPath }
 
     # uv picks the interpreter, and runs every one it considers to ask its version, so a python planted
-    # in a PATH directory another account can write would run elevated. Elevated, uv considers only the
-    # Pythons it manages (user decision), downloading one on first use unless downloads are switched off,
-    # and starts in the anchor directory; the shim is told where to change back to. Everything uv is
-    # handed that the caller gave relative to its own directory (a --with path, a relative
-    # PWSHPY_PACK_CACHE) is made absolute first, or it would resolve against the anchor.
+    # in a PATH directory another account can write would run elevated. Elevated, uv runs the Python
+    # Resolve-PwshPyManagedPython chose (a Python uv manages, user decision) and starts in the anchor
+    # directory; the shim is told where to change back to. Everything uv is handed that the caller gave
+    # relative to its own directory (a --with path, a relative PWSHPY_PACK_CACHE) is made absolute
+    # first, or it would resolve against the anchor.
     $PwshPyRunArgs = @('run', '--no-project')
     if ($PwshPyElevatedRun) {
         $PwshPyRunArgs += Get-PwshPyManagedPythonOption -Python $PwshPyPython

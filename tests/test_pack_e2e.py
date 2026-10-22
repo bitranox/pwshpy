@@ -2336,6 +2336,36 @@ def test_an_elevated_run_never_executes_a_venv_above_the_anchor(
     assert reported is not None and reported.samefile(anchor), result.stdout
 
 
+#: The start of an elevated run's uv options; the control below removes --no-config from it.
+_ELEVATED_RUN_OPTIONS = "return @('--no-config', '--python-preference'"
+
+
+@pytest.mark.local_only
+@pytest.mark.parametrize("no_config", [True, False], ids=["elevated", "elevated-without-no-config-control"])
+def test_a_uv_toml_directory_above_the_anchor_changes_nothing(tmp_path: Path, no_config: bool) -> None:
+    """[A2]: uv run --project reads a uv.toml from the project directory and every one above it unless
+    --no-config, so a DIRECTORY named uv.toml there (any authenticated user can create C:\\uv.toml above
+    System32) failed every elevated run; now it changes nothing. The control, the same elevated run with
+    --no-config taken off its uv run, fails on it: the plant is reachable."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated="$true")
+    (tmp_path / "anchor-parent" / "uv.toml").mkdir(parents=True)
+    anchor = tmp_path / "anchor-parent" / "anchor"
+    anchor.mkdir()
+    _with_anchor(runner, anchor)
+    if not no_config:
+        text = runner.read_text(encoding="utf-8")
+        assert text.count(_ELEVATED_RUN_OPTIONS) == 1
+        runner.write_text(text.replace(_ELEVATED_RUN_OPTIONS, "return @('--python-preference'"), encoding="utf-8")
+    probe = interpreter_probe_env(tmp_path, managed=managed)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=anchor)
+    if not no_config:
+        assert result.returncode == 2 and "uv.toml" in result.stderr, result.stdout + result.stderr
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _reported_python(result) is not None, result.stdout
+
+
 @pytest.mark.local_only
 @pytest.mark.parametrize(
     ("elevated", "refused"),

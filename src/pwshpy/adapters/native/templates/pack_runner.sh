@@ -26,12 +26,14 @@
 # directory holding it, and every directory above that); any other uv it finds is skipped with a
 # line on stderr, and a --pwshpy-uv path that fails the check is refused with exit code 127. As root
 # it also runs its own helpers (ls, tar, base64, ...) only from the fixed system directories, never
-# from the PATH it was given, and runs the script only on a Python uv manages (downloaded on first
-# use unless uv's Python downloads are switched off), with uv started in / so that no .venv in or
-# above your directory is ever run (the script itself still runs in your directory); UV_PYTHON,
-# VIRTUAL_ENV, CONDA_PREFIX, UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON, UV_PYTHON_INSTALL_DIR,
-# UV_CONFIG_FILE, UV_PYTHON_INSTALL_MIRROR and UV_PYTHON_DOWNLOADS_JSON_URL are ignored, each with a
-# line on stderr.
+# from the PATH it was given, and runs the script only on a Python uv manages in root's own data
+# directory (<home from the passwd database>/.local/share/uv/python; downloaded on first use unless
+# UV_PYTHON_DOWNLOADS is never or manual), found with `uv python find --system` and handed to uv run
+# as --python, after the same check as uv itself, so no .venv anywhere is ever run (the script itself
+# still runs in your directory). Every uv call it makes as root reads no uv.toml (--no-config).
+# UV_PYTHON, VIRTUAL_ENV, CONDA_PREFIX, UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON, UV_PYTHON_INSTALL_DIR,
+# UV_CONFIG_FILE, UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL, PYTHONHOME and PYTHONPATH
+# are ignored, each with a line on stderr.
 #
 # Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -800,13 +802,11 @@ fi
 
 if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # uv picks the interpreter, and runs every one it considers to ask its version, so a python
-    # planted in a PATH directory another account can write would run as root. As root uv considers
-    # only the Pythons it manages (user decision), downloading one on first use unless downloads are
-    # switched off; project discovery (the .python-version and uv.toml uv would read from the cache
-    # and every directory above it) moves to /, which only root can write; and uv itself starts in /
-    # (--directory), because it probes a .venv in its working directory and every one above, and
-    # under only-managed even runs the script on that venv's python (measured with uv 0.13.0). So uv
-    # runs the generated shim, which changes back to the caller's directory (handed over in
+    # planted in a PATH directory another account can write would run as root. As root the runner
+    # names the interpreter itself (pwshpy_resolve_managed_python: a Python uv manages, user
+    # decision); project discovery moves to the anchor, which only root can write, and uv itself
+    # starts there (--directory), so nothing in the caller's directory is read. So uv runs the
+    # generated shim, which changes back to the caller's directory (handed over in
     # @@PWSHPY_CWD_ENV@@) before the entry runs; every path the caller gave relative to that
     # directory (a --with path, a relative PWSHPY_PACK_CACHE) is made absolute first.
     # Asked while the helpers still come from the fixed PATH.

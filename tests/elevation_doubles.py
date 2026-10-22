@@ -483,8 +483,10 @@ def plant_library_path(scratch: Path, kind: str, marker: Path, *, home: Path) ->
             encoding="utf-8",
         )
         env_file = scratch / "injected.env"
-        env_file.write_text(f"PYTHONPATH={injected}\n", encoding="utf-8")
-        return {"UV_ENV_FILE": str(env_file)}
+        # Forward slashes: uv reads a backslash in UV_ENV_FILE as an escape, so a Windows path loses its
+        # separators ("No environment file found at: C:Users...", uv 0.13 on Windows); "/" works there.
+        env_file.write_text(f"PYTHONPATH={injected.as_posix()}\n", encoding="utf-8")
+        return {"UV_ENV_FILE": env_file.as_posix()}
     if kind == "user-base":
         base = scratch / "user-base"
         _plant_user_site(base, marker)

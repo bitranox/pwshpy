@@ -2906,9 +2906,9 @@ def test_an_elevated_run_lets_no_git_variable_reach_the_script(tmp_path: Path, e
 
 # --- [X24 G2] git's global config file: HOME, USERPROFILE and XDG_CONFIG_HOME are the caller's ---------
 
-#: What an elevated run points git's global config at: a device no account can replace.
-_GIT_GLOBAL = "NUL" if sys.platform == "win32" else "/dev/null"
-_GIT_GLOBAL_SET = f"pwshpy: setting GIT_CONFIG_GLOBAL={_GIT_GLOBAL}"
+#: What an elevated run on POSIX points git's global config at: a file only root can change. (Windows
+#: names an empty file of its own: [117] below.)
+_GIT_GLOBAL_SET = "pwshpy: setting GIT_CONFIG_GLOBAL=/dev/null"
 
 
 @pytest.mark.local_only
@@ -2951,9 +2951,10 @@ def test_an_elevated_run_never_runs_a_command_from_the_callers_global_git_config
     """[X24 G2], end to end with the real uv and git, on Windows too: a core.fsmonitor command in the
     global git config below the profile the run was given (HOME, and USERPROFILE on Windows) or below
     its XDG_CONFIG_HOME runs from uv's git fetch of a --with git source (the control runs it: the plant
-    fires). Elevated, git reads GIT_CONFIG_GLOBAL (NUL on Windows, /dev/null on POSIX) instead: uv still
-    fetches the source (its git database appears in the cache), and the command never runs. The
-    profile is a scratch directory, never the real one. Offline, so both arms then fail to build it."""
+    fires). Elevated, git reads GIT_CONFIG_GLOBAL (an empty file of the runner's on Windows, [117];
+    /dev/null on POSIX) instead: uv still fetches the source (its git database appears in the cache),
+    and the command never runs. The profile is a scratch directory, never the real one. Offline, so
+    both arms then fail to build it."""
     managed = _needs_managed_python()
     marker = tmp_path / "git-hook-ran.txt"
     hook = tmp_path / "hook.sh"
@@ -2979,3 +2980,118 @@ def test_an_elevated_run_never_runs_a_command_from_the_callers_global_git_config
     assert any(any(cache.glob("git-v*/db/*")) for cache in caches), "uv fetched no git source: " + result.stderr
     ran = marker.exists()
     assert ran is (elevated == "$false"), "global git config command ran: " + str(ran) + result.stderr
+
+
+# --- [117] Windows: GIT_CONFIG_GLOBAL names an empty file of the runner's, not the NUL device ------------
+# An MSYS2 or Cygwin git may read a bare NUL as a file named NUL in its working directory, so an
+# elevated run on Windows points git at an empty file below its account's own data directory instead,
+# judged by the trust rule every other elevated path passes.
+
+#: The packed script under test: prints the GIT_CONFIG_GLOBAL it got.
+_ENTRY_REPORTING_GIT_GLOBAL = """import os
+
+print("gitglobal:" + os.environ.get("GIT_CONFIG_GLOBAL", ""))
+"""
+#: The refusal of a git configuration file another account could change.
+_GIT_GLOBAL_REFUSED = "pwshpy: refusing the git configuration file"
+
+
+def _empty_git_config(tmp_path: Path) -> Path:
+    """Where an elevated test run's empty global git configuration lives: below its scratch data home."""
+    return data_home(tmp_path) / "pwshpy" / "empty.gitconfig"
+
+
+def _reported_git_global(result: subprocess.CompletedProcess[str]) -> str | None:
+    for line in result.stdout.splitlines():
+        if line.startswith("gitglobal:"):
+            return line[len("gitglobal:") :].strip()
+    return None
+
+
+def _global_git_listing(profile: Path, git_global: Path | None) -> subprocess.CompletedProcess[str]:
+    """``git config --global --list`` with ``profile`` as HOME and USERPROFILE, and GIT_CONFIG_GLOBAL
+    set to ``git_global`` (unset when None)."""
+    git = shutil.which("git")
+    assert git is not None
+    environment = {**os.environ, "HOME": str(profile), "USERPROFILE": str(profile)}
+    environment.pop("XDG_CONFIG_HOME", None)
+    environment.pop("GIT_CONFIG_GLOBAL", None)
+    if git_global is not None:
+        environment["GIT_CONFIG_GLOBAL"] = str(git_global)
+    return subprocess.run(  # noqa: S603 - fixed argv, git resolved by shutil.which
+        [git, "config", "--global", "--list"],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+        timeout=60,
+        check=False,
+    )
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.parametrize("state", ["absent", "already-empty"])
+def test_an_elevated_run_on_windows_points_git_config_global_at_an_empty_file_of_its_own(
+    tmp_path: Path, state: str
+) -> None:
+    """[117]: elevated on Windows, GIT_CONFIG_GLOBAL reaches the packed script as an empty file below the
+    account's data directory (created when absent, reused when already there and empty), with a line on
+    stderr, rather than the NUL device a non-Git-for-Windows git may read as a file in its working
+    directory. Git for Windows reads that file as an empty global configuration: with a planted
+    .gitconfig in the profile it lists nothing, while the same listing without the variable lists the
+    plant (the control that the listing reads the profile at all)."""
+    managed = _needs_managed_python()
+    empty = _empty_git_config(tmp_path)
+    if state == "already-empty":
+        empty.parent.mkdir(parents=True)
+        empty.touch()
+    runner, head = _python_runner(tmp_path, elevated="$true", source=_ENTRY_REPORTING_GIT_GLOBAL)
+    environment = interpreter_probe_env(tmp_path, managed=managed)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=environment, cwd=_clean_cwd(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    reported = _reported_git_global(result)
+    assert reported is not None and Path(reported) == empty, (reported, result.stdout)
+    assert empty.is_file() and empty.stat().st_size == 0, empty
+    assert f"pwshpy: setting GIT_CONFIG_GLOBAL={empty}" in result.stderr, result.stderr
+    if shutil.which("git") is None:
+        return
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / ".gitconfig").write_text("[pwshpy]\n\tprobe = planted\n", encoding="utf-8", newline="\n")
+    planted = _global_git_listing(profile, None)
+    assert "pwshpy.probe=planted" in planted.stdout, planted.stdout + planted.stderr
+    listing = _global_git_listing(profile, empty)
+    assert listing.stdout == "", listing.stdout + listing.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.parametrize("where", ["directory-open", "file-open", "file-not-empty", "trusted-control"])
+def test_an_elevated_run_on_windows_refuses_a_git_config_file_it_cannot_trust(tmp_path: Path, where: str) -> None:
+    """[117]: the empty global git configuration an elevated run names is judged as every other elevated
+    path is: when Users may modify its directory or the file, or the file is not empty, the run exits
+    127 naming the file, and the packed script never runs. The control, the same file left trusted and
+    empty, runs the script."""
+    managed = _needs_managed_python()
+    empty = _empty_git_config(tmp_path)
+    empty.parent.mkdir(parents=True)
+    empty.touch()
+    if where == "directory-open":
+        _icacls(empty.parent, "/grant", f"{_SID_USERS}:(M)")
+    elif where == "file-open":
+        _icacls(empty, "/grant", f"{_SID_USERS}:(M)")
+    elif where == "file-not-empty":
+        empty.write_text("[core]\n\tfsmonitor = planted\n", encoding="utf-8")
+    runner, head = _python_runner(tmp_path, elevated="$true", source=_ENTRY_REPORTING_GIT_GLOBAL)
+    environment = interpreter_probe_env(tmp_path, managed=managed)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=environment, cwd=_clean_cwd(tmp_path))
+    if where == "trusted-control":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _reported_git_global(result) is not None, result.stdout
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert _GIT_GLOBAL_REFUSED in result.stderr and str(empty) in result.stderr, result.stderr
+    assert _reported_git_global(result) is None, result.stdout

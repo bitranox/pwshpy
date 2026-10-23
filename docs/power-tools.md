@@ -447,14 +447,21 @@ Details worth knowing:
   `GCM_CREDENTIAL_STORE` the store) and `PASSWORD_STORE_DIR` (where its `gpg` store reads
   credentials) are dropped too. The drop goes by the prefix, so a variable a later git or Git
   Credential Manager release adds is dropped too. git's global configuration file is not read
-  either: after the drop the runner sets `GIT_CONFIG_GLOBAL` to `/dev/null` (POSIX) or the `NUL`
-  device (Windows), with a line on stderr, so neither the `.gitconfig` below the `HOME` (or, on
-  Windows, `USERPROFILE`, which a UAC relaunch keeps as the caller's) nor `git/config` below
-  `XDG_CONFIG_HOME` that the run was given applies (a `core.fsmonitor` command planted there ran
-  from uv's git fetch before, measured; Git for Windows 2.55 reads `NUL` as empty, measured); the
-  packed script inherits the variable, so a git it runs reads no
-  global configuration file either: no `user.name`/`user.email` and no `credential.helper` from the
-  elevated account's own `.gitconfig` (an elevated 1.5.x run read them). A script that needs them
+  either: after the drop the runner sets `GIT_CONFIG_GLOBAL`, with a line on stderr, so neither the
+  `.gitconfig` below the `HOME` (or, on Windows, `USERPROFILE`, which a UAC relaunch keeps as the
+  caller's) nor `git/config` below `XDG_CONFIG_HOME` that the run was given applies (a
+  `core.fsmonitor` command planted there ran from uv's git fetch before, measured). On POSIX it is
+  `/dev/null`. On Windows it is an empty file the runner creates below the account's own data
+  directory (the RoamingAppData known folder, as for uv's managed Pythons):
+  `pwshpy\empty.gitconfig`, which Git for Windows 2.55 reads as an empty configuration (measured);
+  not the `NUL` device, which an MSYS2 or Cygwin git may read as a file named `NUL` in its working
+  directory. The file and every directory above it pass the same trust rule as a `uv`; when another
+  account could change them, or the file is not empty, the run stops with `pwshpy: refusing the git
+  configuration file <path>: <reason>` and exit code 127, naming the remedy (take the other
+  account's write access off, or remove the directory so the next elevated run creates it). The
+  packed script inherits the variable, so a git it runs reads no global configuration file either:
+  no `user.name`/`user.email` and no `credential.helper` from the elevated account's own
+  `.gitconfig` (an elevated 1.5.x run read them). A script that needs them
   passes them itself (`git -c user.name=... -c user.email=...`) or points `GIT_CONFIG_GLOBAL` at a
   file it trusts before it runs git. git honours `GIT_CONFIG_GLOBAL` from 2.32 on; an older git ignores
   it and still reads those files. The system file (`/etc/gitconfig`, or the one below Git for Windows'

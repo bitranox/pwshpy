@@ -60,12 +60,13 @@
     UV_KEYRING_PROVIDER, every variable whose name starts with GIT_ (git, which uv runs for a git
     source, reads them) or GCM_ (Git Credential Manager, the credential helper git runs, reads them;
     both on Windows in any case), SSH_ASKPASS and PASSWORD_STORE_DIR are ignored, each with a line on
-    stderr; git reads no global config file (GIT_CONFIG_GLOBAL is NUL on Windows, /dev/null on POSIX,
-    so not the .gitconfig below the HOME, USERPROFILE or XDG_CONFIG_HOME it was given; git 2.32 or
-    later); the user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file
-    (--no-env-file). In a network that reaches the internet only through a proxy, an elevated run
-    can download nothing: the managed Python and every package the script needs must already be in
-    the account's directories named above.
+    stderr; git reads no global config file (GIT_CONFIG_GLOBAL is /dev/null on POSIX and on Windows
+    an empty file below the account's data directory, pwshpy\empty.gitconfig, refused with exit 127
+    when another account could change it, so not the .gitconfig below the HOME, USERPROFILE or
+    XDG_CONFIG_HOME it was given; git 2.32 or later); the user site-packages is off
+    (PYTHONNOUSERSITE=1) and uv run reads no .env file (--no-env-file). In a network that reaches
+    the internet only through a proxy, an elevated run can download nothing: the managed Python and
+    every package the script needs must already be in the account's directories named above.
 
     Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
 
@@ -1121,6 +1122,30 @@ function Get-PwshPyAccountCacheHome {
     return ((Get-PwshPyAccountHome) + '/.cache')
 }
 
+function Get-PwshPyEmptyFileDistrust {
+    param([string] $Path)
+
+    # Why $Path cannot serve an elevated run as an empty file no other account can change, or ''. Makes
+    # the directory and the file when they are missing; the directory is judged before anything is
+    # written in it, so a file is only ever created where no other account can swap it, and an existing
+    # entry is never truncated or deleted (a link there could point at any file the elevated account
+    # may write). A link, a directory or a file with content in its place is refused: only an account
+    # trusted with the directory can have put it there, and removing it is left to that account.
+    $directory = [IO.Path]::GetDirectoryName($Path)
+    $null = [IO.Directory]::CreateDirectory($directory)
+    $why = Get-PwshPyUvDistrust -Path $directory -Directory $true
+    if ($why) { return $why }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item) {
+        # CreateNew: fails rather than open whatever appeared at the path since it was looked at.
+        [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write).Dispose()
+        $item = Get-Item -LiteralPath $Path -Force
+    }
+    if ($item.LinkType -or $item.PSIsContainer) { return "$Path is not a plain file" }
+    if ($item.Length -ne 0) { return "$Path is not empty" }
+    return (Get-PwshPyUvDistrust -Path $Path)
+}
+
 function Get-PwshPyAccountHome {
     # POSIX: the home of the account this run is (no trailing slash; '' for /), from the passwd
     # database: getent asks every name service (Linux), id -P is the BSD and macOS form, and
@@ -1435,12 +1460,22 @@ $PwshPyPrepare = {
         # caller's profile) and XDG_CONFIG_HOME this run got, and a core.fsmonitor, core.sshCommand or
         # credential.helper there runs a command elevated when uv fetches a git source. A set
         # GIT_CONFIG_GLOBAL replaces both (git 2.32 and later; an older git ignores it and still reads
-        # them). Windows: the NUL device, which Git for Windows reads as empty (measured with 2.55), and
-        # which no account can replace, unlike a path such as \dev\null that a git not mapping it
-        # resolves on the current drive, where any user may create the folder; POSIX: /dev/null, which
-        # only root can change. Set after the drop, which would remove it. The system file
+        # them). POSIX: /dev/null, which only root can change. Windows: an empty file below the
+        # account's own data directory, judged as an elevated run judges a uv, which Git for Windows
+        # reads as an empty configuration (measured with 2.55). Not the NUL device, which an MSYS2 or
+        # Cygwin git may read as a file named NUL in its working directory, nor a path such as
+        # \dev\null, which a git not mapping it resolves on the current drive, where any user may
+        # create the folder. Set after the drop, which would remove it. The system file
         # (Program Files' etc\gitconfig, /etc/gitconfig) is the administrators' and still applies.
-        $PwshPyGitGlobal = if ($PwshPyOnWindows) { 'NUL' } else { '/dev/null' }
+        $PwshPyGitGlobal = '/dev/null'
+        if ($PwshPyOnWindows) {
+            $PwshPyGitGlobal = Join-Path (Join-Path (Get-PwshPyAccountDataHome) 'pwshpy') 'empty.gitconfig'
+            $PwshPyGitGlobalWhy = Get-PwshPyEmptyFileDistrust -Path $PwshPyGitGlobal
+            if ($PwshPyGitGlobalWhy) {
+                Write-PwshPyFailure "pwshpy: refusing the git configuration file ${PwshPyGitGlobal}: $PwshPyGitGlobalWhy (an elevated run points GIT_CONFIG_GLOBAL only at an empty file no other account can modify): take every other account's write access off the path named above and leave the file empty, or remove its directory and run again elevated, which creates it"
+                exit 127
+            }
+        }
         Set-Item -LiteralPath 'Env:GIT_CONFIG_GLOBAL' -Value $PwshPyGitGlobal
         Write-PwshPyNotice "pwshpy: setting GIT_CONFIG_GLOBAL=${PwshPyGitGlobal}: an elevated run lets git read no caller's global config"
         $PwshPyDataHome = Get-PwshPyAccountDataHome

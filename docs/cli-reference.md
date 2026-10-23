@@ -102,6 +102,17 @@ later one leaves an unterminated array (see [Portable record commands](#portable
 Timers systemd reports as not-found or masked (and stopped), aliases and templates are no tasks in
 either mode; a running one is still listed.
 
+`get_scheduled_task --task-name NAME [--folder PATH]` lists nothing: it reads the one task `NAME` in
+`--folder` (default root; on Windows a trailing backslash, the form `task_path` carries, is
+accepted). A folder elsewhere that the caller cannot read never affects the answer. A task that
+does not exist prints nothing (`--json`: `[]`) and exits 0, with `--strict` too; `--strict` decides
+only a task that exists but cannot be read. `NAME` is the task's own name: an empty one, or one with
+a folder part, exits 1 with `ConfigurationError`. Windows matches the name without regard to case
+and echoes the spelling you passed in `task_name` and `task_path`. On Linux `--folder` is ignored
+and the answer is the task's `.timer`, else its on-demand `.service`: a service-only task (no
+trigger) is found by name although the listing, timers only, leaves it out. The suffix is optional,
+and `job.service` names the task `job`, so it answers with the timer record when `job` has a timer.
+
 `get_service [--strict]` follows the same contract. On Linux it skips, with a warning naming it, a
 refused unit-file listing (then no stopped, unloaded service is listed) or a service unit systemd
 will not load or whose load state it will not read; `--strict` exits 1 with one `NativeCallError`

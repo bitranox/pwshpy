@@ -667,15 +667,30 @@ class Ps:
         """
         return Pipeline(self._cim_source(class_name, where=where, namespace=namespace))
 
-    def get_scheduled_task(self, folder_path: str = "\\", *, strict: bool = False) -> Pipeline[ScheduledTaskInfo]:
+    def get_scheduled_task(
+        self, folder_path: str = "\\", *, task_name: str | None = None, strict: bool = False
+    ) -> Pipeline[ScheduledTaskInfo]:
         """Return a lazy, STREAMING pipeline over scheduled tasks (native, portable).
 
         Recurses the Task Scheduler folder tree under ``folder_path`` on Windows (like
         Get-ScheduledTask); on Linux lists the systemd ``.timer`` units (``folder_path``
-        ignored). Yields one record at a time.
+        ignored). Yields one record at a time. Given ``task_name`` it lists nothing and answers
+        for that one task.
 
         Args:
             folder_path: The Task Scheduler folder to recurse (Windows); the root by default.
+                With ``task_name``, the folder holding the task; a trailing backslash (the form a
+                record's ``task_path`` carries) is accepted. Ignored on Linux.
+            task_name: Look up this one task in ``folder_path`` without walking the tree, so an
+                unreadable task elsewhere cannot affect the answer; empty when it does not exist,
+                under ``strict`` too. The task's own name only: an empty name or one with a folder
+                part raises :class:`ConfigurationError`. Windows matches it without regard to case
+                and the record carries the spelling passed here and in ``folder_path`` (the
+                scheduler echoes the caller's spelling), so compare it case-insensitively with a
+                listed one. Linux: the timer, else the on-demand service (which the listing,
+                timers only, leaves out); a ``.timer``/``.service`` suffix is optional, and
+                ``job.service`` names the task ``job`` - its timer record when it has a timer.
+                None (default) lists as before.
             strict: What happens to an item that cannot be read - on Windows a folder whose
                 tasks or subfolders the caller may not list, or a protected or corrupt task; on
                 Linux a refused unit-file listing or ``LoadUnit``. False (default) skips it and
@@ -683,17 +698,24 @@ class Ps:
                 True raises :class:`NativeCallError` naming the folder, task or unit instead: use
                 it when "not listed" must mean "does not exist", e.g. to check a task is gone.
                 The pipeline is lazy, so the error is raised when iteration reaches the item.
+                With ``task_name`` it decides only a task that exists but cannot be read.
 
         Raises:
-            NativeCallError: The scheduler cannot be reached, ``folder_path`` cannot be opened,
-                or (with ``strict``) an item cannot be read - raised during iteration.
+            ConfigurationError: ``task_name`` is empty or names a folder as well as a task
+                (Linux also: no systemd unit name) - raised during iteration.
+            NativeCallError: The scheduler cannot be reached, ``folder_path`` cannot be opened
+                (without ``task_name``), or (with ``strict``) an item cannot be read - raised
+                during iteration.
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().get_scheduled_task(strict=True), Pipeline)
             True
+            >>> lookup = build_ps().get_scheduled_task("\\Microsoft\\Windows\\Defrag", task_name="ScheduledDefrag")
+            >>> isinstance(lookup, Pipeline)  # lazy: nothing is read until it is iterated
+            True
         """
-        return Pipeline(self._scheduled_task_source(folder_path, strict=strict))
+        return Pipeline(self._scheduled_task_source(folder_path, strict=strict, task_name=task_name))
 
     def register_scheduled_task(
         self,

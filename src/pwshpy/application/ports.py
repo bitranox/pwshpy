@@ -355,9 +355,13 @@ class ScheduledTaskSource(Protocol):
 
     ``strict`` decides what happens to an item the source cannot read: False skips it with a
     logged WARNING, True raises :class:`~pwshpy.domain.errors.NativeCallError` naming it.
+    ``task_name`` looks up that one task in ``folder_path`` instead of walking (at most one
+    record; none when it does not exist, under ``strict`` too).
     """
 
-    def __call__(self, folder_path: str = "\\", *, strict: bool = False) -> Iterator[ScheduledTaskInfo]: ...
+    def __call__(
+        self, folder_path: str = "\\", *, strict: bool = False, task_name: str | None = None
+    ) -> Iterator[ScheduledTaskInfo]: ...
 
 
 class ScheduledTaskController(Protocol):

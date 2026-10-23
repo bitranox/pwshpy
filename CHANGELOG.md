@@ -12,18 +12,20 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   lower-case GUID; `type`, such as `UpdateClassification` or `Product`; `name`) per category, so a
   caller can select Security or Definition updates without matching a localized name. The
   `categories` name list is unchanged; the classification GUIDs are listed in `docs/power-tools.md`.
-- The Windows scheduled-task source (`iter_scheduled_tasks`) takes `task_name`: it opens that one
-  task in `folder_path` directly instead of walking the folder tree, so an unreadable task
-  elsewhere no longer refuses a question about a different one. A task or folder that does not
-  exist (HRESULT 0x80070002) is an empty result, under `strict=True` too; any other failure keeps
-  the listing's rule (a WARNING, or `NativeCallError` under `strict`). `folder_path` may end in a
-  backslash, the form a record's `task_path` carries. An empty `task_name`, or one containing a
-  backslash (a path, not a name), raises `ConfigurationError`. `is_not_found()` exposes the
-  not-found test. The Linux source (`iter_timers`) takes the same `task_name` and lists nothing:
-  it reads the task's `.timer`, else its on-demand `.service` (found by name although the listing,
-  timers only, leaves it out), else nothing, under `strict=True` too; a masked or alias unit file
-  counts as absent, as in the listing. An empty name, a folder part (`/`, or a backslash that
-  starts no systemd `\xNN` escape) or an invalid unit name raises `ConfigurationError`.
+- `get_scheduled_task(task_name=...)` / `--task-name` looks up one task without walking the folder
+  tree; an unreadable task elsewhere no longer affects it. On Linux it also finds an on-demand
+  (trigger-less) task, which the listing leaves out. A task or folder that does not exist is an
+  empty result (Windows: HRESULT 0x80070002 from opening the folder or the task), under
+  `strict=True` too; any other failure, and any failure reading a task that was found, keeps the
+  listing's rule (a WARNING, or `NativeCallError` under `strict`). On Windows `folder_path` may end
+  in a backslash, the form a record's `task_path` carries, the name matches without regard to
+  case, and the record carries the caller's spelling (the scheduler echoes it). On Linux the
+  answer is the task's `.timer`, else its on-demand `.service`, else nothing; a masked or alias
+  unit file counts as absent, as in the listing, and a `.timer`/`.service` suffix is optional. An
+  empty name or a folder part (Windows: a backslash; Linux: `/`, or a backslash that starts no
+  systemd `\xNN` escape), or on Linux an invalid unit name, raises `ConfigurationError`. The
+  sources are `iter_scheduled_tasks` (Windows) and `iter_timers` (Linux); `is_not_found()`
+  exposes the Windows not-found test.
 
 ### Changed
 

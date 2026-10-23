@@ -1,8 +1,9 @@
 """Scheduled-tasks oracle: pwshpy vs a real Get-ScheduledTask on Windows.
 
 Compares the task set (folder path + name) and the stable ``Enabled`` flag - both
-locale-independent.  ``State`` is dynamic (a task may run between reads) so it is
-not asserted.  ``local_only`` + ``os_windows``; read-only, safe.
+locale-independent.  ``State`` is dynamic (a task may run between reads), so the listing
+does not assert it; the by-name lookup reads one task right after the cmdlet and compares
+its state by number.  ``local_only`` + ``os_windows``; read-only, safe.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, cast
 
@@ -55,3 +57,37 @@ def test_task_set_and_enabled_match_get_scheduledtask() -> None:
     assert len(common) >= len(theirs) - 3
     for key in common:
         assert ours[key].enabled == bool(theirs[key]["Enabled"]), f"{key} enabled"
+
+
+# Get-ScheduledTask's State is the CIM StateEnum, the same numbers as TASK_STATE (0 Unknown,
+# 1 Disabled, 2 Queued, 3 Ready, 4 Running), so comparing [int]State is locale-independent.
+_STATE_BY_NUMBER = {0: "Unknown", 1: "Disabled", 2: "Queued", 3: "Ready", 4: "Running"}
+
+
+def test_lookup_by_name_matches_get_scheduledtask_for_that_task() -> None:
+    """[50] ps.get_scheduled_task(path, task_name=name) answers like Get-ScheduledTask -TaskPath -TaskName.
+
+    The task is the first one Get-ScheduledTask lists; a name that cannot exist is an empty answer,
+    under strict too.
+    """
+    first = cast(
+        "dict[str, Any]",
+        _run_ps_json("Get-ScheduledTask | Select-Object -First 1 TaskPath,TaskName | ConvertTo-Json -Compress"),
+    )
+    path, name = str(first["TaskPath"]), str(first["TaskName"])
+    quoted_path, quoted_name = path.replace("'", "''"), name.replace("'", "''")
+    theirs = cast(
+        "dict[str, Any]",
+        _run_ps_json(
+            f"Get-ScheduledTask -TaskPath '{quoted_path}' -TaskName '{quoted_name}' "
+            "| Select-Object TaskPath,TaskName,@{n='State';e={[int]$_.State}} | ConvertTo-Json -Compress"
+        ),
+    )
+    (ours,) = ps.get_scheduled_task(path, task_name=name, strict=True).to_list()
+    assert (ours.task_path, ours.task_name, ours.state.value) == (
+        str(theirs["TaskPath"]),
+        str(theirs["TaskName"]),
+        _STATE_BY_NUMBER[int(theirs["State"])],
+    )
+    missing = f"pwshpy-no-such-task-{uuid.uuid4().hex}"
+    assert ps.get_scheduled_task(path, task_name=missing, strict=True).to_list() == []

@@ -1,12 +1,13 @@
-"""CLI tests for ``get_scheduled_task``'s ``--strict`` flag, against a fake ps facade.
+"""CLI tests for ``get_scheduled_task``'s ``--strict`` and ``--task-name`` flags, against a fake ps facade.
 
 ``os_agnostic`` and hermetic: the facade is faked, so the tests pin the CLI's own contract -
-the flag reaches ``ps.get_scheduled_task``, and a strict failure leaves through ``main()`` as one
+the flags reach ``ps.get_scheduled_task``, and a strict failure leaves through ``main()`` as one
 stderr line and exit 1 without leaving a bare ``[`` on a ``--json`` stdout.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 
 import pytest
@@ -27,14 +28,21 @@ def _task(name: str) -> ScheduledTaskInfo:
 
 
 class _FakePs:
-    """Records each get_scheduled_task call; under strict, raises after ``before`` records."""
+    """Records each get_scheduled_task call; under strict, raises after ``before`` records.
+
+    A by-name lookup (``task_name``) answers with that one task and never raises.
+    """
 
     def __init__(self, *, before: int = 0) -> None:
-        self.calls: list[tuple[str, bool]] = []
+        self.calls: list[tuple[str, bool, str | None]] = []
         self._before = before
 
-    def get_scheduled_task(self, folder_path: str = "\\", *, strict: bool = False) -> Pipeline[ScheduledTaskInfo]:
-        self.calls.append((folder_path, strict))
+    def get_scheduled_task(
+        self, folder_path: str = "\\", *, task_name: str | None = None, strict: bool = False
+    ) -> Pipeline[ScheduledTaskInfo]:
+        self.calls.append((folder_path, strict, task_name))
+        if task_name is not None:
+            return Pipeline(iter([_task(task_name)]))
         return Pipeline(self._records(strict=strict))
 
     def _records(self, *, strict: bool) -> Iterator[ScheduledTaskInfo]:
@@ -58,7 +66,7 @@ def test_get_scheduled_task_forwards_the_strict_choice(
     services = _services(fake)
     rc = main(["get_scheduled_task", "--folder", "\\F\\", *flags, "--jsonl"], services_factory=lambda: services)
     capsys.readouterr()
-    assert fake.calls == [("\\F\\", strict)]
+    assert fake.calls == [("\\F\\", strict, None)]
     assert rc == (1 if strict else 0)
 
 
@@ -72,3 +80,18 @@ def test_a_strict_failure_before_any_record_leaves_json_stdout_empty(capsys: pyt
     assert captured.out == ""
     assert captured.err.strip() == f"NativeCallError: {_UNREADABLE}"
     assert "Traceback" not in captured.err
+
+
+@pytest.mark.os_agnostic
+def test_task_name_reaches_the_facade_and_emits_the_one_record(capsys: pytest.CaptureFixture[str]) -> None:
+    """[50] --task-name and --folder reach ps.get_scheduled_task unchanged; --jsonl emits the one record."""
+    fake = _FakePs()
+    services = _services(fake)
+    argv = ["get_scheduled_task", "--task-name", "x", "--folder", "\\F\\", "--strict", "--jsonl"]
+    rc = main(argv, services_factory=lambda: services)
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert fake.calls == [("\\F\\", True, "x")]
+    lines = captured.out.splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["task_name"] == "x"

@@ -399,10 +399,17 @@ def _fake_cim(class_name: str, *, where: str | None = None, namespace: str = "ro
     yield CimInstance(class_name=class_name, properties={"where": where, "namespace": namespace})
 
 
-def _fake_scheduled_tasks(folder_path: str = "\\", *, strict: bool = False) -> Iterator[ScheduledTaskInfo]:
-    # The description echoes the strict choice so a test can see what the facade forwarded.
+def _fake_scheduled_tasks(
+    folder_path: str = "\\", *, strict: bool = False, task_name: str | None = None
+) -> Iterator[ScheduledTaskInfo]:
+    # The description echoes the strict choice, and a by-name lookup answers with the name it was
+    # given, so a test can see what the facade forwarded; without a name the listing yields "T".
     yield ScheduledTaskInfo(
-        task_name="T", task_path=folder_path, state=TaskState.READY, enabled=True, description=f"strict={strict}"
+        task_name="T" if task_name is None else task_name,
+        task_path=folder_path,
+        state=TaskState.READY,
+        enabled=True,
+        description=f"strict={strict}",
     )
 
 
@@ -830,6 +837,9 @@ def test_injected_scheduled_task_adapters(injected: _InjectedPs) -> None:
     assert facade.get_scheduled_task("\\F\\", strict=True).select(lambda t: (t.task_path, t.description)).to_list() == [
         ("\\F\\", "strict=True")
     ]
+    # [50] a by-name lookup hands folder, name and strict to the source unchanged.
+    looked_up = facade.get_scheduled_task("\\F\\", task_name="x", strict=True).to_list()
+    assert [(t.task_path, t.task_name, t.description) for t in looked_up] == [("\\F\\", "x", "strict=True")]
     assert facade.register_scheduled_task("\\T", program="cmd.exe", arguments="/c exit").task_name == "T"
     facade.unregister_scheduled_task("\\T")
     assert facade.enable_scheduled_task("\\T").enabled is True

@@ -43,7 +43,8 @@
 # UV_ENV_FILE, HTTPS_PROXY, HTTP_PROXY, ALL_PROXY (and their lower-case forms), SSL_CERT_FILE,
 # SSL_CERT_DIR, SSL_CLIENT_CERT, UV_NATIVE_TLS, UV_SYSTEM_CERTS, UV_KEYRING_PROVIDER, every variable
 # whose name starts with GIT_ (git, which uv runs for a git source, reads them) and SSH_ASKPASS are
-# ignored, each with a line on stderr;
+# ignored, each with a line on stderr; git reads no global config file (GIT_CONFIG_GLOBAL=/dev/null,
+# so not the ~/.gitconfig or $XDG_CONFIG_HOME/git/config of the HOME it was given; git 2.32 or later);
 # the user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file (--no-env-file).
 # In a network that reaches the internet only through a proxy, a root run can download nothing: the
 # managed Python and every package the script needs must already be in root's directories named
@@ -1002,6 +1003,15 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     set -- "$PWSHPY_CACHE/$PWSHPY_SHIM" "$@"
     eval "set -- $PWSHPY_UV_ARGS_ANCHORED_RAW \"\$@\""
     pwshpy_drop_interpreter_variables
+    # With every GIT_ variable gone git still reads its global files, $HOME/.gitconfig and
+    # $XDG_CONFIG_HOME/git/config, from the HOME and XDG_CONFIG_HOME this run got (a sudo that keeps
+    # HOME, or sudo -E), and a core.fsmonitor, core.sshCommand or credential.helper there runs a command
+    # as root when uv fetches a git source. A set GIT_CONFIG_GLOBAL replaces both (git 2.32 and later;
+    # an older git ignores it and still reads them); /dev/null is a file only root can change. Set after
+    # the drop, which would remove it. The system file (/etc/gitconfig) is root's and still applies.
+    GIT_CONFIG_GLOBAL=/dev/null
+    export GIT_CONFIG_GLOBAL
+    printf '%s\n' "pwshpy: setting GIT_CONFIG_GLOBAL=/dev/null: as root git reads no caller's global config" >&2
     export "@@PWSHPY_CWD_ENV@@=$PWSHPY_CALLER_CWD"
     # The shim keeps its own arguments only when no out-of-band argument vector is set; one inherited
     # from the caller's environment must not replace them.

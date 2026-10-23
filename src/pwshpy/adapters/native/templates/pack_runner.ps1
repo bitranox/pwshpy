@@ -59,7 +59,9 @@
     forms), SSL_CERT_FILE, SSL_CERT_DIR, SSL_CLIENT_CERT, UV_NATIVE_TLS, UV_SYSTEM_CERTS,
     UV_KEYRING_PROVIDER, every variable whose name starts with GIT_ (git, which uv runs for a git
     source, reads them; on Windows in any case) and SSH_ASKPASS are ignored, each with a line on
-    stderr; the user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file
+    stderr; git reads no global config file (GIT_CONFIG_GLOBAL is NUL on Windows, /dev/null on POSIX,
+    so not the .gitconfig below the HOME, USERPROFILE or XDG_CONFIG_HOME it was given; git 2.32 or
+    later); the user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file
     (--no-env-file). In a network that reaches the internet only through a proxy, an elevated run
     can download nothing: the managed Python and every package the script needs must already be in
     the account's directories named above.
@@ -1417,6 +1419,19 @@ $PwshPyPrepare = {
     # XDG_DATA_HOME (POSIX) names, which is the caller's to set too.
     if ($PwshPyElevatedRun) {
         Clear-PwshPyInterpreterVariable
+        # With every GIT_ variable gone git still reads its global files, .gitconfig and
+        # XDG_CONFIG_HOME's git\config, below the HOME, USERPROFILE (Windows: a UAC relaunch keeps the
+        # caller's profile) and XDG_CONFIG_HOME this run got, and a core.fsmonitor, core.sshCommand or
+        # credential.helper there runs a command elevated when uv fetches a git source. A set
+        # GIT_CONFIG_GLOBAL replaces both (git 2.32 and later; an older git ignores it and still reads
+        # them). Windows: the NUL device, which Git for Windows reads as empty (measured with 2.55), and
+        # which no account can replace, unlike a path such as \dev\null that a git not mapping it
+        # resolves on the current drive, where any user may create the folder; POSIX: /dev/null, which
+        # only root can change. Set after the drop, which would remove it. The system file
+        # (Program Files' etc\gitconfig, /etc/gitconfig) is the administrators' and still applies.
+        $PwshPyGitGlobal = if ($PwshPyOnWindows) { 'NUL' } else { '/dev/null' }
+        Set-Item -LiteralPath 'Env:GIT_CONFIG_GLOBAL' -Value $PwshPyGitGlobal
+        Write-PwshPyNotice "pwshpy: setting GIT_CONFIG_GLOBAL=${PwshPyGitGlobal}: an elevated run lets git read no caller's global config"
         $PwshPyDataHome = Get-PwshPyAccountDataHome
         Set-Item -LiteralPath 'Env:UV_PYTHON_INSTALL_DIR' -Value (Join-Path (Join-Path $PwshPyDataHome 'uv') 'python')
         # The cache too, for the same reason: uv's default follows LOCALAPPDATA (Windows) or XDG_CACHE_HOME

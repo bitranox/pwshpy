@@ -55,6 +55,7 @@ from elevation_doubles import (
     with_data_home,
     without_python_dir_check,
     write_fake_sudo,
+    write_git_source,
     write_local_wheel,
     write_planted_environment,
     write_planted_python,
@@ -2888,6 +2889,85 @@ def test_an_elevated_run_lets_no_git_variable_reach_the_script(tmp_path: Path, e
     reached = set(filter(None, line[4:].strip().split(",")))
     assert NOT_A_GIT_VARIABLE.upper() in reached, result.stdout
     if elevated == "$true":
-        assert reached == {NOT_A_GIT_VARIABLE.upper()}, (reached, result.stderr)
+        # GIT_CONFIG_GLOBAL is the runner's own ([X24 G2]), set after the drop.
+        assert reached == {NOT_A_GIT_VARIABLE.upper(), "GIT_CONFIG_GLOBAL"}, (reached, result.stderr)
     else:
         assert {name.upper() for name in given} <= reached, (reached, result.stderr)
+        assert "GIT_CONFIG_GLOBAL" not in reached, (reached, result.stderr)
+
+
+# --- [X24 G2] git's global config file: HOME, USERPROFILE and XDG_CONFIG_HOME are the caller's ---------
+
+#: What an elevated run points git's global config at: a device no account can replace.
+_GIT_GLOBAL = "NUL" if sys.platform == "win32" else "/dev/null"
+_GIT_GLOBAL_SET = f"pwshpy: setting GIT_CONFIG_GLOBAL={_GIT_GLOBAL}"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("given", [None, "/caller/gitconfig"], ids=["caller-sets-none", "caller-sets-one"])
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_run_hands_uv_git_config_global_as_dev_null(
+    tmp_path: Path, elevated: str, given: str | None
+) -> None:
+    """[X24 G2]: elevated, GIT_CONFIG_GLOBAL reaches uv as /dev/null, before uv python find already, with a
+    line on stderr, whether the caller set none or one of its own (that one is dropped with the other
+    GIT_ variables first). The control passes the caller's value, or none, on unchanged and prints no
+    line."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
+    environment = {} if given is None else {"GIT_CONFIG_GLOBAL": given}
+    result = _run_with_path(
+        tmp_path, runner, "-PwshPyUv", str(uv), path_first=[], env=environment, cwd=_clean_cwd(tmp_path)
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = _recorded_variables(record)
+    if elevated == "$true":
+        found = _recorded_variables(Path(f"{record}.python"))
+        assert recorded.get("GIT_CONFIG_GLOBAL") == "/dev/null", (recorded, result.stderr)
+        assert found.get("GIT_CONFIG_GLOBAL") == "/dev/null", (found, result.stderr)
+        assert _GIT_GLOBAL_SET in result.stderr, result.stderr
+        assert (_VARIABLE_DROPPED.format(name="GIT_CONFIG_GLOBAL") in result.stderr) is (given is not None)
+    else:
+        assert recorded.get("GIT_CONFIG_GLOBAL") == given, (recorded, result.stderr)
+        assert _GIT_GLOBAL_SET not in result.stderr, result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+@pytest.mark.parametrize("where", ["profile-gitconfig", "xdg-config-home"])
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_run_never_runs_a_command_from_the_callers_global_git_config(
+    tmp_path: Path, elevated: str, where: str
+) -> None:
+    """[X24 G2], end to end with the real uv and git, on Windows too: a core.fsmonitor command in the
+    global git config below the profile the run was given (HOME, and USERPROFILE on Windows) or below
+    its XDG_CONFIG_HOME runs from uv's git fetch of a --with git source (the control runs it: the plant
+    fires). Elevated, git reads GIT_CONFIG_GLOBAL (NUL on Windows, /dev/null on POSIX) instead: uv still
+    fetches the source (its git database appears in the cache), and the command never runs. The
+    profile is a scratch directory, never the real one. Offline, so both arms then fail to build it."""
+    managed = _needs_managed_python()
+    marker = tmp_path / "git-hook-ran.txt"
+    hook = tmp_path / "hook.sh"
+    # A sh script on Windows too: Git for Windows starts it through its own sh (measured with 2.55).
+    hook.write_text(f'#!/bin/sh\necho ran >> "{marker.as_posix()}"\nexit 1\n', encoding="utf-8", newline="\n")
+    hook.chmod(0o755)
+    source = f"pwshpy-git-probe @ git+{write_git_source(tmp_path).as_uri()}"
+    runner, head = _python_runner(tmp_path, elevated=elevated, with_packages=[source])
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    environment = {**interpreter_probe_env(tmp_path, managed=managed), "UV_OFFLINE": "1", "HOME": str(profile)}
+    if sys.platform == "win32":
+        environment["USERPROFILE"] = str(profile)
+    if where == "profile-gitconfig":
+        config = profile / ".gitconfig"
+    else:
+        environment["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+        config = tmp_path / "xdg" / "git" / "config"
+        config.parent.mkdir(parents=True)
+    config.write_text(f"[core]\n\tfsmonitor = {hook.as_posix()}\n", encoding="utf-8", newline="\n")
+    result = _run_with_path(tmp_path, runner, path_first=head, env=environment, cwd=_clean_cwd(tmp_path))
+    caches = (default_uv_cache_dir(tmp_path), tmp_path / "uv-cache")
+    assert any(any(cache.glob("git-v*/db/*")) for cache in caches), "uv fetched no git source: " + result.stderr
+    ran = marker.exists()
+    assert ran is (elevated == "$false"), "global git config command ran: " + str(ran) + result.stderr

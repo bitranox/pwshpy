@@ -48,6 +48,7 @@ from elevation_doubles import (
     with_data_home,
     without_python_dir_check,
     write_fake_sudo,
+    write_git_source,
     write_local_wheel,
     write_planted_environment,
     write_planted_python,
@@ -1932,17 +1933,6 @@ def test_as_root_no_git_variable_reaches_uv(tmp_path: Path, as_root: bool) -> No
             assert recorded.get(name) == value and not dropped_line, (recorded, result.stderr)
 
 
-def _git_source(tmp_path: Path) -> Path:
-    """A one-commit git repository holding a project uv can read from a git+file URL."""
-    repo = tmp_path / "git-source"
-    repo.mkdir()
-    (repo / "pyproject.toml").write_text('[project]\nname = "pwshpy-git-probe"\nversion = "0.1"\n', encoding="utf-8")
-    identity = ["-c", "user.name=t", "-c", "user.email=t@t"]
-    for argv in (["init", "-q", "."], ["add", "pyproject.toml"], [*identity, "commit", "-qm", "x"]):
-        subprocess.run(["git", *argv], cwd=repo, check=True, capture_output=True)  # noqa: S603, S607
-    return repo
-
-
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
 def test_as_root_a_git_config_command_from_the_environment_never_runs(tmp_path: Path, as_root: bool) -> None:
@@ -1955,7 +1945,7 @@ def test_as_root_a_git_config_command_from_the_environment_never_runs(tmp_path: 
     hook = tmp_path / "hook.sh"
     hook.write_text(f'#!/bin/sh\necho ran >> "{marker}"\nexit 1\n', encoding="utf-8", newline="\n")
     hook.chmod(0o755)
-    source = f"pwshpy-git-probe @ git+file://{_git_source(tmp_path)}"
+    source = f"pwshpy-git-probe @ git+file://{write_git_source(tmp_path)}"
     runner, uv = _python_runner(tmp_path, as_root=as_root, with_packages=[source])
     environment = {
         **_trust_env(tmp_path, uv.parent),
@@ -1967,3 +1957,65 @@ def test_as_root_a_git_config_command_from_the_environment_never_runs(tmp_path: 
     result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
     assert any(default_uv_cache_dir(tmp_path).glob("git-v*/db/*")), "uv fetched no git source: " + result.stderr
     assert marker.exists() is not as_root, "git config command ran: " + str(marker.exists()) + result.stderr
+
+
+# --- [X24 G2] git's global config file: HOME and XDG_CONFIG_HOME are the caller's ---------------------
+
+#: The line a root run prints when it points git's global config at /dev/null.
+_GIT_GLOBAL_SET = "pwshpy: setting GIT_CONFIG_GLOBAL=/dev/null"
+
+
+@pytest.mark.parametrize("given", [None, "/caller/gitconfig"], ids=["caller-sets-none", "caller-sets-one"])
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_git_config_global_reaches_uv_as_dev_null(tmp_path: Path, as_root: bool, given: str | None) -> None:
+    """[X24 G2]: as root GIT_CONFIG_GLOBAL reaches uv as /dev/null, before uv python find already, with a
+    line on stderr, whether the caller set none or one of its own (that one is dropped with the other
+    GIT_ variables first). Not root (the control), the caller's value, or none, reaches uv unchanged and
+    no line is printed."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root)
+    environment = _trust_env(tmp_path)
+    if given is not None:
+        environment["GIT_CONFIG_GLOBAL"] = given
+    result = _run_in(["sh"], runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = _recorded_variables(record)
+    found = _recorded_variables(Path(f"{record}.python")) if as_root else {}
+    if as_root:
+        assert recorded.get("GIT_CONFIG_GLOBAL") == "/dev/null", (recorded, result.stderr)
+        assert found.get("GIT_CONFIG_GLOBAL") == "/dev/null", (found, result.stderr)
+        assert _GIT_GLOBAL_SET in result.stderr, result.stderr
+        assert ("pwshpy: ignoring GIT_CONFIG_GLOBAL: " in result.stderr) is (given is not None), result.stderr
+    else:
+        assert recorded.get("GIT_CONFIG_GLOBAL") == given, (recorded, result.stderr)
+        assert _GIT_GLOBAL_SET not in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+@pytest.mark.parametrize("where", ["home-gitconfig", "xdg-config-home"])
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_a_command_in_the_callers_global_git_config_never_runs(
+    tmp_path: Path, as_root: bool, where: str
+) -> None:
+    """[X24 G2], end to end with the real uv and git: a core.fsmonitor command in the global git config
+    below the HOME or XDG_CONFIG_HOME the run was given runs from uv's git fetch of a --with git source
+    (the control, not root, runs it: the plant fires). As root git reads GIT_CONFIG_GLOBAL=/dev/null
+    instead: uv still fetches the source (its git database appears in the cache), and the command never
+    runs. Offline, so both arms then fail to build it."""
+    _needs_managed_python()
+    marker = tmp_path / "git-hook-ran.txt"
+    hook = tmp_path / "hook.sh"
+    hook.write_text(f'#!/bin/sh\necho ran >> "{marker}"\nexit 1\n', encoding="utf-8", newline="\n")
+    hook.chmod(0o755)
+    source = f"pwshpy-git-probe @ git+file://{write_git_source(tmp_path)}"
+    runner, uv = _python_runner(tmp_path, as_root=as_root, with_packages=[source])
+    environment = {**_trust_env(tmp_path, uv.parent), "UV_OFFLINE": "1"}
+    if where == "home-gitconfig":
+        config = Path(environment["HOME"]) / ".gitconfig"
+    else:
+        environment["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+        config = tmp_path / "xdg" / "git" / "config"
+        config.parent.mkdir(parents=True)
+    config.write_text(f"[core]\n\tfsmonitor = {hook}\n", encoding="utf-8", newline="\n")
+    result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert any(default_uv_cache_dir(tmp_path).glob("git-v*/db/*")), "uv fetched no git source: " + result.stderr
+    assert marker.exists() is not as_root, "global git config command ran: " + str(marker.exists()) + result.stderr

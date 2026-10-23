@@ -13,6 +13,7 @@ Contents:
     * :data:`INTERPRETER_VARIABLES` - the variables an elevated run drops before uv picks a Python.
     * :data:`LIBRARY_VARIABLES` - the variables the interpreter reads itself, dropped too.
     * :data:`GIT_VARIABLES` - git variables (and SSH_ASKPASS) an elevated run drops by their name's prefix.
+    * :func:`write_git_source` - a one-commit git repository uv can fetch from a git+file URL.
     * :func:`write_planted_python` - ``python`` / ``python3`` doubles that record being run.
     * :func:`write_planted_environment` - a virtual or conda environment whose python is such a double.
     * :func:`write_planted_venv` - a real virtual environment whose python records every start.
@@ -211,6 +212,27 @@ GIT_VARIABLES = {
 #: A variable whose name holds GIT_ without starting with it: an elevated run keeps it, so the
 #: tests see the drop is by prefix, not by substring.
 NOT_A_GIT_VARIABLE = "PWSHPY_GIT_NOT_A_PREFIX"
+
+
+def write_git_source(scratch: Path) -> Path:
+    """A one-commit git repository below ``scratch`` holding a project uv can read from a git+file URL.
+
+    The source a git e2e test hands a packed run (``--with``), so uv runs git to fetch it and any git
+    configuration the run lets through gets its chance to run a command.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as d:
+        ...     shutil.which("git") is None or (write_git_source(Path(d)) / ".git").is_dir()
+        True
+    """
+    repo = scratch / "git-source"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text('[project]\nname = "pwshpy-git-probe"\nversion = "0.1"\n', encoding="utf-8")
+    identity = ["-c", "user.name=t", "-c", "user.email=t@t"]
+    for argv in (["init", "-q", "."], ["add", "pyproject.toml"], [*identity, "commit", "-qm", "x"]):
+        subprocess.run(["git", *argv], cwd=repo, check=True, capture_output=True)  # noqa: S603, S607
+    return repo
 
 
 def _real_python() -> str:
@@ -843,6 +865,7 @@ __all__ = [
     "with_data_home",
     "without_python_dir_check",
     "write_fake_sudo",
+    "write_git_source",
     "write_planted_environment",
     "write_local_wheel",
     "write_planted_python",

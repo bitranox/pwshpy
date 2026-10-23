@@ -85,6 +85,8 @@ killed is not returned; the error carries the message and `.timeout` only. A pro
 exits nonzero is no error: the result holds its `exit_code` until you call `.check()`.
 
 CLI: `pwshpy exec -- git status` (put the program after `--` so its flags are not parsed by pwshpy).
+Piped or redirected, the program's stdout and stderr are written as UTF-8 bytes whatever the console
+code page (see [CLI Reference](cli-reference.md#portable-record-commands)).
 A run that hits `--timeout` exits 110 (ETIMEDOUT) with an `OperationTimeoutError` line on stderr; a
 program that cannot start exits 1. A `--timeout` outside `(0, 2147483]` is a usage error (exit 2), and
 `nan` exits 22 (87 on Windows), the code for a `ValueError`.
@@ -220,8 +222,9 @@ for line in ps.get_content_lines("huge.log"):  # reads one line at a time (vs wh
 ps.download_file("https://host/big.iso", "big.iso")  # copies to disk in chunks; never buffers the body
 ```
 
-CLI: `pwshpy write_text PATH` (reads stdin), `pwshpy get_content PATH` (streams), `pwshpy
-download_file URL DEST`.
+CLI: `pwshpy write_text PATH` (reads stdin), `pwshpy get_content PATH` (streams; UTF-8 bytes when
+piped, see [CLI Reference](cli-reference.md#portable-record-commands)), `pwshpy download_file URL
+DEST`.
 
 ## Credential vault - typed, secret-safe, unattended-friendly
 

@@ -13,11 +13,14 @@ volatile set.  Known representational deltas are handled explicitly: psutil's
 ``name`` keeps ``.exe`` (stripped to match ``Get-Process`` - see
 ``marshal.to_process_name``); os.environ upper-cases variable names on Windows
 (compared case-insensitively); psutil reports a mountpoint (``C:\\``) where
-``Get-Volume`` reports a drive letter (``C``); and two pseudo-processes carry a
+``Get-Volume`` reports a drive letter (``C``); two pseudo-processes carry a
 different name in each: PID 0, the idle process (psutil ``System Idle Process`` vs
 Get-Process ``Idle``), and the kernel's memory compression store (psutil
 ``MemCompression`` vs Get-Process ``Memory Compression``), both excluded from the
-name check. pwshpy keeps psutil's names (documented on ``ps.get_process``).
+name check. pwshpy keeps psutil's names (documented on ``ps.get_process``). And the
+pwsh 7 child the env oracle reads rewrites its own PATH and PSModulePath at
+startup, so those two are compared against that rewrite (``pwsh_child_env``), not
+against the raw value.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from pwsh_child_env import expected_child_module_path, expected_child_path
 
 from pwshpy import ps
 
@@ -39,9 +43,11 @@ if sys.platform != "win32":  # pragma: no cover - CI filters local_only; guards 
     pytest.skip("the portable pwsh oracle is Windows-only", allow_module_level=True)
 
 
+_PWSH7 = Path(r"C:\Program Files\PowerShell\7\pwsh.exe")
+
+
 def _pwsh_exe() -> str:
-    candidate = Path(r"C:\Program Files\PowerShell\7\pwsh.exe")
-    return str(candidate) if candidate.exists() else "powershell"
+    return str(_PWSH7) if _PWSH7.exists() else "powershell"
 
 
 def _run_ps_json(script: str) -> object:
@@ -114,18 +120,42 @@ def test_disks_fstype_matches_get_volume() -> None:
             assert ours[letter].fstype.upper() == str(file_system).upper(), f"drive {letter} fstype"
 
 
+#: Run in the oracle child: its env plus what it needs to know about its own startup rewrite.
+_ENV_ORACLE_SCRIPT = (
+    "$mi = [System.Management.Automation.ModuleIntrinsics]; "
+    "$scope = [System.Management.Automation.ModuleIntrinsics+PSModulePathScope]; "
+    "[pscustomobject]@{ "
+    "ExeHome = [System.IO.Path]::GetDirectoryName([Environment]::ProcessPath); "
+    "ModuleInserts = @($mi::GetPSModulePath($scope::User), $mi::GetPSModulePath($scope::Machine), "
+    "$mi::GetPSModulePath($scope::Builtin)); "
+    "Env = @(Get-ChildItem env: | Select-Object Name,Value) "
+    "} | ConvertTo-Json -Compress -Depth 3"
+)
+
+
 def test_env_matches_get_childitem_env() -> None:
-    """Env var names (case-insensitive) and their values match Get-ChildItem env:."""
+    """Env var names (case-insensitive) and values match Get-ChildItem env: in a pwsh 7 child.
+
+    Every variable is compared exactly. PATH and PSModulePath are compared against the value the
+    child derives from ours at its startup (``pwsh_child_env``), not against ours: that rewrite is
+    a no-op when pytest runs under pwsh 7 and prepends pwsh's entries when it runs under Windows
+    PowerShell 5.1 or cmd, which is what made this test pass or fail by launching shell alone.
+    """
+    if not _PWSH7.exists():
+        pytest.skip("needs pwsh 7: the expected PATH/PSModulePath rewrite is pwsh 7's own")
     ours = {e.name.upper(): e.value for e in ps.environment().to_list()}
-    ps_env = cast(
-        "list[dict[str, Any]]",
-        _run_ps_json("Get-ChildItem env: | Select-Object Name,Value | ConvertTo-Json -Compress -AsArray"),
-    )
-    theirs = {str(e["Name"]).upper(): str(e["Value"]) for e in ps_env}
+    oracle = cast("dict[str, Any]", _run_ps_json(_ENV_ORACLE_SCRIPT))
+    theirs = {str(e["Name"]).upper(): str(e["Value"]) for e in cast("list[dict[str, Any]]", oracle["Env"])}
 
     assert set(ours) == set(theirs), f"env name sets differ: {sorted(set(ours) ^ set(theirs))[:8]}"
-    mismatches = {k: (ours[k], theirs[k]) for k in ours if ours[k] != theirs[k]}
-    assert not mismatches, f"env value mismatches: {list(mismatches.items())[:3]}"
+    expected = dict(ours)
+    if "PATH" in ours:
+        expected["PATH"] = expected_child_path(ours["PATH"], str(oracle["ExeHome"]))
+    if "PSMODULEPATH" in ours:
+        inserts = [str(p) for p in cast("list[Any]", oracle["ModuleInserts"]) if p]
+        expected["PSMODULEPATH"] = expected_child_module_path(ours["PSMODULEPATH"], inserts)
+    mismatches = {k: (expected[k], theirs[k]) for k in expected if expected[k] != theirs[k]}
+    assert not mismatches, f"env value mismatches (expected, Get-ChildItem): {list(mismatches.items())[:3]}"
 
 
 def test_resolve_localhost_matches() -> None:

@@ -534,11 +534,12 @@ class Ps:
 
         win32service on Windows, systemd (D-Bus, needs root) on Linux.
 
-        Idempotent - starting an already-running service is a no-op.
+        Idempotent - starting an already-running service is a no-op. On Windows a service still
+        stopping (``StopPending``) is first waited out, since the SCM cannot start it yet.
 
         Args:
             name: The service name (on Linux the unit name, ``"sshd.service"``).
-            timeout: Seconds to wait for the service to settle after the start.
+            timeout: Seconds for the whole call: waiting out a pending stop, then for Running.
 
         Returns:
             The service's :class:`ServiceInfo` once it settled (``Running``; on Linux a
@@ -546,7 +547,8 @@ class Ps:
 
         Raises:
             OperationTimeoutError: The service was still not Running after ``timeout`` seconds -
-                the start WAS issued; ``.timeout`` holds the limit (CLI exit 110).
+                the start WAS issued, unless the service was still in a pending stop, which then
+                did not end in time and got no start; ``.timeout`` holds the limit (CLI exit 110).
             NativeCallError: The start was refused or the service could not be opened.
 
         Example:
@@ -560,11 +562,14 @@ class Ps:
 
         win32service on Windows, systemd (D-Bus, needs root) on Linux.
 
-        Idempotent - stopping an already-stopped service is a no-op.
+        Idempotent - stopping an already-stopped service is a no-op. On Windows a service still
+        starting (``StartPending``) is first waited out, in both forms, since the SCM refuses a
+        stop until the start has settled.
 
         Args:
             name: The service name (on Linux the unit name, ``"sshd.service"``).
-            timeout: Seconds to wait for the service to reach Stopped (``wait=True`` only).
+            timeout: Seconds for the whole call: waiting out a pending start, then (``wait=True``)
+                for Stopped.
             wait: ``True`` polls until Stopped; ``False`` issues the stop and returns the state
                 right after it, typically ``StopPending``, for a service that takes long to stop.
 
@@ -573,7 +578,8 @@ class Ps:
 
         Raises:
             OperationTimeoutError: ``wait=True`` and the service was still not Stopped after
-                ``timeout`` seconds - the stop WAS issued; ``.timeout`` holds the limit.
+                ``timeout`` seconds - the stop WAS issued; or a pending start did not end within
+                ``timeout`` seconds and the stop was NOT issued; ``.timeout`` holds the limit.
             NativeCallError: The stop was refused or the service could not be opened.
 
         Example:

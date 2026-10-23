@@ -5,8 +5,9 @@ The unit tests drive :class:`NativeServiceController` against a fake
 flow, idempotency, error wrapping, and the wait-for-state timeout).
 
 The ``local_only`` + ``mutating`` tests actually start/stop/restart a real
-Windows service (Print Spooler) and restore it - they run ONLY on the disposable
-throwaway VM (see CLAUDE.md Development Safety), never in CI.
+Windows service (Print Spooler) and restore it, and create, drive and delete a
+scratch service that takes seconds to start and to stop - they run ONLY on the
+disposable throwaway VM (see CLAUDE.md Development Safety), never in CI.
 """
 
 # The fake below deliberately mirrors win32service's PascalCase method names.
@@ -14,15 +15,20 @@ throwaway VM (see CLAUDE.md Development Safety), never in CI.
 
 from __future__ import annotations
 
+import importlib
 import sys
+import sysconfig
 import time
+import uuid
 import warnings
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from pwshpy.adapters.native import service_control as mod
-from pwshpy.adapters.native.service_control import NativeServiceController
+from pwshpy.adapters.native.service_control import NativeServiceController, PollClock
 from pwshpy.composition.facade import Ps
 from pwshpy.domain.enums import ServiceStartType, ServiceState
 from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
@@ -93,8 +99,9 @@ class _FakeWin32Service:
     def StartService(self, handle: Any, args: list[str]) -> None:
         if self.raise_on == "start":
             raise OSError("access denied")
-        if self.state in {self.SERVICE_RUNNING, self.SERVICE_START_PENDING}:
-            # StartService's contract: ERROR_SERVICE_ALREADY_RUNNING for a running or start-pending service.
+        if self.state in {self.SERVICE_RUNNING, self.SERVICE_START_PENDING, self.SERVICE_STOP_PENDING}:
+            # StartService's contract: ERROR_SERVICE_ALREADY_RUNNING for a running or start-pending
+            # service, and (measured on Windows 11) for a stop-pending one too, whose process still runs.
             raise OSError(1056, "An instance of the service is already running.")
         self.actions.append("start")
         self.state = self._start_effect
@@ -102,7 +109,11 @@ class _FakeWin32Service:
     def ControlService(self, handle: Any, control: int) -> None:
         if self.raise_on == "stop":
             raise OSError("the service cannot accept control messages at this time")
-        if self.state in {self.SERVICE_STOPPED, self.SERVICE_START_PENDING, self.SERVICE_STOP_PENDING}:
+        if self.state == self.SERVICE_START_PENDING:
+            # Measured on Windows 11: a starting service accepts no stop yet, so the SCM answers
+            # ERROR_INVALID_SERVICE_CONTROL rather than ERROR_SERVICE_CANNOT_ACCEPT_CTRL.
+            raise OSError(1052, "The requested control is not valid for this service.")
+        if self.state in {self.SERVICE_STOPPED, self.SERVICE_STOP_PENDING}:
             # ControlService's contract: ERROR_SERVICE_CANNOT_ACCEPT_CTRL in a pending or stopped state.
             raise OSError(1061, "The service cannot accept control messages at this time.")
         self.actions.append("stop")
@@ -336,6 +347,133 @@ def test_restart_of_a_stop_pending_service_waits_then_starts(
     assert fake.actions == ["start"]
 
 
+@pytest.mark.os_agnostic
+def test_start_of_a_stop_pending_service_waits_for_the_stop_then_starts(
+    monkeypatch: pytest.MonkeyPatch, controller: NativeServiceController
+) -> None:
+    """[97]: StartService on a StopPending service fails with 1056, so wait for Stopped, then start."""
+    fake = _FakeWin32Service(state=_FakeWin32Service.SERVICE_STOP_PENDING, settle_after=2)
+    _use(monkeypatch, fake)
+    assert controller.start("Svc", timeout=5.0).status is ServiceState.RUNNING
+    assert fake.actions == ["start"]
+
+
+@pytest.mark.os_agnostic
+def test_stop_of_a_start_pending_service_waits_for_the_start_then_stops(
+    monkeypatch: pytest.MonkeyPatch, controller: NativeServiceController
+) -> None:
+    """[97]: ControlService(STOP) on a StartPending service fails with 1052, so wait for Running, then stop."""
+    fake = _FakeWin32Service(state=_FakeWin32Service.SERVICE_START_PENDING, settle_after=2)
+    _use(monkeypatch, fake)
+    assert controller.stop("Svc", timeout=5.0).status is ServiceState.STOPPED
+    assert fake.actions == ["stop"]
+
+
+@pytest.mark.os_agnostic
+def test_stop_without_wait_of_a_start_pending_service_still_settles_before_the_control(
+    monkeypatch: pytest.MonkeyPatch, controller: NativeServiceController
+) -> None:
+    """wait=False skips only the wait for Stopped: the stop cannot be issued before the start settles."""
+    fake = _FakeWin32Service(
+        state=_FakeWin32Service.SERVICE_START_PENDING,
+        settle_after=2,
+        stop_effect=_FakeWin32Service.SERVICE_STOP_PENDING,
+    )
+    _use(monkeypatch, fake)
+    assert controller.stop("Svc", wait=False, timeout=5.0).status is ServiceState.STOP_PENDING
+    assert fake.actions == ["stop"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("verb", "state"),
+    [("start", _FakeWin32Service.SERVICE_STOP_PENDING), ("stop", _FakeWin32Service.SERVICE_START_PENDING)],
+)
+def test_a_pending_state_that_never_settles_times_out_without_sending_the_control(
+    monkeypatch: pytest.MonkeyPatch, controller: NativeServiceController, verb: str, state: int
+) -> None:
+    """The settle wait is bounded by the call's timeout and ends in OperationTimeoutError, no control sent."""
+    fake = _FakeWin32Service(state=state)
+    _use(monkeypatch, fake)
+    with pytest.raises(OperationTimeoutError) as caught:
+        getattr(controller, verb)("Svc", timeout=0.4)
+    assert caught.value.timeout == 0.4
+    assert fake.actions == []
+
+
+class _SteppedClock:
+    """A clock that moves only when the code under test sleeps: deterministic, no real waiting."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.mark.os_agnostic
+def test_the_settle_wait_and_the_target_wait_share_one_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``timeout`` bounds the whole call: time spent settling is not granted a second time."""
+    clock = _SteppedClock()
+    controller = NativeServiceController(clock=PollClock(monotonic=clock.monotonic, sleep=clock.sleep))
+    # One status query per 0.25 s poll: the pending stop settles after 5 s, then the start never
+    # reaches Running, so only the deadline can end the call.
+    fake = _FakeWin32Service(
+        state=_FakeWin32Service.SERVICE_STOP_PENDING, settle_after=20, start_effect=_FakeWin32Service.SERVICE_STOPPED
+    )
+    _use(monkeypatch, fake)
+    with pytest.raises(OperationTimeoutError) as caught:
+        controller.start("Svc", timeout=10.0)
+    assert fake.actions == ["start"], "the settle ended inside the budget and the start was issued"
+    # One shared deadline fires when the clock reaches 10 s (within one poll); a fresh deadline
+    # for the target wait would fire at settle + timeout, about 15 s.
+    assert 10.0 <= clock.now < 10.0 + 0.25
+    assert caught.value.timeout == 10.0
+
+
+_STOPPED, _START_PENDING, _STOP_PENDING, _RUNNING = 1, 2, 3, 4
+_CONTINUE_PENDING, _PAUSE_PENDING, _PAUSED = 5, 6, 7
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("state", "step"),
+    [
+        (_RUNNING, mod.ControlStep.DONE),
+        (_START_PENDING, mod.ControlStep.AWAIT_TARGET),
+        (_STOP_PENDING, mod.ControlStep.SETTLE_FIRST),
+        (_CONTINUE_PENDING, mod.ControlStep.SETTLE_FIRST),
+        (_PAUSE_PENDING, mod.ControlStep.SETTLE_FIRST),
+        (_STOPPED, mod.ControlStep.ISSUE),
+        (_PAUSED, mod.ControlStep.ISSUE),
+    ],
+)
+def test_next_step_toward_running(state: int, step: mod.ControlStep) -> None:
+    """The start decision: settled states issue or finish, the own pending waits, any other pending settles."""
+    assert mod.next_control_step(state, target=_RUNNING, target_pending=_START_PENDING) is step
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("state", "step"),
+    [
+        (_STOPPED, mod.ControlStep.DONE),
+        (_STOP_PENDING, mod.ControlStep.AWAIT_TARGET),
+        (_START_PENDING, mod.ControlStep.SETTLE_FIRST),
+        (_CONTINUE_PENDING, mod.ControlStep.SETTLE_FIRST),
+        (_PAUSE_PENDING, mod.ControlStep.SETTLE_FIRST),
+        (_RUNNING, mod.ControlStep.ISSUE),
+        (_PAUSED, mod.ControlStep.ISSUE),
+    ],
+)
+def test_next_step_toward_stopped(state: int, step: mod.ControlStep) -> None:
+    """The stop decision mirrors the start one."""
+    assert mod.next_control_step(state, target=_STOPPED, target_pending=_STOP_PENDING) is step
+
+
 # --- Real integration: run only on the disposable throwaway VM ---------------
 
 _SCRATCH_SERVICE = "Spooler"  # Print Spooler: present on Windows, safe to stop/start on a throwaway box
@@ -436,3 +574,193 @@ def test_set_startup_roundtrip_on_real_service() -> None:
         assert remanual.start_type is ServiceStartType.MANUAL
     finally:
         ps.set_service(_SCRATCH_SERVICE, original)
+
+
+# --- [97] Real pending states: a scratch service that is slow to start AND to stop -----------
+
+#: Seconds the scratch service stays in StartPending, and again in StopPending.
+_SLOW_SECONDS = 6.0
+_SLOW_TIMEOUT = 60.0
+
+#: The scratch service, run by the base interpreter (a venv's python.exe is a launcher that hands
+#: off to a child process, which the SCM would not accept as the service). argv: site-packages dir
+#: (pywin32 lives there; addsitedir runs its .pth bootstrap) and the pending seconds. pywin32's
+#: ServiceFramework accepts no control while StartPending, which is what makes a stop there fail.
+_SLOW_SERVICE_PROGRAM = """
+import site, sys, time
+site.addsitedir(sys.argv[1])
+DELAY = float(sys.argv[2])
+import servicemanager, win32event, win32service, win32serviceutil
+
+
+def pend(service, state):
+    end = time.monotonic() + DELAY
+    while time.monotonic() < end:
+        service.ReportServiceStatus(state, waitHint=5000)
+        time.sleep(0.5)
+
+
+class SlowService(win32serviceutil.ServiceFramework):
+    _svc_name_ = "pwshpy-slow"
+
+    def __init__(self, args):
+        super().__init__(args)
+        self.stop_event = win32event.CreateEvent(None, 0, 0, None)
+
+    def SvcStop(self):
+        self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING, waitHint=5000)
+        win32event.SetEvent(self.stop_event)
+
+    def SvcRun(self):
+        pend(self, win32service.SERVICE_START_PENDING)
+        self.ReportServiceStatus(win32service.SERVICE_RUNNING)
+        win32event.WaitForSingleObject(self.stop_event, win32event.INFINITE)
+        pend(self, win32service.SERVICE_STOP_PENDING)
+
+
+servicemanager.Initialize()
+servicemanager.PrepareToHostSingle(SlowService)
+servicemanager.StartServiceCtrlDispatcher()
+"""
+
+
+def _win32service() -> Any:
+    return importlib.import_module("win32service")
+
+
+def _raw_state(name: str) -> int:
+    """The scratch service's win32 state id, read with pywin32 directly (arrangement, not under test)."""
+    win32service = _win32service()
+    scm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
+    try:
+        handle = win32service.OpenService(scm, name, win32service.SERVICE_QUERY_STATUS)
+        try:
+            return int(win32service.QueryServiceStatus(handle)[1])
+        finally:
+            win32service.CloseServiceHandle(handle)
+    finally:
+        win32service.CloseServiceHandle(scm)
+
+
+def _raw_start(name: str) -> None:
+    """StartService without waiting: it returns once the service is in StartPending."""
+    win32service = _win32service()
+    scm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
+    try:
+        handle = win32service.OpenService(scm, name, win32service.SERVICE_START)
+        try:
+            win32service.StartService(handle, None)
+        finally:
+            win32service.CloseServiceHandle(handle)
+    finally:
+        win32service.CloseServiceHandle(scm)
+
+
+def _create_service(name: str, command_line: str) -> None:
+    win32service = _win32service()
+    scm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_ALL_ACCESS)
+    try:
+        handle = win32service.CreateService(
+            scm,
+            name,
+            name,
+            win32service.SERVICE_ALL_ACCESS,
+            win32service.SERVICE_WIN32_OWN_PROCESS,
+            win32service.SERVICE_DEMAND_START,
+            win32service.SERVICE_ERROR_NORMAL,
+            command_line,
+            None,
+            0,
+            None,
+            None,
+            None,
+        )
+        win32service.CloseServiceHandle(handle)
+    finally:
+        win32service.CloseServiceHandle(scm)
+
+
+def _settle(name: str, deadline: float) -> int:
+    """Poll the scratch service until it leaves every pending state (or the deadline); return its state."""
+    win32service = _win32service()
+    pending = {
+        win32service.SERVICE_START_PENDING,
+        win32service.SERVICE_STOP_PENDING,
+        win32service.SERVICE_CONTINUE_PENDING,
+        win32service.SERVICE_PAUSE_PENDING,
+    }
+    state = _raw_state(name)
+    while state in pending and time.monotonic() < deadline:
+        time.sleep(0.25)
+        state = _raw_state(name)
+    return state
+
+
+def _delete_service(name: str) -> None:
+    """Stop the scratch service, wait until it is Stopped, then delete it.
+
+    Deleting a service that is still stopping only marks it for deletion, so it would outlive
+    the fixture by _SLOW_SECONDS; waiting for Stopped first makes the deletion immediate.
+    """
+    win32service = _win32service()
+    deadline = time.monotonic() + _SLOW_TIMEOUT
+    scm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_ALL_ACCESS)
+    try:
+        handle = win32service.OpenService(scm, name, win32service.SERVICE_ALL_ACCESS)
+        try:
+            if _settle(name, deadline) != win32service.SERVICE_STOPPED:
+                win32service.ControlService(handle, win32service.SERVICE_CONTROL_STOP)
+                _settle(name, deadline)
+            win32service.DeleteService(handle)
+        finally:
+            win32service.CloseServiceHandle(handle)
+    finally:
+        win32service.CloseServiceHandle(scm)
+
+
+@pytest.fixture
+def slow_service(tmp_path: Path) -> Iterator[str]:
+    """Create a demand-start scratch service that is slow to start and to stop; delete it afterwards."""
+    if sys.platform != "win32":  # pragma: no cover - the tests using it are skipped off Windows
+        pytest.skip("creates a real Windows service")
+    program = tmp_path / "slow_service.py"
+    program.write_text(_SLOW_SERVICE_PROGRAM, encoding="utf-8")
+    interpreter = getattr(sys, "_base_executable", sys.executable)
+    site_packages = sysconfig.get_paths()["purelib"]
+    name = f"pwshpy-slow-{uuid.uuid4().hex[:8]}"
+    _create_service(name, f'"{interpreter}" "{program}" "{site_packages}" {_SLOW_SECONDS}')
+    try:
+        yield name
+    finally:
+        _delete_service(name)
+    with pytest.raises(Exception, match="1060"):  # ERROR_SERVICE_DOES_NOT_EXIST: nothing left behind
+        _raw_state(name)
+
+
+@pytest.mark.local_only
+@pytest.mark.mutating
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="creates and drives a real Windows service")
+def test_stop_of_a_real_start_pending_service_waits_for_the_start_then_stops(slow_service: str) -> None:
+    """[97]: a stop meeting StartPending waits for Running and stops, instead of failing with 1052."""
+    from pwshpy.composition import build_ps
+
+    _raw_start(slow_service)
+    # Holds only because the service stays StartPending for _SLOW_SECONDS: do not shorten it to ~0.
+    assert _raw_state(slow_service) == _win32service().SERVICE_START_PENDING, "the scratch service is StartPending"
+    assert build_ps().stop_service(slow_service, timeout=_SLOW_TIMEOUT).status is ServiceState.STOPPED
+
+
+@pytest.mark.local_only
+@pytest.mark.mutating
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="creates and drives a real Windows service")
+def test_start_of_a_real_stop_pending_service_waits_for_the_stop_then_starts(slow_service: str) -> None:
+    """[97]: a start meeting StopPending (after a no-wait stop) waits for Stopped and starts, not 1056."""
+    from pwshpy.composition import build_ps
+
+    ps = build_ps()
+    assert ps.start_service(slow_service, timeout=_SLOW_TIMEOUT).status is ServiceState.RUNNING
+    # Holds only because the service stays StopPending for _SLOW_SECONDS: do not shorten it to ~0.
+    assert ps.stop_service(slow_service, wait=False).status is ServiceState.STOP_PENDING
+    assert ps.start_service(slow_service, timeout=_SLOW_TIMEOUT).status is ServiceState.RUNNING

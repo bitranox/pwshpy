@@ -45,6 +45,7 @@ from elevation_doubles import (
     planted_managed_python,
     session_uv_cache,
     trusted_managed_python,
+    with_account_cache_home,
     with_data_home,
     without_python_dir_check,
     write_fake_sudo,
@@ -122,7 +123,14 @@ def _force_probe(runner: Path, *, as_root: bool | None, real_data_home: bool = F
     A runner forced to root also takes ``data_home(runner.parent)`` for its account's data directory
     (see :func:`elevation_doubles.with_data_home`) unless ``real_data_home`` keeps the passwd lookup;
     that real directory is then taken as trusted (:func:`elevation_doubles.without_python_dir_check`).
+    None on a root run of the suite still answers the cache-home lookup inside ``runner.parent``: the
+    real probe then says root, and a root run names uv's cache from root's passwd home ([X22 C1]),
+    which no uv this suite starts may write ([93], [111]).
     """
+    if as_root is None and RUNNING_AS_ROOT:
+        text = with_account_cache_home(runner.read_text(encoding="utf-8"), runner.parent, powershell=False)
+        runner.write_text(text, encoding="utf-8")
+        return
     if as_root is None or (not as_root and not RUNNING_AS_ROOT):
         return
     text = runner.read_text(encoding="utf-8")

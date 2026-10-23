@@ -441,8 +441,14 @@ Details worth knowing:
   (`GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND`, `GIT_ASKPASS`) or a CA to trust (`GIT_SSL_CAINFO`), and git
   runs `SSH_ASKPASS` for a password when `GIT_ASKPASS` and `core.askPass` are unset (measured on an
   HTTP 401 from uv's git fetch). The drop goes by the prefix, so a variable a later git release adds
-  is dropped too; git's configuration files still apply (the system one, and the global one below
-  `HOME` or `XDG_CONFIG_HOME`, which the runner leaves as it got them). The runner cannot tell who set
+  is dropped too. git's global configuration file is not read either: after the drop the runner sets
+  `GIT_CONFIG_GLOBAL` to `/dev/null` (POSIX) or the `NUL` device (Windows), with a line on stderr, so
+  neither the `.gitconfig` below the `HOME` (or, on Windows, `USERPROFILE`, which a UAC relaunch keeps
+  as the caller's) nor `git/config` below `XDG_CONFIG_HOME` that the run was given applies (a
+  `core.fsmonitor` command planted there ran from uv's git fetch before, measured; Git for Windows 2.55
+  reads `NUL` as empty, measured). git honours `GIT_CONFIG_GLOBAL` from 2.32 on; an older git ignores
+  it and still reads those files. The system file (`/etc/gitconfig`, or the one below Git for Windows'
+  install directory) is the administrators' and still applies. The runner cannot tell who set
   a variable, so an elevated run in a network that reaches the internet only through a proxy
   downloads nothing: the proxy can be named neither in the
   environment (root's own included) nor in a `uv.toml` (none is read), and the certificate of a

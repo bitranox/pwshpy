@@ -595,15 +595,21 @@ class Ps:
 
         Args:
             name: The service name (on Linux the unit name, ``"sshd.service"``).
-            timeout: Seconds to wait for the service to settle.
+            timeout: Seconds to wait for the service to settle. On Linux it bounds the one
+                ``RestartUnit`` job; on Windows the stop and the start each get their own
+                ``timeout``, so the whole restart can take up to twice ``timeout``.
 
         Returns:
             The service's :class:`ServiceInfo` once it settled.
 
         Raises:
-            OperationTimeoutError: The service did not settle within ``timeout`` seconds - the
-                restart WAS issued; ``.timeout`` holds the limit (CLI exit 110).
-            NativeCallError: The restart was refused or the service could not be opened.
+            OperationTimeoutError: The service did not settle within ``timeout`` seconds;
+                ``.timeout`` holds the limit (CLI exit 110). On Linux the restart WAS issued. On
+                Windows a timeout in the stop half sends no start, and one while the stop half
+                still waits out a pending start sends no stop either; a timeout in the start half
+                means the start WAS issued.
+            NativeCallError: The restart was refused, the service could not be opened, or (on
+                Linux) the unit settled at ``failed``.
 
         Example:
             >>> callable(build_ps().restart_service)

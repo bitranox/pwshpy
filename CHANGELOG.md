@@ -19,7 +19,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   body), `get_content` (the lines) and `download_file` (its `downloaded URL -> DEST` line) write
   UTF-8 bytes, like `--json`. A character the console code page cannot hold no longer fails the
   command with `UnicodeEncodeError` after the work was done. Piped `exec` output has LF line ends
-  and keeps ANSI sequences. At a terminal nothing changes.
+  and keeps ANSI sequences. On Windows, piped `get_content` lines and the `download_file` line
+  also change from CRLF to LF, and the `invoke_web_request` body is written byte-exact (the old
+  text layer turned `\r\n` into `\r\r\n`). At a terminal nothing changes.
 - An elevated packed run also drops the caller's `GCM_*` (Git Credential Manager) variables and
   `PASSWORD_STORE_DIR`, in both runners, like the `GIT_*` variables.
 - An elevated Windows run points `GIT_CONFIG_GLOBAL` at an empty file of its own

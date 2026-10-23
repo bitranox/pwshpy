@@ -391,12 +391,12 @@ def extract_script_metadata(source: str) -> str:
     return ""
 
 
-#: The ``requires-python`` key at the start of a (left-stripped) line, bare or as a quoted TOML key:
+#: The ``requires-python`` key at the start of a (stripped) line, bare or as a quoted TOML key:
 #: ``"requires-python" =`` and an indented key are valid TOML that uv honours (measured), and a longer
 #: bare key such as ``requires-python-note`` is another key.
 _REQUIRES_PYTHON_KEY = re.compile(r"""(?:requires-python|"requires-python"|'requires-python')(?=\s*=)""")
 
-#: A whole ``requires-python`` line inside a PEP 723 block (left-stripped); the value is a basic or
+#: A whole ``requires-python`` line inside a PEP 723 block (stripped); the value is a basic or
 #: literal TOML string.
 _REQUIRES_PYTHON_LINE = re.compile(
     _REQUIRES_PYTHON_KEY.pattern + r"""\s*=\s*"""
@@ -522,7 +522,7 @@ def extract_requires_python(metadata: str) -> str:
 
 
 def _requires_python_value(line: str) -> str:
-    """The specifier set a ``requires-python`` line (left-stripped) assigns.
+    """The specifier set a ``requires-python`` line (stripped) assigns.
 
     Raises:
         PackError: When the value is not one quoted string of specifier characters.

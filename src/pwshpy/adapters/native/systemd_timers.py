@@ -80,9 +80,14 @@ _UNIT_NAME_PREFIX = re.compile(r"[A-Za-z0-9:_.\-]+")
 #: for "-" in ``zfs-scrub-monthly@my\x2dpool``.
 _UNIT_NAME_ESCAPE = r"\\x[0-9A-Fa-f]{2}"
 
-#: A folder separator in a task path: "/", or a backslash that does not start an escape. The
-#: backslash form is the Windows one (``\Folder\Name``), which a portable script may pass on Linux.
+#: A folder separator in a task path that does not start with a backslash (a listed unit name, or a
+#: "/" path): "/", or a backslash that does not start an escape.
 _FOLDER_SEPARATOR = re.compile(r"/|\\(?!x[0-9A-Fa-f]{2})")
+
+#: A folder separator in the Windows form ``\Folder\Name`` (it starts with a backslash), which a
+#: portable script may pass on Linux: every backslash and "/", as in 1.5.2. No listed unit name starts
+#: with a backslash, so ``\Maintenance\xfer_logs`` is the task ``xfer_logs``, never an escape.
+_WINDOWS_FOLDER_SEPARATOR = re.compile(r"[\\/]")
 
 #: A unit name prefix as systemd may list it: the prefix characters or escapes (a backslash only as
 #: part of one, the only form that survives :func:`base_name`).
@@ -463,14 +468,18 @@ def iter_timers(folder_path: str = _ROOT, *, strict: bool = False) -> Iterator[S
 def base_name(task_path: str) -> str:
     """Reduce a task identifier to its systemd unit base name (drop any folder and .timer/.service).
 
-    A folder ends at "/" or at a backslash, except a backslash that starts systemd's ``\\xNN`` escape,
-    which is part of the name (:data:`_FOLDER_SEPARATOR`).
+    A path starting with a backslash is the Windows form ``\\Folder\\Name``: every backslash and "/"
+    ends a folder (:data:`_WINDOWS_FOLDER_SEPARATOR`). Otherwise a folder ends at "/" or at a backslash,
+    except a backslash that starts systemd's ``\\xNN`` escape, which is part of the name
+    (:data:`_FOLDER_SEPARATOR`).
 
     Example:
-        >>> base_name(r"\\tasks\\backup.timer"), base_name(r"/zfs-scrub-monthly@my\\x2dpool.timer")
-        ('backup', 'zfs-scrub-monthly@my\\\\x2dpool')
+        >>> base_name(r"\\Maintenance\\xfer_logs"), base_name(r"/zfs-scrub-monthly@my\\x2dpool.timer")
+        ('xfer_logs', 'zfs-scrub-monthly@my\\\\x2dpool')
     """
-    name = _FOLDER_SEPARATOR.split(task_path.strip())[-1]
+    path = task_path.strip()
+    separator = _WINDOWS_FOLDER_SEPARATOR if path.startswith("\\") else _FOLDER_SEPARATOR
+    name = separator.split(path)[-1]
     for suffix in (".timer", ".service"):
         if name.endswith(suffix):
             return name[: -len(suffix)]
@@ -499,9 +508,18 @@ def unit_base(task_path: str) -> str:
     if not _UNIT_NAME_PREFIX.fullmatch(base):
         raise ConfigurationError(
             f"{base!r} is not a systemd unit name: use ASCII letters, digits, ':', '-', '_' and '.' only "
-            "('@' would make a template or instance unit)."
+            f"('@' would make a template or instance unit).{_backslash_hint(task_path, base)}"
         )
     return _within_unit_name_max(base)
+
+
+def _backslash_hint(task_path: str, base: str) -> str:
+    """How :func:`base_name` read a backslash in ``task_path``, for a refusal naming ``base``; or ''."""
+    if task_path.strip().startswith("\\"):
+        return " A path starting with a backslash is read as \\Folder\\Name: every backslash ends a folder."
+    if "\\" in base:
+        return " Here a backslash starts a systemd \\xNN escape, which pwshpy does not register."
+    return ""
 
 
 def existing_unit_base(task_path: str) -> str:

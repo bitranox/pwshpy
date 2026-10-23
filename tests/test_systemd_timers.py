@@ -1405,19 +1405,84 @@ def test_a_listed_escaped_timer_is_addressed_by_its_exact_unit_name(
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(
     ("task_path", "expected"),
-    [(r"\tasks\backup.timer", "backup"), ("/tasks/backup", "backup"), (r"\tasks\x2dname", r"tasks\x2dname")],
-    ids=["windows-folder", "posix-folder", "escape-after-a-folder"],
+    [
+        (r"\tasks\backup.timer", "backup"),
+        ("/tasks/backup", "backup"),
+        (r"\tasks\x2dname", "x2dname"),
+        (r"tasks\x2dname", r"tasks\x2dname"),
+        (r"/tasks/a\x2dname", r"a\x2dname"),
+    ],
+    ids=["windows-folder", "posix-folder", "windows-folder-leaf-like-escape", "listed-escape", "escape-after-slash"],
 )
 def test_a_folder_is_dropped_at_a_slash_or_a_backslash_that_starts_no_escape(task_path: str, expected: str) -> None:
-    """[X22 T1]: the Windows folder form ``\\Folder\\Name`` stays a folder; only ``\\xNN`` is kept."""
+    """[X22 T1]: a listed name keeps systemd's ``\\xNN`` escape; a backslash starting none is a folder.
+    [X23 R2]: a path starting with a backslash is the Windows form ``\\Folder\\Name``, where every
+    backslash ends a folder, so a leaf that looks like an escape (``x2dname``) is the name, as in 1.5.2."""
     assert base_name(task_path) == expected
 
 
 @pytest.mark.os_agnostic
 def test_register_still_refuses_an_escaped_name() -> None:
-    """[X22 T1]: register and unregister keep the strict grammar: an escape is no name pwshpy writes."""
-    with pytest.raises(ConfigurationError, match="not a systemd unit name"):
+    """[X22 T1]: register and unregister keep the strict grammar: an escape is no name pwshpy writes.
+    [X23 C1]: the refusal says how the backslash was read."""
+    with pytest.raises(ConfigurationError, match=r"not a systemd unit name.*starts a systemd \\xNN escape"):
         unit_base(r"backup\x2dnightly")
+
+
+@pytest.mark.os_agnostic
+def test_a_refused_windows_form_name_says_every_backslash_ends_a_folder() -> None:
+    """[X23 C1]: a refused name from a path starting with a backslash says it was read as a folder path."""
+    with pytest.raises(ConfigurationError, match=r"'my job' is not a systemd unit name.*every backslash ends a folder"):
+        unit_base("\\Tasks\\my job")
+
+
+_WINDOWS_FORM_LEAF_LIKE_AN_ESCAPE = pytest.mark.parametrize(
+    ("task_path", "base"),
+    [(r"\Tasks\xfer", "xfer"), (r"\Jobs\xbackup", "xbackup"), (r"\Maintenance\xfer_logs", "xfer_logs")],
+    ids=["xfer", "xbackup", "xfer_logs"],
+)
+
+
+@pytest.mark.os_agnostic
+@_WINDOWS_FORM_LEAF_LIKE_AN_ESCAPE
+def test_a_windows_form_path_whose_leaf_starts_like_an_escape_registers_its_leaf(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, task_path: str, base: str
+) -> None:
+    """[X23 R2]: X22 read ``\\Tasks\\xfer``'s last backslash as the start of a ``\\xfe`` escape and
+    refused the name; 1.5.2 registered the leaf, and so does 1.6 again."""
+    units = frozenset({f"{base}.service", f"{base}.timer"})
+    conn = FakeConn([], _job_props(base, user=""), frozenset({f"{base}.timer"}), pending=units)
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    SystemdScheduledTaskController().register(task_path, program="/bin/true", triggers=[OnceTrigger(at=_AT)])
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(units)
+
+
+@pytest.mark.os_agnostic
+@_WINDOWS_FORM_LEAF_LIKE_AN_ESCAPE
+def test_a_windows_form_path_whose_leaf_starts_like_an_escape_is_addressed_by_its_leaf(
+    monkeypatch: pytest.MonkeyPatch, task_path: str, base: str
+) -> None:
+    """[X23 R2]: X22 sent run, stop, enable and disable on ``\\Maintenance\\xfer_logs`` to
+    ``Maintenance\\xfer_logs.service``; each now reaches the leaf's units."""
+    conn = _instance_conn(f"{base}.timer")
+    use_bus(monkeypatch, conn)
+    controller = SystemdScheduledTaskController()
+    controller.run(task_path)
+    controller.stop(task_path)
+    controller.enable(task_path)
+    controller.disable(task_path)
+    service, armed = f"{base}.service", f"{base}.timer"
+    assert conn.calls == [
+        ("StartUnit", (service, "replace")),
+        ("StopUnit", (service, "replace")),
+        ("EnableUnitFiles", ([armed], False, False)),
+        ("Reload", ()),
+        ("StartUnit", (armed, "replace")),
+        ("StopUnit", (armed, "replace")),
+        ("DisableUnitFiles", ([armed], False)),
+        ("Reload", ()),
+    ]
 
 
 # --- [X22 M-L1] control characters in the arguments and the description ---------------------------

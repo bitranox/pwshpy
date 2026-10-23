@@ -94,10 +94,13 @@ def test_a_flag_byte_of_zero_parses_too(tmp_path: Path) -> None:
 
 @pytest.mark.os_agnostic
 def test_a_real_esd_layout_reads_like_a_wim(tmp_path: Path) -> None:
-    """Microsoft's install.esd (measured 2026-10-23): LZMS/solid header flags, uncompressed XML.
+    """Microsoft's install.esd (measured 2026-10-23): LZMS header flags, uncompressed XML.
 
     The header flags and the XML flag byte are the values measured on a real install.esd;
-    only the XML resource is read, so the solid LZMS payload never matters.
+    only the XML resource is read, so the LZMS image data never matters. A failure means
+    the reader refused a file because its header names LZMS: this guards against a future
+    header-flag check (the XML flag 0x02 alone is covered by
+    test_the_metadata_flag_real_wims_set_does_not_refuse).
     """
     path = _write(
         tmp_path,

@@ -16,13 +16,18 @@ import pytest
 
 from pwshpy.adapters.native import windows_update
 from pwshpy.domain.errors import NativeCallError, PlatformUnsupportedError
-from pwshpy.domain.records import WindowsUpdate
+from pwshpy.domain.records import UpdateCategory, WindowsUpdate
 
 # White-box tests of the adapter's pure helpers (no public path reaches them off Windows).
 _to_update = windows_update._to_update  # pyright: ignore[reportPrivateUsage]
 _flatten = windows_update._flatten  # pyright: ignore[reportPrivateUsage]
 _com_failure_message = windows_update._com_failure_message  # pyright: ignore[reportPrivateUsage]
 _rows_or_raise = windows_update._rows_or_raise  # pyright: ignore[reportPrivateUsage]
+
+# Real WUA CategoryIDs (read live from the Windows Update agent): the Security Updates
+# classification and the Windows 11 product.
+_SECURITY_UPDATES = "0fa1201d-4330-4fa8-8ae9-b877473b6441"
+_WINDOWS_11 = "72e7624a-5b00-45d2-b92f-e561c0a6a160"
 
 _ROW: dict[str, object] = {
     "update_id": "u",
@@ -36,6 +41,10 @@ _ROW: dict[str, object] = {
     "msrc_severity": "Critical",
     "max_download_size": 1024,
     "categories": ["Security Updates", "Windows 11"],
+    "category_details": [
+        {"category_id": _SECURITY_UPDATES, "type": "UpdateClassification", "name": "Security Updates"},
+        {"category_id": _WINDOWS_11, "type": "Product", "name": "Windows 11"},
+    ],
 }
 
 
@@ -51,11 +60,35 @@ def test_to_update_turns_a_child_row_into_a_record_with_tuples() -> None:
 
 
 @pytest.mark.os_agnostic
+def test_to_update_carries_each_category_as_a_typed_sub_record() -> None:
+    """category_details holds one UpdateCategory per category, in the same order as categories."""
+    update = _to_update(dict(_ROW))
+    assert update.category_details == (
+        UpdateCategory(category_id=_SECURITY_UPDATES, type="UpdateClassification", name="Security Updates"),
+        UpdateCategory(category_id=_WINDOWS_11, type="Product", name="Windows 11"),
+    )
+    assert all(type(category) is UpdateCategory for category in update.category_details)
+    assert tuple(category.name for category in update.category_details) == update.categories
+
+
+@pytest.mark.os_agnostic
+def test_category_details_serialise_as_nested_objects() -> None:
+    """--json / --jsonl carry each category as an object with its id, type and name."""
+    dumped = _to_update(dict(_ROW)).to_dict()
+    assert dumped["category_details"][0] == {
+        "category_id": _SECURITY_UPDATES,
+        "type": "UpdateClassification",
+        "name": "Security Updates",
+    }
+
+
+@pytest.mark.os_agnostic
 def test_windows_update_record_defaults() -> None:
     """Only the identity and title are required; the rest default to empty / False / 0."""
     update = WindowsUpdate(update_id="u", title="t")
     assert update.kb_article_ids == ()
     assert update.categories == ()
+    assert update.category_details == ()
     assert update.revision_number == 0
     assert update.max_download_size == 0
     assert update.is_installed is False
@@ -87,6 +120,8 @@ class _Identity:
 @dataclass
 class _Category:
     Name: str
+    CategoryID: str
+    Type: str
 
 
 @dataclass
@@ -110,7 +145,13 @@ def test_flatten_reads_every_iupdate_field_into_plain_picklable_data() -> None:
         Identity=_Identity(UpdateID="1a2b", RevisionNumber=201),
         Title="2026-10 Cumulative Update",
         KBArticleIDs=_Collection(["5031455", "5031456"]),
-        Categories=_Collection([_Category("Security Updates")]),
+        # WUA hands CategoryID over as the agent stored it; upper case must come out lower.
+        Categories=_Collection(
+            [
+                _Category("Security Updates", _SECURITY_UPDATES.upper(), "UpdateClassification"),
+                _Category("Windows 11", _WINDOWS_11, "Product"),
+            ]
+        ),
         MsrcSeverity=None,
         MaxDownloadSize=Decimal(123456789),
     )
@@ -126,7 +167,11 @@ def test_flatten_reads_every_iupdate_field_into_plain_picklable_data() -> None:
         "is_mandatory": True,
         "msrc_severity": "",
         "max_download_size": 123456789,
-        "categories": ["Security Updates"],
+        "categories": ["Security Updates", "Windows 11"],
+        "category_details": [
+            {"category_id": _SECURITY_UPDATES, "type": "UpdateClassification", "name": "Security Updates"},
+            {"category_id": _WINDOWS_11, "type": "Product", "name": "Windows 11"},
+        ],
     }
     assert type(row["max_download_size"]) is int
 

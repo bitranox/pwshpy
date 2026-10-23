@@ -26,7 +26,7 @@ from collections.abc import Iterator
 from typing import Any, cast
 
 from ...domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
-from ...domain.records import WindowsUpdate
+from ...domain.records import UpdateCategory, WindowsUpdate
 from .bounded import run_bounded
 
 # DISP_E_EXCEPTION: IDispatch::Invoke reports that the callee raised, with the callee's own
@@ -43,9 +43,20 @@ def _strings(collection: Any) -> list[str]:
     return [str(collection.Item(i)) for i in range(int(collection.Count))]
 
 
+def _category(category: Any) -> dict[str, str]:
+    """One ICategory as plain data.
+
+    The GUID is lower-cased so it compares equal however the agent spelled it: the WSUS
+    classification table publishes these GUIDs in upper case, the agent was read returning
+    lower case, and a caller filtering on either must match.
+    """
+    return {"category_id": str(category.CategoryID).lower(), "type": str(category.Type), "name": str(category.Name)}
+
+
 def _flatten(update: Any) -> dict[str, Any]:
     """One IUpdate as plain data (only picklable values cross the pipe)."""
     categories = update.Categories
+    details = [_category(categories.Item(c)) for c in range(int(categories.Count))]
     return {
         "update_id": str(update.Identity.UpdateID),
         "revision_number": int(update.Identity.RevisionNumber),
@@ -58,7 +69,8 @@ def _flatten(update: Any) -> dict[str, Any]:
         "msrc_severity": str(update.MsrcSeverity or ""),
         # MaxDownloadSize is a COM DECIMAL, which pywin32 hands over as decimal.Decimal.
         "max_download_size": int(update.MaxDownloadSize),
-        "categories": [str(categories.Item(c).Name) for c in range(int(categories.Count))],
+        "categories": [detail["name"] for detail in details],
+        "category_details": details,
     }
 
 
@@ -139,6 +151,7 @@ def _to_update(row: dict[str, Any]) -> WindowsUpdate:
         msrc_severity=row["msrc_severity"],
         max_download_size=row["max_download_size"],
         categories=tuple(row["categories"]),
+        category_details=tuple(UpdateCategory.model_construct(**detail) for detail in row["category_details"]),
     )
 
 

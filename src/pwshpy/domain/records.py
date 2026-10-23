@@ -807,12 +807,41 @@ class WindowsImage(PSRecord):
     size_bytes: int = 0
 
 
+class UpdateCategory(PSRecord):
+    """One category of a Windows Update (part of :class:`WindowsUpdate`; the WUA ``ICategory``).
+
+    ``category_id`` is the locale-independent identity: select Security or Definition updates
+    by it, never by ``name``, which the Windows Update agent may localize.  ``type`` is the
+    agent's own, untranslated kind identifier.  It is kept as the agent's string rather than
+    an enum because Microsoft documents no closed set of values, and an enum would turn an
+    unlisted kind into a guess.
+
+    Attributes:
+        category_id: The category GUID (``ICategory.CategoryID``), lower case, e.g.
+            ``"0fa1201d-4330-4fa8-8ae9-b877473b6441"`` for the Security Updates classification.
+        type: The category kind (``ICategory.Type``), e.g. ``"UpdateClassification"`` or
+            ``"Product"``.
+        name: The display name (``ICategory.Name``).
+
+    Example:
+        >>> UpdateCategory(category_id="0fa1201d-4330-4fa8-8ae9-b877473b6441",
+        ...                type="UpdateClassification", name="Security Updates").type
+        'UpdateClassification'
+    """
+
+    category_id: str
+    type: str = ""
+    name: str = ""
+
+
 class WindowsUpdate(PSRecord):
     """One update from a Windows Update search (Microsoft.Update.Session; Windows-only).
 
     ``update_id`` plus ``revision_number`` is the update's stable identity.  ``title`` and
     ``categories`` are display text, localized by the Windows Update agent to the machine's
-    language, so match on ``update_id`` or ``kb_article_ids``, never on them.
+    language, so match on ``update_id`` or ``kb_article_ids``, never on them.  To select by
+    category (Security Updates, Definition Updates, a product), match the ``category_id`` of an
+    entry in ``category_details``.
 
     Attributes:
         update_id: The update's GUID (``Identity.UpdateID``).
@@ -826,6 +855,8 @@ class WindowsUpdate(PSRecord):
         msrc_severity: The MSRC rating (``Critical``, ``Important``, ...), ``""`` when unrated.
         max_download_size: The largest download it may need, in bytes.
         categories: The localized category names.
+        category_details: One :class:`UpdateCategory` per category (GUID, kind and name), in
+            the same order as ``categories``.
 
     Example:
         >>> WindowsUpdate(update_id="u", title="t").kb_article_ids
@@ -843,6 +874,7 @@ class WindowsUpdate(PSRecord):
     msrc_severity: str = ""
     max_download_size: int = 0
     categories: tuple[str, ...] = ()
+    category_details: tuple[UpdateCategory, ...] = ()
 
 
 __all__ = [
@@ -876,6 +908,7 @@ __all__ = [
     "ScheduledTaskInfo",
     "ServiceInfo",
     "SystemUptime",
+    "UpdateCategory",
     "WebResponse",
     "WindowsImage",
     "WindowsUpdate",

@@ -39,9 +39,11 @@
 # UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL, UV_ASTRAL_MIRROR_URL,
 # UV_PYPY_INSTALL_MIRROR, UV_GRAALPY_INSTALL_MIRROR, UV_PYODIDE_INSTALL_MIRROR, PYTHONHOME,
 # PYTHONPATH, PYTHONUSERBASE, UV_INDEX_URL, UV_DEFAULT_INDEX, UV_INDEX, UV_EXTRA_INDEX_URL,
-# UV_FIND_LINKS, UV_INSECURE_HOST, UV_CACHE_DIR, UV_PYTHON_CACHE_DIR, UV_ENV_FILE, HTTPS_PROXY,
-# HTTP_PROXY, ALL_PROXY (and their lower-case forms), SSL_CERT_FILE, SSL_CERT_DIR, SSL_CLIENT_CERT,
-# UV_NATIVE_TLS, UV_SYSTEM_CERTS and UV_KEYRING_PROVIDER are ignored, each with a line on stderr;
+# UV_FIND_LINKS, UV_INSECURE_HOST, UV_INSECURE_NO_ZIP_VALIDATION, UV_CACHE_DIR, UV_PYTHON_CACHE_DIR,
+# UV_ENV_FILE, HTTPS_PROXY, HTTP_PROXY, ALL_PROXY (and their lower-case forms), SSL_CERT_FILE,
+# SSL_CERT_DIR, SSL_CLIENT_CERT, UV_NATIVE_TLS, UV_SYSTEM_CERTS, UV_KEYRING_PROVIDER, every variable
+# whose name starts with GIT_ (git, which uv runs for a git source, reads them) and SSH_ASKPASS are
+# ignored, each with a line on stderr;
 # the user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file (--no-env-file).
 # In a network that reaches the internet only through a proxy, a root run can download nothing: the
 # managed Python and every package the script needs must already be in root's directories named
@@ -557,14 +559,15 @@ pwshpy_drop_interpreter_variables() {
     # .pth the caller put in ~/.local/lib/pythonX.Y/site-packages would run as root (measured): off.
     PYTHONNOUSERSITE=1
     export PYTHONNOUSERSITE
-    # Where uv takes packages (an index, a find-links location, a host it skips TLS checks for), its
-    # caches and an env file from: each is the caller's to choose, and an env file can set PYTHONPATH
-    # again (uv run loads UV_ENV_FILE despite --no-config, measured with uv 0.13). A root run uses uv's
-    # defaults (user decision, X21); the run below also passes --no-env-file, which no variable undoes.
+    # Where uv takes packages (an index, a find-links location, a host it skips TLS checks for), how it
+    # checks a wheel's archive (UV_INSECURE_NO_ZIP_VALIDATION turns that off), its caches and an env file
+    # from: each is the caller's to choose, and an env file can set PYTHONPATH again (uv run loads
+    # UV_ENV_FILE despite --no-config, measured with uv 0.13). A root run uses uv's defaults (user
+    # decision, X21); the run below also passes --no-env-file, which no variable undoes.
     for _iv in UV_INDEX_URL UV_DEFAULT_INDEX UV_INDEX UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_INSECURE_HOST \
-        UV_CACHE_DIR UV_PYTHON_CACHE_DIR UV_ENV_FILE; do
+        UV_INSECURE_NO_ZIP_VALIDATION UV_CACHE_DIR UV_PYTHON_CACHE_DIR UV_ENV_FILE; do
         if eval "[ -n \"\${$_iv+set}\" ]"; then
-            _iv_text="as root uv uses its defaults for package sources, caches and env files"
+            _iv_text="as root uv uses its defaults for package sources, archive checks, caches and env files"
             printf '%s\n' "pwshpy: ignoring $_iv: $_iv_text" >&2
             unset "$_iv"
         fi
@@ -581,6 +584,21 @@ pwshpy_drop_interpreter_variables() {
         if eval "[ -n \"\${$_iv+set}\" ]"; then
             _iv_text="as root uv connects with its own defaults: no proxy, its built-in certificate roots, no keyring"
             printf '%s\n' "pwshpy: ignoring $_iv: $_iv_text" >&2
+            unset "$_iv"
+        fi
+    done
+    # git, which uv runs for a git source (a PEP 723 dependency or a --with value), reads every GIT_
+    # variable: GIT_CONFIG_COUNT with GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n sets any config key (a
+    # core.fsmonitor command ran from uv's git fetch, measured with uv 0.13 and git 2.53), and
+    # GIT_SSH_COMMAND, GIT_PROXY_COMMAND, GIT_EXEC_PATH, GIT_ASKPASS or GIT_SSL_CAINFO name a command to
+    # run or a CA to trust. Dropped by prefix, so a variable a later git adds is gone too, with
+    # SSH_ASKPASS: git runs it for a password when GIT_ASKPASS and core.askPass are unset (it ran on an
+    # HTTP 401 from uv's git fetch, measured). Names are read from env, a line per variable; a line inside
+    # a multi-line value that only looks like one names nothing set, and is skipped.
+    _iv_env=$(env) || pwshpy_die "cannot list the environment to drop the caller's git variables" 70
+    for _iv in $(printf '%s\n' "$_iv_env" | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p') SSH_ASKPASS; do
+        if eval "[ -n \"\${$_iv+set}\" ]"; then
+            printf '%s\n' "pwshpy: ignoring $_iv: as root uv runs git with none of the caller's git settings" >&2
             unset "$_iv"
         fi
     done

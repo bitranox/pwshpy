@@ -54,10 +54,12 @@
     UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_DOWNLOADS_JSON_URL, UV_ASTRAL_MIRROR_URL,
     UV_PYPY_INSTALL_MIRROR, UV_GRAALPY_INSTALL_MIRROR, UV_PYODIDE_INSTALL_MIRROR, PYTHONHOME,
     PYTHONPATH, PYTHONUSERBASE, UV_INDEX_URL, UV_DEFAULT_INDEX, UV_INDEX, UV_EXTRA_INDEX_URL,
-    UV_FIND_LINKS, UV_INSECURE_HOST, UV_CACHE_DIR, UV_PYTHON_CACHE_DIR, UV_ENV_FILE, HTTPS_PROXY,
-    HTTP_PROXY, ALL_PROXY (and their lower-case forms), SSL_CERT_FILE, SSL_CERT_DIR,
-    SSL_CLIENT_CERT, UV_NATIVE_TLS, UV_SYSTEM_CERTS and UV_KEYRING_PROVIDER are ignored, each with a
-    line on stderr; the user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file
+    UV_FIND_LINKS, UV_INSECURE_HOST, UV_INSECURE_NO_ZIP_VALIDATION, UV_CACHE_DIR,
+    UV_PYTHON_CACHE_DIR, UV_ENV_FILE, HTTPS_PROXY, HTTP_PROXY, ALL_PROXY (and their lower-case
+    forms), SSL_CERT_FILE, SSL_CERT_DIR, SSL_CLIENT_CERT, UV_NATIVE_TLS, UV_SYSTEM_CERTS,
+    UV_KEYRING_PROVIDER, every variable whose name starts with GIT_ (git, which uv runs for a git
+    source, reads them; on Windows in any case) and SSH_ASKPASS are ignored, each with a line on
+    stderr; the user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file
     (--no-env-file). In a network that reaches the internet only through a proxy, an elevated run
     can download nothing: the managed Python and every package the script needs must already be in
     the account's directories named above.
@@ -254,14 +256,15 @@ $PwshPyInterpreterVariables = @(
 # site-packages, so each would run code the caller chose with elevated rights. An elevated run drops
 # them too, and turns the user site-packages off (PYTHONNOUSERSITE); identical to the .sh runner.
 $PwshPyLibraryVariables = @('PYTHONHOME', 'PYTHONPATH', 'PYTHONUSERBASE')
-# Where uv takes packages (an index, a find-links location, a host it skips TLS checks for), its caches
-# and an env file from: each is the caller's to choose, and an env file can set PYTHONPATH again (uv
-# run loads UV_ENV_FILE despite --no-config, measured with uv 0.13). An elevated run drops them and uses
-# uv's defaults (user decision, X21); its uv run also passes --no-env-file, which no variable undoes.
+# Where uv takes packages (an index, a find-links location, a host it skips TLS checks for), how it
+# checks a wheel's archive (UV_INSECURE_NO_ZIP_VALIDATION turns that off), its caches and an env file
+# from: each is the caller's to choose, and an env file can set PYTHONPATH again (uv run loads
+# UV_ENV_FILE despite --no-config, measured with uv 0.13). An elevated run drops them and uses uv's
+# defaults (user decision, X21); its uv run also passes --no-env-file, which no variable undoes.
 # Identical to the .sh runner.
 $PwshPyUvSourceVariables = @(
     'UV_INDEX_URL', 'UV_DEFAULT_INDEX', 'UV_INDEX', 'UV_EXTRA_INDEX_URL', 'UV_FIND_LINKS', 'UV_INSECURE_HOST',
-    'UV_CACHE_DIR', 'UV_PYTHON_CACHE_DIR', 'UV_ENV_FILE'
+    'UV_INSECURE_NO_ZIP_VALIDATION', 'UV_CACHE_DIR', 'UV_PYTHON_CACHE_DIR', 'UV_ENV_FILE'
 )
 # How uv connects: a proxy (uv 0.13 sends https through HTTPS_PROXY, http through HTTP_PROXY and both
 # through ALL_PROXY, each also in lower case, measured; on Windows the two spellings are one variable),
@@ -1020,12 +1023,29 @@ function Clear-PwshPyInterpreterVariable {
     Set-Item -LiteralPath 'Env:PYTHONNOUSERSITE' -Value '1'
     foreach ($name in $PwshPyUvSourceVariables) {
         if ($null -eq [Environment]::GetEnvironmentVariable($name)) { continue }
-        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run lets uv use its defaults for package sources, caches and env files"
+        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run lets uv use its defaults for package sources, archive checks, caches and env files"
         Remove-Item -LiteralPath "Env:$name"
     }
     foreach ($name in $PwshPyNetworkVariables) {
         if ($null -eq [Environment]::GetEnvironmentVariable($name)) { continue }
         Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run lets uv connect with its own defaults: no proxy, its built-in certificate roots, no keyring"
+        Remove-Item -LiteralPath "Env:$name"
+    }
+    # git, which uv runs for a git source (a PEP 723 dependency or a --with value), reads every GIT_
+    # variable: GIT_CONFIG_COUNT with GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n sets any config key (a
+    # core.fsmonitor command ran from uv's git fetch, measured with uv 0.13 and git 2.53), and
+    # GIT_SSH_COMMAND, GIT_PROXY_COMMAND, GIT_EXEC_PATH, GIT_ASKPASS or GIT_SSL_CAINFO name a command to
+    # run or a CA to trust. Dropped by prefix, so a variable a later git adds is gone too, with
+    # SSH_ASKPASS: git runs it for a password when GIT_ASKPASS and core.askPass are unset (it ran on an
+    # HTTP 401 from uv's git fetch, measured). Windows matches the prefix in any case, as its environment
+    # does (Git_Ssh_Command is GIT_SSH_COMMAND there); POSIX only in upper case, as the .sh runner.
+    $gitNames = @(foreach ($variable in @(Get-ChildItem -LiteralPath 'Env:')) {
+        $isGit = if ($PwshPyOnWindows) { $variable.Name -like 'GIT_*' } else { $variable.Name -clike 'GIT_*' }
+        if ($isGit) { $variable.Name }
+    })
+    foreach ($name in $gitNames + @('SSH_ASKPASS')) {
+        if ($null -eq [Environment]::GetEnvironmentVariable($name)) { continue }
+        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run lets uv run git with none of the caller's git settings"
         Remove-Item -LiteralPath "Env:$name"
     }
 }

@@ -27,10 +27,12 @@ from pathlib import Path
 
 import pytest
 from elevation_doubles import (
+    GIT_VARIABLES,
     LIBRARY_PATH_PLANTS,
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
     NETWORK_VARIABLES,
+    NOT_A_GIT_VARIABLE,
     OTHER_UID,
     RUNNING_AS_ROOT,
     UV_SOURCE_VARIABLES,
@@ -1903,3 +1905,28 @@ def test_as_root_no_proxy_certificate_or_keyring_variable_reaches_uv(tmp_path: P
         assert name not in recorded and name not in found and dropped_line, (recorded, found, result.stderr)
     else:
         assert recorded.get(name) == value and not dropped_line, (recorded, result.stderr)
+
+
+# --- [X23 G1] git's variables: uv runs git for a git source ------------------------------------------
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_no_git_variable_reaches_uv(tmp_path: Path, as_root: bool) -> None:
+    """[X23 G1]: git, which uv runs for a git source, reads every GIT_ variable (a GIT_CONFIG_* pair sets
+    any config key, a command-valued one included) and runs SSH_ASKPASS for a password. As root every
+    variable whose name starts with GIT_ (one no git reads included: the drop is by prefix) and
+    SSH_ASKPASS is dropped with a line each, before uv python find already; one holding GIT_ elsewhere in
+    its name stays. Not root (the control), each reaches uv unchanged and no line is printed."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root)
+    environment = {**_trust_env(tmp_path), **GIT_VARIABLES, NOT_A_GIT_VARIABLE: "kept"}
+    result = _run_in(["sh"], runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = _recorded_variables(record)
+    assert recorded.get(NOT_A_GIT_VARIABLE) == "kept", recorded
+    for name, value in GIT_VARIABLES.items():
+        dropped_line = f"pwshpy: ignoring {name}: " in result.stderr
+        if as_root:
+            found = _recorded_variables(Path(f"{record}.python"))
+            assert name not in recorded and name not in found and dropped_line, (recorded, found, result.stderr)
+        else:
+            assert recorded.get(name) == value and not dropped_line, (recorded, result.stderr)

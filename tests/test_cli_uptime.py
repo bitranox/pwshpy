@@ -31,7 +31,7 @@ def test_uptime_jsonl_emits_single_record(
     """--jsonl emits exactly one JSON record with boot_time and uptime_seconds."""
     result = _invoke(cli_runner, production_factory, ["--jsonl"])
     assert result.exit_code == 0
-    lines = [line for line in result.output.splitlines() if line.startswith("{")]
+    lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
     assert len(lines) == 1
     record = json.loads(lines[0])
     assert "boot_time" in record

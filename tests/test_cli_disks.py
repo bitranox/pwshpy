@@ -31,7 +31,7 @@ def test_disks_jsonl_streams_records(
     """--jsonl emits one JSON object per filesystem and exits 0."""
     result = _invoke(cli_runner, production_factory, ["--jsonl"])
     assert result.exit_code == 0
-    lines = [line for line in result.output.splitlines() if line.startswith("{")]
+    lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
     assert lines
     assert "mountpoint" in json.loads(lines[0])
 

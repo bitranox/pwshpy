@@ -777,8 +777,9 @@ def with_account_cache_home(text: str, scratch: Path, *, powershell: bool) -> st
     cache an elevated test run uses. One counted substitution.
 
     Example:
-        >>> with_account_cache_home("C=$(pwshpy_account_cache_home) || exit", Path("/s"), powershell=False)
-        "C='/s/default-cache' || exit"
+        >>> out = with_account_cache_home("C=$(pwshpy_account_cache_home) || exit", Path("/s"), powershell=False)
+        >>> out == "C='%s' || exit" % (Path("/s") / "default-cache")
+        True
     """
     return _answering(
         text, scratch / "default-cache", powershell=powershell, lookups=(SH_CACHE_HOME_LOOKUP, PS1_CACHE_HOME_LOOKUP)
@@ -796,8 +797,9 @@ def with_data_home(text: str, scratch: Path, *, powershell: bool) -> str:
 
     Example:
         >>> text = "X=$(pwshpy_account_data_home) C=$(pwshpy_account_cache_home)"
-        >>> with_data_home(text, Path("/s"), powershell=False)
-        "X='/s/data-home' C='/s/default-cache'"
+        >>> with_data_home(text, Path("/s"), powershell=False) == "X='%s' C='%s'" % (
+        ...     data_home(Path("/s")), Path("/s") / "default-cache")
+        True
     """
     text = with_account_cache_home(text, scratch, powershell=powershell)
     return _answering(

@@ -35,7 +35,7 @@ def test_connections_jsonl_streams_valid_records(
         srv.listen()
         result = _invoke(cli_runner, production_factory, ["--jsonl"])
     assert result.exit_code == 0
-    for line in result.output.splitlines():
+    for line in result.stdout.splitlines():
         if line.startswith("{"):
             assert "local_port" in json.loads(line)
 

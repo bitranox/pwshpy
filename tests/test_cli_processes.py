@@ -31,7 +31,7 @@ def test_processes_jsonl_streams_records(
     """--jsonl emits one JSON object per line and exits 0."""
     result = _invoke(cli_runner, production_factory, ["--jsonl", "--limit", "3"])
     assert result.exit_code == 0
-    lines = [line for line in result.output.strip().splitlines() if line.startswith("{")]
+    lines = [line for line in result.stdout.strip().splitlines() if line.startswith("{")]
     assert lines
     for line in lines:
         assert "pid" in json.loads(line)
@@ -45,10 +45,9 @@ def test_processes_json_emits_array(
     """--json emits a parseable JSON array."""
     result = _invoke(cli_runner, production_factory, ["--json", "--limit", "2"])
     assert result.exit_code == 0
-    # CliRunner mixes the stderr log line into the output; the JSON array is the
-    # line beginning with "[{" (in real runs logs go to stderr, stdout is clean).
-    payload = next(line for line in result.output.splitlines() if line.startswith("[{"))
-    parsed: list[object] = json.loads(payload)
+    # result.output interleaves stderr, where the log line can land inside the array (seen on
+    # Windows CI); result.stdout is what a pipe reader gets.
+    parsed: list[object] = json.loads(result.stdout)
     assert isinstance(parsed, list)
     assert len(parsed) <= 2
 
@@ -83,5 +82,5 @@ def test_processes_limit_bounds_count(
     """--limit caps the number of emitted records."""
     result = _invoke(cli_runner, production_factory, ["--jsonl", "--limit", "1"])
     assert result.exit_code == 0
-    lines = [line for line in result.output.strip().splitlines() if line.startswith("{")]
+    lines = [line for line in result.stdout.strip().splitlines() if line.startswith("{")]
     assert len(lines) == 1

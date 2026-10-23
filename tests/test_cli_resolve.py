@@ -31,7 +31,7 @@ def test_resolve_localhost_jsonl(
     """resolve localhost --jsonl emits DnsRecord objects and exits 0."""
     result = _invoke(cli_runner, production_factory, ["localhost", "--jsonl"])
     assert result.exit_code == 0
-    lines = [line for line in result.output.splitlines() if line.startswith("{")]
+    lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
     assert lines
     assert "address" in json.loads(lines[0])
 

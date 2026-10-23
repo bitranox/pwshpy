@@ -33,7 +33,7 @@ def test_env_jsonl_streams_records(
     monkeypatch.setenv("PWSHPY_CLI_ENV_TEST", "x")
     result = _invoke(cli_runner, production_factory, ["--jsonl"])
     assert result.exit_code == 0
-    names = {json.loads(line)["name"] for line in result.output.splitlines() if line.startswith("{")}
+    names = {json.loads(line)["name"] for line in result.stdout.splitlines() if line.startswith("{")}
     assert "PWSHPY_CLI_ENV_TEST" in names
 
 

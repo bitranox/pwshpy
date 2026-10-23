@@ -36,7 +36,7 @@ def test_reachable_socket_reports_true(
         port = srv.getsockname()[1]
         result = _invoke(cli_runner, production_factory, ["127.0.0.1", "-p", str(port), "--timeout", "2", "--jsonl"])
     assert result.exit_code == 0
-    line = next(line for line in result.output.splitlines() if line.startswith("{"))
+    line = next(line for line in result.stdout.splitlines() if line.startswith("{"))
     assert json.loads(line)["reachable"] is True
 
 

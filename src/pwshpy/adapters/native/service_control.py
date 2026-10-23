@@ -12,13 +12,20 @@ typically ``StopPending``.  Verbs are idempotent: starting a running service
 (or stopping a stopped one) is a no-op, not an error.  A service already in
 ``StartPending`` (``StopPending``) has its start (stop) issued, so the control is
 not sent again - the SCM would refuse it - and the verb waits for that pending
-transition instead, as ``Start-Service`` / ``Stop-Service`` do.
+transition instead, as ``Start-Service`` / ``Stop-Service`` do.  A service in any
+OTHER pending state (a start meeting ``StopPending``, a stop meeting
+``StartPending``) cannot take the control yet - the SCM answers 1056 for the start
+and 1052 or 1061 for the stop, which read as "already running" / "refused" - so the
+verb first waits for it to settle, then decides again from the settled state
+(:func:`next_control_step`).  One deadline, ``timeout`` seconds from the call,
+bounds the settle wait and the wait for the target state together.
 
 **MUTATING** - see CLAUDE.md "Development Safety": exercise only on a disposable
 Windows VM (the throwaway box), never a machine you care about.  ``pywin32`` is
 imported lazily so a portable install stays clean.
 
 Contents:
+    * :class:`ControlStep` / :func:`next_control_step` - the pure decision what a verb does in a state.
     * :class:`NativeServiceController` - start/stop/restart/set_startup over one SCM.
 """
 
@@ -26,6 +33,9 @@ from __future__ import annotations
 
 import importlib
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from ...domain.enums import ServiceStartType
@@ -35,6 +45,57 @@ from .marshal import from_service_start_type, to_service_kind, to_service_start_
 
 _POLL_INTERVAL = 0.25
 _DEFAULT_TIMEOUT = 30.0
+
+# win32 SERVICE_* state ids (winsvc.h); fixed by the Win32 ABI, so the decision below needs no pywin32.
+_SERVICE_STOPPED = 1
+_SERVICE_START_PENDING = 2
+_SERVICE_STOP_PENDING = 3
+_SERVICE_RUNNING = 4
+_SERVICE_CONTINUE_PENDING = 5
+_SERVICE_PAUSE_PENDING = 6
+_PENDING_STATES = frozenset(
+    {_SERVICE_START_PENDING, _SERVICE_STOP_PENDING, _SERVICE_CONTINUE_PENDING, _SERVICE_PAUSE_PENDING}
+)
+
+
+class ControlStep(Enum):
+    """What a start/stop verb does next, given the service's current state."""
+
+    DONE = "done"
+    """Already in the target state: send nothing (idempotent no-op)."""
+    AWAIT_TARGET = "await_target"
+    """The verb's own transition is already pending: send nothing, wait for the target."""
+    SETTLE_FIRST = "settle_first"
+    """Another transition is pending and the SCM would refuse the control: wait for a settled state."""
+    ISSUE = "issue"
+    """Settled in another state: send the control (then wait for the target, unless told not to)."""
+
+
+def next_control_step(state: int, *, target: int, target_pending: int) -> ControlStep:
+    """Decide what a verb heading for ``target`` does in ``state``.
+
+    Args:
+        state: The service's current win32 ``SERVICE_*`` state id.
+        target: The state the verb ends in (``SERVICE_RUNNING`` for start, ``SERVICE_STOPPED`` for stop).
+        target_pending: The pending state on the way there (``SERVICE_START_PENDING`` / ``SERVICE_STOP_PENDING``).
+
+    Returns:
+        The :class:`ControlStep`. ``SETTLE_FIRST`` never follows a settled state, so deciding again
+        after the settle wait yields ``DONE`` or ``ISSUE``.
+
+    Examples:
+        >>> next_control_step(3, target=4, target_pending=2)
+        <ControlStep.SETTLE_FIRST: 'settle_first'>
+        >>> next_control_step(1, target=4, target_pending=2)
+        <ControlStep.ISSUE: 'issue'>
+    """
+    if state == target:
+        return ControlStep.DONE
+    if state == target_pending:
+        return ControlStep.AWAIT_TARGET
+    if state in _PENDING_STATES:
+        return ControlStep.SETTLE_FIRST
+    return ControlStep.ISSUE
 
 
 def _load_win32service() -> Any:
@@ -75,15 +136,71 @@ def _current_state(win32service: Any, handle: Any) -> int:
         raise NativeCallError(str(exc) or "cannot query the service status") from exc
 
 
-def _wait_for_state(win32service: Any, handle: Any, target: int, timeout: float) -> None:
-    """Poll until the service reaches ``target`` state; raise OperationTimeoutError at ``timeout``."""
-    deadline = time.monotonic() + timeout
+def _wait_for_state(win32service: Any, handle: Any, target: int, *, deadline: float, timeout: float) -> None:
+    """Poll until the service reaches ``target`` state; raise OperationTimeoutError at ``deadline``.
+
+    ``timeout`` is the call's whole budget, carried on the error; ``deadline`` is where it ends.
+    """
     while _current_state(win32service, handle) != target:
         if time.monotonic() >= deadline:
             # Its own type: the control was accepted and the service is still on its way (a
             # wuauserv in StopPending), which a caller handles differently from a refused control.
             raise OperationTimeoutError(f"service did not reach state {target} within {timeout}s", timeout=timeout)
         time.sleep(_POLL_INTERVAL)
+
+
+def _wait_until_settled(win32service: Any, handle: Any, *, deadline: float, timeout: float) -> int:
+    """Poll until the service leaves every pending state; return the settled state id.
+
+    Raises:
+        OperationTimeoutError: still pending at ``deadline``; no control was sent.
+        NativeCallError: the status query failed.
+    """
+    state = _current_state(win32service, handle)
+    while state in _PENDING_STATES:
+        if time.monotonic() >= deadline:
+            raise OperationTimeoutError(
+                f"service still in pending state {state} after {timeout}s; no control sent", timeout=timeout
+            )
+        time.sleep(_POLL_INTERVAL)
+        state = _current_state(win32service, handle)
+    return state
+
+
+@dataclass(frozen=True)
+class _Control:
+    """One verb's transition: the control that starts it and the states it passes through."""
+
+    issue: Callable[[], None]
+    """Sends the control (StartService / ControlService STOP), wrapping its failure."""
+    target: int
+    """The state the verb ends in."""
+    target_pending: int
+    """The pending state on the way to ``target``."""
+
+    def step_in(self, state: int) -> ControlStep:
+        """Return :func:`next_control_step` for this transition in ``state``."""
+        return next_control_step(state, target=self.target, target_pending=self.target_pending)
+
+
+def _drive(win32service: Any, handle: Any, control: _Control, *, timeout: float, wait: bool = True) -> None:
+    """Bring one open service to ``control.target``: settle a foreign pending state, issue, then wait.
+
+    Args:
+        win32service: The (lazily imported) ``win32service`` module.
+        handle: The open service handle (query rights plus the right the control needs).
+        control: The verb's transition.
+        timeout: Seconds from now that bound the settle wait and the target wait together.
+        wait: False skips only the wait for the target after the control is sent.
+    """
+    deadline = time.monotonic() + timeout
+    step = control.step_in(_current_state(win32service, handle))
+    if step is ControlStep.SETTLE_FIRST:
+        step = control.step_in(_wait_until_settled(win32service, handle, deadline=deadline, timeout=timeout))
+    if step is ControlStep.ISSUE:
+        control.issue()
+    if wait and step is not ControlStep.DONE:
+        _wait_for_state(win32service, handle, control.target, deadline=deadline, timeout=timeout)
 
 
 def _query_one(win32service: Any, scm: Any, name: str) -> ServiceInfo:
@@ -123,6 +240,12 @@ class NativeServiceController:
         """Start ``name`` (no-op if already running); return its post-start state.
 
         A service already in ``StartPending`` gets no second StartService; the call waits for it.
+        One in ``StopPending`` (or another foreign pending state) is first waited out, since
+        StartService would fail on it with ERROR_SERVICE_ALREADY_RUNNING (1056).
+
+        Raises:
+            OperationTimeoutError: not settled, or not Running, within ``timeout`` seconds.
+            NativeCallError: the SCM refused the start, or a status query failed.
         """
         win32service = _load_win32service()
         scm = _open_scm(win32service)
@@ -130,17 +253,16 @@ class NativeServiceController:
             handle = _open_service(
                 win32service, scm, name, win32service.SERVICE_START | win32service.SERVICE_QUERY_STATUS
             )
+
+            def issue() -> None:
+                try:
+                    win32service.StartService(handle, [])
+                except Exception as exc:
+                    raise NativeCallError(str(exc) or f"cannot start service {name!r}") from exc
+
             try:
-                state = _current_state(win32service, handle)
-                if state != win32service.SERVICE_RUNNING:
-                    # StartPending: the start is already issued and StartService would fail with
-                    # ERROR_SERVICE_ALREADY_RUNNING, so only wait for it.
-                    if state != win32service.SERVICE_START_PENDING:
-                        try:
-                            win32service.StartService(handle, [])
-                        except Exception as exc:
-                            raise NativeCallError(str(exc) or f"cannot start service {name!r}") from exc
-                    _wait_for_state(win32service, handle, win32service.SERVICE_RUNNING, timeout)
+                control = _Control(issue, target=_SERVICE_RUNNING, target_pending=_SERVICE_START_PENDING)
+                _drive(win32service, handle, control, timeout=timeout)
             finally:
                 win32service.CloseServiceHandle(handle)
             return _query_one(win32service, scm, name)
@@ -151,9 +273,17 @@ class NativeServiceController:
         """Stop ``name`` (no-op if already stopped); return its post-stop state.
 
         With ``wait=False`` the stop is issued and the state right after the control is
-        returned (typically ``StopPending``) without polling; ``timeout`` is then unused. A
-        service already in ``StopPending`` gets no second control: ``wait=True`` waits for the
-        pending stop, ``wait=False`` returns ``StopPending``.
+        returned (typically ``StopPending``) without waiting for Stopped. A service already in
+        ``StopPending`` gets no second control: ``wait=True`` waits for the pending stop,
+        ``wait=False`` returns ``StopPending``. One in ``StartPending`` (or another foreign
+        pending state) is first waited out, bounded by ``timeout``, in both forms: the SCM
+        refuses a stop there: ERROR_INVALID_SERVICE_CONTROL (1052) when the starting service
+        accepts no stop yet (measured on Windows 11), ERROR_SERVICE_CANNOT_ACCEPT_CTRL (1061)
+        otherwise.
+
+        Raises:
+            OperationTimeoutError: not settled, or (``wait=True``) not Stopped, within ``timeout`` seconds.
+            NativeCallError: the SCM refused the stop, or a status query failed.
         """
         win32service = _load_win32service()
         scm = _open_scm(win32service)
@@ -161,18 +291,16 @@ class NativeServiceController:
             handle = _open_service(
                 win32service, scm, name, win32service.SERVICE_STOP | win32service.SERVICE_QUERY_STATUS
             )
+
+            def issue() -> None:
+                try:
+                    win32service.ControlService(handle, win32service.SERVICE_CONTROL_STOP)
+                except Exception as exc:
+                    raise NativeCallError(str(exc) or f"cannot stop service {name!r}") from exc
+
             try:
-                state = _current_state(win32service, handle)
-                if state != win32service.SERVICE_STOPPED:
-                    # StopPending (a second stop on a slow wuauserv): the stop is already issued and
-                    # ControlService would fail with ERROR_SERVICE_CANNOT_ACCEPT_CTRL, read as refused.
-                    if state != win32service.SERVICE_STOP_PENDING:
-                        try:
-                            win32service.ControlService(handle, win32service.SERVICE_CONTROL_STOP)
-                        except Exception as exc:
-                            raise NativeCallError(str(exc) or f"cannot stop service {name!r}") from exc
-                    if wait:
-                        _wait_for_state(win32service, handle, win32service.SERVICE_STOPPED, timeout)
+                control = _Control(issue, target=_SERVICE_STOPPED, target_pending=_SERVICE_STOP_PENDING)
+                _drive(win32service, handle, control, timeout=timeout, wait=wait)
             finally:
                 win32service.CloseServiceHandle(handle)
             return _query_one(win32service, scm, name)
@@ -214,4 +342,4 @@ class NativeServiceController:
             win32service.CloseServiceHandle(scm)
 
 
-__all__ = ["NativeServiceController"]
+__all__ = ["ControlStep", "NativeServiceController", "next_control_step"]

@@ -134,7 +134,11 @@ returns at once with the state right after it, typically `StopPending`, for a se
 long to stop (Windows Update's `wuauserv`). A wait that hits its deadline exits 110 (ETIMEDOUT) with
 an `OperationTimeoutError` line on stderr - the stop was issued and the service is still on its
 way - while a refused stop exits 1 with a `NativeCallError` line. `start_service` and
-`restart_service` time out the same way.
+`restart_service` time out the same way. On Windows a service still in the opposite transition is
+waited out first, within the same timeout: `start_service` on a service in `StopPending`, and
+`stop_service` (with or without `--no-wait`) on one in `StartPending`, since the service control
+manager cannot take the control until it settles. If it does not settle in time the command exits 110
+without having sent the control.
 
 On Linux, `add_acl_ace` takes a `user:NAME` / `group:NAME` trustee and the low 3 bits of `RIGHTS` as
 `rwx` (POSIX ACLs are allow-only, so `--deny` is rejected); `save_credential` needs an unlocked

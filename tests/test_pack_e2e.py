@@ -35,6 +35,7 @@ from elevation_doubles import (
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
     NETWORK_VARIABLES,
+    OTHER_UID,
     RUNNING_AS_ROOT,
     UV_SOURCE_VARIABLES,
     data_home,
@@ -2599,6 +2600,36 @@ def test_an_elevated_posix_run_refuses_an_acl_below_the_managed_python_dir(tmp_p
     assert not marker.exists(), "uv ran a Python below an ACL elevated: " + marker.read_text()
     assert result.returncode == 127, result.stdout + result.stderr
     assert f"{site_packages.relative_to(planted).as_posix()} carries an ACL" in result.stderr, result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.skipif(not RUNNING_AS_ROOT, reason="only root can give a symlink to another account (lchown)")
+@pytest.mark.parametrize("foreign", [True, False], ids=["foreign-symlink", "roots-symlink-control"])
+def test_an_elevated_posix_run_judges_a_symlink_below_the_managed_python_dir_by_its_owner(
+    tmp_path: Path, foreign: bool
+) -> None:
+    """[X23 R1]: a symlink below the managed-Python directory owned by another account is refused
+    before uv runs any Python (exit 127, naming the link and its owner): that account can repoint it.
+    The control, the same link left root's, runs the plant and the script."""
+    runner, head = _python_runner(tmp_path, elevated="$true")
+    marker = tmp_path / "planted-pth-ran.txt"
+    probe, planted = _planted_python_probe(tmp_path, marker)
+    (site_packages,) = planted.glob("*/lib/python3*/site-packages")
+    link = site_packages / "pwshpy_link"
+    link.symlink_to("pwshpy_planted.pth")
+    if foreign:
+        owned_by_another_account(link)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))
+    if not foreign:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert marker.is_file(), "the control never ran the planted .pth: " + result.stderr
+        return
+    assert not marker.exists(), "uv ran a Python below a foreign symlink elevated: " + marker.read_text()
+    assert result.returncode == 127, result.stdout + result.stderr
+    named = link.relative_to(planted).as_posix()
+    assert f"{named} is owned by uid {OTHER_UID}, not root" in result.stderr, result.stderr
 
 
 @pytest.mark.local_only

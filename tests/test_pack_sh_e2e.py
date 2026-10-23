@@ -31,6 +31,7 @@ from elevation_doubles import (
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
     NETWORK_VARIABLES,
+    OTHER_UID,
     RUNNING_AS_ROOT,
     UV_SOURCE_VARIABLES,
     default_uv_cache_dir,
@@ -1707,6 +1708,34 @@ def test_as_root_a_python_whose_install_another_account_can_modify_is_refused(
     assert _PYTHON_DIR_REFUSED in result.stderr and _PYTHON_REMEDY in result.stderr, result.stderr
     assert f"{target.name} is writable by every account" in result.stderr, result.stderr
     assert _reported_python(result) is None, result.stdout
+
+
+@pytest.mark.skipif(not RUNNING_AS_ROOT, reason="only root can give a symlink to another account (lchown)")
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize("foreign", [True, False], ids=["foreign-symlink", "roots-symlink-control"])
+def test_as_root_a_symlink_below_the_managed_python_dir_is_judged_by_its_owner(
+    tmp_path: Path, shell_id: str, shell: list[str], foreign: bool
+) -> None:
+    """[X23 R1]: a symlink below the managed-Python directory owned by another account is refused
+    before uv runs any Python (exit 127, naming the link and its owner): that account can repoint it.
+    The control, the same link left root's, runs the plant and the script."""
+    runner, uv = _python_runner(tmp_path, as_root=True)
+    marker = tmp_path / "planted-pth-ran.txt"
+    environment, planted = _planted_python_env(tmp_path, uv.parent, marker)
+    (site_packages,) = planted.glob("*/lib/python3*/site-packages")
+    link = site_packages / "pwshpy_link"
+    link.symlink_to("pwshpy_planted.pth")
+    if foreign:
+        owned_by_another_account(link)
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    if not foreign:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert marker.is_file(), "the control never ran the planted .pth: " + result.stderr
+        return
+    assert not marker.exists(), "uv ran a Python below a foreign symlink as root: " + marker.read_text()
+    assert result.returncode == 127, result.stdout + result.stderr
+    named = link.relative_to(planted).as_posix()
+    assert f"{named} is owned by uid {OTHER_UID}, not root" in result.stderr, result.stderr
 
 
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])

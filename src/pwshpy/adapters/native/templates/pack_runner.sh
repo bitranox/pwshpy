@@ -660,9 +660,12 @@ pwshpy_python_tree_distrust() {
     done
     # The trailing slash makes find enter the directory when "$1" is a symlink to it. The whole output is
     # read (sed, not head): find killed by a closed pipe would print nothing on a host where SIGPIPE is
-    # ignored, and its failure is the one answer that must not be missed.
-    _pt_hit=$({ find "$_pt_root/" \( -type l "$@" \) -o \( ! -type l \( "$@" -o \( \( -perm -0002 -o -perm -0020 \) \
-        ! \( -type f -name .lock \) \) \) \) -print 2>/dev/null || printf '%s\n' "$PWSHPY_WALK_FAILED"; } | sed -n 1p)
+    # ignored, and its failure is the one answer that must not be missed. The two arms are grouped before
+    # -print: find binds the implicit -a tighter than -o, so an ungrouped -print would end the second arm
+    # only, and a symlink matching the first would be printed by nothing.
+    _pt_hit=$({ find "$_pt_root/" \( \( -type l "$@" \) -o \( ! -type l \( "$@" -o \( \( -perm -0002 -o \
+        -perm -0020 \) ! \( -type f -name .lock \) \) \) \) \) -print 2>/dev/null \
+        || printf '%s\n' "$PWSHPY_WALK_FAILED"; } | sed -n 1p)
     if [ "$_pt_hit" = "$PWSHPY_WALK_FAILED" ]; then
         printf '%s' "the entries below $_pt_root cannot be listed"
         return 0

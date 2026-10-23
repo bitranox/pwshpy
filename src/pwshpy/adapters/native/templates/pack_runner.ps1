@@ -771,8 +771,10 @@ function Get-PwshPyPosixTreeDistrust {
     $top = $Path.TrimEnd('/') + '/'
     $owners = New-Object System.Collections.Generic.List[string]
     foreach ($uid in $PwshPyTrustedUids) { $owners.AddRange([string[]]@('!', '-user', [string]$uid)) }
-    $words = @($top, '(', '-type', 'l') + $owners.ToArray() + @(')', '-o', '(', '!', '-type', 'l', '(') + $owners.ToArray()
-    $words += @('-o', '(', '(', '-perm', '-0002', '-o', '-perm', '-0020', ')', '!', '(', '-type', 'f', '-name', '.lock', ')', ')', ')', ')', '-print')
+    # The two arms are grouped before -print: find binds the implicit -a tighter than -o, so an ungrouped
+    # -print would end the second arm only, and a symlink matching the first would be printed by nothing.
+    $words = @($top, '(', '(', '-type', 'l') + $owners.ToArray() + @(')', '-o', '(', '!', '-type', 'l', '(') + $owners.ToArray()
+    $words += @('-o', '(', '(', '-perm', '-0002', '-o', '-perm', '-0020', ')', '!', '(', '-type', 'f', '-name', '.lock', ')', ')', ')', ')', ')', '-print')
     $hits = @(. (ConvertTo-PwshPyNativeCall -FilePath $find.Source -ArgumentList $words -StderrPath '/dev/null'))
     if ($LASTEXITCODE -ne 0) { return "the entries below $Path cannot be listed" }
     if ($hits.Count -gt 0) {

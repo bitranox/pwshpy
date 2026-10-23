@@ -48,6 +48,9 @@ from pwshpy.domain.scheduling import (
     TaskTrigger,
 )
 
+if sys.platform == "win32":
+    import winreg
+
 _HAS_JEEPNEY = importlib.util.find_spec("jeepney") is not None
 
 
@@ -1138,7 +1141,24 @@ def test_a_name_systemd_would_not_accept_is_refused_before_anything(
     assert conn.methods == []
 
 
+def _long_paths_enabled() -> bool:
+    """Whether this host lets a process use a path longer than MAX_PATH (260): always off Windows."""
+    if sys.platform != "win32":
+        return True
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as key:
+            value, _kind = winreg.QueryValueEx(key, "LongPathsEnabled")
+    except OSError:
+        return False
+    return bool(value == 1)
+
+
 @pytest.mark.os_agnostic
+@pytest.mark.skipif(
+    not _long_paths_enabled(),
+    reason="HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem LongPathsEnabled is not 1, so Windows refuses "
+    "the 255-character unit file name under the temp directory (past MAX_PATH)",
+)
 def test_the_longest_name_systemd_accepts_registers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """[C1]: 247 characters plus ".service" is systemd's 255 (UNIT_NAME_MAX 256 includes the NUL)."""
     base = "a" * 247

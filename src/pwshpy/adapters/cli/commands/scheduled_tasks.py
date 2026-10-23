@@ -69,7 +69,7 @@ def cli_scheduled_tasks(
     """
     fmt = resolve_format(as_json, as_jsonl)
     ps = get_cli_context(ctx).services.ps
-    with lib_log_rich.runtime.bind(job_id="get_scheduled_task", extra={"command": "get_scheduled_task"}):
+    with lib_log_rich.runtime.bind(job_id="cli-get-scheduled-task", extra={"command": "get_scheduled_task"}):
         if task_name is None:
             logger.info("Listing scheduled tasks")
         else:

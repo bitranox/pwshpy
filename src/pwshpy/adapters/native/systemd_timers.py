@@ -448,19 +448,37 @@ def _check_task_name(task_name: str) -> None:
         )
 
 
-def _is_absent(bus: _dbus.Bus, path: str, file_state: str) -> bool:
-    """Whether the loaded unit at ``path`` is no task, by the listing's rule: masked counts unless running.
+def _is_absent(bus: _dbus.Bus, loaded: _dbus.LoadedUnit, file_state: str) -> bool:
+    """Whether the ``loaded`` unit is no task, by the listing's rule: masked counts unless running.
 
     The listing lists a ``ListUnits`` entry unless :func:`~.systemd_dbus.is_unlisted_unit` says no, and
-    an unloaded timer unless its file is masked. Here the unit was loaded just now, so its LoadState
-    answers for both - and a masked file is read as masked even when ``GetUnitFileState`` failed. A
-    masked file state with a stale LoadState (masked after it was loaded) is masked too.
+    an unloaded timer unless its file is masked. Here the unit was loaded just now, so the LoadState
+    read with it answers for both - and a masked file is read as masked even when
+    ``GetUnitFileState`` failed. A masked file state with a stale LoadState (masked after it was
+    loaded) is masked too.
     """
-    load_state = str(_dbus.path_property(bus, path, "LoadState", ""))
-    if file_state in _dbus.UNLISTED_FILE_STATES:
-        load_state = "masked"
-    active_state = str(_dbus.path_property(bus, path, "ActiveState", "inactive"))
+    load_state = "masked" if file_state in _dbus.UNLISTED_FILE_STATES else loaded.load_state
+    active_state = str(_dbus.path_property(bus, loaded.path, "ActiveState", "inactive"))
     return _dbus.is_unlisted_unit(load_state, active_state)
+
+
+def _load_named_unit(bus: _dbus.Bus, unit: str) -> _dbus.LoadedUnit | None:
+    """``unit`` loaded, or None when it has no unit file or is an alias of another unit.
+
+    ``LoadUnit`` of an alias returns the object of the unit it names, whose ``Id`` is that unit's
+    name, so an ``Id`` other than ``unit`` is an alias even when ``GetUnitFileState`` could not say
+    "alias": the listing reports the real unit under its own name, never under the alias.
+
+    Raises:
+        NativeCallError: The ``LoadUnit`` call, its ``LoadState`` read or the ``Id`` read fails.
+    """
+    loaded = _dbus.load_unit_state(bus, unit)
+    if loaded is None:
+        return None
+    unit_id = _dbus.path_property(bus, loaded.path, "Id", None)
+    if unit_id is None:
+        raise NativeCallError(f"cannot read the Id of '{unit}'")
+    return loaded if str(unit_id) == unit else None
 
 
 def _owned_service(bus: _dbus.Bus, unit: str, path: str, *, strict: bool) -> bool:
@@ -497,27 +515,27 @@ def _lookup_unit(bus: _dbus.Bus, base: str, *, strict: bool) -> Iterator[Schedul
 
     The same answer the controller reads back after register: a ``.timer`` makes it a scheduled
     task, a ``.service`` alone an on-demand one - but only a ``.service`` whose unit file pwshpy
-    wrote (:func:`_owned_service`), or every system daemon would answer as a task. An alias unit
-    file counts as absent, and a masked unit unless it is running, as in the listing
-    (:func:`_is_absent`). A unit systemd does not answer for (a refused ``LoadUnit`` or ``LoadState``
-    read) ends the lookup through the listing's skip-or-raise rule: the service must not stand in
-    for a timer that may exist.
+    wrote (:func:`_owned_service`), or every system daemon would answer as a task. An alias counts
+    as absent (:func:`_load_named_unit`), and a masked unit unless it is running, as in the listing
+    (:func:`_is_absent`). A unit systemd does not answer for (a refused ``LoadUnit``, ``LoadState``
+    or ``Id`` read) ends the lookup through the listing's skip-or-raise rule: the service must not
+    stand in for a timer that may exist.
     """
     for unit in (f"{base}.timer", f"{base}.service"):
         state = _dbus.unit_file_state(bus, unit) or ""
         if state == "alias":  # the name of another unit: the listing reports that unit, never the alias
             continue
         try:
-            path = _dbus.load_unit(bus, unit)
+            loaded = _load_named_unit(bus, unit)
         except NativeCallError as exc:
             skip_or_raise(f"cannot load unit '{unit}'", exc, strict=strict, log=logger)
             return
-        if path is None or _is_absent(bus, path, state):
+        if loaded is None or _is_absent(bus, loaded, state):
             continue
         if unit.endswith(".timer"):
-            yield _timer_task(bus, unit, path, file_state=state)
-        elif _owned_service(bus, unit, path, strict=strict):
-            yield _service_task(bus, base, path)
+            yield _timer_task(bus, unit, loaded.path, file_state=state)
+        elif _owned_service(bus, unit, loaded.path, strict=strict):
+            yield _service_task(bus, base, loaded.path)
         return
 
 

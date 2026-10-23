@@ -82,6 +82,11 @@ class FakeConn:
     ``refused_reads`` names (unit, property) pairs whose ``Properties.Get`` fails with a D-Bus
     error although the unit is loaded (a refused or broken property read).
 
+    ``aliases`` maps an alias name to its unit: ``LoadUnit`` of the alias returns the unit's own
+    object, whose ``Id`` is the unit's name, as on systemd 259 (measured: ``LoadUnit("sshd.service")``
+    answers the ``ssh.service`` object, ``Id`` ``ssh.service``). Every unit object reads its own
+    name as ``Id``, a not-found one too. ``reads`` records each property read as (unit, property).
+
     ``Unit.Job`` is ``(0, "/")`` (no job, as busctl and jeepney show it) unless the unit's
     ActiveState is a transition (activating, deactivating, reloading), which holds a job path, as a
     start or stop job does on systemd; a ``Job`` entry in ``props`` overrides that. ``walks`` maps a
@@ -111,6 +116,7 @@ class FakeConn:
         refused_loads: frozenset[str] = frozenset(),
         refused_reads: frozenset[tuple[str, str]] = frozenset(),
         pending: frozenset[str] = frozenset(),
+        aliases: dict[str, str] | None = None,
     ) -> None:
         self._units = units  # (name, description, active_state)
         self._props = props
@@ -128,7 +134,9 @@ class FakeConn:
         self._known = {unit for unit, _iface, _prop in props} | set(unit_files) | set(unloaded)
         self._not_found: set[str] = set()  # names LoadUnit answered with a not-found object
         self._pending = set(pending)  # unknown to systemd until the first Reload
+        self._aliases = aliases or {}
         self.verbs: list[str] = []
+        self.reads: list[tuple[str, str]] = []  # every property read as (unit, property), in order
         self.calls: list[tuple[str, tuple[Any, ...]]] = []  # each verb with its body (the unit names sent)
         self.methods: list[str] = []  # every method sent, in order (to count round trips)
         self.closed = False
@@ -158,6 +166,8 @@ class FakeConn:
         (name,) = msg.body
         if name in self._refused_loads:
             return Reply(("org.freedesktop.DBus.Error.AccessDenied",), error=True)
+        if name in self._aliases:  # systemd resolves an alias to the unit it names
+            name = self._aliases[name]
         self._unloaded.discard(name)  # loaded from its unit file
         if name in self._appeared and self._load_states.get(name) == "not-found":
             self._load_states[name] = "loaded"  # the unit-cache retry finds the file written since
@@ -225,7 +235,7 @@ class FakeConn:
     def _get(self, msg: Message) -> Reply:
         name, _iface, prop = (msg.path[len("/u/") :], *msg.body)
         if name in self._not_found:
-            value = self._NOT_FOUND_DEFAULTS.get(prop, name if prop == "Description" else None)
+            value = self._NOT_FOUND_DEFAULTS.get(prop, name if prop in {"Description", "Id"} else None)
             return Reply(("no prop",), error=True) if value is None else Reply((("t", value),))
         if name in self._unloaded:  # an unloaded unit has no readable properties
             return Reply(("not loaded",), error=True)
@@ -235,12 +245,21 @@ class FakeConn:
         key = (name, _iface, prop)
         if key in self._props:
             return Reply((("t", self._props[key]),))
-        if prop == "LoadState" and name in self._known:
-            return Reply((("t", self._load_states.get(name, "loaded")),))
-        return Reply(("no prop",), error=True)
+        derived = self._derived(name, prop)
+        return Reply(("no prop",), error=True) if derived is None else Reply((("t", derived),))
+
+    def _derived(self, name: str, prop: str) -> Any:
+        """The LoadState and Id systemd reports for a known unit with no ``props`` entry; None otherwise."""
+        if name not in self._known:
+            return None
+        if prop == "LoadState":
+            return self._load_states.get(name, "loaded")
+        return name if prop == "Id" else None
 
     def send_and_get_reply(self, msg: Message) -> Reply:
         self.methods.append(msg.method)
+        if msg.method == "Get":
+            self.reads.append((msg.path[len("/u/") :], str(msg.body[1])))
         handlers: dict[str, Callable[[Message], Reply]] = {
             "ListUnits": self._list_units,
             "ListUnitFilesByPatterns": self._list_unit_files,

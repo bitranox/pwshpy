@@ -14,19 +14,18 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `categories` name list is unchanged; the classification GUIDs are listed in `docs/power-tools.md`.
 - `get_scheduled_task(task_name=...)` / `--task-name` looks up one task without walking the folder
   tree; an unreadable task elsewhere no longer affects it. On Linux it also finds an on-demand
-  (trigger-less) task pwshpy registered, which the listing leaves out. A task or folder that does not exist is an
-  empty result (Windows: HRESULT 0x80070002 from opening the folder or the task), under
-  `strict=True` too; any other failure, and any failure reading a task that was found, keeps the
-  listing's rule (a WARNING, or `NativeCallError` under `strict`). On Windows `folder_path` may end
-  in a backslash, the form a record's `task_path` carries, the name matches without regard to
-  case, and the record carries the caller's spelling (the scheduler echoes it). On Linux the
-  answer is the task's `.timer`, else its `.service` when pwshpy wrote it (the unit file carries
+  (trigger-less) task pwshpy registered, which the listing leaves out. A task or folder that does
+  not exist is an empty result (Windows: HRESULT 0x80070002 from opening the folder or the task),
+  under `strict=True` too; any other failure, and any failure reading a task that was found, keeps
+  the listing's rule (a WARNING, or `NativeCallError` under `strict`). On Windows `folder_path` may
+  end in a backslash, the form a record's `task_path` carries, the name matches without regard to
+  case, and the record carries the caller's spelling (the scheduler echoes it). On Linux the answer
+  is the task's `.timer`, else its `.service` when pwshpy wrote it (the unit file carries
   `X-PwshPy=` in `[Unit]`; a system daemon such as `ssh` is no task), else nothing; a unit file
-  whose marker cannot be read keeps the listing's rule. A masked unit counts as absent unless it
-  is running, and an alias as absent, as in the listing; a `.timer`/`.service` suffix is
-  optional. An empty name or a folder part (Windows: a backslash; Linux: `/`, or a backslash that
-  starts no systemd `\xNN` escape), or on Linux an invalid unit name, raises
-  `ConfigurationError`.
+  whose marker cannot be read keeps the listing's rule. A masked unit counts as absent unless it is
+  running, and an alias as absent, as in the listing; a `.timer`/`.service` suffix is optional. An
+  empty name or a folder part (Windows: a backslash; Linux: `/`, or a backslash that starts no
+  systemd `\xNN` escape), or on Linux an invalid unit name, raises `ConfigurationError`.
 
 ### Changed
 

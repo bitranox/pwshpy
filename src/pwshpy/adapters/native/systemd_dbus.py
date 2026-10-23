@@ -18,6 +18,8 @@ Contents:
       (None for a name with no unit file, which systemd answers as a ``not-found`` object).
     * :func:`load_unit` - :func:`load_unit_path` that raises when the ``LoadUnit`` call or the
       ``LoadState`` read fails, for a caller that must tell "no such unit" from "could not ask".
+    * :func:`load_unit_state` - :func:`load_unit` that also returns the ``LoadState`` it read
+      (:class:`LoadedUnit`).
     * :func:`unit_files` - every unit file of one type with its UnitFileState: the units
       ``ListUnits`` omits because nothing has loaded them (a stopped, disabled service or timer).
     * :data:`UNLISTED_LOAD_STATES` / :data:`UNLISTED_FILE_STATES` - the states that are no unit
@@ -140,13 +142,24 @@ def unit_path(bus: Bus, name: str) -> str | None:
     return str(path)
 
 
-def load_unit(bus: Bus, name: str) -> str | None:
-    """The object path of a unit, loading it from its unit file if needed; None when it has none.
+class LoadedUnit(NamedTuple):
+    """A unit :func:`load_unit_state` loaded: its object path and the ``LoadState`` read with it."""
+
+    path: str
+    load_state: str
+
+
+def load_unit_state(bus: Bus, name: str) -> LoadedUnit | None:
+    """The object path and ``LoadState`` of a unit, loaded from its file if needed; None if it has none.
 
     systemd answers ``LoadUnit`` for a valid name with NO unit file too (measured on 259): the
     object's ``LoadState`` is ``not-found`` and every property reads a default - ``User`` ``""``,
     which would read as root. So one ``LoadState`` read turns that into None, letting callers apply
-    their "unknown" defaults.
+    their "unknown" defaults. The state comes back with the path so a caller that also judges
+    masked units needs no second read, which could fail where the first succeeded.
+
+    For an alias name ``LoadUnit`` returns the object of the unit the alias names (measured on 259:
+    ``sshd.service`` answers the ``ssh.service`` object); that object's ``Id`` is the real name.
 
     Raises:
         NativeCallError: When the ``LoadUnit`` call itself or the ``LoadState`` read fails (an
@@ -161,7 +174,17 @@ def load_unit(bus: Bus, name: str) -> str | None:
         raise NativeCallError(f"cannot read the LoadState of '{name}'")
     if load_state == "not-found":
         return None
-    return resolved
+    return LoadedUnit(resolved, str(load_state))
+
+
+def load_unit(bus: Bus, name: str) -> str | None:
+    """The object path of :func:`load_unit_state`; None when the unit has no unit file.
+
+    Raises:
+        NativeCallError: When the ``LoadUnit`` call itself or the ``LoadState`` read fails.
+    """
+    loaded = load_unit_state(bus, name)
+    return None if loaded is None else loaded.path
 
 
 def load_unit_path(bus: Bus, name: str) -> str | None:
@@ -272,8 +295,10 @@ __all__ = [
     "has_pending_job",
     "is_error",
     "is_unlisted_unit",
+    "LoadedUnit",
     "load_unit",
     "load_unit_path",
+    "load_unit_state",
     "open_bus",
     "path_property",
     "unit_file_state",

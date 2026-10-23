@@ -1735,6 +1735,57 @@ def test_lookup_by_name_reads_masked_from_load_state_when_the_file_state_read_fa
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("strict", [False, True])
+def test_lookup_by_name_of_an_alias_is_empty_when_the_file_state_read_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path, strict: bool
+) -> None:
+    """[50] An alias is never reported under its own name: LoadUnit resolves it to the unit it names.
+
+    GetUnitFileState fails for both alias names (no listed unit file), so the file state cannot say
+    "alias"; the loaded object's Id (``job.timer``, ``job.service``) differs from the name asked.
+    """
+    _write_owned(tmp_path, "job.service")
+    aliases = {"nightly.timer": "job.timer", "nightly.service": "job.service"}
+    conn = _lookup_conn(fragments=tmp_path, aliases=aliases)
+    use_bus(monkeypatch, conn)
+    with caplog.at_level(logging.WARNING, logger=systemd_timers.__name__):
+        assert list(iter_timers(task_name="nightly", strict=strict)) == []
+    assert caplog.records == []
+    assert conn.methods.count("LoadUnit") == 2  # both names were loaded, then judged by their Id
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
+def test_lookup_by_name_applies_the_strict_rule_to_an_id_it_cannot_read(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, strict: bool
+) -> None:
+    """[50] A refused Id read is no answer: strict raises naming the unit, lenient warns; no service stands in."""
+    conn = _lookup_conn(refused_reads=frozenset({("job.timer", "Id")}))
+    use_bus(monkeypatch, conn)
+    if strict:
+        with pytest.raises(NativeCallError, match=r"'job\.timer'"):
+            list(iter_timers(task_name="job", strict=True))
+        assert conn.closed is True
+        return
+    with caplog.at_level(logging.WARNING, logger=systemd_timers.__name__):
+        assert list(iter_timers(task_name="job")) == []
+    (warning,) = caplog.records
+    assert "'job.timer'" in warning.getMessage()
+
+
+@pytest.mark.os_agnostic
+def test_lookup_by_name_reads_each_load_state_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """[50] The LoadState LoadUnit read decides absence too: a second read could fail and default to present."""
+    _write_owned(tmp_path, "adhoc.service")
+    conn = _lookup_conn(fragments=tmp_path)
+    use_bus(monkeypatch, conn)
+    assert [t.task_name for t in iter_timers(task_name="job")] == ["job"]
+    assert [t.task_name for t in iter_timers(task_name="adhoc")] == ["adhoc"]
+    assert conn.reads.count(("job.timer", "LoadState")) == 1
+    assert conn.reads.count(("adhoc.service", "LoadState")) == 1
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
 def test_lookup_by_name_of_no_task_is_empty(monkeypatch: pytest.MonkeyPatch, strict: bool) -> None:
     """[50] A name with neither a .timer nor a .service is an empty answer, under strict too."""
     conn = _lookup_conn()

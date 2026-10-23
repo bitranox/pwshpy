@@ -447,7 +447,10 @@ Details worth knowing:
   as the caller's) nor `git/config` below `XDG_CONFIG_HOME` that the run was given applies (a
   `core.fsmonitor` command planted there ran from uv's git fetch before, measured; Git for Windows 2.55
   reads `NUL` as empty, measured); the packed script inherits the variable, so a git it runs reads no
-  global configuration file either. git honours `GIT_CONFIG_GLOBAL` from 2.32 on; an older git ignores
+  global configuration file either: no `user.name`/`user.email` and no `credential.helper` from the
+  elevated account's own `.gitconfig` (an elevated 1.5.x run read them). A script that needs them
+  passes them itself (`git -c user.name=... -c user.email=...`) or points `GIT_CONFIG_GLOBAL` at a
+  file it trusts before it runs git. git honours `GIT_CONFIG_GLOBAL` from 2.32 on; an older git ignores
   it and still reads those files. The system file (`/etc/gitconfig`, or the one below Git for Windows'
   install directory) is the administrators' and still applies. The runner cannot tell who set
   a variable, so an elevated run in a network that reaches the internet only through a proxy

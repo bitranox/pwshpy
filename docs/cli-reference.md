@@ -21,8 +21,12 @@ parseable.
 `--json` and `--jsonl` write UTF-8 bytes with LF line ends on every OS, whatever the console
 code page, `PYTHONIOENCODING` or `PYTHONUTF8` say (JSON is UTF-8 by spec), so a consumer reading
 the pipe decodes it as UTF-8 even from a cp1252 Windows console. The JSON that `run`, `cmdlet`,
-`get_command` and `invoke_rest_method` print is written the same way. The human table and
-`get_content` stay on the console's own encoding.
+`get_command` and `invoke_rest_method` print is written the same way. So are the text bodies that
+`exec` (the program's stdout and stderr) and `invoke_web_request` (the response body) pass through
+when piped or redirected: a character the console code page cannot hold no longer fails the command
+after the program ran. Those bytes are the text's own: `exec` output has LF line ends (it is captured
+with universal newlines), a web body keeps its line ends, and ANSI sequences are not stripped. At a
+terminal they print as before. The human table and `get_content` stay on the console's own encoding.
 
 At a terminal the human table fits the terminal's width and may shorten long cells. Piped or
 redirected (`pwshpy env | grep PATH`, `> out.txt`), it is as wide as its content instead, up to

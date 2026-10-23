@@ -85,6 +85,8 @@ killed is not returned; the error carries the message and `.timeout` only. A pro
 exits nonzero is no error: the result holds its `exit_code` until you call `.check()`.
 
 CLI: `pwshpy exec -- git status` (put the program after `--` so its flags are not parsed by pwshpy).
+Piped or redirected, the program's stdout and stderr are written as UTF-8 bytes whatever the console
+code page (see [CLI Reference](cli-reference.md#portable-record-commands)).
 A run that hits `--timeout` exits 110 (ETIMEDOUT) with an `OperationTimeoutError` line on stderr; a
 program that cannot start exits 1. A `--timeout` outside `(0, 2147483]` is a usage error (exit 2), and
 `nan` exits 22 (87 on Windows), the code for a `ValueError`.

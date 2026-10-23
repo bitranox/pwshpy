@@ -1,7 +1,8 @@
 """``pwshpy`` web commands - HTTP requests with typed / JSON output (native, portable).
 
 ``invoke_web_request`` prints the response body (or the whole ``WebResponse`` with
-``--json``); ``invoke_rest_method`` sends/receives JSON.  A curl with typed output.
+``--json``; piped, the body is written as UTF-8 bytes whatever the console code page);
+``invoke_rest_method`` sends/receives JSON.  A curl with typed output.
 
 Contents:
     * the ``cli_*`` web commands, collected in ``WEB_COMMANDS``.
@@ -14,7 +15,7 @@ import rich_click as click
 
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
-from ..output import emit, emit_json
+from ..output import emit, emit_json, emit_text
 from ..typed_click import argument, option
 from ._common import parse_pairs, resolve_format
 
@@ -54,7 +55,7 @@ def cli_invoke_web_request(
     if as_json:
         emit([response], resolve_format(as_json=True, as_jsonl=False))
     else:
-        click.echo(response.text, nl=False)
+        emit_text(response.text)
 
 
 @click.command("invoke_rest_method", context_settings=CLICK_CONTEXT_SETTINGS)

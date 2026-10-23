@@ -2,7 +2,9 @@
 
 ``exec`` runs a program with no shell (no quoting hell); it streams stdout, sends the
 child's stderr to stderr, and exits with the child's exit code (or emits the typed
-``ProcessResult`` as JSON with ``--json``).  ``--wait-tree`` also waits for every process
+``ProcessResult`` as JSON with ``--json``).  Piped or redirected, the child's output is
+written as UTF-8 bytes whatever the console code page (see
+:func:`~pwshpy.adapters.cli.output.emit_text`).  ``--wait-tree`` also waits for every process
 the program started, like ``Start-Process -Wait``.  Put the program after ``--`` so its own
 flags are not parsed by pwshpy: ``pwshpy exec -- git status``.
 
@@ -16,7 +18,7 @@ import rich_click as click
 
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
-from ..output import emit
+from ..output import emit, emit_text
 from ..typed_click import argument, option
 from ._common import TIMEOUT_RANGE, resolve_format
 
@@ -53,9 +55,9 @@ def cli_exec(
     if as_json:
         emit([result], resolve_format(as_json=True, as_jsonl=False))
     else:
-        click.echo(result.stdout, nl=False)
+        emit_text(result.stdout)
         if result.stderr:
-            click.echo(result.stderr, nl=False, err=True)
+            emit_text(result.stderr, err=True)
     ctx.exit(result.exit_code)
 
 

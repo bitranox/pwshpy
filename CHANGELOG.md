@@ -28,6 +28,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   (`<data home>\pwshpy\empty.gitconfig`, judged by the same trust rule as uv) instead of `NUL`,
   which some git builds read as a file in the current directory. A file that is not empty, a link
   or writable by another account is refused with exit 127. POSIX keeps `/dev/null`.
+- `get_windows_image` documents the measured ESD support: the two `install.esd` files measured from
+  Microsoft's catalog (2026-10-23, build 26100.4349 en-us, x64 and arm64) store their XML resource
+  uncompressed and are read like a `.wim`; the CLI was run on the x64 one, and other ESD files are
+  unverified. An image whose XML resource is compressed is still refused.
 
 ### Fixed
 

@@ -59,8 +59,12 @@ matches `Get-Process`'s `ProcessName`, `.exe` stripped.
 
 `get_windows_image PATH [--index N]` reads the WIM header and its XML resource directly, so it
 lists the images of a `.wim` (or a split `.swm` part) on any OS without DISM. An image file whose XML
-resource is compressed (resource flag 0x04) is refused with an error rather than guessed at; ESD
-support is unverified. `--index N` prints only image N and stops reading right after it; an index
+resource is compressed (resource flag 0x04) is refused with an error rather than guessed at. The
+two `install.esd` files measured from Microsoft's catalog (2026-10-23, build 26100.4349 en-us, x64
+and arm64) store their XML resource uncompressed, so they are read like a `.wim`; the CLI was run on
+the x64 one. Other ESD files are unverified. An image whose XML has no `WINDOWS` element (image 1,
+`Windows Setup Media`, in the x64 file) is listed with `build` 0, `sp_build` 0 and `architecture`
+`Unknown`. `--index N` prints only image N and stops reading right after it; an index
 the file does not hold exits non-zero with a message on stderr naming it, and an index below 1 is a
 usage error (exit 2).
 

@@ -144,7 +144,8 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
     (:func:`~.systemd_dbus.is_unlisted_unit`; a running one is listed, as Get-Service lists a
     running service marked for deletion), and a masked file, an alias, a template or a file
     ``LoadUnit`` reads as not-found. A skipped entry does not hide its file: a name systemd cached
-    as not-found before its file was written is listed from the file. Lazy: ``GetUnitFileState``,
+    as not-found before its file was written is listed from the file (systemd >= 246; an older
+    one needs a daemon-reload first). Lazy: ``GetUnitFileState``,
     the unit-file listing and each ``LoadUnit`` run only for consumed services, so
     ``get_service().where(...).take(5)`` over loaded services costs one ``ListUnits`` plus five
     state lookups. Reading an unloaded service loads it transiently; systemd unloads it again when
@@ -182,7 +183,12 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
             # ListUnits fields: 1 Description, 2 LoadState, 3 ActiveState.
             if _dbus.is_unlisted_unit(str(unit[2]), str(unit[3])):
                 # Not marked seen: a cached not-found name whose file appeared since (no
-                # daemon-reload) is still listed by the unit-file pass, which LoadUnit reloads.
+                # daemon-reload) is still listed by the unit-file pass, whose LoadUnit retries the
+                # load from disk on systemd >= 246: manager_load_unit_prepare (src/core/manager.c)
+                # re-loads a not-found unit when the unit-file cache is stale or was refreshed
+                # after its failed load (commits d904afc7 and 7233e91a, both first in v246-rc1;
+                # not in NEWS). An older systemd answers not-found until a daemon-reload, so
+                # there the unit-file pass skips the name as well.
                 continue
             seen.add(name)
             yield ServiceInfo(

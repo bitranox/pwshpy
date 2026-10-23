@@ -62,13 +62,16 @@ def run_bounded(target: Callable[..., Any], args: tuple[Any, ...], *, timeout: f
         OperationTimeoutError: If no result arrives within ``timeout`` (the child is killed).
         NativeCallError: If ``target`` raised in the child (its type and message are kept
             in the message), the child exited without sending a result (its exit code is
-            in the message), or the child could not be started.
+            in the message), or the child could not be started - including when the caller
+            is itself a daemonic process (a ``multiprocessing.Pool`` worker), which may not
+            start children.
 
     Example:
         >>> run_bounded(abs, (-3,), timeout=30)
         3
     """
     name = getattr(target, "__name__", "call")
+    _refuse_in_daemonic_process(name)
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe(duplex=False)
     try:
@@ -79,6 +82,24 @@ def run_bounded(target: Callable[..., Any], args: tuple[Any, ...], *, timeout: f
     if kind == "error":
         raise NativeCallError(str(payload))
     return payload
+
+
+def _refuse_in_daemonic_process(name: str) -> None:
+    """Raise NativeCallError when the calling process is daemonic, before any pipe or child exists.
+
+    multiprocessing refuses a child of a daemonic process with a bare ``assert`` in
+    ``BaseProcess.start`` (the same test of ``current_process().daemon`` in CPython 3.10 to
+    3.15), so without this check the caller gets an AssertionError that is no PwshPyError, and
+    under ``python -O`` the assert is stripped and the child starts after all.  Checking the same
+    flag up front gives one typed answer on every version and in every optimisation mode.
+    """
+    if multiprocessing.current_process().daemon:
+        raise NativeCallError(
+            f"{name} worker could not be started: this process is a daemonic multiprocessing worker"
+            " (a multiprocessing.Pool worker is one), and daemonic processes cannot start children;"
+            " call it from a non-daemonic process, such as a concurrent.futures.ProcessPoolExecutor"
+            " worker or a Process started with daemon=False"
+        )
 
 
 def _start(context: SpawnContext, child: PipeEnd, target: Callable[..., Any], args: tuple[Any, ...]) -> SpawnProcess:

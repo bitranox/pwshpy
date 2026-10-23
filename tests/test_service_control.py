@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 
 from pwshpy.adapters.native import service_control as mod
-from pwshpy.adapters.native.service_control import NativeServiceController
+from pwshpy.adapters.native.service_control import NativeServiceController, PollClock
 from pwshpy.composition.facade import Ps
 from pwshpy.domain.enums import ServiceStartType, ServiceState
 from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
@@ -401,22 +401,37 @@ def test_a_pending_state_that_never_settles_times_out_without_sending_the_contro
     assert fake.actions == []
 
 
+class _SteppedClock:
+    """A clock that moves only when the code under test sleeps: deterministic, no real waiting."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
 @pytest.mark.os_agnostic
-def test_the_settle_wait_and_the_target_wait_share_one_deadline(
-    monkeypatch: pytest.MonkeyPatch, controller: NativeServiceController
-) -> None:
+def test_the_settle_wait_and_the_target_wait_share_one_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     """``timeout`` bounds the whole call: time spent settling is not granted a second time."""
-    # Settles after ~0.75 s of polling; the start then never reaches Running.
+    clock = _SteppedClock()
+    controller = NativeServiceController(clock=PollClock(monotonic=clock.monotonic, sleep=clock.sleep))
+    # One status query per 0.25 s poll: the pending stop settles after 5 s, then the start never
+    # reaches Running, so only the deadline can end the call.
     fake = _FakeWin32Service(
-        state=_FakeWin32Service.SERVICE_STOP_PENDING, settle_after=3, start_effect=_FakeWin32Service.SERVICE_STOPPED
+        state=_FakeWin32Service.SERVICE_STOP_PENDING, settle_after=20, start_effect=_FakeWin32Service.SERVICE_STOPPED
     )
     _use(monkeypatch, fake)
-    started = time.monotonic()
-    with pytest.raises(OperationTimeoutError):
-        controller.start("Svc", timeout=1.0)
-    # One shared deadline ends near 1.0 s (plus one poll); a fresh one per wait would run past 1.75 s.
-    assert time.monotonic() - started < 1.6
-    assert fake.actions == ["start"]
+    with pytest.raises(OperationTimeoutError) as caught:
+        controller.start("Svc", timeout=10.0)
+    assert fake.actions == ["start"], "the settle ended inside the budget and the start was issued"
+    # One shared deadline fires when the clock reaches 10 s (within one poll); a fresh deadline
+    # for the target wait would fire at settle + timeout, about 15 s.
+    assert 10.0 <= clock.now < 10.0 + 0.25
+    assert caught.value.timeout == 10.0
 
 
 _STOPPED, _START_PENDING, _STOP_PENDING, _RUNNING = 1, 2, 3, 4
@@ -716,6 +731,7 @@ def test_stop_of_a_real_start_pending_service_waits_for_the_start_then_stops(slo
     from pwshpy.composition import build_ps
 
     _raw_start(slow_service)
+    # Holds only because the service stays StartPending for _SLOW_SECONDS: do not shorten it to ~0.
     assert _raw_state(slow_service) == _win32service().SERVICE_START_PENDING, "the scratch service is StartPending"
     assert build_ps().stop_service(slow_service, timeout=_SLOW_TIMEOUT).status is ServiceState.STOPPED
 
@@ -730,5 +746,6 @@ def test_start_of_a_real_stop_pending_service_waits_for_the_stop_then_starts(slo
 
     ps = build_ps()
     assert ps.start_service(slow_service, timeout=_SLOW_TIMEOUT).status is ServiceState.RUNNING
+    # Holds only because the service stays StopPending for _SLOW_SECONDS: do not shorten it to ~0.
     assert ps.stop_service(slow_service, wait=False).status is ServiceState.STOP_PENDING
     assert ps.start_service(slow_service, timeout=_SLOW_TIMEOUT).status is ServiceState.RUNNING

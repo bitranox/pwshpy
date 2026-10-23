@@ -26,6 +26,7 @@ imported lazily so a portable install stays clean.
 
 Contents:
     * :class:`ControlStep` / :func:`next_control_step` - the pure decision what a verb does in a state.
+    * :class:`PollClock` - the clock the waits read and sleep on (injectable, so tests need no real time).
     * :class:`NativeServiceController` - start/stop/restart/set_startup over one SCM.
 """
 
@@ -136,33 +137,64 @@ def _current_state(win32service: Any, handle: Any) -> int:
         raise NativeCallError(str(exc) or "cannot query the service status") from exc
 
 
-def _wait_for_state(win32service: Any, handle: Any, target: int, *, deadline: float, timeout: float) -> None:
-    """Poll until the service reaches ``target`` state; raise OperationTimeoutError at ``deadline``.
+@dataclass(frozen=True)
+class PollClock:
+    """The clock the service waits read (``monotonic``) and poll with (``sleep``).
 
-    ``timeout`` is the call's whole budget, carried on the error; ``deadline`` is where it ends.
+    The default is the real one; a test passes a stepped clock so a deadline is reached
+    deterministically, without sleeping.
     """
+
+    monotonic: Callable[[], float] = time.monotonic
+    """Returns the current time in seconds (monotonic)."""
+    sleep: Callable[[float], None] = time.sleep
+    """Waits the given seconds between two status queries."""
+
+
+@dataclass(frozen=True)
+class _Deadline:
+    """One call's time budget: where it ends on ``clock``, and the ``timeout`` it came from."""
+
+    clock: PollClock
+    at: float
+    timeout: float
+
+    @classmethod
+    def after(cls, timeout: float, clock: PollClock) -> _Deadline:
+        """Start a budget of ``timeout`` seconds on ``clock`` now."""
+        return cls(clock=clock, at=clock.monotonic() + timeout, timeout=timeout)
+
+    def passed(self) -> bool:
+        """True once the clock reached the end of the budget."""
+        return self.clock.monotonic() >= self.at
+
+
+def _wait_for_state(win32service: Any, handle: Any, target: int, *, deadline: _Deadline) -> None:
+    """Poll until the service reaches ``target`` state; raise OperationTimeoutError at ``deadline``."""
+    timeout = deadline.timeout
     while _current_state(win32service, handle) != target:
-        if time.monotonic() >= deadline:
+        if deadline.passed():
             # Its own type: the control was accepted and the service is still on its way (a
             # wuauserv in StopPending), which a caller handles differently from a refused control.
             raise OperationTimeoutError(f"service did not reach state {target} within {timeout}s", timeout=timeout)
-        time.sleep(_POLL_INTERVAL)
+        deadline.clock.sleep(_POLL_INTERVAL)
 
 
-def _wait_until_settled(win32service: Any, handle: Any, *, deadline: float, timeout: float) -> int:
+def _wait_until_settled(win32service: Any, handle: Any, *, deadline: _Deadline) -> int:
     """Poll until the service leaves every pending state; return the settled state id.
 
     Raises:
         OperationTimeoutError: still pending at ``deadline``; no control was sent.
         NativeCallError: the status query failed.
     """
+    timeout = deadline.timeout
     state = _current_state(win32service, handle)
     while state in _PENDING_STATES:
-        if time.monotonic() >= deadline:
+        if deadline.passed():
             raise OperationTimeoutError(
                 f"service still in pending state {state} after {timeout}s; no control sent", timeout=timeout
             )
-        time.sleep(_POLL_INTERVAL)
+        deadline.clock.sleep(_POLL_INTERVAL)
         state = _current_state(win32service, handle)
     return state
 
@@ -183,24 +215,23 @@ class _Control:
         return next_control_step(state, target=self.target, target_pending=self.target_pending)
 
 
-def _drive(win32service: Any, handle: Any, control: _Control, *, timeout: float, wait: bool = True) -> None:
+def _drive(win32service: Any, handle: Any, control: _Control, *, deadline: _Deadline, wait: bool = True) -> None:
     """Bring one open service to ``control.target``: settle a foreign pending state, issue, then wait.
 
     Args:
         win32service: The (lazily imported) ``win32service`` module.
         handle: The open service handle (query rights plus the right the control needs).
         control: The verb's transition.
-        timeout: Seconds from now that bound the settle wait and the target wait together.
+        deadline: The call's one budget, shared by the settle wait and the target wait.
         wait: False skips only the wait for the target after the control is sent.
     """
-    deadline = time.monotonic() + timeout
     step = control.step_in(_current_state(win32service, handle))
     if step is ControlStep.SETTLE_FIRST:
-        step = control.step_in(_wait_until_settled(win32service, handle, deadline=deadline, timeout=timeout))
+        step = control.step_in(_wait_until_settled(win32service, handle, deadline=deadline))
     if step is ControlStep.ISSUE:
         control.issue()
     if wait and step is not ControlStep.DONE:
-        _wait_for_state(win32service, handle, control.target, deadline=deadline, timeout=timeout)
+        _wait_for_state(win32service, handle, control.target, deadline=deadline)
 
 
 def _query_one(win32service: Any, scm: Any, name: str) -> ServiceInfo:
@@ -234,7 +265,14 @@ def _query_one(win32service: Any, scm: Any, name: str) -> ServiceInfo:
 
 
 class NativeServiceController:
-    """Mutating service control over ``win32service`` (Start/Stop/Restart/Set startup type)."""
+    """Mutating service control over ``win32service`` (Start/Stop/Restart/Set startup type).
+
+    Args:
+        clock: The clock the waits read and poll with; the real one when omitted.
+    """
+
+    def __init__(self, *, clock: PollClock | None = None) -> None:
+        self._clock = clock if clock is not None else PollClock()
 
     def start(self, name: str, *, timeout: float = _DEFAULT_TIMEOUT) -> ServiceInfo:
         """Start ``name`` (no-op if already running); return its post-start state.
@@ -262,7 +300,7 @@ class NativeServiceController:
 
             try:
                 control = _Control(issue, target=_SERVICE_RUNNING, target_pending=_SERVICE_START_PENDING)
-                _drive(win32service, handle, control, timeout=timeout)
+                _drive(win32service, handle, control, deadline=_Deadline.after(timeout, self._clock))
             finally:
                 win32service.CloseServiceHandle(handle)
             return _query_one(win32service, scm, name)
@@ -300,7 +338,7 @@ class NativeServiceController:
 
             try:
                 control = _Control(issue, target=_SERVICE_STOPPED, target_pending=_SERVICE_STOP_PENDING)
-                _drive(win32service, handle, control, timeout=timeout, wait=wait)
+                _drive(win32service, handle, control, deadline=_Deadline.after(timeout, self._clock), wait=wait)
             finally:
                 win32service.CloseServiceHandle(handle)
             return _query_one(win32service, scm, name)
@@ -308,7 +346,11 @@ class NativeServiceController:
             win32service.CloseServiceHandle(scm)
 
     def restart(self, name: str, *, timeout: float = _DEFAULT_TIMEOUT) -> ServiceInfo:
-        """Stop then start ``name``; return its post-restart state."""
+        """Stop then start ``name``; return its post-restart state.
+
+        Unlike a single start or stop, this is two calls, and each gets its own ``timeout``:
+        the whole restart can take up to twice ``timeout``.
+        """
         self.stop(name, timeout=timeout)
         return self.start(name, timeout=timeout)
 
@@ -342,4 +384,4 @@ class NativeServiceController:
             win32service.CloseServiceHandle(scm)
 
 
-__all__ = ["ControlStep", "NativeServiceController", "next_control_step"]
+__all__ = ["ControlStep", "NativeServiceController", "PollClock", "next_control_step"]

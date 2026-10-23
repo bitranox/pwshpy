@@ -409,39 +409,77 @@ _REQUIRES_PYTHON_LINE = re.compile(
 _SPECIFIER_CHARACTERS = re.compile(r"[0-9A-Za-z.,<>=!~*+ ]*")
 
 
-def _array_depth_change(line: str) -> int:
-    """How many TOML arrays ``line`` opens minus how many it closes, ignoring strings and a comment.
+#: How many quote characters open or close a TOML multi-line string, and the longest run that may close
+#: one: up to two quote characters of content can sit right before the closing delimiter.
+_MULTI_LINE_DELIMITER = 3
+_LONGEST_CLOSING_RUN = 5
+
+
+def _scan_toml_line(line: str, open_string: str = "") -> tuple[int, str]:
+    """Scan one TOML line: arrays opened minus closed, and the multi-line string still open at its end.
+
+    Brackets inside a string or after a comment do not count. ``open_string`` is the delimiter
+    (``\"\"\"`` or ``'''``) of a multi-line string an earlier line left open, so the line starts inside
+    it; the second value is the delimiter left open by this line, or ``""``. A single-line string
+    never spans lines (TOML forbids it), so only a multi-line one carries over.
 
     Example:
-        >>> _array_depth_change('dependencies = [  # "]" in a comment')
-        1
-        >>> _array_depth_change('  "a[1]", ["b\\\\"]"],')
-        0
-        >>> _array_depth_change("]")
-        -1
+        >>> _scan_toml_line('dependencies = [  # "]" in a comment')
+        (1, '')
+        >>> _scan_toml_line('  "a[1]", ["b\\\\"]"],')
+        (0, '')
+        >>> _scan_toml_line("]")
+        (-1, '')
+        >>> _scan_toml_line('x = \"\"\" [')
+        (0, '\"\"\"')
+        >>> _scan_toml_line("[x] ''', [", "'''")
+        (1, '')
     """
     change = 0
-    quote = ""
-    escaped = False
-    for character in line:
+    index = 0
+    quote = open_string
+    while index < len(line):
         if quote:
-            # Only a basic string ("...") has escapes; a literal one ('...') ends at its next quote.
-            if escaped:
-                escaped = False
-            elif quote == '"' and character == "\\":
-                escaped = True
-            elif character == quote:
-                quote = ""
+            index, quote = _string_end(line, index, quote)
             continue
+        character = line[index]
         if character == "#":
             break
         if character in "\"'":
-            quote = character
-        elif character == "[":
-            change += 1
-        elif character == "]":
-            change -= 1
-    return change
+            # Three quotes open a multi-line string; fewer are a single-line one (or an empty one).
+            multi_line = character * _MULTI_LINE_DELIMITER
+            quote = multi_line if line.startswith(multi_line, index) else character
+            index += len(quote)
+            continue
+        change += {"[": 1, "]": -1}.get(character, 0)
+        index += 1
+    return change, quote if len(quote) == _MULTI_LINE_DELIMITER else ""
+
+
+def _string_end(line: str, start: int, quote: str) -> tuple[int, str]:
+    """Where the ``quote``-delimited string that ``line[start:]`` is inside ends, and the quote still open.
+
+    Returns ``(index past its closing delimiter, "")``, or ``(len(line), quote)`` when it runs past
+    the line. Only a basic string (``"``) has backslash escapes; a literal one (``'``) ends at its next
+    delimiter. A multi-line string's run of three to five quotes closes it: TOML lets up to two quote
+    characters of content sit right before the delimiter (``\"\"\"a\"\"\"\"`` is ``a"``).
+    """
+    mark = quote[0]
+    index = start
+    while index < len(line):
+        if mark == '"' and line[index] == "\\":
+            index += 2
+            continue
+        if line[index] != mark:
+            index += 1
+            continue
+        run = len(line[index:]) - len(line[index:].lstrip(mark))
+        if len(quote) == 1:
+            return index + 1, ""
+        if run >= _MULTI_LINE_DELIMITER:
+            return index + min(run, _LONGEST_CLOSING_RUN), ""
+        index += run
+    return len(line), quote
 
 
 def extract_requires_python(metadata: str) -> str:
@@ -450,7 +488,8 @@ def extract_requires_python(metadata: str) -> str:
     An elevated run names its interpreter to uv outright (``--python <path>``, so no ``.venv`` above
     the directory uv starts in is probed), and uv then only warns when that interpreter is outside the
     script's ``requires-python``. So the runner asks ``uv python find`` for a managed Python matching
-    this request first. Only a top-level key counts (a ``[tool...]`` table may hold its own), and only
+    this request first. Only a top-level key counts (a ``[tool...]`` table may hold its own; a line of
+    a multi-line string is content, never a header or the key, see :func:`_scan_toml_line`), and only
     a plain quoted string of specifier characters is accepted: anything else would be a runner value
     no reader can check at a glance.
 
@@ -466,24 +505,35 @@ def extract_requires_python(metadata: str) -> str:
         ''
     """
     depth = 0
+    open_string = ""
     for raw in metadata.splitlines()[1:-1]:
         # TOML allows whitespace before a key and a table header, so neither has to start the line.
         line = (raw[2:] if raw.startswith("# ") else raw[1:]).strip()
-        # A line opening with '[' inside a multi-line array (`#   ["x"],`) is one of its elements; only
-        # one outside every open array is a table header, which ends the top level.
-        if line.startswith("[") and depth == 0:
+        # A line that starts inside a multi-line string is its content, whatever it spells. A line
+        # opening with '[' inside a multi-line array (`#   ["x"],`) is one of its elements; only one
+        # outside every open array is a table header, which ends the top level.
+        if not open_string and line.startswith("[") and depth == 0:
             return ""
-        depth = max(depth + _array_depth_change(line), 0)
-        if not _REQUIRES_PYTHON_KEY.match(line):
-            continue
-        match = _REQUIRES_PYTHON_LINE.fullmatch(line)
-        value = None if match is None else match.group("basic") or match.group("literal") or ""
-        if value is None or _SPECIFIER_CHARACTERS.fullmatch(value) is None:
-            raise PackError(
-                f"the entry's requires-python must be one quoted string of version specifiers, got: {line.strip()!r}"
-            )
-        return value.strip()
+        if not open_string and _REQUIRES_PYTHON_KEY.match(line):
+            return _requires_python_value(line)
+        change, open_string = _scan_toml_line(line, open_string)
+        depth = max(depth + change, 0)
     return ""
+
+
+def _requires_python_value(line: str) -> str:
+    """The specifier set a ``requires-python`` line (left-stripped) assigns.
+
+    Raises:
+        PackError: When the value is not one quoted string of specifier characters.
+    """
+    match = _REQUIRES_PYTHON_LINE.fullmatch(line)
+    value = None if match is None else match.group("basic") or match.group("literal") or ""
+    if value is None or _SPECIFIER_CHARACTERS.fullmatch(value) is None:
+        raise PackError(
+            f"the entry's requires-python must be one quoted string of version specifiers, got: {line.strip()!r}"
+        )
+    return value.strip()
 
 
 def render_shim(*, entry: str, metadata: str) -> str:

@@ -455,6 +455,67 @@ def test_requires_python_is_read_from_the_top_level_of_the_block(block: str, exp
     assert extract_requires_python(block) == expected
 
 
+#: PEP 723 blocks whose multi-line strings hold a line a line scanner could take for a table header or
+#: for the key itself, with the requires-python a TOML parser reads from them.
+_MULTI_LINE_STRING_CASES = [
+    pytest.param(
+        '# /// script\n# description = """\n# [x]\n# """\n# requires-python = ">=3.12"\n# ///\n',
+        ">=3.12",
+        id="header-line-in-a-basic-string",
+    ),
+    pytest.param(
+        "# /// script\n# dependencies = [\n#   '''\n# [x]\n# ''',\n# ]\n# requires-python = \">=3.12\"\n# ///\n",
+        ">=3.12",
+        id="header-line-in-a-literal-string-in-dependencies",
+    ),
+    pytest.param(
+        "# /// script\n# x = '''\n# requires-python = \">=3.9\"\n# '''\n# requires-python = \">=3.12\"\n# ///\n",
+        ">=3.12",
+        id="key-line-in-a-literal-string",
+    ),
+    pytest.param(
+        '# /// script\n# x = """\n# \\"""\n# [x]\n# """\n# requires-python = ">=3.12"\n# ///\n',
+        ">=3.12",
+        id="escaped-quotes-do-not-close-a-basic-string",
+    ),
+    pytest.param(
+        "# /// script\n# x = '''\n# \\'''\n# [tool.x]\n# requires-python = \">=3.12\"\n# ///\n",
+        "",
+        id="a-backslash-does-not-escape-in-a-literal-string",
+    ),
+    pytest.param(
+        '# /// script\n# x = """a""""\n# [tool.x]\n# requires-python = ">=3.12"\n# ///\n',
+        "",
+        id="closing-delimiter-with-an-extra-quote",
+    ),
+    pytest.param(
+        '# /// script\n# x = """ [ """\n# [tool.x]\n# requires-python = ">=3.12"\n# ///\n',
+        "",
+        id="one-line-multi-line-string-opens-no-array",
+    ),
+]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("block", "expected"), _MULTI_LINE_STRING_CASES)
+def test_a_multi_line_string_is_not_read_as_toml_lines(block: str, expected: str) -> None:
+    """[111]: a line inside a TOML multi-line string (basic or literal) is string content.
+
+    It is neither a table header ending the top level nor the requires-python key: read as one, the
+    scan stopped early and an elevated run asked uv for any managed Python."""
+    assert extract_requires_python(block) == expected
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("block", "expected"), _MULTI_LINE_STRING_CASES)
+def test_the_multi_line_string_cases_agree_with_a_toml_parser(block: str, expected: str) -> None:
+    """The expectations above are what a real TOML parser reads, not what the scanner happens to do."""
+    # tomllib is 3.11+; the scanner itself exists because the domain cannot rely on it on 3.10.
+    tomllib = pytest.importorskip("tomllib")
+    content = "\n".join(line[2:] if line.startswith("# ") else line[1:] for line in block.splitlines()[1:-1])
+    assert tomllib.loads(content).get("requires-python", "") == expected
+
+
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(
     "line",

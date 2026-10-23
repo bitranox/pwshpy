@@ -399,6 +399,27 @@ def _service_task(bus: _dbus.Bus, base: str, path: str | None) -> ScheduledTaskI
     )
 
 
+def _folder_separator(path: str) -> re.Pattern[str]:
+    """The folder separator for a stripped task path: the Windows form's when it starts with a backslash.
+
+    The one choice :func:`base_name` splits by and :func:`_check_task_name` refuses by, so the guard
+    can never accept a folder the splitter would then drop.
+
+    Args:
+        path: The task path or name, already stripped of surrounding whitespace.
+
+    Returns:
+        :data:`_WINDOWS_FOLDER_SEPARATOR` for the ``\\Folder\\Name`` form, else :data:`_FOLDER_SEPARATOR`.
+
+    Example:
+        >>> _folder_separator(r"\\Maintenance\\xfer_logs") is _WINDOWS_FOLDER_SEPARATOR
+        True
+        >>> _folder_separator(r"zfs-scrub-monthly@my\\x2dpool") is _FOLDER_SEPARATOR
+        True
+    """
+    return _WINDOWS_FOLDER_SEPARATOR if path.startswith("\\") else _FOLDER_SEPARATOR
+
+
 def _check_task_name(task_name: str) -> None:
     """Refuse a ``task_name`` that names something other than one task, as the Windows lookup does.
 
@@ -420,8 +441,7 @@ def _check_task_name(task_name: str) -> None:
     if task_name == "":
         raise ConfigurationError("task_name must not be empty: an empty name names no task")
     stripped = task_name.strip()
-    separator = _WINDOWS_FOLDER_SEPARATOR if stripped.startswith("\\") else _FOLDER_SEPARATOR
-    if separator.search(stripped):
+    if _folder_separator(stripped).search(stripped):
         raise ConfigurationError(
             f"task_name {task_name!r} contains a folder: systemd timers have no folders, "
             "so pass only the unit name (folder_path is ignored on Linux)"
@@ -586,8 +606,7 @@ def base_name(task_path: str) -> str:
         ('xfer_logs', 'zfs-scrub-monthly@my\\\\x2dpool')
     """
     path = task_path.strip()
-    separator = _WINDOWS_FOLDER_SEPARATOR if path.startswith("\\") else _FOLDER_SEPARATOR
-    name = separator.split(path)[-1]
+    name = _folder_separator(path).split(path)[-1]
     for suffix in (".timer", ".service"):
         if name.endswith(suffix):
             return name[: -len(suffix)]

@@ -521,6 +521,48 @@ def test_unreadable_found_task_raises_under_strict(monkeypatch: pytest.MonkeyPat
     assert "access denied" in str(caught.value)
 
 
+class _VanishingDefinitionTask(_FakeTask):
+    """A task GetTask found whose definition read reports not-found (the code that means "absent")."""
+
+    @property
+    def Definition(self) -> Any:  # noqa: N802 - COM API name
+        raise _measured(_NOT_FOUND)
+
+    @Definition.setter
+    def Definition(self, value: Any) -> None:  # noqa: N802 - COM API name
+        del value  # the base __init__ assigns it; this task refuses to read it back
+
+
+@pytest.mark.os_agnostic
+def test_a_found_task_whose_read_says_not_found_is_never_absent(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """[50] Not-found means absent only from GetFolder/GetTask: once GetTask has FOUND the task, a
+    failure reading it is an unreadable task, raised under strict and warned without - never empty."""
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [_VanishingDefinitionTask("Odd", 3, True)], [])})
+    with pytest.raises(NativeCallError) as caught:
+        list(iter_scheduled_tasks("\\", task_name="Odd", strict=True))
+    assert "'\\Odd'" in str(caught.value)
+    with caplog.at_level(logging.WARNING, logger=st_mod.__name__):
+        assert list(iter_scheduled_tasks("\\", task_name="Odd")) == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "'\\Odd'" in warnings[0].getMessage()
+
+
+@pytest.mark.os_agnostic
+def test_a_slash_in_task_name_is_left_to_the_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[50] GetTask does not read "/" as a folder separator: it refuses such a name as
+    ERROR_INVALID_NAME (0x8007007B; measured 2026-10-23 for ``Defrag/ScheduledDefrag`` in
+    ``\\Microsoft\\Windows`` and for ``no/such``), so no record can carry a wrong task_path and the
+    name is not refused up front. That answer is a failure, not an absence: strict raises."""
+    folder = _LookupFolder("\\Microsoft\\Windows", [], [], lookup_error=_measured(_INVALID_NAME))
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [], [folder]), "\\Microsoft\\Windows": folder})
+    with pytest.raises(NativeCallError) as caught:
+        list(iter_scheduled_tasks("\\Microsoft\\Windows", task_name="Defrag/ScheduledDefrag", strict=True))
+    assert "'\\Microsoft\\Windows\\Defrag/ScheduledDefrag'" in str(caught.value)
+
+
 @pytest.mark.os_agnostic
 def test_missing_folder_without_task_name_still_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """[50] Unchanged: without task_name a folder that does not exist raises, whatever strict says."""
@@ -580,7 +622,6 @@ def test_is_not_found_reads_only_0x80070002(exc: BaseException, expected: bool) 
     assert st_mod.is_not_found(exc) is expected
 
 
-@pytest.mark.local_only
 @pytest.mark.os_windows
 @pytest.mark.skipif(sys.platform != "win32", reason="Task Scheduler COM is Windows-only")
 def test_real_lookup_finds_a_listed_task_and_not_a_missing_one() -> None:

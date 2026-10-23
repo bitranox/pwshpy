@@ -195,10 +195,11 @@ def _check_task_name(task_name: str) -> None:
 def _lookup(service: Any, folder_path: str, task_name: str, *, strict: bool) -> Iterator[ScheduledTaskInfo]:
     """Yield the one task ``task_name`` in ``folder_path``, or nothing when it does not exist.
 
-    Not-found (of the folder or the task) is an empty answer under ``strict`` too; any other
-    failure - opening the folder, opening the task, reading it - follows the listing's
-    skip-or-raise rule, naming the task's full path. ``folder_path`` may end in a backslash,
-    the form a record's ``task_path`` carries: it is stripped, because GetFolder refuses it.
+    Only opening the folder or the task can answer "absent": a not-found there is an empty answer
+    under ``strict`` too. Any other failure to open them, and ANY failure reading a task GetTask
+    found (a not-found code included: a found task is never absent), follows the listing's
+    skip-or-raise rule, naming the task's full path. ``folder_path`` may end in a backslash, the
+    form a record's ``task_path`` carries: it is stripped, because GetFolder refuses it.
     """
     com_folder = folder_path.rstrip("\\") or _ROOT
     prefix = "" if com_folder == _ROOT else com_folder
@@ -206,10 +207,13 @@ def _lookup(service: Any, folder_path: str, task_name: str, *, strict: bool) -> 
     try:
         folder = service.GetFolder(com_folder)
         task = folder.GetTask(task_name)
-        info = _to_task_info(task, _folder_path(folder))
     except Exception as exc:
-        if is_not_found(exc):
-            return
+        if not is_not_found(exc):
+            skip_or_raise(f"cannot read task {label}", exc, strict=strict, log=logger)
+        return
+    try:
+        info = _to_task_info(task, _folder_path(folder))
+    except Exception as exc:  # found, but unreadable: never reported as absent
         skip_or_raise(f"cannot read task {label}", exc, strict=strict, log=logger)
         return
     yield info
@@ -237,7 +241,7 @@ def iter_scheduled_tasks(
     ``folder_path`` directly and yields it, or nothing when it does not exist.
 
     Args:
-        folder_path: The task folder to recurse, e.g. ``"\\Microsoft\\Windows\\"``; the root
+        folder_path: The task folder to recurse, e.g. ``"\\Microsoft\\Windows"``; the root
             by default. Without ``task_name`` a folder that does not exist or cannot be opened
             always raises; with it, a missing folder means the task is absent (empty result),
             and a trailing backslash (the form ``task_path`` carries) is accepted.
@@ -251,7 +255,10 @@ def iter_scheduled_tasks(
             task or folder that does not exist is an empty result either way.
         task_name: Look up this one task in ``folder_path`` (no subfolders) instead of walking
             the tree, so an unreadable task elsewhere never refuses the lookup. The task's own
-            name only, no backslash. None (default) walks as before.
+            name only, no backslash. Matched without regard to case, and the record carries the
+            spelling passed in ``task_name`` and ``folder_path``: the scheduler echoes the
+            caller's spelling in the task's name, path and URI (measured 2026-10-23). None
+            (default) walks as before.
 
     Yields:
         One :class:`ScheduledTaskInfo` per task, folder by folder; with ``task_name``, at

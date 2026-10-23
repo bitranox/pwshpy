@@ -6,6 +6,114 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.6.0] 2026-10-23 12:21:55
+
+### Added
+
+- `get_windows_image PATH [--index N]` (`ps.get_windows_image`): the images in a `.wim` or split
+  `.swm` file, read from its header and XML on any OS without DISM (record `WindowsImage`, enum
+  `ImageArchitecture`). A compressed XML resource is refused; ESD files are not verified yet.
+- `get_windows_update [--criteria C] [--timeout S]` (`ps.get_windows_update`, Windows): a Windows Update
+  search in a child process that is killed after the timeout (record `WindowsUpdate`). A script that
+  calls it needs an `if __name__ == "__main__":` guard.
+- `get_current_identity` (`ps.get_current_identity`, like `whoami /user`): the account the process
+  runs as, read from its token, never from `USERNAME` (record `CurrentIdentity`, enum
+  `IntegrityLevel`).
+- `register_scheduled_task` takes a principal (`TaskPrincipal`: a SID on Windows, a uid on Linux), a
+  run level and once/daily/boot/logon triggers, on Task Scheduler and on systemd; CLI `--run-as`,
+  `--run-level`, `--logon-type`, `--at`, `--daily`, `--every-days`, `--at-boot`, `--boot-delay`,
+  `--at-logon`, `--logon-user`. `ScheduledTaskInfo` reads back `user_id`, `run_level`,
+  `last_run_time`, `last_task_result` and `next_run_time`.
+- `get_scheduled_task --strict` and `get_service --strict` raise `NativeCallError` for an item the
+  caller cannot read; without it, each skipped item is logged as a WARNING.
+- `stop_service --no-wait` (`wait=False`) issues the stop and returns at once.
+- `exec --wait-tree` (`wait_tree=True`) waits, like `Start-Process -Wait`, until every process the
+  program started has exited, and `--timeout` kills the whole tree.
+- `OperationTimeoutError`, a `NativeCallError` subclass with `.timeout`.
+- Packed runners take `-PwshPyUv PATH` / `--pwshpy-uv PATH` to pin the `uv` they run.
+- An exit-code table in `docs/cli-reference.md`.
+
+### Changed
+
+- Every `OperationTimeoutError` exits 110 on the CLI. It is now raised by the service start, stop and
+  restart waits (on Linux they returned silently), by `exec --timeout` (exit 1 before), by
+  `wait_process --timeout` and `resolve_dns_name --timeout` (exit 1 before: a script checking for 1
+  there must check for 110), and by the Linux local-account commands after 30 s. The .NET and web
+  `--timeout` still exit 1.
+- `exec --timeout` accepts `(0, 2147483]` seconds; anything else raises `ValueError` before the
+  program starts.
+- A refused elevation exits 77 (`pwshpy --elevate`, `-PwshPyElevate`, `--pwshpy-elevate`); an elevated
+  `.ps1` child that fails before the script runs relays its error and exits 70.
+- `--json` / `--jsonl` are written as UTF-8 with LF line ends on every OS, whatever the console code
+  page, and `--json` writes nothing until the first record exists.
+- A piped or redirected table is as wide as its content (up to 8192 columns) and prints cells
+  literally, never as rich markup.
+- Linux `start_service` / `restart_service` raise `NativeCallError` naming systemd's `Service.Result`
+  when the unit fails; they returned `Stopped`. A `Type=oneshot` unit returns `Stopped` once its start
+  job succeeded.
+- Linux `get_service` and `get_scheduled_task` list stopped and unloaded units.
+- Linux scheduled tasks: every unit pwshpy writes carries `X-PwshPy=<version>`. `register` refuses to
+  overwrite or shadow a unit without it, and `unregister` touches only marked units ("not written by
+  pwshpy"). Units written by pwshpy 1.0 to 1.5 carry no marker: remove their files under
+  `/etc/systemd/system` by hand, or add `X-PwshPy=` to their `[Unit]` section.
+- Linux scheduled tasks: names systemd would not accept are refused before anything is written.
+  run/stop/enable/disable take a listed instance or escaped name such as
+  `zfs-scrub-monthly@my\x2dpool` (1.5.2 sent it to `x2dpool`); a path starting with a backslash is the
+  Windows `\Folder\Name` form. A program starting with an `ExecStart=` prefix (`@ - : + ! |`), a lone
+  `;`, and any control character in the program, arguments or description raise `ConfigurationError`.
+- `enable_scheduled_task` on a boot timer only enables it.
+- Windows event-log messages are rendered through the provider's publisher metadata, as
+  `Get-WinEvent` does.
+- The `[full]` extra pins pythonnet per Python: `>=3.1.0` on 3.10, `>=3.2.1` from 3.11.
+
+### Security
+
+Elevated packed runs (administrator, SYSTEM, root) no longer let another account, or the caller's
+environment, choose code that runs with those rights. Details in `docs/power-tools.md`.
+
+- Only a `uv` that no other account can modify runs, judged on the file and every directory above it;
+  as root the `.sh` runner takes its helpers from the system directories only.
+- Only a uv-managed Python from the running account's own data directory runs. That directory and
+  everything below it is checked before uv searches it, the Python is named to `uv run --python`, and
+  no `.venv` in or above the starting directory is run. The first elevated run on a machine without
+  one installs a CPython build (about 36 MiB), so it fails offline when none is installed. The check
+  costs an elevated `.ps1` run about 2 to 3.5 s per installed Python on Windows.
+- uv starts in an admin-only directory and reads no `uv.toml` (`--no-config`) and no `.env`
+  (`--no-env-file`); its cache is named from the account.
+- The caller's interpreter, library, package-index, cache, proxy, certificate, keyring and
+  Python-mirror variables are dropped, one `pwshpy: ignoring <NAME>` stderr line each, and the user's
+  site-packages is off. In a network reachable only through a proxy, an elevated run therefore
+  downloads nothing.
+- Every `GIT_*` variable and `SSH_ASKPASS` is dropped, and `GIT_CONFIG_GLOBAL` is set to `/dev/null`
+  (`NUL` on Windows), so git 2.32 or later reads no global config. The packed script inherits that: a
+  git it runs no longer sees `user.name` or a `credential.helper` from a global `.gitconfig`; pass them
+  with `git -c ...`.
+- Native-call arguments in the `.ps1` reach their program literally (pwsh on Linux and macOS no
+  longer globs them).
+
+### Fixed
+
+- Entry names and `--with` values holding quotes, `$`, a backtick or a space pack and run in both
+  runners; a name with a line break is refused at pack time.
+- Every `PwshPyError` survives pickle and deepcopy.
+- A refused UAC prompt is recognised by its error code on every locale.
+- `get_windows_image` with an index the file does not hold raises `NativeCallError`.
+- WARNING lines that look like rich markup print literally (lib_log_rich >= 6.5.7).
+- `enable_scheduled_task` / `disable_scheduled_task` on a static systemd timer raise
+  `NativeCallError`; they changed nothing silently.
+- Windows: a failing status query during a service wait raises `NativeCallError` instead of a raw
+  `pywintypes.error`, and `exec(wait_tree=True)` no longer hangs on a program with no thread.
+- Tests never touch the desktop keyring unless `PWSHPY_TEST_SECRET_SERVICE` is set in the process
+  environment.
+
+### Known limitations
+
+- On Windows, `get_process` names two pseudo-processes as psutil does: `MemCompression` (Get-Process:
+  `Memory Compression`) and `System Idle Process` (Get-Process: `Idle`).
+- `exec` drops the output a program wrote before a timeout.
+- A git older than 2.32 ignores `GIT_CONFIG_GLOBAL` and still reads the global config in an elevated
+  run.
+
 ## [1.5.2] 2026-10-19 14:48:04
 
 ### Fixed

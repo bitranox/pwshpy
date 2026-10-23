@@ -377,6 +377,84 @@ def _timer_task(
     )
 
 
+def _service_task(bus: _dbus.Bus, base: str, path: str | None) -> ScheduledTaskInfo:
+    """The record for the on-demand task ``base``: its ``.service`` at object ``path`` (None: fields default).
+
+    A task with no ``.timer`` runs only when started, so it is always enabled, has nothing
+    scheduled, and its last run is the service's own last start.
+    """
+    result, started = _service_run(bus, path)
+    return ScheduledTaskInfo.model_construct(
+        task_name=base,
+        task_path=_ROOT,
+        state=service_task_state(str(_dbus.path_property(bus, path, "ActiveState", "inactive"))),
+        enabled=True,  # an on-demand oneshot has no schedule to disable; it can always be run
+        author="",
+        description=str(_dbus.path_property(bus, path, "Description", "")),
+        user_id=_service_user(bus, path),
+        run_level=None,  # systemd has no split token, so no run level to report
+        last_run_time=usec_to_datetime(started),  # no timer: the last run is the service's own last start
+        last_task_result=result,
+        next_run_time=None,  # on demand: nothing is scheduled
+    )
+
+
+def _check_task_name(task_name: str) -> None:
+    """Refuse a ``task_name`` that names something other than one task, as the Windows lookup does.
+
+    An empty name names no task, and a folder part would be dropped silently by :func:`base_name`
+    (``tasks/job`` would answer for ``job``). The folder separators are the ones :func:`base_name`
+    splits on; a systemd ``\\xNN`` escape is part of a name, not a separator, because the listing
+    reports instance timers such as ``zfs-scrub-monthly@my\\x2dpool`` and the lookup must reach them.
+    So unlike the Windows rule (every backslash) a backslash that starts an escape is accepted here.
+
+    Raises:
+        ConfigurationError: ``task_name`` is empty or contains a folder separator.
+
+    Example:
+        >>> _check_task_name("tasks/job")
+        Traceback (most recent call last):
+        ...
+        pwshpy.domain.errors.ConfigurationError: task_name 'tasks/job' contains a folder: ...
+    """
+    if task_name == "":
+        raise ConfigurationError("task_name must not be empty: an empty name names no task")
+    stripped = task_name.strip()
+    separator = _WINDOWS_FOLDER_SEPARATOR if stripped.startswith("\\") else _FOLDER_SEPARATOR
+    if separator.search(stripped):
+        raise ConfigurationError(
+            f"task_name {task_name!r} contains a folder: systemd timers have no folders, "
+            "so pass only the unit name (folder_path is ignored on Linux)"
+        )
+
+
+def _lookup_unit(bus: _dbus.Bus, base: str, *, strict: bool) -> Iterator[ScheduledTaskInfo]:
+    """The timer task ``base``, else its on-demand service, else nothing.
+
+    The same answer the controller reads back after register: a ``.timer`` makes it a scheduled
+    task, a ``.service`` alone an on-demand one. A masked or alias unit file counts as absent, as in
+    the listing. A unit systemd does not answer for (a refused ``LoadUnit`` or ``LoadState`` read)
+    ends the lookup through the listing's skip-or-raise rule: the service must not stand in for a
+    timer that may exist.
+    """
+    for unit in (f"{base}.timer", f"{base}.service"):
+        state = _dbus.unit_file_state(bus, unit) or ""
+        if state in _dbus.UNLISTED_FILE_STATES:
+            continue
+        try:
+            path = _dbus.load_unit(bus, unit)
+        except NativeCallError as exc:
+            skip_or_raise(f"cannot load unit '{unit}'", exc, strict=strict, log=logger)
+            return
+        if path is None:
+            continue
+        if unit.endswith(".timer"):
+            yield _timer_task(bus, unit, path, file_state=state)
+        else:
+            yield _service_task(bus, base, path)
+        return
+
+
 def _timer_files(bus: _dbus.Bus, *, strict: bool) -> list[tuple[str, str]]:
     """Every ``.timer`` unit file as (unit name, UnitFileState); [] when no listing answers.
 
@@ -401,11 +479,17 @@ def _timer_file_path(bus: _dbus.Bus, name: str, *, strict: bool) -> str | None:
         return None
 
 
-def iter_timers(folder_path: str = _ROOT, *, strict: bool = False) -> Iterator[ScheduledTaskInfo]:
+def iter_timers(
+    folder_path: str = _ROOT, *, strict: bool = False, task_name: str | None = None
+) -> Iterator[ScheduledTaskInfo]:
     """Yield a :class:`ScheduledTaskInfo` per systemd ``.timer`` unit (like Get-ScheduledTask, Linux).
 
     ``folder_path`` is accepted for signature parity with the Windows source and ignored (systemd
-    timers are flat). The loaded timers come first, from ``ListUnits``: the timer's object path
+    timers are flat). Given ``task_name``, nothing is listed: the one task of that name is read
+    directly - its ``.timer``, else its on-demand ``.service`` (which the listing, timers only,
+    leaves out), else nothing - the record the controller reads back after register.
+
+    Without ``task_name`` the loaded timers come first, from ``ListUnits``: the timer's object path
     comes from the listing itself, so a loaded timer costs no lookup. Then the timer unit FILES
     not among them - a disabled or not-yet-started timer is unloaded and ``ListUnits`` omits it,
     while Get-ScheduledTask lists a disabled task - each read through ``LoadUnit``. Skipped as no
@@ -426,9 +510,19 @@ def iter_timers(folder_path: str = _ROOT, *, strict: bool = False) -> Iterator[S
             iteration reaches it. The deliberate filtering above (not-found, masked, alias,
             template, stale) is systemd's answer, not a failure, and is the same either way; a
             single property that cannot be read still falls back to its default in both modes
-            (the task is kept).
+            (the task is kept). With ``task_name`` it decides only a unit whose ``LoadUnit`` or
+            ``LoadState`` read fails; a task that does not exist is an empty answer either way.
+        task_name: Read this one task instead of listing: a unit name as the listing reports it
+            (``.timer``/``.service`` suffix optional; an instance with ``\\xNN`` escapes accepted).
+            A masked or alias unit file counts as absent, as in the listing.
+
+    Yields:
+        One :class:`ScheduledTaskInfo` per timer; with ``task_name``, at most one.
 
     Raises:
+        ConfigurationError: ``task_name`` is empty, contains a folder (``/``, or a backslash that
+            starts no ``\\xNN`` escape), or is no systemd unit name (:func:`existing_unit_base`);
+            raised before the bus is opened.
         NativeCallError: The system bus or ``ListUnits`` cannot be reached, or (with ``strict``)
             a read named above fails.
 
@@ -436,6 +530,15 @@ def iter_timers(folder_path: str = _ROOT, *, strict: bool = False) -> Iterator[S
         >>> callable(iter_timers)
         True
     """
+    if task_name is not None:
+        _check_task_name(task_name)
+        base = existing_unit_base(task_name)
+        bus = _dbus.open_bus()
+        try:
+            yield from _lookup_unit(bus, base, strict=strict)
+        finally:
+            bus.conn.close()
+        return
     bus = _dbus.open_bus()
     try:
         (units,) = _dbus.call(bus, "ListUnits")
@@ -1087,21 +1190,7 @@ class SystemdScheduledTaskController:
             unit = f"{base}.timer"
             state = _dbus.unit_file_state(bus, unit) or ""
             return _timer_task(bus, unit, _dbus.load_unit_path(bus, unit), file_state=state)
-        path = _dbus.load_unit_path(bus, f"{base}.service")
-        result, started = _service_run(bus, path)
-        return ScheduledTaskInfo.model_construct(
-            task_name=base,
-            task_path=_ROOT,
-            state=service_task_state(str(_dbus.path_property(bus, path, "ActiveState", "inactive"))),
-            enabled=True,  # an on-demand oneshot has no schedule to disable; it can always be run
-            author="",
-            description=str(_dbus.path_property(bus, path, "Description", "")),
-            user_id=_service_user(bus, path),
-            run_level=None,  # systemd has no split token, so no run level to report
-            last_run_time=usec_to_datetime(started),  # no timer: the last run is the service's own last start
-            last_task_result=result,
-            next_run_time=None,  # on demand: nothing is scheduled
-        )
+        return _service_task(bus, base, _dbus.load_unit_path(bus, f"{base}.service"))
 
 
 __all__ = [

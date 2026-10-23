@@ -13,7 +13,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -22,7 +22,7 @@ from pwshpy.adapters.native.systemd_timers import SystemdScheduledTaskController
 from pwshpy.composition import build_ps
 from pwshpy.domain.enums import TaskState
 from pwshpy.domain.errors import NativeCallError
-from pwshpy.domain.scheduling import BootTrigger
+from pwshpy.domain.scheduling import BootTrigger, DailyTrigger
 
 _UNIT_DIR = Path("/etc/systemd/system")
 _ONDEMAND = "pwshpy-pytest-task"
@@ -170,3 +170,26 @@ def test_systemd_loads_the_ownership_key_without_a_warning(ondemand_task: str) -
     )
     assert "X-PwshPy" not in verify.stdout + verify.stderr, verify.stdout + verify.stderr
     assert "X-PwshPy=" in path.read_text(encoding="utf-8")
+
+
+def test_lookup_by_name_reads_a_timer_task(ondemand_task: str) -> None:
+    """[50] A task with a daily trigger is found by name as its timer: one record, a next run set."""
+    at = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=1)
+    SystemdScheduledTaskController().register(ondemand_task, program="/bin/true", triggers=[DailyTrigger(at=at)])
+    (found,) = iter_timers(task_name=ondemand_task, strict=True)
+    assert found.task_name == ondemand_task
+    assert found.next_run_time is not None
+
+
+def test_lookup_by_name_reads_an_on_demand_task_the_listing_leaves_out(ondemand_task: str) -> None:
+    """[50] A task with no trigger is found by name, although the listing (timers only) omits it."""
+    SystemdScheduledTaskController().register(ondemand_task, program="/bin/true", description="pwshpy pytest task")
+    (found,) = iter_timers(task_name=ondemand_task, strict=True)
+    assert (found.task_name, found.enabled, found.next_run_time) == (ondemand_task, True, None)
+    assert found.description == "pwshpy pytest task"
+    assert ondemand_task not in [t.task_name for t in iter_timers()]
+
+
+def test_lookup_by_name_of_no_task_is_empty() -> None:
+    """[50] On real systemd, a name with no unit file is an empty answer (LoadUnit's not-found), strict too."""
+    assert list(iter_timers(task_name="pwshpy-pytest-no-such-task", strict=True)) == []

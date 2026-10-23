@@ -1524,3 +1524,166 @@ def test_timer_unit_refuses_a_control_character_in_the_description() -> None:
     """[X22 M-L1]: the timer's description is refused like the service's."""
     with pytest.raises(ConfigurationError, match="description must not contain a control character"):
         timer_unit("job", "d\x1bx", [OnceTrigger(at=_AT)])
+
+
+# --- [50] iter_timers(task_name=...): one task by name, timer first, then the on-demand service ----------
+
+#: The listing calls a by-name lookup must never send: it reads the one task, it walks nothing.
+_LISTING_CALLS = frozenset({"ListUnits", "ListUnitFilesByPatterns", "ListUnitFiles"})
+
+
+def _lookup_conn(**kwargs: Any) -> FakeConn:
+    """A box with a disabled timer task ``job`` (unloaded) and an on-demand service ``adhoc``.
+
+    The listing would show ``job`` only: ``adhoc`` has no ``.timer``. Keyword arguments override
+    the FakeConn defaults (file states, refused loads).
+    """
+    props: dict[tuple[str, str, str], Any] = {
+        ("job.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "inactive",
+        ("job.timer", systemd_dbus.UNIT_IFACE, "Description"): "Nightly job",
+        ("job.timer", _TIMER, "NextElapseUSecRealtime"): _T1,
+        ("job.timer", _TIMER, "Unit"): "job.service",
+        **_service_props("job.service", code=1, status=0, started=_T0),
+        ("job.service", _SERVICE, "User"): "1000",
+        ("adhoc.service", systemd_dbus.UNIT_IFACE, "ActiveState"): "inactive",
+        ("adhoc.service", systemd_dbus.UNIT_IFACE, "Description"): "Ad hoc",
+        **_service_props("adhoc.service", code=1, status=4, started=_T0),
+        ("adhoc.service", _SERVICE, "User"): "",
+    }
+    defaults: dict[str, Any] = {
+        "file_states": {"job.timer": "disabled", "job.service": "static", "adhoc.service": "static"},
+        "unloaded": frozenset({"job.timer", "job.service", "adhoc.service"}),
+    }
+    files = frozenset({"job.timer", "job.service", "adhoc.service"})
+    return FakeConn([], props, files, **{**defaults, **kwargs})
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
+def test_lookup_by_name_reads_the_timer_task_without_listing(monkeypatch: pytest.MonkeyPatch, strict: bool) -> None:
+    """[50] A timer task by name: the same record the listing gives, read with no listing call."""
+    conn = _lookup_conn()
+    use_bus(monkeypatch, conn)
+    (job,) = iter_timers(task_name="job", strict=strict)
+    assert (job.task_name, job.task_path, job.description, job.user_id) == ("job", "/", "Nightly job", "1000")
+    assert (job.enabled, job.state) == (False, TaskState.DISABLED)
+    assert job.next_run_time == datetime(2023, 11, 14, 23, 13, 20, tzinfo=timezone.utc)
+    assert not _LISTING_CALLS & set(conn.methods)
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_lookup_by_name_finds_an_on_demand_service_the_listing_leaves_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[50] A task with no .timer is found by name although the listing (timers only) omits it."""
+    use_bus(monkeypatch, _lookup_conn())
+    assert "adhoc" not in [t.task_name for t in iter_timers()]
+    conn = _lookup_conn()
+    use_bus(monkeypatch, conn)
+    (adhoc,) = iter_timers(task_name="adhoc", strict=True)
+    assert (adhoc.task_name, adhoc.task_path, adhoc.description, adhoc.user_id) == ("adhoc", "/", "Ad hoc", "0")
+    assert (adhoc.enabled, adhoc.next_run_time, adhoc.last_task_result) == (True, None, 4)
+    assert adhoc.last_run_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+    assert not _LISTING_CALLS & set(conn.methods)
+
+
+@pytest.mark.os_agnostic
+def test_lookup_by_name_agrees_with_the_controller_read_back(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """[50] The lookup answers what the controller reads back: disable for a timer, register for a service."""
+    controller = SystemdScheduledTaskController()
+    use_bus(monkeypatch, _lookup_conn())
+    disabled = controller.disable("job")
+    use_bus(monkeypatch, _lookup_conn())
+    assert list(iter_timers(task_name="job")) == [disabled]
+    # adhoc.service is unknown to systemd until register writes it and reloads (the ownership check).
+    use_bus(monkeypatch, _lookup_conn(pending=frozenset({"adhoc.service"})))
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)  # filesystem edge: never write /etc here
+    registered = controller.register("adhoc", program="/bin/true")
+    assert list(iter_timers(task_name="adhoc")) == [registered]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("state", sorted(systemd_dbus.UNLISTED_FILE_STATES))
+def test_lookup_by_name_treats_a_masked_or_alias_timer_as_absent(monkeypatch: pytest.MonkeyPatch, state: str) -> None:
+    """[50] A masked or alias .timer is no task, as in the listing: the lookup falls to the service."""
+    file_states = {"job.timer": state, "job.service": "static", "adhoc.service": "static"}
+    conn = _lookup_conn(file_states=file_states)
+    use_bus(monkeypatch, conn)
+    (job,) = iter_timers(task_name="job", strict=True)
+    assert (job.next_run_time, job.description) == (None, "")  # the on-demand record of job.service
+    assert "LoadUnit" in conn.methods
+    assert conn.calls == []  # no verb: a read
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
+def test_lookup_by_name_of_no_task_is_empty(monkeypatch: pytest.MonkeyPatch, strict: bool) -> None:
+    """[50] A name with neither a .timer nor a .service is an empty answer, under strict too."""
+    conn = _lookup_conn()
+    use_bus(monkeypatch, conn)
+    assert list(iter_timers(task_name="pwshpy-no-such-task", strict=strict)) == []
+    assert not _LISTING_CALLS & set(conn.methods)
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_strict_lookup_raises_naming_a_unit_that_cannot_be_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[50] strict: a refused LoadUnit is no answer, so it raises naming the unit (never the service)."""
+    conn = _lookup_conn(refused_loads=frozenset({"job.timer"}))
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeCallError, match=r"'job\.timer'"):
+        list(iter_timers(task_name="job", strict=True))
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_lenient_lookup_warns_and_yields_nothing_for_a_unit_that_cannot_be_loaded(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """[50] Default: the refused timer is skipped with a WARNING; its service does not stand in for it."""
+    use_bus(monkeypatch, _lookup_conn(refused_loads=frozenset({"job.timer"})))
+    with caplog.at_level(logging.WARNING, logger=systemd_timers.__name__):
+        assert list(iter_timers(task_name="job")) == []
+    (warning,) = caplog.records
+    assert "'job.timer'" in warning.getMessage()
+
+
+@pytest.mark.os_agnostic
+def test_lookup_by_name_reaches_an_escaped_instance_timer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[50] A listed instance name with a systemd \\xNN escape is a name, not a folder: it is found."""
+    name = r"zfs-scrub-monthly@my\x2dpool"
+    props: dict[tuple[str, str, str], Any] = {
+        (f"{name}.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "active",
+        (f"{name}.timer", _TIMER, "Unit"): f"{name}.service",
+    }
+    use_bus(monkeypatch, FakeConn([], props, frozenset({f"{name}.timer"})))
+    assert [t.task_name for t in iter_timers(task_name=name, strict=True)] == [name]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("task_name", "match"),
+    [
+        ("", "must not be empty"),
+        (r"\Maintenance\job", "folder"),
+        (r"\job", "folder"),
+        (r"tasks\job", "folder"),
+        ("tasks/job", "folder"),
+        ("/job", "folder"),
+        ("bad name with spaces", "not a systemd unit name"),
+        ("scrub@", "template"),
+    ],
+    ids=["empty", "windows-path", "leading-backslash", "backslash", "slash", "leading-slash", "space", "template"],
+)
+def test_lookup_by_name_refuses_what_names_no_single_task_before_the_bus(
+    monkeypatch: pytest.MonkeyPatch, task_name: str, match: str
+) -> None:
+    """[50] Parity with the Windows lookup: an empty name or a folder part is refused, not stripped.
+
+    ``existing_unit_base`` alone would read ``tasks/job`` as ``job``, so the answer would be about a
+    task the caller did not name. Refused before the bus is opened, like an invalid unit name.
+    """
+    conn = _lookup_conn()
+    use_bus(monkeypatch, conn)
+    with pytest.raises(ConfigurationError, match=match):
+        list(iter_timers(task_name=task_name))
+    assert conn.methods == []

@@ -19,7 +19,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   the listing's rule (a WARNING, or `NativeCallError` under `strict`). `folder_path` may end in a
   backslash, the form a record's `task_path` carries. An empty `task_name`, or one containing a
   backslash (a path, not a name), raises `ConfigurationError`. `is_not_found()` exposes the
-  not-found test.
+  not-found test. The Linux source (`iter_timers`) takes the same `task_name` and lists nothing:
+  it reads the task's `.timer`, else its on-demand `.service` (found by name although the listing,
+  timers only, leaves it out), else nothing, under `strict=True` too; a masked or alias unit file
+  counts as absent, as in the listing. An empty name, a folder part (`/`, or a backslash that
+  starts no systemd `\xNN` escape) or an invalid unit name raises `ConfigurationError`.
 
 ### Changed
 

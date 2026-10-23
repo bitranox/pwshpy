@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,7 +20,7 @@ from pwshpy.adapters.native import scheduled_tasks as st_mod
 from pwshpy.adapters.native import task_readback
 from pwshpy.adapters.native.scheduled_tasks import iter_scheduled_tasks
 from pwshpy.domain.enums import TaskRunLevel, TaskState
-from pwshpy.domain.errors import NativeCallError
+from pwshpy.domain.errors import ConfigurationError, NativeCallError
 from pwshpy.domain.records import ScheduledTaskInfo
 
 
@@ -377,6 +378,183 @@ def test_strict_on_a_readable_tree_yields_what_lenient_yields(
     assert [t.to_dict() for t in strict] == [t.to_dict() for t in lenient]
     assert [t.task_name for t in strict] == ["Top", "Alpha", "Beta"]
     assert caplog.records == []
+
+
+_NOT_FOUND = -2147024894  # HRESULT 0x80070002 as pywin32 reports it (signed)
+_DISP_E_EXCEPTION = -2147352567  # HRESULT 0x80020009: late-bound IDispatch, real code in excepinfo[5]
+_ACCESS_DENIED = -2147024891  # HRESULT 0x80070005
+
+
+class _ComError(Exception):
+    """Shaped like pywintypes.com_error: hresult, strerror, excepinfo, argerror."""
+
+    def __init__(self, hresult: int, excepinfo: tuple[Any, ...] | None = None) -> None:
+        super().__init__(hresult, "error", excepinfo, None)
+        self.hresult = hresult
+        self.excepinfo = excepinfo
+
+
+class _LookupFolder(_FakeFolder):
+    """A folder that also answers ``GetTask(name)``, raising ``lookup_error`` or not-found like COM."""
+
+    def __init__(
+        self, path: str, tasks: list[Any], subfolders: list[Any], lookup_error: Exception | None = None
+    ) -> None:
+        super().__init__(path, tasks, subfolders)
+        self._lookup_error = lookup_error
+
+    def GetTask(self, name: str) -> Any:  # noqa: N802 - COM API name
+        if self._lookup_error is not None:
+            raise self._lookup_error
+        for task in self._tasks:
+            if task.Name == name:
+                return task
+        raise _ComError(_NOT_FOUND)
+
+
+class _PathService(_FakeService):
+    """A service that opens folders BY PATH, raising not-found for a path it does not hold."""
+
+    def __init__(self, folders: dict[str, _FakeFolder]) -> None:
+        super().__init__(folders["\\"])
+        self._folders = folders
+
+    def GetFolder(self, path: str) -> _FakeFolder:  # noqa: N802 - COM API name
+        try:
+            return self._folders[path]
+        except KeyError:
+            raise _ComError(_NOT_FOUND) from None
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, folders: dict[str, _FakeFolder]) -> None:
+    monkeypatch.setattr(st_mod, "_connect_scheduler", lambda: _PathService(folders))
+
+
+@pytest.mark.os_agnostic
+def test_task_name_returns_only_that_task(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """[50] A by-name lookup reads that one task and never walks into an unreadable folder elsewhere."""
+    locked = _LookupFolder("\\Locked", [_DeniedTask("Broken", 3, True)], [])
+    root = _LookupFolder("\\", [_FakeTask("a", 3, True), _FakeTask("b", 1, False, "me", "d")], [locked])
+    _install(monkeypatch, {"\\": root, "\\Locked": locked})
+    with caplog.at_level(logging.WARNING, logger=st_mod.__name__):
+        (info,) = list(iter_scheduled_tasks("\\", task_name="b", strict=True))
+    assert (info.task_name, info.task_path) == ("b", "\\")
+    assert (info.state, info.enabled, info.author, info.description) == (TaskState.DISABLED, False, "me", "d")
+    assert caplog.records == []
+
+
+@pytest.mark.os_agnostic
+def test_task_name_in_a_subfolder_carries_that_folder_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[50] The record's task_path is the folder COM opened, with its trailing backslash, as in the walk."""
+    sub = _LookupFolder("\\Sub", [_FakeTask("x", 3, True)], [])
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [], [sub]), "\\Sub\\": sub})
+    (info,) = list(iter_scheduled_tasks("\\Sub\\", task_name="x"))
+    assert (info.task_name, info.task_path) == ("x", "\\Sub\\")
+
+
+@pytest.mark.os_agnostic
+def test_task_name_absent_is_empty_even_under_strict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[50] A task that does not exist is no error: an empty result, strict or not."""
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [_FakeTask("a", 3, True)], [])})
+    assert list(iter_scheduled_tasks("\\", task_name="missing", strict=True)) == []
+
+
+@pytest.mark.os_agnostic
+def test_task_name_absent_reported_through_disp_e_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[50] Not-found wrapped by late-bound IDispatch (DISP_E_EXCEPTION, code in excepinfo[5]) is still absent."""
+    wrapped = _ComError(_DISP_E_EXCEPTION, (0, "src", "desc", None, 0, _NOT_FOUND))
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [], [], lookup_error=wrapped)})
+    assert list(iter_scheduled_tasks("\\", task_name="missing", strict=True)) == []
+
+
+@pytest.mark.os_agnostic
+def test_missing_folder_with_task_name_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[50] A task in a folder that does not exist is absent too (COM reports both as 0x80070002)."""
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [], [])})
+    assert list(iter_scheduled_tasks("\\Nope\\", task_name="x", strict=True)) == []
+
+
+@pytest.mark.os_agnostic
+def test_other_lookup_error_raises_under_strict_and_warns_without(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """[50] Any failure but not-found follows the strict rule: raise naming the task, or skip with a WARNING."""
+    denied = _ComError(_ACCESS_DENIED)
+    folder = _LookupFolder("\\Folder", [], [], lookup_error=denied)
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [], [folder]), "\\Folder\\": folder})
+    with pytest.raises(NativeCallError) as caught:
+        list(iter_scheduled_tasks("\\Folder\\", task_name="Name", strict=True))
+    assert "'\\Folder\\Name'" in str(caught.value)
+    assert caught.value.__cause__ is denied
+    with caplog.at_level(logging.WARNING, logger=st_mod.__name__):
+        assert list(iter_scheduled_tasks("\\Folder\\", task_name="Name")) == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "'\\Folder\\Name'" in warnings[0].getMessage()
+
+
+@pytest.mark.os_agnostic
+def test_unreadable_found_task_raises_under_strict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[50] A task that exists but whose definition is unreadable is never reported as absent."""
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [_DeniedTask("Broken", 3, True)], [])})
+    with pytest.raises(NativeCallError) as caught:
+        list(iter_scheduled_tasks("\\", task_name="Broken", strict=True))
+    assert "'\\Broken'" in str(caught.value)
+    assert "access denied" in str(caught.value)
+
+
+@pytest.mark.os_agnostic
+def test_missing_folder_without_task_name_still_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[50] Unchanged: without task_name a folder that does not exist raises, whatever strict says."""
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [], [])})
+    with pytest.raises(NativeCallError) as caught:
+        list(iter_scheduled_tasks("\\Nope\\"))
+    assert "'\\Nope\\'" in str(caught.value)
+
+
+@pytest.mark.os_agnostic
+def test_empty_task_name_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[50] An empty name would name the folder, not a task: refused before the scheduler is reached."""
+
+    def _never_connect() -> Any:
+        raise AssertionError("the scheduler must not be reached for an empty task name")
+
+    monkeypatch.setattr(st_mod, "_connect_scheduler", _never_connect)
+    with pytest.raises(ConfigurationError, match="task_name"):
+        list(iter_scheduled_tasks("\\", task_name=""))
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (_ComError(_NOT_FOUND), True),
+        (_ComError(0x80070002), True),  # an unsigned code, as some callers carry it
+        (_ComError(_DISP_E_EXCEPTION, (0, "src", "desc", None, 0, _NOT_FOUND)), True),
+        (_ComError(_DISP_E_EXCEPTION, (0, "src", "desc", None, 0, _ACCESS_DENIED)), False),
+        (_ComError(_DISP_E_EXCEPTION, None), False),  # wrapped, but no inner code to read
+        (_ComError(_DISP_E_EXCEPTION, (0, "src", "desc", None, 0, None)), False),
+        (_ComError(_ACCESS_DENIED), False),
+        (OSError("no such task"), False),  # no hresult at all: never guessed from the text
+    ],
+    ids=["signed", "unsigned", "wrapped", "wrapped-denied", "wrapped-no-info", "wrapped-no-scode", "denied", "plain"],
+)
+def test_is_not_found_reads_only_0x80070002(exc: BaseException, expected: bool) -> None:
+    """[50] Only 0x80070002, direct or inside DISP_E_EXCEPTION's excepinfo, means absent."""
+    assert st_mod.is_not_found(exc) is expected
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Task Scheduler COM is Windows-only")
+def test_real_lookup_finds_a_listed_task_and_not_a_missing_one() -> None:
+    """[50] Against the real Task Scheduler: a listed task is found by name; a random name is absent, even strict."""
+    listed = next(iter_scheduled_tasks())
+    (found,) = list(iter_scheduled_tasks(listed.task_path, task_name=listed.task_name, strict=True))
+    assert (found.task_name, found.task_path, found.author) == (listed.task_name, listed.task_path, listed.author)
+    missing = f"pwshpy-no-such-task-{uuid.uuid4().hex}"
+    assert list(iter_scheduled_tasks("\\", task_name=missing, strict=True)) == []
+    assert list(iter_scheduled_tasks(f"\\{missing}\\", task_name=missing, strict=True)) == []
 
 
 @pytest.mark.os_windows

@@ -6,12 +6,15 @@ yields one :class:`~pwshpy.domain.records.ScheduledTaskInfo` at a time, so the
 pipeline stays memory-bounded across a large task tree.  What the caller cannot read (a
 folder's task or subfolder list, a subfolder, a task) is skipped with a logged WARNING, or
 raised as :class:`~pwshpy.domain.errors.NativeCallError` under ``strict=True``, so an
-unreadable task is never silently indistinguishable from an absent one.  ``win32com`` (from
+unreadable task is never silently indistinguishable from an absent one.  Given a task name it
+opens that one task directly (``ITaskFolder.GetTask``) instead of walking, so an unreadable
+task elsewhere in the tree cannot refuse a question about a different one.  ``win32com`` (from
 pywin32) is imported lazily so a portable install stays clean and raises
 :class:`~pwshpy.domain.errors.PlatformUnsupportedError`.
 
 Contents:
-    * :func:`iter_scheduled_tasks` - stream the registered tasks under a folder.
+    * :func:`iter_scheduled_tasks` - stream the registered tasks under a folder, or look up one.
+    * :func:`is_not_found` - whether a Task Scheduler COM error means "no such task or folder".
 """
 
 from __future__ import annotations
@@ -19,9 +22,9 @@ from __future__ import annotations
 import importlib
 import logging
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
 from .marshal import skip_or_raise, to_task_state
 from .task_readback import read_task_extras
@@ -30,6 +33,14 @@ logger = logging.getLogger(__name__)
 
 _TASK_ENUM_HIDDEN = 1  # include hidden tasks, like Get-ScheduledTask
 _ROOT = "\\"
+# The one status meaning "absent": GetFolder and GetTask both report a missing task, a missing
+# folder and a task in a missing folder as ERROR_FILE_NOT_FOUND (measured 2026-10-23 through
+# the COM API). Every other status is a failure to read, never an absence.
+_ERROR_FILE_NOT_FOUND = 0x80070002
+# A late-bound IDispatch call can wrap the callee's status as DISP_E_EXCEPTION with the real
+# code in excepinfo[5] (the scode), so both shapes are read.
+_DISP_E_EXCEPTION = 0x80020009
+_EXCEPINFO_SCODE = 5
 
 
 def _connect_scheduler() -> Any:
@@ -125,6 +136,65 @@ def _subfolders(folder: Any, folder_path: str, *, strict: bool) -> Iterator[tupl
         yield child, child_path
 
 
+def _com_code(exc: BaseException) -> int | None:
+    """The COM status an error carries, unsigned; None when it carries none.
+
+    pywin32 reports an HRESULT signed (0x80070002 arrives as -2147024894), so it is masked to
+    32 bits; a DISP_E_EXCEPTION is unwrapped to the scode in its excepinfo when one is there.
+    """
+    hresult = getattr(exc, "hresult", None)
+    if not isinstance(hresult, int):
+        return None
+    code = hresult & 0xFFFFFFFF
+    excepinfo: object = getattr(exc, "excepinfo", None)
+    if code != _DISP_E_EXCEPTION or not isinstance(excepinfo, tuple):
+        return code
+    fields = cast("tuple[object, ...]", excepinfo)  # pywin32's excepinfo is an untyped 6-tuple
+    scode = fields[_EXCEPINFO_SCODE] if len(fields) > _EXCEPINFO_SCODE else None
+    return scode & 0xFFFFFFFF if isinstance(scode, int) else code
+
+
+def is_not_found(exc: BaseException) -> bool:
+    """Whether a Task Scheduler COM error means the task or its folder does not exist.
+
+    Only HRESULT 0x80070002 (ERROR_FILE_NOT_FOUND) counts, reported directly or wrapped in a
+    DISP_E_EXCEPTION's excepinfo; an error carrying no COM status is never read as absent,
+    whatever its message says.
+
+    Args:
+        exc: The error a ``GetFolder`` / ``GetTask`` call raised.
+
+    Returns:
+        True only for the not-found status.
+
+    Example:
+        >>> is_not_found(OSError("The system cannot find the file specified"))
+        False
+    """
+    return _com_code(exc) == _ERROR_FILE_NOT_FOUND
+
+
+def _lookup(service: Any, folder_path: str, task_name: str, *, strict: bool) -> Iterator[ScheduledTaskInfo]:
+    """Yield the one task ``task_name`` in ``folder_path``, or nothing when it does not exist.
+
+    Not-found (of the folder or the task) is an empty answer under ``strict`` too; any other
+    failure - opening the folder, opening the task, reading it - follows the listing's
+    skip-or-raise rule, naming the task's full path.
+    """
+    folder_label = folder_path.rstrip("\\")
+    label = f"'{folder_label}\\{task_name}'"
+    try:
+        folder = service.GetFolder(folder_path)
+        task = folder.GetTask(task_name)
+        info = _to_task_info(task, _folder_path(folder))
+    except Exception as exc:
+        if is_not_found(exc):
+            return
+        skip_or_raise(f"cannot read task {label}", exc, strict=strict, log=logger)
+        return
+    yield info
+
+
 def _walk(folder: Any, folder_path: str, *, strict: bool) -> Iterator[ScheduledTaskInfo]:
     """Yield the tasks under a folder, its own first, then each subfolder's, depth first.
 
@@ -137,28 +207,39 @@ def _walk(folder: Any, folder_path: str, *, strict: bool) -> Iterator[ScheduledT
         yield from _walk(child, child_path, strict=strict)
 
 
-def iter_scheduled_tasks(folder_path: str = _ROOT, *, strict: bool = False) -> Iterator[ScheduledTaskInfo]:
+def iter_scheduled_tasks(
+    folder_path: str = _ROOT, *, strict: bool = False, task_name: str | None = None
+) -> Iterator[ScheduledTaskInfo]:
     """Stream the scheduled tasks under a folder, recursing subfolders (like ``Get-ScheduledTask``).
 
     Yields one record at a time while walking the folder tree, so it stays memory-bounded
-    across a large task set.
+    across a large task set. Given ``task_name`` it walks nothing: it opens that one task in
+    ``folder_path`` directly and yields it, or nothing when it does not exist.
 
     Args:
         folder_path: The task folder to recurse, e.g. ``"\\Microsoft\\Windows\\"``; the root
-            by default. A folder that does not exist or cannot be opened always raises.
+            by default. Without ``task_name`` a folder that does not exist or cannot be opened
+            always raises; with it, a missing folder means the task is absent (empty result).
         strict: What happens to an item the caller cannot read (a folder whose tasks or
             subfolders it may not list, a protected or corrupt task). False (default) skips it
             and logs a WARNING naming it, so a non-elevated caller can list what it CAN read.
             True raises :class:`NativeCallError` naming its folder or task path instead, so an
             unreadable task never reads like an absent one. The walk is lazy: the error comes
-            when iteration reaches the item, after the records before it were yielded.
+            when iteration reaches the item, after the records before it were yielded. With
+            ``task_name`` it decides only a task that exists but cannot be opened or read; a
+            task or folder that does not exist is an empty result either way.
+        task_name: Look up this one task in ``folder_path`` (no subfolders) instead of walking
+            the tree, so an unreadable task elsewhere never refuses the lookup. None (default)
+            walks as before.
 
     Yields:
-        One :class:`ScheduledTaskInfo` per task, folder by folder.
+        One :class:`ScheduledTaskInfo` per task, folder by folder; with ``task_name``, at
+        most one.
 
     Raises:
-        NativeCallError: The scheduler cannot be reached, ``folder_path`` cannot be opened, or
-            (with ``strict``) an item under it cannot be read.
+        ConfigurationError: ``task_name`` is empty (it would name the folder, not a task).
+        NativeCallError: The scheduler cannot be reached, ``folder_path`` cannot be opened
+            (without ``task_name``), or (with ``strict``) an item under it cannot be read.
         PlatformUnsupportedError: Off Windows (no pywin32).
 
     Example:
@@ -166,8 +247,15 @@ def iter_scheduled_tasks(folder_path: str = _ROOT, *, strict: bool = False) -> I
         >>> from pwshpy.domain.records import ScheduledTaskInfo
         >>> sys.platform != "win32" or isinstance(next(iter_scheduled_tasks()), ScheduledTaskInfo)
         True
+        >>> sys.platform != "win32" or list(iter_scheduled_tasks(task_name="pwshpy-no-such-task")) == []
+        True
     """
+    if task_name == "":
+        raise ConfigurationError("task_name must not be empty: an empty name names the folder, not a task")
     service = _connect_scheduler()
+    if task_name is not None:
+        yield from _lookup(service, folder_path, task_name, strict=strict)
+        return
     try:
         root = service.GetFolder(folder_path)
         root_path = _folder_path(root)
@@ -176,4 +264,4 @@ def iter_scheduled_tasks(folder_path: str = _ROOT, *, strict: bool = False) -> I
     yield from _walk(root, root_path, strict=strict)
 
 
-__all__ = ["iter_scheduled_tasks"]
+__all__ = ["is_not_found", "iter_scheduled_tasks"]

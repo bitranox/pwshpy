@@ -12,6 +12,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   lower-case GUID; `type`, such as `UpdateClassification` or `Product`; `name`) per category, so a
   caller can select Security or Definition updates without matching a localized name. The
   `categories` name list is unchanged; the classification GUIDs are listed in `docs/power-tools.md`.
+- The Windows scheduled-task source (`iter_scheduled_tasks`) takes `task_name`: it opens that one
+  task in `folder_path` directly instead of walking the folder tree, so an unreadable task
+  elsewhere no longer refuses a question about a different one. A task or folder that does not
+  exist (HRESULT 0x80070002) is an empty result, under `strict=True` too; any other failure keeps
+  the listing's rule (a WARNING, or `NativeCallError` under `strict`). An empty `task_name` raises
+  `ConfigurationError`. `is_not_found()` exposes the not-found test.
 
 ### Changed
 

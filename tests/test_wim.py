@@ -9,7 +9,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from wim_builder import COMPRESSED_FLAG, METADATA_FLAG, image, image_xml, wim_bytes
+from wim_builder import (
+    COMPRESSED_FLAG,
+    MEASURED_ESD_HEADER_FLAGS,
+    MEASURED_ESD_XML_FLAGS,
+    METADATA_FLAG,
+    image,
+    image_xml,
+    wim_bytes,
+)
 
 from pwshpy import ImageArchitecture, WindowsImage
 from pwshpy.adapters.native import iter_wim_images
@@ -81,6 +89,21 @@ def test_the_metadata_flag_real_wims_set_does_not_refuse(tmp_path: Path) -> None
 def test_a_flag_byte_of_zero_parses_too(tmp_path: Path) -> None:
     """A writer that leaves the flag byte clear still has a plain XML resource."""
     path = _write(tmp_path, wim_bytes(image_xml(image()), xml_flags=0))
+    assert [img.index for img in iter_wim_images(path)] == [1]
+
+
+@pytest.mark.os_agnostic
+def test_a_real_esd_layout_reads_like_a_wim(tmp_path: Path) -> None:
+    """Microsoft's install.esd (measured 2026-10-23): LZMS/solid header flags, uncompressed XML.
+
+    The header flags and the XML flag byte are the values measured on a real install.esd;
+    only the XML resource is read, so the solid LZMS payload never matters.
+    """
+    path = _write(
+        tmp_path,
+        wim_bytes(image_xml(image()), header_flags=MEASURED_ESD_HEADER_FLAGS, xml_flags=MEASURED_ESD_XML_FLAGS),
+        "install.esd",
+    )
     assert [img.index for img in iter_wim_images(path)] == [1]
 
 
@@ -220,7 +243,7 @@ def test_a_short_header_is_refused(tmp_path: Path) -> None:
 @pytest.mark.os_agnostic
 def test_a_compressed_xml_resource_names_the_unsupported_format(tmp_path: Path) -> None:
     """A compressed XML resource (flag 0x04) is refused with a message naming the flag."""
-    path = _write(tmp_path, wim_bytes(image_xml(image()), xml_flags=COMPRESSED_FLAG), "install.esd")
+    path = _write(tmp_path, wim_bytes(image_xml(image()), xml_flags=COMPRESSED_FLAG), "compressed.wim")
     with pytest.raises(NativeCallError, match=r"compressed XML resource \(resource flag 0x04\) is not supported"):
         list(iter_wim_images(path))
 

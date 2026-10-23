@@ -216,8 +216,10 @@ link) and also take an instance name such as `zfs-scrub-monthly@rpool`, as
 `ps.get_scheduled_task()` lists it: a non-empty part before the first `@`, then an instance of the
 same characters plus `@`; either part may hold systemd's `\xNN` escapes
 (`zfs-scrub-monthly@my\x2dpool`, as `systemd-escape` writes `my-pool`), which are part of the name. A
-bare template (`scrub@`, nothing after the `@`) is refused. In a task path a folder ends at `/` or at
-a backslash that does not start such an escape, so the Windows form `\Tasks\backup` names `backup`. Every unit
+bare template (`scrub@`, nothing after the `@`) is refused. A task path that starts with a backslash is
+the Windows form `\Folder\Name`: every backslash and `/` ends a folder, so `\Tasks\backup` names
+`backup` and `\Maintenance\xfer_logs` names `xfer_logs`. In any other task path a folder ends at `/` or
+at a backslash that does not start such an escape. Every unit
 pwshpy writes carries `X-PwshPy=<version>` in `[Unit]`, which systemd ignores, and pwshpy only
 replaces or deletes a unit that carries it: `register` raises `NativeCallError` when
 `/etc/systemd/system` holds a unit of that name without the key, or systemd already has one from

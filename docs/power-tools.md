@@ -424,16 +424,27 @@ Details worth knowing:
   `PYTHONPATH` and `PYTHONUSERBASE`, which the interpreter itself reads (another standard library,
   the caller's directories ahead of it, the caller's own site-packages), so the packed script does
   not see them either; and `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `UV_INDEX`, `UV_EXTRA_INDEX_URL`,
-  `UV_FIND_LINKS`, `UV_INSECURE_HOST`, `UV_CACHE_DIR`, `UV_PYTHON_CACHE_DIR` and `UV_ENV_FILE`
-  (where uv takes packages, its caches and an env file from; an env file can set `PYTHONPATH` again,
-  and `uv run` loads the one `UV_ENV_FILE` names despite `--no-config`); and `HTTPS_PROXY`,
+  `UV_FIND_LINKS`, `UV_INSECURE_HOST`, `UV_INSECURE_NO_ZIP_VALIDATION`, `UV_CACHE_DIR`,
+  `UV_PYTHON_CACHE_DIR` and `UV_ENV_FILE` (where uv takes packages, how it checks a wheel's archive,
+  its caches and an env file from; an env file can set `PYTHONPATH` again, and `uv run` loads the one
+  `UV_ENV_FILE` names despite `--no-config`); and `HTTPS_PROXY`,
   `HTTP_PROXY` and `ALL_PROXY` with their lower-case forms, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
   `SSL_CLIENT_CERT`, `UV_NATIVE_TLS`, `UV_SYSTEM_CERTS` and `UV_KEYRING_PROVIDER` (how uv connects:
   a proxy, which uv 0.13 sends its requests through in each of these spellings, the certificate
   roots it trusts, which `SSL_CERT_FILE` and `SSL_CERT_DIR` replace, the client certificate it
   presents, and a keyring helper it would run from `PATH`), so the packed script does not see these
-  either. The runner cannot tell who set a variable, so an elevated run in a network that reaches
-  the internet only through a proxy downloads nothing: the proxy can be named neither in the
+  either; and every variable whose name starts with `GIT_` (on Windows in any case, as the
+  environment's names are) and `SSH_ASKPASS`, because uv runs git for a git source (a PEP 723
+  dependency or a `--with` value) and git reads them: a `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` /
+  `GIT_CONFIG_VALUE_<n>` triple sets any git config key (measured with uv 0.13 and git 2.53: a
+  `core.fsmonitor` command named that way ran from uv's git fetch), others name a command to run
+  (`GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND`, `GIT_ASKPASS`) or a CA to trust (`GIT_SSL_CAINFO`), and git
+  runs `SSH_ASKPASS` for a password when `GIT_ASKPASS` and `core.askPass` are unset (measured on an
+  HTTP 401 from uv's git fetch). The drop goes by the prefix, so a variable a later git release adds
+  is dropped too; git's configuration files still apply (the system one, and the global one below
+  `HOME` or `XDG_CONFIG_HOME`, which the runner leaves as it got them). The runner cannot tell who set
+  a variable, so an elevated run in a network that reaches the internet only through a proxy
+  downloads nothing: the proxy can be named neither in the
   environment (root's own included) nor in a `uv.toml` (none is read), and the certificate of a
   TLS-inspecting proxy is not trusted. What still works there: a script with no dependencies (no PEP
   723 `dependencies`, no `--with`) on a managed Python already in the account's managed-Python

@@ -813,7 +813,7 @@ function Get-PwshPyPosixTreeDistrust {
 function Read-PwshPySecurity {
     param([IO.FileSystemInfo] $Item)
 
-    # The owner and the DACL of $Item, read through .NET rather than Get-Acl: measured on vm-pydev-win,
+    # The owner and the DACL of $Item, read through .NET rather than Get-Acl: measured on a Windows 11 test VM,
     # about 0.7 ms an entry against Get-Acl's 1.6 ms, which over a tree of thousands is the difference.
     # On PowerShell 7 (.NET Core) the method is an extension, called as the static it is.
     $sections = [Security.AccessControl.AccessControlSections]'Access, Owner'
@@ -827,7 +827,7 @@ function ConvertTo-PwshPyLongPath {
 
     # Windows: $Path in the extended-length form (\\?\C:\..., \\?\UNC\server\share\...). Windows
     # PowerShell 5.1 (.NET Framework) refuses a longer path than MAX_PATH (260) with "Illegal name" in
-    # GetAccessControl and "does not exist" in Get-Acl, measured on vm-pydev-win at 377 characters,
+    # GetAccessControl and "does not exist" in Get-Acl, measured on a Windows 11 test VM at 377 characters,
     # while both read the extended form; an install's deepest .pyc already comes close in a profile.
     $Path = $Path.Replace('/', '\')
     if ($Path.StartsWith('\\?\')) { return $Path }
@@ -854,7 +854,7 @@ function Get-PwshPyWindowsTreeDistrust {
     # it lies. uv's lock file inherits the directory's ACL here (measured with uv 0.13), so unlike POSIX
     # no entry is exempt. The trusted SIDs are asked for once, and a verdict is kept per distinct owner
     # and DACL (their SDDL) and kind: the entries of an install share a few, so most are judged by a
-    # lookup (measured on vm-pydev-win, five installs: see Get-PwshPyPythonTreeDistrust).
+    # lookup (measured on a Windows 11 test VM, five installs: see Get-PwshPyPythonTreeDistrust).
     $trusted = Get-PwshPyTrustedSid
     $sections = [Security.AccessControl.AccessControlSections]'Access, Owner'
     $verdicts = @{}

@@ -161,9 +161,9 @@ def test_a_system_token_reads_as_local_system() -> None:
 @pytest.mark.os_agnostic
 def test_a_filtered_user_token_reads_medium_and_not_elevated() -> None:
     """An ordinary user's filtered token: the user's SID, medium integrity, not elevated, not SYSTEM."""
-    fake = _FakeWin32(user_sid="S-1-5-21-1-2-3-1001", label_sid="S-1-16-8192", elevated=0, account=("srvadmin", "PC1"))
+    fake = _FakeWin32(user_sid="S-1-5-21-1-2-3-1001", label_sid="S-1-16-8192", elevated=0, account=("alice", "PC1"))
     identity = windows_current_identity(load=fake.load)
-    assert (identity.sid, identity.account, identity.is_system) == ("S-1-5-21-1-2-3-1001", "PC1\\srvadmin", False)
+    assert (identity.sid, identity.account, identity.is_system) == ("S-1-5-21-1-2-3-1001", "PC1\\alice", False)
     assert (identity.elevated, identity.integrity_level) == (False, IntegrityLevel.MEDIUM)
 
 

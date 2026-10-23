@@ -40,7 +40,7 @@ def test_to_task_run_level(value: int, expected: TaskRunLevel) -> None:
     assert to_task_run_level(value) is expected
 
 
-# What a real Task Scheduler hands back through pywin32 (measured on Windows 11 25H2, VM 24000,
+# What a real Task Scheduler hands back through pywin32 (measured on Windows 11 25H2, a throwaway Windows VM,
 # 2026-10-21, host zone CEST): a VT_DATE carries LOCAL wall time, and pywin32 labels it with a
 # UTC-like TimeZoneInfo('GMT Standard Time'), so the label must be ignored. A never-run task reads
 # LastRunTime 1999-11-30 00:00 (Get-ScheduledTaskInfo shows the same date); "no next run" is the
@@ -120,6 +120,6 @@ def test_to_task_result(value: int, expected: int | None) -> None:
     """LastTaskResult: has-not-run and still-running -> None, an HRESULT -> its unsigned value, 0 stays 0.
 
     0x41301 (SCHED_S_TASK_RUNNING) is what a real Task Scheduler reports while the task runs
-    (measured on VM 24000): no result exists yet, so it is not a result code.
+    (measured on a throwaway Windows VM): no result exists yet, so it is not a result code.
     """
     assert to_task_result(value) == expected

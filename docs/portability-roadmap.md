@@ -34,7 +34,7 @@ prompt), and `get_computer_info`. These are the same bytes on Windows, macOS, an
 ## Build order
 
 Ranked value / (1 - risk). Read sides need no root and verify in CI; mutating verbs need a root Linux
-box (like the Windows mutating tests need throwaway VM 24000).
+box (like the Windows mutating tests need a throwaway Windows VM).
 
 1. **Event log -> journald** (read) - **DONE** (`journald.py`, streaming, verified live on Linux).
 2. **Local users/groups -> pwd/grp + shadow-utils** (read + mutating) - **DONE** (`posix_accounts.py`

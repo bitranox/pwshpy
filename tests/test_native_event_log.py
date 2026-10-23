@@ -65,7 +65,7 @@ class _FakeHandle:
 
 
 # What real pywin32 EvtFormatMessage(None, ...) returned on a German Windows for
-# Setup and System events (measured on vm-pydev-win, 2026-10-21): a Win32 error text
+# Setup and System events (measured on a Windows 11 test VM, 2026-10-21): a Win32 error text
 # posing as the message.  The fake reproduces it so a renderer that skips the
 # publisher metadata yields this string instead of the provider's text.
 _NO_METADATA_GARBAGE = "Unzulaessige Funktion. "

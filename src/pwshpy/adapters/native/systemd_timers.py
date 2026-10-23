@@ -448,29 +448,75 @@ def _check_task_name(task_name: str) -> None:
         )
 
 
+def _is_absent(bus: _dbus.Bus, path: str, file_state: str) -> bool:
+    """Whether the loaded unit at ``path`` is no task, by the listing's rule: masked counts unless running.
+
+    The listing lists a ``ListUnits`` entry unless :func:`~.systemd_dbus.is_unlisted_unit` says no, and
+    an unloaded timer unless its file is masked. Here the unit was loaded just now, so its LoadState
+    answers for both - and a masked file is read as masked even when ``GetUnitFileState`` failed. A
+    masked file state with a stale LoadState (masked after it was loaded) is masked too.
+    """
+    load_state = str(_dbus.path_property(bus, path, "LoadState", ""))
+    if file_state in _dbus.UNLISTED_FILE_STATES:
+        load_state = "masked"
+    active_state = str(_dbus.path_property(bus, path, "ActiveState", "inactive"))
+    return _dbus.is_unlisted_unit(load_state, active_state)
+
+
+def _owned_service(bus: _dbus.Bus, unit: str, path: str, *, strict: bool) -> bool:
+    """Whether the on-demand ``unit`` at ``path`` is a task: its unit file carries :data:`OWNERSHIP_KEY`.
+
+    A ``.service`` alone is a task only when pwshpy registered it (USER decision for [50]): every
+    system daemon is a ``.service`` without a ``.timer``. The file is the one systemd loaded the unit
+    from (``FragmentPath``); a unit with none (``""``: transient or generated) is not pwshpy's. A
+    ``FragmentPath`` systemd does not answer, or a file that cannot be read, goes through the
+    skip-or-raise rule: ownership that cannot be read is no answer, unlike a service that is not ours,
+    which is no task and is left out silently.
+    """
+    fragment = _dbus.path_property(bus, path, "FragmentPath", None)
+    if fragment is None:
+        skip_or_raise(
+            f"cannot read the unit file path of '{unit}'",
+            NativeCallError("systemd did not answer the FragmentPath read"),
+            strict=strict,
+            log=logger,
+        )
+        return False
+    if str(fragment) == "":
+        return False
+    try:
+        text = Path(str(fragment)).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        skip_or_raise(f"cannot read the unit file of '{unit}' ({fragment})", exc, strict=strict, log=logger)
+        return False
+    return is_pwshpy_unit(text)
+
+
 def _lookup_unit(bus: _dbus.Bus, base: str, *, strict: bool) -> Iterator[ScheduledTaskInfo]:
-    """The timer task ``base``, else its on-demand service, else nothing.
+    """The timer task ``base``, else the on-demand service pwshpy registered as ``base``, else nothing.
 
     The same answer the controller reads back after register: a ``.timer`` makes it a scheduled
-    task, a ``.service`` alone an on-demand one. A masked or alias unit file counts as absent, as in
-    the listing. A unit systemd does not answer for (a refused ``LoadUnit`` or ``LoadState`` read)
-    ends the lookup through the listing's skip-or-raise rule: the service must not stand in for a
-    timer that may exist.
+    task, a ``.service`` alone an on-demand one - but only a ``.service`` whose unit file pwshpy
+    wrote (:func:`_owned_service`), or every system daemon would answer as a task. An alias unit
+    file counts as absent, and a masked unit unless it is running, as in the listing
+    (:func:`_is_absent`). A unit systemd does not answer for (a refused ``LoadUnit`` or ``LoadState``
+    read) ends the lookup through the listing's skip-or-raise rule: the service must not stand in
+    for a timer that may exist.
     """
     for unit in (f"{base}.timer", f"{base}.service"):
         state = _dbus.unit_file_state(bus, unit) or ""
-        if state in _dbus.UNLISTED_FILE_STATES:
+        if state == "alias":  # the name of another unit: the listing reports that unit, never the alias
             continue
         try:
             path = _dbus.load_unit(bus, unit)
         except NativeCallError as exc:
             skip_or_raise(f"cannot load unit '{unit}'", exc, strict=strict, log=logger)
             return
-        if path is None:
+        if path is None or _is_absent(bus, path, state):
             continue
         if unit.endswith(".timer"):
             yield _timer_task(bus, unit, path, file_state=state)
-        else:
+        elif _owned_service(bus, unit, path, strict=strict):
             yield _service_task(bus, base, path)
         return
 
@@ -506,8 +552,9 @@ def iter_timers(
 
     ``folder_path`` is accepted for signature parity with the Windows source and ignored (systemd
     timers are flat). Given ``task_name``, nothing is listed: the one task of that name is read
-    directly - its ``.timer``, else its on-demand ``.service`` (which the listing, timers only,
-    leaves out), else nothing - the record the controller reads back after register.
+    directly - its ``.timer``, else its on-demand ``.service`` when pwshpy wrote it (the listing,
+    timers only, leaves it out; a service whose unit file lacks :data:`OWNERSHIP_KEY`, such as a
+    system daemon, is no task), else nothing - the record the controller reads back after register.
 
     Without ``task_name`` the loaded timers come first, from ``ListUnits``: the timer's object path
     comes from the listing itself, so a loaded timer costs no lookup. Then the timer unit FILES
@@ -530,11 +577,13 @@ def iter_timers(
             iteration reaches it. The deliberate filtering above (not-found, masked, alias,
             template, stale) is systemd's answer, not a failure, and is the same either way; a
             single property that cannot be read still falls back to its default in both modes
-            (the task is kept). With ``task_name`` it decides only a unit whose ``LoadUnit`` or
-            ``LoadState`` read fails; a task that does not exist is an empty answer either way.
+            (the task is kept). With ``task_name`` it decides a unit whose ``LoadUnit`` or
+            ``LoadState`` read fails, and an on-demand service whose unit file (``FragmentPath``)
+            cannot be read; a task that does not exist, or a service pwshpy did not write, is an
+            empty answer either way.
         task_name: Read this one task instead of listing: a unit name as the listing reports it
             (``.timer``/``.service`` suffix optional; an instance with ``\\xNN`` escapes accepted).
-            A masked or alias unit file counts as absent, as in the listing.
+            An alias counts as absent, and a masked unit unless it is running, as in the listing.
 
     Yields:
         One :class:`ScheduledTaskInfo` per timer; with ``task_name``, at most one.

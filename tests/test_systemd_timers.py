@@ -1532,13 +1532,37 @@ def test_timer_unit_refuses_a_control_character_in_the_description() -> None:
 _LISTING_CALLS = frozenset({"ListUnits", "ListUnitFilesByPatterns", "ListUnitFiles"})
 
 
-def _lookup_conn(**kwargs: Any) -> FakeConn:
+def _write_owned(directory: Path, *units: str) -> None:
+    """Write each unit as the file pwshpy's register writes (its [Unit] carries the ownership key)."""
+    for unit in units:
+        (directory / unit).write_text(service_unit("/bin/true", "", "pwshpy task"), encoding="utf-8")
+
+
+def _lookup_conn(
+    *,
+    fragments: Path | None = None,
+    extra_props: dict[tuple[str, str, str], Any] | None = None,
+    files: frozenset[str] = frozenset({"job.timer", "job.service", "adhoc.service"}),
+    **kwargs: Any,
+) -> FakeConn:
     """A box with a disabled timer task ``job`` (unloaded) and an on-demand service ``adhoc``.
 
-    The listing would show ``job`` only: ``adhoc`` has no ``.timer``. Keyword arguments override
-    the FakeConn defaults (file states, refused loads).
+    The listing would show ``job`` only: ``adhoc`` has no ``.timer``. With ``fragments`` each
+    service's ``FragmentPath`` (its unit file) is ``fragments/<unit>``; the caller writes the file
+    (:func:`_write_owned` for one pwshpy wrote). ``extra_props`` adds or overrides properties,
+    ``files`` are the units with a unit file (GetUnitFileState fails for the others), and the
+    remaining keyword arguments override the FakeConn defaults (file states, refused loads).
     """
+    fragment_props: dict[tuple[str, str, str], Any] = (
+        {}
+        if fragments is None
+        else {
+            (unit, systemd_dbus.UNIT_IFACE, "FragmentPath"): str(fragments / unit)
+            for unit in ("job.service", "adhoc.service")
+        }
+    )
     props: dict[tuple[str, str, str], Any] = {
+        **fragment_props,
         ("job.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "inactive",
         ("job.timer", systemd_dbus.UNIT_IFACE, "Description"): "Nightly job",
         ("job.timer", _TIMER, "NextElapseUSecRealtime"): _T1,
@@ -1549,12 +1573,12 @@ def _lookup_conn(**kwargs: Any) -> FakeConn:
         ("adhoc.service", systemd_dbus.UNIT_IFACE, "Description"): "Ad hoc",
         **_service_props("adhoc.service", code=1, status=4, started=_T0),
         ("adhoc.service", _SERVICE, "User"): "",
+        **(extra_props or {}),
     }
     defaults: dict[str, Any] = {
         "file_states": {"job.timer": "disabled", "job.service": "static", "adhoc.service": "static"},
         "unloaded": frozenset({"job.timer", "job.service", "adhoc.service"}),
     }
-    files = frozenset({"job.timer", "job.service", "adhoc.service"})
     return FakeConn([], props, files, **{**defaults, **kwargs})
 
 
@@ -1573,11 +1597,14 @@ def test_lookup_by_name_reads_the_timer_task_without_listing(monkeypatch: pytest
 
 
 @pytest.mark.os_agnostic
-def test_lookup_by_name_finds_an_on_demand_service_the_listing_leaves_out(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_lookup_by_name_finds_an_on_demand_service_the_listing_leaves_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """[50] A task with no .timer is found by name although the listing (timers only) omits it."""
-    use_bus(monkeypatch, _lookup_conn())
+    _write_owned(tmp_path, "adhoc.service")
+    use_bus(monkeypatch, _lookup_conn(fragments=tmp_path))
     assert "adhoc" not in [t.task_name for t in iter_timers()]
-    conn = _lookup_conn()
+    conn = _lookup_conn(fragments=tmp_path)
     use_bus(monkeypatch, conn)
     (adhoc,) = iter_timers(task_name="adhoc", strict=True)
     assert (adhoc.task_name, adhoc.task_path, adhoc.description, adhoc.user_id) == ("adhoc", "/", "Ad hoc", "0")
@@ -1595,7 +1622,8 @@ def test_lookup_by_name_agrees_with_the_controller_read_back(monkeypatch: pytest
     use_bus(monkeypatch, _lookup_conn())
     assert list(iter_timers(task_name="job")) == [disabled]
     # adhoc.service is unknown to systemd until register writes it and reloads (the ownership check).
-    use_bus(monkeypatch, _lookup_conn(pending=frozenset({"adhoc.service"})))
+    # Its FragmentPath is the file register writes, so the lookup reads the ownership key register wrote.
+    use_bus(monkeypatch, _lookup_conn(fragments=tmp_path, pending=frozenset({"adhoc.service"})))
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)  # filesystem edge: never write /etc here
     registered = controller.register("adhoc", program="/bin/true")
     assert list(iter_timers(task_name="adhoc")) == [registered]
@@ -1603,15 +1631,106 @@ def test_lookup_by_name_agrees_with_the_controller_read_back(monkeypatch: pytest
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("state", sorted(systemd_dbus.UNLISTED_FILE_STATES))
-def test_lookup_by_name_treats_a_masked_or_alias_timer_as_absent(monkeypatch: pytest.MonkeyPatch, state: str) -> None:
-    """[50] A masked or alias .timer is no task, as in the listing: the lookup falls to the service."""
+def test_lookup_by_name_treats_a_masked_or_alias_timer_as_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: str
+) -> None:
+    """[50] A stopped masked or alias .timer is no task, as in the listing: the lookup falls to the service."""
     file_states = {"job.timer": state, "job.service": "static", "adhoc.service": "static"}
-    conn = _lookup_conn(file_states=file_states)
+    _write_owned(tmp_path, "job.service")
+    conn = _lookup_conn(fragments=tmp_path, file_states=file_states)
     use_bus(monkeypatch, conn)
     (job,) = iter_timers(task_name="job", strict=True)
     assert (job.next_run_time, job.description) == (None, "")  # the on-demand record of job.service
     assert "LoadUnit" in conn.methods
     assert conn.calls == []  # no verb: a read
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
+def test_lookup_by_name_counts_a_lone_service_only_when_pwshpy_wrote_it(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path, strict: bool
+) -> None:
+    """[50] USER decision: a .service with no .timer is a task only when its unit file carries X-PwshPy.
+
+    Without the gate every system daemon (ssh, cron, dbus) answered as a running task. A service
+    pwshpy did not write is no task: an empty answer, silently, under strict too.
+    """
+    (tmp_path / "ssh.service").write_text(
+        "[Unit]\nDescription=OpenBSD Secure Shell server\n\n[Service]\nExecStart=/usr/sbin/sshd -D\n",
+        encoding="utf-8",
+    )
+    _write_owned(tmp_path, "adhoc.service")
+    extra = {
+        ("ssh.service", systemd_dbus.UNIT_IFACE, "ActiveState"): "active",
+        ("ssh.service", systemd_dbus.UNIT_IFACE, "Description"): "OpenBSD Secure Shell server",
+        ("ssh.service", systemd_dbus.UNIT_IFACE, "FragmentPath"): str(tmp_path / "ssh.service"),
+    }
+    files = frozenset({"job.timer", "job.service", "adhoc.service", "ssh.service"})
+    conn = _lookup_conn(fragments=tmp_path, extra_props=extra, files=files)
+    use_bus(monkeypatch, conn)
+    with caplog.at_level(logging.WARNING, logger=systemd_timers.__name__):
+        assert list(iter_timers(task_name="ssh", strict=strict)) == []
+        assert [t.task_name for t in iter_timers(task_name="adhoc", strict=strict)] == ["adhoc"]
+    assert caplog.records == []
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("unreadable", ["file-read-fails", "fragmentpath-read-refused"])
+def test_lookup_by_name_applies_the_strict_rule_to_a_service_file_it_cannot_read(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path, strict: bool, unreadable: str
+) -> None:
+    """[50] Ownership that cannot be read is no answer: strict raises naming the unit, lenient warns, empty.
+
+    A directory stands in for an unreadable file: reading it fails for root too (a 0000 mode does not).
+    """
+    (tmp_path / "adhoc.service").mkdir()
+    refused: frozenset[tuple[str, str]] = (
+        frozenset({("adhoc.service", "FragmentPath")}) if unreadable == "fragmentpath-read-refused" else frozenset()
+    )
+    conn = _lookup_conn(fragments=tmp_path, refused_reads=refused)
+    use_bus(monkeypatch, conn)
+    if strict:
+        with pytest.raises(NativeCallError, match=r"'adhoc\.service'"):
+            list(iter_timers(task_name="adhoc", strict=True))
+        assert conn.closed is True
+        return
+    with caplog.at_level(logging.WARNING, logger=systemd_timers.__name__):
+        assert list(iter_timers(task_name="adhoc")) == []
+    (warning,) = caplog.records
+    assert "'adhoc.service'" in warning.getMessage()
+
+
+@pytest.mark.os_agnostic
+def test_lookup_by_name_finds_a_masked_timer_while_it_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """[50] As in the listing, a masked timer that is still running is listed: the lookup finds the timer."""
+    _write_owned(tmp_path, "job.service")
+    file_states = {"job.timer": "masked", "job.service": "static", "adhoc.service": "static"}
+    running = {("job.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "active"}
+    conn = _lookup_conn(
+        fragments=tmp_path, extra_props=running, file_states=file_states, load_states={"job.timer": "masked"}
+    )
+    use_bus(monkeypatch, conn)
+    (job,) = iter_timers(task_name="job", strict=True)
+    assert (job.description, job.next_run_time) == (
+        "Nightly job",
+        datetime(2023, 11, 14, 23, 13, 20, tzinfo=timezone.utc),
+    )
+    assert job.enabled is False  # a masked file is not enabled, as the listing reports it
+
+
+@pytest.mark.os_agnostic
+def test_lookup_by_name_reads_masked_from_load_state_when_the_file_state_read_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[50] GetUnitFileState failing must not let a stopped masked timer through: LoadState says masked."""
+    _write_owned(tmp_path, "job.service")
+    # job.timer has no listed unit file, so GetUnitFileState fails for it (a refused or broken read).
+    files = frozenset({"job.service", "adhoc.service"})
+    conn = _lookup_conn(fragments=tmp_path, files=files, load_states={"job.timer": "masked"})
+    use_bus(monkeypatch, conn)
+    (job,) = iter_timers(task_name="job", strict=True)
+    assert (job.next_run_time, job.description) == (None, "")  # the on-demand record of job.service, not the timer
 
 
 @pytest.mark.os_agnostic

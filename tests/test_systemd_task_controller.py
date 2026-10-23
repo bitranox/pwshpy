@@ -190,6 +190,37 @@ def test_lookup_by_name_reads_an_on_demand_task_the_listing_leaves_out(ondemand_
     assert ondemand_task not in [t.task_name for t in iter_timers()]
 
 
+#: System daemons a systemd host commonly runs as a .service with no .timer; none is a pwshpy task.
+_SYSTEM_SERVICES = ("ssh", "cron", "dbus", "systemd-journald")
+
+
+def _loaded_system_services() -> list[str]:
+    """The :data:`_SYSTEM_SERVICES` this host has loaded (``systemctl show`` reads LoadState=loaded)."""
+    loaded: list[str] = []
+    for name in _SYSTEM_SERVICES:
+        shown = subprocess.run(  # noqa: S603 - fixed argv
+            ["systemctl", "show", "-p", "LoadState", "--value", f"{name}.service"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if shown.stdout.strip() == "loaded":
+            loaded.append(name)
+    return loaded
+
+
+def test_lookup_by_name_skips_a_system_service_but_finds_a_pwshpy_on_demand_task(ondemand_task: str) -> None:
+    """[50] USER decision: a lone .service is a task only when pwshpy wrote it, so no daemon answers as one."""
+    SystemdScheduledTaskController().register(ondemand_task, program="/bin/true")
+    services = _loaded_system_services()
+    assert services, f"none of {_SYSTEM_SERVICES} is loaded here, so the gate is not exercised"
+    for name in services:
+        assert list(iter_timers(task_name=name, strict=True)) == [], name
+    assert [t.task_name for t in iter_timers(task_name=ondemand_task, strict=True)] == [ondemand_task]
+
+
 def test_lookup_by_name_of_no_task_is_empty() -> None:
     """[50] On real systemd, a name with no unit file is an empty answer (LoadUnit's not-found), strict too."""
     assert list(iter_timers(task_name="pwshpy-pytest-no-such-task", strict=True)) == []

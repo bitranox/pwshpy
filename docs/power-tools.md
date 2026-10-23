@@ -446,7 +446,8 @@ Details worth knowing:
   neither the `.gitconfig` below the `HOME` (or, on Windows, `USERPROFILE`, which a UAC relaunch keeps
   as the caller's) nor `git/config` below `XDG_CONFIG_HOME` that the run was given applies (a
   `core.fsmonitor` command planted there ran from uv's git fetch before, measured; Git for Windows 2.55
-  reads `NUL` as empty, measured). git honours `GIT_CONFIG_GLOBAL` from 2.32 on; an older git ignores
+  reads `NUL` as empty, measured); the packed script inherits the variable, so a git it runs reads no
+  global configuration file either. git honours `GIT_CONFIG_GLOBAL` from 2.32 on; an older git ignores
   it and still reads those files. The system file (`/etc/gitconfig`, or the one below Git for Windows'
   install directory) is the administrators' and still applies. The runner cannot tell who set
   a variable, so an elevated run in a network that reaches the internet only through a proxy

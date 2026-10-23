@@ -412,8 +412,8 @@ def iter_timers(folder_path: str = _ROOT, *, strict: bool = False) -> Iterator[S
     task: a stopped ListUnits entry whose LoadState is not-found or masked
     (:func:`~.systemd_dbus.is_unlisted_unit`; a running one is listed), and a masked file, an alias,
     a template or a file ``LoadUnit`` reads as not-found. A skipped entry does not hide its file:
-    a name systemd cached as not-found before its file was written is listed from the file.
-    Lazy: the unit-file listing,
+    a name systemd cached as not-found before its file was written is listed from the file
+    (systemd >= 246; an older one needs a daemon-reload first). Lazy: the unit-file listing,
     ``GetUnitFileState`` and the run-info reads run only for consumed timers. Reading an unloaded
     timer loads it transiently; systemd unloads it again when nothing references it.
 
@@ -447,7 +447,12 @@ def iter_timers(folder_path: str = _ROOT, *, strict: bool = False) -> Iterator[S
             # ListUnits fields: 1 Description, 2 LoadState, 3 ActiveState, 6 the unit object path.
             if _dbus.is_unlisted_unit(str(unit[2]), str(unit[3])):
                 # Not marked seen: a cached not-found name whose file appeared since (no
-                # daemon-reload) is still listed by the unit-file pass, which LoadUnit reloads.
+                # daemon-reload) is still listed by the unit-file pass, whose LoadUnit retries the
+                # load from disk on systemd >= 246: manager_load_unit_prepare (src/core/manager.c)
+                # re-loads a not-found unit when the unit-file cache is stale or was refreshed
+                # after its failed load (commits d904afc7 and 7233e91a, both first in v246-rc1;
+                # not in NEWS). An older systemd answers not-found until a daemon-reload, so
+                # there the unit-file pass skips the name as well.
                 continue
             seen.add(name)
             state = _dbus.unit_file_state(bus, name) or ""

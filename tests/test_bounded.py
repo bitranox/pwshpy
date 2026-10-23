@@ -19,7 +19,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from bounded_targets import boom, die, echo, hang
+from bounded_targets import boom, die, echo, hang, run_bounded_and_report
 
 from pwshpy.adapters.native.bounded import run_bounded
 from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
@@ -147,3 +147,30 @@ def test_a_child_that_dies_while_bootstrapping_is_reported_at_once(tmp_path: Pat
     report = json.loads(lines[-1])
     assert report["outcome"] == "NativeCallError", completed.stderr
     assert report["seconds"] < 30, report  # reported when the child dies, not after the 60 s timeout
+
+
+@pytest.mark.os_agnostic
+def test_inside_a_daemonic_worker_raises_a_typed_error() -> None:
+    """A daemonic process cannot start children (a multiprocessing.Pool worker is one).
+
+    multiprocessing refuses with a bare AssertionError; run_bounded must say so as a
+    NativeCallError that names the cause, like every other failure to start its child.
+    """
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    worker = context.Process(target=run_bounded_and_report, args=(sender,), daemon=True)
+    worker.start()
+    sender.close()
+    try:
+        assert receiver.poll(60), "the daemonic worker sent no outcome"
+        outcome = receiver.recv()
+    finally:
+        receiver.close()
+        worker.join(30)
+        if worker.is_alive():
+            worker.kill()
+            worker.join()
+    assert isinstance(outcome, NativeCallError), repr(outcome)
+    assert not isinstance(outcome, OperationTimeoutError)
+    assert re.search(r"echo worker could not be started: .*daemonic", str(outcome)), str(outcome)
+    assert worker.exitcode == 0

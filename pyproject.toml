@@ -69,8 +69,12 @@ Issues = "https://github.com/bitranox/pwshpy/issues"
 # .NET - hosted PowerShell 7.6 SDK (in-process via pythonnet/CoreCLR).
 # Requires the .NET 10 runtime present. A .NET call without this extra raises
 # FeatureUnavailableError naming this exact install.
+# pythonnet is split by Python because no 3.x release covers 3.10 and 3.15: 3.1.0
+# declares <3.15, 3.2.x declares >=3.11. 2.x cannot host CoreCLR, so the floor must
+# never fall below 3.1.0.
 full = [
-  "pythonnet>=3.1.0",
+  "pythonnet>=3.1.0; python_version < '3.11'",
+  "pythonnet>=3.2.1; python_version >= '3.11'",
   "clr-loader>=0.3.1",
 ]
 # Linux event log via journald (get_win_event on Linux). systemd-python builds a C

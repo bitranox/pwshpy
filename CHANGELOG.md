@@ -16,8 +16,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   task in `folder_path` directly instead of walking the folder tree, so an unreadable task
   elsewhere no longer refuses a question about a different one. A task or folder that does not
   exist (HRESULT 0x80070002) is an empty result, under `strict=True` too; any other failure keeps
-  the listing's rule (a WARNING, or `NativeCallError` under `strict`). An empty `task_name` raises
-  `ConfigurationError`. `is_not_found()` exposes the not-found test.
+  the listing's rule (a WARNING, or `NativeCallError` under `strict`). `folder_path` may end in a
+  backslash, the form a record's `task_path` carries. An empty `task_name`, or one containing a
+  backslash (a path, not a name), raises `ConfigurationError`. `is_not_found()` exposes the
+  not-found test.
 
 ### Changed
 

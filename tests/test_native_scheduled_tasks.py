@@ -383,6 +383,7 @@ def test_strict_on_a_readable_tree_yields_what_lenient_yields(
 _NOT_FOUND = -2147024894  # HRESULT 0x80070002 as pywin32 reports it (signed)
 _DISP_E_EXCEPTION = -2147352567  # HRESULT 0x80020009: late-bound IDispatch, real code in excepinfo[5]
 _ACCESS_DENIED = -2147024891  # HRESULT 0x80070005
+_INVALID_NAME = -2147024773  # HRESULT 0x8007007B
 
 
 class _ComError(Exception):
@@ -394,8 +395,13 @@ class _ComError(Exception):
         self.excepinfo = excepinfo
 
 
+def _measured(scode: int) -> _ComError:
+    """The shape pywin32's late-bound CDispatch raises (measured 2026-10-23): the status in the scode."""
+    return _ComError(_DISP_E_EXCEPTION, (0, None, None, None, 0, scode))
+
+
 class _LookupFolder(_FakeFolder):
-    """A folder that also answers ``GetTask(name)``, raising ``lookup_error`` or not-found like COM."""
+    """A folder that also answers ``GetTask(name)``, raising ``lookup_error`` or not-found as COM does."""
 
     def __init__(
         self, path: str, tasks: list[Any], subfolders: list[Any], lookup_error: Exception | None = None
@@ -409,21 +415,27 @@ class _LookupFolder(_FakeFolder):
         for task in self._tasks:
             if task.Name == name:
                 return task
-        raise _ComError(_NOT_FOUND)
+        raise _measured(_NOT_FOUND)
 
 
 class _PathService(_FakeService):
-    """A service that opens folders BY PATH, raising not-found for a path it does not hold."""
+    """A service that opens folders BY PATH the way COM does (measured 2026-10-23).
+
+    A non-root path with a trailing backslash is refused as ERROR_INVALID_NAME, existing or
+    not; a path it does not hold is not-found. Both in the wrapped DISP_E_EXCEPTION shape.
+    """
 
     def __init__(self, folders: dict[str, _FakeFolder]) -> None:
         super().__init__(folders["\\"])
         self._folders = folders
 
     def GetFolder(self, path: str) -> _FakeFolder:  # noqa: N802 - COM API name
+        if path not in ("", "\\") and path.endswith("\\"):
+            raise _measured(_INVALID_NAME)
         try:
-            return self._folders[path]
+            return self._folders[path or "\\"]
         except KeyError:
-            raise _ComError(_NOT_FOUND) from None
+            raise _measured(_NOT_FOUND) from None
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, folders: dict[str, _FakeFolder]) -> None:
@@ -445,11 +457,16 @@ def test_task_name_returns_only_that_task(monkeypatch: pytest.MonkeyPatch, caplo
 
 @pytest.mark.os_agnostic
 def test_task_name_in_a_subfolder_carries_that_folder_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """[50] The record's task_path is the folder COM opened, with its trailing backslash, as in the walk."""
+    """[50] A subfolder lookup accepts the listing's own task_path form and carries it back.
+
+    The walk reports ``\\Sub\\`` (trailing backslash), which GetFolder refuses; the lookup strips it,
+    so a record's task_path can be passed straight back as folder_path.
+    """
     sub = _LookupFolder("\\Sub", [_FakeTask("x", 3, True)], [])
-    _install(monkeypatch, {"\\": _LookupFolder("\\", [], [sub]), "\\Sub\\": sub})
-    (info,) = list(iter_scheduled_tasks("\\Sub\\", task_name="x"))
-    assert (info.task_name, info.task_path) == ("x", "\\Sub\\")
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [], [sub]), "\\Sub": sub})
+    for folder_path in ("\\Sub\\", "\\Sub"):
+        (info,) = list(iter_scheduled_tasks(folder_path, task_name="x", strict=True))
+        assert (info.task_name, info.task_path) == ("x", "\\Sub\\")
 
 
 @pytest.mark.os_agnostic
@@ -460,18 +477,19 @@ def test_task_name_absent_is_empty_even_under_strict(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.os_agnostic
-def test_task_name_absent_reported_through_disp_e_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    """[50] Not-found wrapped by late-bound IDispatch (DISP_E_EXCEPTION, code in excepinfo[5]) is still absent."""
-    wrapped = _ComError(_DISP_E_EXCEPTION, (0, "src", "desc", None, 0, _NOT_FOUND))
-    _install(monkeypatch, {"\\": _LookupFolder("\\", [], [], lookup_error=wrapped)})
+def test_task_name_absent_reported_as_a_direct_hresult(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[50] Not-found carried directly in ``hresult`` (an early-bound wrapper's shape) is absent too."""
+    direct = _ComError(_NOT_FOUND)
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [], [], lookup_error=direct)})
     assert list(iter_scheduled_tasks("\\", task_name="missing", strict=True)) == []
 
 
 @pytest.mark.os_agnostic
 def test_missing_folder_with_task_name_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """[50] A task in a folder that does not exist is absent too (COM reports both as 0x80070002)."""
+    """[50] A task in a folder that does not exist is absent too, with or without the trailing backslash."""
     _install(monkeypatch, {"\\": _LookupFolder("\\", [], [])})
     assert list(iter_scheduled_tasks("\\Nope\\", task_name="x", strict=True)) == []
+    assert list(iter_scheduled_tasks("\\Nope", task_name="x", strict=True)) == []
 
 
 @pytest.mark.os_agnostic
@@ -481,7 +499,7 @@ def test_other_lookup_error_raises_under_strict_and_warns_without(
     """[50] Any failure but not-found follows the strict rule: raise naming the task, or skip with a WARNING."""
     denied = _ComError(_ACCESS_DENIED)
     folder = _LookupFolder("\\Folder", [], [], lookup_error=denied)
-    _install(monkeypatch, {"\\": _LookupFolder("\\", [], [folder]), "\\Folder\\": folder})
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [], [folder]), "\\Folder": folder})
     with pytest.raises(NativeCallError) as caught:
         list(iter_scheduled_tasks("\\Folder\\", task_name="Name", strict=True))
     assert "'\\Folder\\Name'" in str(caught.value)
@@ -508,20 +526,27 @@ def test_missing_folder_without_task_name_still_raises(monkeypatch: pytest.Monke
     """[50] Unchanged: without task_name a folder that does not exist raises, whatever strict says."""
     _install(monkeypatch, {"\\": _LookupFolder("\\", [], [])})
     with pytest.raises(NativeCallError) as caught:
-        list(iter_scheduled_tasks("\\Nope\\"))
-    assert "'\\Nope\\'" in str(caught.value)
+        list(iter_scheduled_tasks("\\Nope"))
+    assert "'\\Nope'" in str(caught.value)
 
 
 @pytest.mark.os_agnostic
-def test_empty_task_name_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """[50] An empty name would name the folder, not a task: refused before the scheduler is reached."""
+@pytest.mark.parametrize(
+    "task_name",
+    ["", "Windows\\Defrag\\ScheduledDefrag", "\\x"],
+    ids=["empty", "relative-path", "leading-backslash"],
+)
+def test_task_name_that_is_not_one_name_is_refused(monkeypatch: pytest.MonkeyPatch, task_name: str) -> None:
+    """[50] An empty name names the folder and a backslash names a path GetTask would resolve into
+    ANOTHER folder (measured: root.GetTask("Microsoft\\...\\Name") succeeds), leaving a wrong
+    task_path on the record. Both are refused before the scheduler is reached."""
 
     def _never_connect() -> Any:
-        raise AssertionError("the scheduler must not be reached for an empty task name")
+        raise AssertionError("the scheduler must not be reached for a refused task name")
 
     monkeypatch.setattr(st_mod, "_connect_scheduler", _never_connect)
     with pytest.raises(ConfigurationError, match="task_name"):
-        list(iter_scheduled_tasks("\\", task_name=""))
+        list(iter_scheduled_tasks("\\", task_name=task_name))
 
 
 @pytest.mark.os_agnostic
@@ -534,10 +559,21 @@ def test_empty_task_name_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
         (_ComError(_DISP_E_EXCEPTION, (0, "src", "desc", None, 0, _ACCESS_DENIED)), False),
         (_ComError(_DISP_E_EXCEPTION, None), False),  # wrapped, but no inner code to read
         (_ComError(_DISP_E_EXCEPTION, (0, "src", "desc", None, 0, None)), False),
+        (_measured(_INVALID_NAME), False),  # GetFolder's answer to a trailing backslash: not an absence
         (_ComError(_ACCESS_DENIED), False),
         (OSError("no such task"), False),  # no hresult at all: never guessed from the text
     ],
-    ids=["signed", "unsigned", "wrapped", "wrapped-denied", "wrapped-no-info", "wrapped-no-scode", "denied", "plain"],
+    ids=[
+        "signed",
+        "unsigned",
+        "wrapped",
+        "wrapped-denied",
+        "wrapped-no-info",
+        "wrapped-no-scode",
+        "wrapped-invalid-name",
+        "denied",
+        "plain",
+    ],
 )
 def test_is_not_found_reads_only_0x80070002(exc: BaseException, expected: bool) -> None:
     """[50] Only 0x80070002, direct or inside DISP_E_EXCEPTION's excepinfo, means absent."""
@@ -548,13 +584,19 @@ def test_is_not_found_reads_only_0x80070002(exc: BaseException, expected: bool) 
 @pytest.mark.os_windows
 @pytest.mark.skipif(sys.platform != "win32", reason="Task Scheduler COM is Windows-only")
 def test_real_lookup_finds_a_listed_task_and_not_a_missing_one() -> None:
-    """[50] Against the real Task Scheduler: a listed task is found by name; a random name is absent, even strict."""
-    listed = next(iter_scheduled_tasks())
+    """[50] Against the real Task Scheduler: a listed task is found by name; a random name is absent, even strict.
+
+    The listed task comes from a SUBFOLDER, so its task_path ends in the backslash GetFolder refuses:
+    passing it straight back is the round trip a caller makes.
+    """
+    listed = next(t for t in iter_scheduled_tasks() if t.task_path != "\\")
     (found,) = list(iter_scheduled_tasks(listed.task_path, task_name=listed.task_name, strict=True))
     assert (found.task_name, found.task_path, found.author) == (listed.task_name, listed.task_path, listed.author)
     missing = f"pwshpy-no-such-task-{uuid.uuid4().hex}"
     assert list(iter_scheduled_tasks("\\", task_name=missing, strict=True)) == []
+    assert list(iter_scheduled_tasks(listed.task_path, task_name=missing, strict=True)) == []
     assert list(iter_scheduled_tasks(f"\\{missing}\\", task_name=missing, strict=True)) == []
+    assert list(iter_scheduled_tasks(f"\\{missing}", task_name=missing, strict=True)) == []
 
 
 @pytest.mark.os_windows

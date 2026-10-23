@@ -41,6 +41,9 @@ _ERROR_FILE_NOT_FOUND = 0x80070002
 # code in excepinfo[5] (the scode), so both shapes are read.
 _DISP_E_EXCEPTION = 0x80020009
 _EXCEPINFO_SCODE = 5
+# Measured 2026-10-23: pywin32's late-bound CDispatch reports every GetFolder/GetTask failure as
+# DISP_E_EXCEPTION with the status in the scode, and GetFolder refuses a trailing backslash on a
+# non-root folder with ERROR_INVALID_NAME (0x8007007B) whether or not the folder exists.
 
 
 def _connect_scheduler() -> Any:
@@ -174,17 +177,34 @@ def is_not_found(exc: BaseException) -> bool:
     return _com_code(exc) == _ERROR_FILE_NOT_FOUND
 
 
+def _check_task_name(task_name: str) -> None:
+    """Refuse a ``task_name`` that names something other than one task in ``folder_path``.
+
+    An empty name names the folder itself, and a name with a backslash is a relative PATH that
+    GetTask resolves into another folder, so the record would carry the wrong ``task_path``.
+    """
+    if task_name == "":
+        raise ConfigurationError("task_name must not be empty: an empty name names the folder, not a task")
+    if "\\" in task_name:
+        raise ConfigurationError(
+            f"task_name {task_name!r} contains a backslash: pass the folder as folder_path "
+            "and only the task's own name as task_name"
+        )
+
+
 def _lookup(service: Any, folder_path: str, task_name: str, *, strict: bool) -> Iterator[ScheduledTaskInfo]:
     """Yield the one task ``task_name`` in ``folder_path``, or nothing when it does not exist.
 
     Not-found (of the folder or the task) is an empty answer under ``strict`` too; any other
     failure - opening the folder, opening the task, reading it - follows the listing's
-    skip-or-raise rule, naming the task's full path.
+    skip-or-raise rule, naming the task's full path. ``folder_path`` may end in a backslash,
+    the form a record's ``task_path`` carries: it is stripped, because GetFolder refuses it.
     """
-    folder_label = folder_path.rstrip("\\")
-    label = f"'{folder_label}\\{task_name}'"
+    com_folder = folder_path.rstrip("\\") or _ROOT
+    prefix = "" if com_folder == _ROOT else com_folder
+    label = f"'{prefix}\\{task_name}'"
     try:
-        folder = service.GetFolder(folder_path)
+        folder = service.GetFolder(com_folder)
         task = folder.GetTask(task_name)
         info = _to_task_info(task, _folder_path(folder))
     except Exception as exc:
@@ -219,7 +239,8 @@ def iter_scheduled_tasks(
     Args:
         folder_path: The task folder to recurse, e.g. ``"\\Microsoft\\Windows\\"``; the root
             by default. Without ``task_name`` a folder that does not exist or cannot be opened
-            always raises; with it, a missing folder means the task is absent (empty result).
+            always raises; with it, a missing folder means the task is absent (empty result),
+            and a trailing backslash (the form ``task_path`` carries) is accepted.
         strict: What happens to an item the caller cannot read (a folder whose tasks or
             subfolders it may not list, a protected or corrupt task). False (default) skips it
             and logs a WARNING naming it, so a non-elevated caller can list what it CAN read.
@@ -229,15 +250,16 @@ def iter_scheduled_tasks(
             ``task_name`` it decides only a task that exists but cannot be opened or read; a
             task or folder that does not exist is an empty result either way.
         task_name: Look up this one task in ``folder_path`` (no subfolders) instead of walking
-            the tree, so an unreadable task elsewhere never refuses the lookup. None (default)
-            walks as before.
+            the tree, so an unreadable task elsewhere never refuses the lookup. The task's own
+            name only, no backslash. None (default) walks as before.
 
     Yields:
         One :class:`ScheduledTaskInfo` per task, folder by folder; with ``task_name``, at
         most one.
 
     Raises:
-        ConfigurationError: ``task_name`` is empty (it would name the folder, not a task).
+        ConfigurationError: ``task_name`` is empty (it would name the folder, not a task) or
+            contains a backslash (it would name a path, not a task in ``folder_path``).
         NativeCallError: The scheduler cannot be reached, ``folder_path`` cannot be opened
             (without ``task_name``), or (with ``strict``) an item under it cannot be read.
         PlatformUnsupportedError: Off Windows (no pywin32).
@@ -250,8 +272,8 @@ def iter_scheduled_tasks(
         >>> sys.platform != "win32" or list(iter_scheduled_tasks(task_name="pwshpy-no-such-task")) == []
         True
     """
-    if task_name == "":
-        raise ConfigurationError("task_name must not be empty: an empty name names the folder, not a task")
+    if task_name is not None:
+        _check_task_name(task_name)
     service = _connect_scheduler()
     if task_name is not None:
         yield from _lookup(service, folder_path, task_name, strict=strict)

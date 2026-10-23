@@ -2,8 +2,10 @@
 
 Point ``PWSHPY_TEST_WIM`` at a real ``.wim`` (a ``boot.wim`` from an install ISO is small
 enough). Locale-safe: compares only fields no host locale can change - index, name (the
-image's own XML text), build, SP build and the architecture NUMBER, which DISM reports
-as PROCESSOR_ARCHITECTURE_* and this test maps to the spelling the record carries.
+image's own XML text), build, SP build, the version (digits and dots) and the architecture
+NUMBER, which DISM reports as PROCESSOR_ARCHITECTURE_* and ``wim_oracle_rows`` maps to the
+spelling the record carries. The one documented difference - an image with no architecture
+in its XML - is mapped there too, narrowly, and pinned on every OS by ``test_wim_oracle_rows``.
 ``local_only`` + ``os_windows``; ``Get-WindowsImage`` needs an elevated session but only
 reads the image, so the test is non-mutating.
 """
@@ -18,6 +20,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from wim_oracle_rows import expected_from_get_windowsimage
 
 from pwshpy import ps
 
@@ -30,9 +33,6 @@ _WIM = os.environ.get("PWSHPY_TEST_WIM", "")
 if not _WIM:  # pragma: no cover - needs a real image on the test box
     pytest.skip("set PWSHPY_TEST_WIM to a real .wim to run the WIM oracle", allow_module_level=True)
 
-# PROCESSOR_ARCHITECTURE_* numbers, spelled the way ImageArchitecture spells them.
-_ARCH = {0: "x86", 5: "ARM", 6: "ia64", 9: "x64", 12: "ARM64"}
-
 # A per-index call is needed: the list form of Get-WindowsImage leaves Architecture and the
 # version fields empty. -InputObject @(...) keeps a one-image result a JSON array on both
 # Windows PowerShell 5.1 (no -AsArray) and PowerShell 7.
@@ -42,7 +42,8 @@ _SCRIPT = (
     "$rows = @(Get-WindowsImage -ImagePath $p | ForEach-Object { "
     "$i = Get-WindowsImage -ImagePath $p -Index $_.ImageIndex; "
     "[pscustomobject]@{ index = [int]$i.ImageIndex; name = [string]$i.ImageName; "
-    "build = [int]$i.Build; sp_build = [int]$i.SPBuild; arch = [int]$i.Architecture } }); "
+    "build = [int]$i.Build; sp_build = [int]$i.SPBuild; arch = [int]$i.Architecture; "
+    "version = [string]$i.Version } }); "
     "ConvertTo-Json -Compress -InputObject $rows"
 )
 
@@ -66,12 +67,11 @@ def _get_windows_image() -> list[dict[str, Any]]:
 
 def test_images_match_get_windowsimage() -> None:
     """Every image pwshpy reads matches Get-WindowsImage on the locale-independent fields."""
-    theirs = sorted(
-        (int(row["index"]), str(row["name"]), int(row["build"]), int(row["sp_build"]), _ARCH.get(int(row["arch"])))
-        for row in _get_windows_image()
-    )
+    # Get-WindowsImage shows architecture 0 and Version 0.0.0.0 for an image whose XML has no
+    # WINDOWS element; pwshpy keeps Unknown and "" there (see expected_from_get_windowsimage).
+    theirs = sorted(expected_from_get_windowsimage(row) for row in _get_windows_image())
     ours = sorted(
-        (image.index, image.name, image.build, image.sp_build, image.architecture.value)
+        (image.index, image.name, image.build, image.sp_build, image.architecture.value, image.version)
         for image in ps.get_windows_image(_WIM)
     )
     assert theirs, "Get-WindowsImage listed no images; the oracle would compare nothing"

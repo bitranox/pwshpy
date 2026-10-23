@@ -63,8 +63,12 @@ resource is compressed (resource flag 0x04) is refused with an error rather than
 two `install.esd` files measured from Microsoft's catalog (2026-10-23, build 26100.4349 en-us, x64
 and arm64) store their XML resource uncompressed, so they are read like a `.wim`; the CLI was run on
 the x64 one. Other ESD files are unverified. An image whose XML has no `WINDOWS` element (image 1,
-`Windows Setup Media`, in the x64 file) is listed with `build` 0, `sp_build` 0 and `architecture`
-`Unknown`. `--index N` prints only image N and stops reading right after it; an index
+`Windows Setup Media`, in the x64 file) is listed with `build` 0, `sp_build` 0, `architecture`
+`Unknown` and an empty `version`. That is the one difference from `Get-WindowsImage` measured on
+that file: it shows the same image with architecture 0 (x86) and version `0.0.0.0`, a default
+rather than a number read from the image, so pwshpy does not report a guessed x86. The other nine
+images matched `Get-WindowsImage` on index, name, build, SP build, architecture and version.
+`--index N` prints only image N and stops reading right after it; an index
 the file does not hold exits non-zero with a message on stderr naming it, and an index below 1 is a
 usage error (exit 2).
 

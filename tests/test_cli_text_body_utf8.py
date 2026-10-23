@@ -1,4 +1,4 @@
-"""Text bodies (``exec`` output, ``invoke_web_request`` body) are UTF-8 bytes when piped.
+"""Passed-through text (exec output, web body, get_content lines, download line) is UTF-8 when piped.
 
 A German Windows console encodes a text-mode stdout in cp1252, so a piped ``pwshpy exec`` whose
 child printed a character cp1252 cannot represent raised ``UnicodeEncodeError`` AFTER the child had
@@ -18,10 +18,11 @@ import subprocess
 import sys
 import threading
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
-from pwshpy.adapters.cli.output import emit_text
+from pwshpy.adapters.cli.output import emit_json, emit_lines, emit_text
 
 #: Not representable in cp1252: the old code raised UnicodeEncodeError on stdout.
 _BEYOND_CP1252 = chr(0x4E2D) + chr(0x6587) + " " + chr(0x2603)
@@ -129,3 +130,55 @@ def test_emit_text_to_a_piped_stderr_is_utf8(monkeypatch: pytest.MonkeyPatch) ->
     emit_text(_BEYOND_CP1252, err=True)
     sys.stderr.flush()
     assert sink.getvalue() == b"before\n" + _BEYOND_CP1252.encode("utf-8")
+
+
+@pytest.mark.os_agnostic
+def test_piped_get_content_beyond_cp1252_is_utf8(tmp_path: Path) -> None:
+    """A piped get_content streams a UTF-8 file's lines as UTF-8 bytes, not a UnicodeEncodeError."""
+    content = ("first " + _BEYOND_CP1252 + "\nsecond " + _GERMAN + "\n").encode("utf-8")
+    source = tmp_path / "body.txt"
+    # write_bytes, not write_text: write_text would turn the LF into CRLF on Windows.
+    source.write_bytes(content)
+    completed = _run_pwshpy("get_content", str(source))
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
+    assert completed.stdout == content
+
+
+@pytest.mark.os_agnostic
+def test_piped_download_file_line_with_a_beyond_cp1252_path_is_utf8(utf8_body_url: str, tmp_path: Path) -> None:
+    """The download_file confirmation line names a non-cp1252 destination as UTF-8 bytes."""
+    dest = tmp_path / ("snow" + chr(0x2603) + ".txt")
+    completed = _run_pwshpy("download_file", utf8_body_url, str(dest))
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
+    assert completed.stdout == f"downloaded {utf8_body_url} -> {dest}\n".encode()
+    assert dest.read_bytes() == _WEB_BODY
+
+
+@pytest.mark.os_agnostic
+def test_emit_lines_at_a_terminal_stays_on_the_text_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At a terminal get_content's lines go through the stream's own encoding, as before."""
+    sink = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", _TerminalStream(sink, encoding="cp1252", errors="strict", newline="\n"))
+    emit_lines([_GERMAN + "\n", "plain\n"])
+    sys.stdout.flush()
+    assert sink.getvalue() == (_GERMAN + "\nplain\n").encode("cp1252")
+
+
+@pytest.mark.os_agnostic
+def test_emit_text_to_a_missing_stderr_is_dropped_not_sent_to_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no stderr (pythonw, a detached service) the stderr body is dropped, never written to stdout."""
+    sink = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(sink, encoding="cp1252", errors="strict", newline="\n"))
+    monkeypatch.setattr(sys, "stderr", None)
+    emit_text("child stderr\n", err=True)
+    sys.stdout.flush()
+    assert sink.getvalue() == b""
+
+
+@pytest.mark.os_agnostic
+def test_output_to_a_missing_stdout_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no stdout every writer drops its output quietly, as click.echo does, instead of raising."""
+    monkeypatch.setattr(sys, "stdout", None)
+    emit_text("body\n")
+    emit_lines(["line\n"])
+    emit_json({"ok": True})

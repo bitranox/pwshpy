@@ -90,7 +90,9 @@ def cli_invoke_rest_method(
 def cli_download_file(ctx: click.Context, url: str, dest: str, timeout: float) -> None:
     """Stream a URL to DEST, memory-bounded (never buffers the whole body; unlike Invoke-WebRequest)."""
     written = get_cli_context(ctx).services.ps.download_file(url, dest, timeout=timeout)
-    click.echo(f"downloaded {url} -> {written}")
+    # Through emit_text, not click.echo: a destination path outside the console code page
+    # raised UnicodeEncodeError on a piped cp1252 stdout after the download had finished.
+    emit_text(f"downloaded {url} -> {written}\n")
 
 
 WEB_COMMANDS = (

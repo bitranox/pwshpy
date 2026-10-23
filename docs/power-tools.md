@@ -179,8 +179,9 @@ for line in ps.get_content_lines("huge.log"):  # reads one line at a time (vs wh
 ps.download_file("https://host/big.iso", "big.iso")  # copies to disk in chunks; never buffers the body
 ```
 
-CLI: `pwshpy write_text PATH` (reads stdin), `pwshpy get_content PATH` (streams), `pwshpy
-download_file URL DEST`.
+CLI: `pwshpy write_text PATH` (reads stdin), `pwshpy get_content PATH` (streams; UTF-8 bytes when
+piped, see [CLI Reference](cli-reference.md#portable-record-commands)), `pwshpy download_file URL
+DEST`.
 
 ## Credential vault - typed, secret-safe, unattended-friendly
 

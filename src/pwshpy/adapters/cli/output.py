@@ -14,12 +14,13 @@ stream.  The exit code is non-zero either way.
 JSON output (``--json``, ``--jsonl``, :func:`emit_json`) is written as UTF-8 bytes below
 the text layer, whatever the console code page, ``PYTHONIOENCODING`` or ``PYTHONUTF8``
 say: JSON is UTF-8 by spec, and a cp1252 stdout (German Windows) turned every non-ASCII
-field into mojibake for a consumer reading the pipe.  Lines end in LF on every OS.  A text
-body passed through from elsewhere (:func:`emit_text`: a child's output, a web response) is
-written the same way when its stream is not a terminal, because a character outside cp1252
-raised ``UnicodeEncodeError`` there after the work was done.  The human table and
-:func:`emit_lines` stay on the console's own encoding: they are text for a person or a text
-tool, not JSON.
+field into mojibake for a consumer reading the pipe.  Lines end in LF on every OS.  Text
+passed through from elsewhere (:func:`emit_text`: a child's output, a web response, a status
+line naming a path; :func:`emit_lines`: a file's lines) is written the same way when its stream
+is not a terminal, because a character outside cp1252 raised ``UnicodeEncodeError`` there after
+the work was done; at a terminal it goes through the text layer as before.  A missing stream
+(``None``, as under pythonw or a detached service) drops the output, as ``click.echo`` does.
+The human table stays on the console's own encoding: it is text for a person.
 
 The human table fits a terminal's width. Piped or redirected it is sized to its content up to
 ``_MAX_PIPED_WIDTH`` columns, so no cell is cut: every value is whole, a value without line
@@ -31,6 +32,7 @@ Contents:
     * :class:`RecordFormat` - human / json / jsonl selector.
     * :func:`emit` - render an iterable of records in the chosen format.
     * :func:`emit_text` - pass a text body through, UTF-8 when piped.
+    * :func:`emit_lines` - stream text lines, UTF-8 when piped.
 """
 
 from __future__ import annotations
@@ -126,42 +128,45 @@ def _clean_broken_pipe() -> Generator[None, None, None]:
 
 
 class _Utf8Writer:
-    """UTF-8 byte writer for a text stream (stdout by default) that bypasses its encoding.
+    """UTF-8 byte writer for a text stream that bypasses the stream's encoding.
 
     Writes go to the stream's ``buffer`` so the bytes are UTF-8 whatever encoding the
     text layer was opened with. Whatever the text layer still holds is flushed first,
     so earlier text output stays ahead of the bytes. A stream with no ``buffer`` (a
     ``StringIO`` stand-in, doctest's capture) has no encoding step to bypass, so the
-    UTF-8 is decoded and written as text there.
+    UTF-8 is decoded and written as text there. A ``None`` stream (``sys.stderr`` or
+    ``sys.stdout`` under pythonw or a detached service) drops every write, as
+    ``click.echo`` does; the stream is required rather than defaulted so a missing
+    stderr can never fall back to stdout and mix a child's errors into its output.
 
     Args:
-        stream: The text stream to write below; ``None`` means the current ``sys.stdout``.
+        stream: The text stream to write below, or ``None`` when there is none.
 
     Example:
-        >>> out = _Utf8Writer()
+        >>> out = _Utf8Writer(sys.stdout)
         >>> out.write(b"ok\\n"); out.flush()
         ok
     """
 
-    def __init__(self, stream: TextIO | None = None) -> None:
-        self._text: TextIO = sys.stdout if stream is None else stream
-        self._binary: BinaryIO | None = getattr(self._text, "buffer", None)
-        if self._binary is not None:
-            self._text.flush()
+    def __init__(self, stream: TextIO | None) -> None:
+        self._text = stream
+        self._binary: BinaryIO | None = None if stream is None else getattr(stream, "buffer", None)
+        if stream is not None and self._binary is not None:
+            stream.flush()
 
     def write(self, data: bytes) -> None:
-        """Write UTF-8 ``data`` to stdout."""
-        if self._binary is None:
-            self._text.write(data.decode("utf-8"))
-        else:
+        """Write UTF-8 ``data`` to the stream (nothing when there is no stream)."""
+        if self._binary is not None:
             self._binary.write(data)
+        elif self._text is not None:
+            self._text.write(data.decode("utf-8"))
 
     def flush(self) -> None:
-        """Flush the stream the bytes went to."""
-        if self._binary is None:
-            self._text.flush()
-        else:
+        """Flush the stream the bytes went to (nothing when there is no stream)."""
+        if self._binary is not None:
             self._binary.flush()
+        elif self._text is not None:
+            self._text.flush()
 
 
 def _dumps(record: PSRecord) -> bytes:
@@ -169,7 +174,7 @@ def _dumps(record: PSRecord) -> bytes:
 
 
 def _write_jsonl(records: Iterable[PSRecord]) -> None:
-    out = _Utf8Writer()
+    out = _Utf8Writer(sys.stdout)
     for record in records:
         out.write(_dumps(record) + b"\n")
         out.flush()
@@ -183,7 +188,7 @@ def _write_json_array(records: Iterable[PSRecord]) -> None:
     # whole stream to avoid that would end --json's lazy, memory-bounded streaming.
     iterator = iter(records)
     first = next(iterator, None)
-    out = _Utf8Writer()
+    out = _Utf8Writer(sys.stdout)
     if first is None:
         out.write(b"[]\n")
         out.flush()
@@ -214,14 +219,14 @@ def _cell(value: object) -> Text:
     return Text("" if value is None else str(value))
 
 
-def _is_terminal(stream: TextIO) -> bool:
+def _is_terminal(stream: TextIO | None) -> bool:
     """Whether ``stream`` is a real terminal (a closed, missing or odd stream counts as not one).
 
     Asks the stream itself rather than ``Console.is_terminal``: rich reports a terminal whenever
     FORCE_COLOR is set, even into a pipe, and still has no terminal width to read there.
 
     Args:
-        stream: The stream to ask, usually ``sys.stdout`` or ``sys.stderr``.
+        stream: The stream to ask, usually ``sys.stdout`` or ``sys.stderr``; ``None`` is no terminal.
 
     Returns:
         True only when the stream answers ``isatty()`` with a true value.
@@ -230,6 +235,8 @@ def _is_terminal(stream: TextIO) -> bool:
         >>> _is_terminal(sys.stdout)  # doctest captures stdout, so it is no terminal here
         False
     """
+    if stream is None:
+        return False
     try:
         return bool(stream.isatty())
     except (AttributeError, ValueError, OSError):
@@ -315,7 +322,7 @@ def emit_json(data: object) -> None:
         {"ok":true,"n":1}
     """
     with _clean_broken_pipe():
-        out = _Utf8Writer()
+        out = _Utf8Writer(sys.stdout)
         out.write(orjson.dumps(data, default=str) + b"\n")
         out.flush()
 
@@ -324,7 +331,13 @@ def emit_lines(lines: Iterable[str]) -> None:
     """Stream raw text lines to stdout, broken-pipe safe and memory-bounded.
 
     For streaming a file's content (``get_content_lines``) - one line at a time, so a huge
-    file never materializes and a downstream ``| head`` closes cleanly.
+    file never materializes and a downstream ``| head`` closes cleanly. Piped or redirected
+    the lines are written as UTF-8 bytes, like :func:`emit_text` (a line holding a character
+    outside a cp1252 console's code page raised ``UnicodeEncodeError`` mid-file); at a
+    terminal they go through the text layer as before.
+
+    Args:
+        lines: The lines to write, each with its own line end.
 
     Example:
         >>> emit_lines(["a\\n", "b\\n"])
@@ -332,10 +345,23 @@ def emit_lines(lines: Iterable[str]) -> None:
         b
     """
     with _clean_broken_pipe():
-        out = sys.stdout
-        for line in lines:
-            out.write(line)
-        out.flush()
+        stream = sys.stdout
+        if _is_terminal(stream):
+            _write_lines_as_text(lines, stream)
+        else:
+            _write_lines_as_utf8(lines, _Utf8Writer(stream))
+
+
+def _write_lines_as_text(lines: Iterable[str], stream: TextIO) -> None:
+    for line in lines:
+        stream.write(line)
+    stream.flush()
+
+
+def _write_lines_as_utf8(lines: Iterable[str], out: _Utf8Writer) -> None:
+    for line in lines:
+        out.write(line.encode("utf-8"))
+    out.flush()
 
 
 def emit_text(text: str, *, err: bool = False) -> None:
@@ -348,7 +374,8 @@ def emit_text(text: str, *, err: bool = False) -> None:
     exactly the text's own, so line ends are not translated and no ANSI sequence is stripped. At a
     terminal the body goes through ``click.echo`` as before, which a Windows console already
     renders as Unicode. Stdout is broken-pipe safe (``| head`` exits cleanly); stderr is written
-    without that guard, because the guard redirects stdout.
+    without that guard, because the guard redirects stdout. A missing (``None``) stream drops
+    the body; a missing stderr is never replaced by stdout.
 
     Args:
         text: The body to write, verbatim (no newline is added).
@@ -367,7 +394,7 @@ def emit_text(text: str, *, err: bool = False) -> None:
         _write_text_body(text, stream, err=False)
 
 
-def _write_text_body(text: str, stream: TextIO, *, err: bool) -> None:
+def _write_text_body(text: str, stream: TextIO | None, *, err: bool) -> None:
     """Write ``text`` to ``stream``: via ``click.echo`` at a terminal, as UTF-8 bytes otherwise."""
     # click.echo is kept at a terminal so a person sees exactly what they saw before (on Windows
     # click routes console output through its own wrapper); only the piped path changes.

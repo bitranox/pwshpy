@@ -106,7 +106,10 @@ in either mode, and a single field that cannot be read keeps its default in both
 updates not yet installed); `--timeout SECONDS` (default 300, at most 2147483) bounds the search,
 which runs in a child process that is killed when the time is up. A search that times out prints
 one `timed out` line on stderr and exits **110** (ETIMEDOUT), so a script can tell it from a
-failure (exit 1). Off Windows it exits 1 with `PlatformUnsupportedError`.
+failure (exit 1). Off Windows it exits 1 with `PlatformUnsupportedError`. Each record's
+`category_details` lists its categories as `{"category_id", "type", "name"}` objects; filter on the
+lower-case `category_id` GUID, not the localized name (the classification GUIDs are in
+[Power Tools](power-tools.md#selecting-updates-by-category)).
 
 ```bash
 # streaming and piping stay lazy end to end

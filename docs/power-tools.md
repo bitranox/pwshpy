@@ -162,6 +162,49 @@ CLI already does).
 CLI: `pwshpy get_windows_update --timeout 600 --jsonl`; a timeout prints one `timed out` line on
 stderr and exits **110** (ETIMEDOUT).
 
+### Selecting updates by category
+
+Each `WindowsUpdate` record carries its categories twice: `categories` holds the display names,
+which the Windows Update agent may localize, and `category_details` holds one `UpdateCategory` per
+category, in the same order, with the locale-independent identity:
+
+- `category_id`: the category GUID (`ICategory.CategoryID`), always lower case.
+- `type`: the agent's untranslated kind, e.g. `UpdateClassification` or `Product`.
+- `name`: the display name (the same text as the matching `categories` entry).
+
+Select by `category_id`, never by `name`, so a script behaves the same on every Windows language.
+The classifications most scripts filter on:
+
+| Classification     | `category_id`                          |
+|--------------------|----------------------------------------|
+| Security Updates   | `0fa1201d-4330-4fa8-8ae9-b877473b6441` |
+| Critical Updates   | `e6cf1350-c01b-414d-a61f-263d14d133b4` |
+| Definition Updates | `e0789628-ce08-4437-be74-2495b842f43b` |
+| Update Rollups     | `28bc880e-0592-4cbf-8f95-c79b17911d5f` |
+| Updates            | `cd5ffd1e-e932-4e3a-bf74-18bf0b1bbd83` |
+
+They are Microsoft's
+[WSUS Classification GUIDs](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/ff357803(v=vs.85)),
+which Microsoft publishes in upper case; pwshpy lower-cases every `category_id`, so compare against
+the lower-case form.
+
+```python
+from pwshpy import ps
+
+SECURITY_UPDATES = "0fa1201d-4330-4fa8-8ae9-b877473b6441"
+
+if __name__ == "__main__":
+    security = (
+        ps.get_windows_update(timeout=600)
+        .where(lambda u: any(c.category_id == SECURITY_UPDATES for c in u.category_details))
+        .to_list()
+    )
+```
+
+The agent can also filter for you: a `criteria=` of
+`"IsInstalled=0 and CategoryIDs contains '0fa1201d-4330-4fa8-8ae9-b877473b6441'"` returns only the
+security updates not yet installed (the GUID matches in either case there).
+
 ## Predictable, memory-bounded file I/O
 
 No more UTF-16LE-with-a-BOM surprises from `Out-File`; the bytes are identical on every OS and

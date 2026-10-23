@@ -680,24 +680,37 @@ def _create_service(name: str, command_line: str) -> None:
         win32service.CloseServiceHandle(scm)
 
 
-def _delete_service(name: str) -> None:
-    """Wait out any pending state, stop the service if it runs, then delete it."""
+def _settle(name: str, deadline: float) -> int:
+    """Poll the scratch service until it leaves every pending state (or the deadline); return its state."""
     win32service = _win32service()
-    deadline = time.monotonic() + _SLOW_TIMEOUT
     pending = {
         win32service.SERVICE_START_PENDING,
         win32service.SERVICE_STOP_PENDING,
         win32service.SERVICE_CONTINUE_PENDING,
         win32service.SERVICE_PAUSE_PENDING,
     }
-    while _raw_state(name) in pending and time.monotonic() < deadline:
+    state = _raw_state(name)
+    while state in pending and time.monotonic() < deadline:
         time.sleep(0.25)
+        state = _raw_state(name)
+    return state
+
+
+def _delete_service(name: str) -> None:
+    """Stop the scratch service, wait until it is Stopped, then delete it.
+
+    Deleting a service that is still stopping only marks it for deletion, so it would outlive
+    the fixture by _SLOW_SECONDS; waiting for Stopped first makes the deletion immediate.
+    """
+    win32service = _win32service()
+    deadline = time.monotonic() + _SLOW_TIMEOUT
     scm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_ALL_ACCESS)
     try:
         handle = win32service.OpenService(scm, name, win32service.SERVICE_ALL_ACCESS)
         try:
-            if int(win32service.QueryServiceStatus(handle)[1]) != win32service.SERVICE_STOPPED:
+            if _settle(name, deadline) != win32service.SERVICE_STOPPED:
                 win32service.ControlService(handle, win32service.SERVICE_CONTROL_STOP)
+                _settle(name, deadline)
             win32service.DeleteService(handle)
         finally:
             win32service.CloseServiceHandle(handle)
@@ -720,6 +733,8 @@ def slow_service(tmp_path: Path) -> Iterator[str]:
         yield name
     finally:
         _delete_service(name)
+    with pytest.raises(Exception, match="1060"):  # ERROR_SERVICE_DOES_NOT_EXIST: nothing left behind
+        _raw_state(name)
 
 
 @pytest.mark.local_only

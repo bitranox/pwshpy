@@ -105,13 +105,20 @@ either mode; a running one is still listed.
 `get_scheduled_task --task-name NAME [--folder PATH]` lists nothing: it reads the one task `NAME` in
 `--folder` (default root; on Windows a trailing backslash, the form `task_path` carries, is
 accepted). A folder elsewhere that the caller cannot read never affects the answer. A task that
-does not exist prints nothing (`--json`: `[]`) and exits 0, with `--strict` too; `--strict` decides
-only a task that exists but cannot be read. `NAME` is the task's own name: an empty one, or one with
-a folder part, exits 1 with `ConfigurationError`. Windows matches the name without regard to case
-and echoes the spelling you passed in `task_name` and `task_path`. On Linux `--folder` is ignored
-and the answer is the task's `.timer`, else its on-demand `.service`: a service-only task (no
-trigger) is found by name although the listing, timers only, leaves it out. The suffix is optional,
-and `job.service` names the task `job`, so it answers with the timer record when `job` has a timer.
+does not exist prints nothing (`--json`: `[]`) and exits 0, with `--strict` too. Every other
+failure is skipped with a warning, or with `--strict` exits 1 with `NativeCallError`: on Windows any
+error opening the folder or the task other than not-found (HRESULT 0x80070002) - access denied on
+the folder, a name the scheduler refuses (0x8007007B), a scheduler error - and a found task that
+cannot be read; on Linux a refused `LoadUnit` or `LoadState` read, or a unit file whose ownership
+marker cannot be read. `NAME` is the task's own name: an empty one, or one with a folder part,
+exits 1 with `ConfigurationError`. Windows matches the name without regard to case and echoes the
+spelling you passed in `task_name` and `task_path`. On Linux `--folder` is ignored and the answer is
+the task's `.timer`, else an on-demand task pwshpy registered: a `.service` with no `.timer` counts
+only when its unit file carries pwshpy's `X-PwshPy=` marker in `[Unit]`, so a system daemon such as
+`ssh` or `cron` is no task. Such an on-demand task is found by name although the listing, timers
+only, leaves it out. A masked unit counts as absent unless it is running, and an alias as absent,
+as in the listing. The suffix is optional, and `job.service` names the task `job`, so it answers
+with the timer record when `job` has a timer.
 
 `get_service [--strict]` follows the same contract. On Linux it skips, with a warning naming it, a
 refused unit-file listing (then no stopped, unloaded service is listed) or a service unit systemd

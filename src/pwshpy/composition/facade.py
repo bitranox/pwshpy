@@ -687,10 +687,12 @@ class Ps:
                 part raises :class:`ConfigurationError`. Windows matches it without regard to case
                 and the record carries the spelling passed here and in ``folder_path`` (the
                 scheduler echoes the caller's spelling), so compare it case-insensitively with a
-                listed one. Linux: the timer, else the on-demand service (which the listing,
-                timers only, leaves out); a ``.timer``/``.service`` suffix is optional, and
-                ``job.service`` names the task ``job`` - its timer record when it has a timer.
-                None (default) lists as before.
+                listed one. Linux: the timer task, else an on-demand task pwshpy registered (a
+                ``.service`` with no ``.timer`` counts only when its unit file carries pwshpy's
+                ``X-PwshPy`` marker, so a system daemon such as ``ssh`` is no task; the listing,
+                timers only, leaves such a task out); a ``.timer``/``.service`` suffix is
+                optional, and ``job.service`` names the task ``job`` - its timer record when it
+                has a timer. None (default) lists as before.
             strict: What happens to an item that cannot be read - on Windows a folder whose
                 tasks or subfolders the caller may not list, or a protected or corrupt task; on
                 Linux a refused unit-file listing or ``LoadUnit``. False (default) skips it and
@@ -698,7 +700,12 @@ class Ps:
                 True raises :class:`NativeCallError` naming the folder, task or unit instead: use
                 it when "not listed" must mean "does not exist", e.g. to check a task is gone.
                 The pipeline is lazy, so the error is raised when iteration reaches the item.
-                With ``task_name`` it decides only a task that exists but cannot be read.
+                With ``task_name`` a task or folder that does not exist is an empty answer either
+                way; every other failure follows this rule: on Windows any GetFolder or GetTask
+                error other than not-found (0x80070002) - access denied on the folder, a name the
+                scheduler refuses (0x8007007B), a scheduler error - and a found task that cannot
+                be read; on Linux a refused ``LoadUnit`` or ``LoadState`` read, or a unit file
+                whose ownership marker cannot be read.
 
         Raises:
             ConfigurationError: ``task_name`` is empty or names a folder as well as a task
@@ -711,7 +718,7 @@ class Ps:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().get_scheduled_task(strict=True), Pipeline)
             True
-            >>> lookup = build_ps().get_scheduled_task("\\Microsoft\\Windows\\Defrag", task_name="ScheduledDefrag")
+            >>> lookup = build_ps().get_scheduled_task(r"\\Microsoft\\Windows\\Defrag", task_name="ScheduledDefrag")
             >>> isinstance(lookup, Pipeline)  # lazy: nothing is read until it is iterated
             True
         """

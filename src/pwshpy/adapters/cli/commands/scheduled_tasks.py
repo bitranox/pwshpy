@@ -26,15 +26,20 @@ logger = logging.getLogger(__name__)
 
 
 @click.command("get_scheduled_task", context_settings=CLICK_CONTEXT_SETTINGS)
-@option("--folder", "folder_path", default="\\", help="Task-folder path to recurse (default: root).")
+@option(
+    "--folder",
+    "folder_path",
+    default="\\",
+    help="Task-folder path to recurse (default: root); with --task-name, the folder holding the task.",
+)
 @option(
     "--task-name",
     "task_name",
     default=None,
     help=(
         "Look up only this task in --folder, without walking the tree; prints nothing when it does not "
-        "exist. Linux: the timer, else the on-demand service; a .timer/.service suffix is optional and "
-        "job.service names the task job."
+        "exist. Linux: the timer, else an on-demand task pwshpy registered (a system service is no "
+        "task); a .timer/.service suffix is optional and job.service names the task job."
     ),
 )
 @option(
@@ -64,8 +69,11 @@ def cli_scheduled_tasks(
     """
     fmt = resolve_format(as_json, as_jsonl)
     ps = get_cli_context(ctx).services.ps
-    with lib_log_rich.runtime.bind(job_id="cli-scheduled-tasks", extra={"command": "scheduled-tasks"}):
-        logger.info("Listing scheduled tasks")
+    with lib_log_rich.runtime.bind(job_id="get_scheduled_task", extra={"command": "get_scheduled_task"}):
+        if task_name is None:
+            logger.info("Listing scheduled tasks")
+        else:
+            logger.info("Looking up scheduled task %r", task_name)
         emit(ps.get_scheduled_task(folder_path, task_name=task_name, strict=strict), fmt)
 
 

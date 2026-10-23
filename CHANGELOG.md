@@ -6,6 +6,39 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `get_windows_update` records carry `category_details`: one `UpdateCategory` (`category_id`, the
+  lower-case GUID; `type`, such as `UpdateClassification` or `Product`; `name`) per category, so a
+  caller can select Security or Definition updates without matching a localized name. The
+  `categories` name list is unchanged; the classification GUIDs are listed in `docs/power-tools.md`.
+
+### Changed
+
+- When piped or redirected, `exec` (the program's stdout and stderr), `invoke_web_request` (the
+  body), `get_content` (the lines) and `download_file` (its `downloaded URL -> DEST` line) write
+  UTF-8 bytes, like `--json`. A character the console code page cannot hold no longer fails the
+  command with `UnicodeEncodeError` after the work was done. Piped `exec` output has LF line ends
+  and keeps ANSI sequences. At a terminal nothing changes.
+- An elevated packed run also drops the caller's `GCM_*` (Git Credential Manager) variables and
+  `PASSWORD_STORE_DIR`, in both runners, like the `GIT_*` variables.
+- An elevated Windows run points `GIT_CONFIG_GLOBAL` at an empty file of its own
+  (`<data home>\pwshpy\empty.gitconfig`, judged by the same trust rule as uv) instead of `NUL`,
+  which some git builds read as a file in the current directory. A file that is not empty, a link
+  or writable by another account is refused with exit 127. POSIX keeps `/dev/null`.
+
+### Fixed
+
+- Windows `start_service`, `stop_service` and `restart_service` wait for a service that is still
+  starting or stopping to settle before they send the control (within the same `timeout`), instead
+  of failing with error 1052, 1056 or 1061 after `stop_service(wait=False)`.
+- `run_bounded` (used by `get_windows_update`) called inside a daemonic `multiprocessing` worker
+  raises `NativeCallError` saying why, instead of a bare `AssertionError`; under `python -O`, where
+  that assert is stripped, it is now refused too instead of starting a child the worker cannot
+  reap.
+- The packer's `requires-python` scan of a PEP 723 block skips the contents of TOML multi-line
+  strings, so a `[` line inside one no longer ends the scan early.
+
 ## [1.6.0] 2026-10-23 12:21:55
 
 ### Added

@@ -12,7 +12,7 @@ Contents:
     * :data:`MANAGED_PYTHON_VARIABLES` - the variables that steer where uv's managed Pythons come from.
     * :data:`INTERPRETER_VARIABLES` - the variables an elevated run drops before uv picks a Python.
     * :data:`LIBRARY_VARIABLES` - the variables the interpreter reads itself, dropped too.
-    * :data:`GIT_VARIABLES` - git variables (and SSH_ASKPASS) an elevated run drops by their name's prefix.
+    * :data:`GIT_VARIABLES` - git and credential-helper variables an elevated run drops (GIT_, GCM_ by prefix).
     * :func:`write_git_source` - a one-commit git repository uv can fetch from a git+file URL.
     * :func:`write_planted_python` - ``python`` / ``python3`` doubles that record being run.
     * :func:`write_planted_environment` - a virtual or conda environment whose python is such a double.
@@ -199,7 +199,10 @@ NETWORK_VARIABLES = (
 
 #: [X23 G1] Variables git reads, which an elevated run drops because their name starts with GIT_ (one
 #: no git release reads, so a fixed list would miss it), plus SSH_ASKPASS, which git runs for a
-#: password. The values are never used: a recording uv runs no git.
+#: password. [113]: and the ones Git Credential Manager, the credential helper git runs, reads: every
+#: GCM_ name (by prefix too; GCM_GPG_PATH names the gpg it runs, GCM_PLAINTEXT_STORE_PATH a credential
+#: directory) and PASSWORD_STORE_DIR (where its gpg store reads credentials). The values are never
+#: used: a recording uv runs no git.
 GIT_VARIABLES = {
     "GIT_CONFIG_COUNT": "1",
     "GIT_CONFIG_KEY_0": "core.fsmonitor",
@@ -207,11 +210,19 @@ GIT_VARIABLES = {
     "GIT_SSH_COMMAND": "pwshpy-planted-ssh",
     "GIT_PWSHPY_NOT_READ_BY_ANY_GIT": "1",
     "SSH_ASKPASS": "pwshpy-planted-askpass",
+    "GCM_CREDENTIAL_STORE": "plaintext",
+    "GCM_PLAINTEXT_STORE_PATH": "pwshpy-planted-store",
+    "GCM_GPG_PATH": "pwshpy-planted-gpg",
+    "GCM_PWSHPY_NOT_READ_BY_ANY_GCM": "1",
+    "PASSWORD_STORE_DIR": "pwshpy-planted-password-store",
 }
 
 #: A variable whose name holds GIT_ without starting with it: an elevated run keeps it, so the
 #: tests see the drop is by prefix, not by substring.
 NOT_A_GIT_VARIABLE = "PWSHPY_GIT_NOT_A_PREFIX"
+
+#: The same for the GCM_ prefix ([113]).
+NOT_A_GCM_VARIABLE = "PWSHPY_GCM_NOT_A_PREFIX"
 
 
 def write_git_source(scratch: Path) -> Path:
@@ -378,7 +389,8 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
 
     After the arguments it records ``env:<NAME>=<value>`` for each of :data:`INTERPRETER_VARIABLES`,
     :data:`LIBRARY_VARIABLES`, :data:`UV_SOURCE_VARIABLES`, :data:`NETWORK_VARIABLES`,
-    ``SSH_ASKPASS``, ``PYTHONNOUSERSITE`` and every variable whose name holds ``GIT_`` it was handed, so a
+    ``SSH_ASKPASS``, ``PASSWORD_STORE_DIR``, ``PYTHONNOUSERSITE`` and every variable whose name holds
+    ``GIT_`` or ``GCM_`` it was handed, so a
     test can read both what a runner passed, dropped and set. A ``uv python ...`` call (an elevated
     run resolving its interpreter) is recorded the same way into ``record`` with ``.python`` appended
     to its name, and ``uv python find`` prints the path of a stand-in ``python`` beside the double, so
@@ -398,11 +410,14 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
             *UV_SOURCE_VARIABLES,
             *NETWORK_VARIABLES,
             "SSH_ASKPASS",
+            "PASSWORD_STORE_DIR",
             "PYTHONNOUSERSITE",
         )
     )
-    # Every name holding GIT_, found by pattern: the runners drop by prefix, so no list can name them all.
-    report += "env | sed -n 's/^\\([A-Za-z0-9_]*GIT_[A-Za-z0-9_]*=.*\\)$/env:\\1/p' >> \"$record\"\n"
+    # Every name holding GIT_ or GCM_, found by pattern: the runners drop by prefix, so no list can name
+    # them all.
+    report += "env | sed -n -e 's/^\\([A-Za-z0-9_]*GIT_[A-Za-z0-9_]*=.*\\)$/env:\\1/p' "
+    report += "-e 's/^\\([A-Za-z0-9_]*GCM_[A-Za-z0-9_]*=.*\\)$/env:\\1/p' >> \"$record\"\n"
     python = directory / "python"
     python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
     python.chmod(0o755)
@@ -849,6 +864,7 @@ __all__ = [
     "LOCAL_WHEEL_DISTRIBUTION",
     "MANAGED_PYTHON_VARIABLES",
     "NETWORK_VARIABLES",
+    "NOT_A_GCM_VARIABLE",
     "NOT_A_GIT_VARIABLE",
     "OTHER_UID",
     "PS1_CACHE_HOME_LOOKUP",

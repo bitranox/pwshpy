@@ -32,6 +32,7 @@ from elevation_doubles import (
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
     NETWORK_VARIABLES,
+    NOT_A_GCM_VARIABLE,
     NOT_A_GIT_VARIABLE,
     OTHER_UID,
     RUNNING_AS_ROOT,
@@ -1925,13 +1926,15 @@ def test_as_root_no_git_variable_reaches_uv(tmp_path: Path, as_root: bool) -> No
     any config key, a command-valued one included) and runs SSH_ASKPASS for a password. As root every
     variable whose name starts with GIT_ (one no git reads included: the drop is by prefix) and
     SSH_ASKPASS is dropped with a line each, before uv python find already; one holding GIT_ elsewhere in
-    its name stays. Not root (the control), each reaches uv unchanged and no line is printed."""
+    its name stays. [113]: the same for Git Credential Manager's GCM_ prefix and PASSWORD_STORE_DIR. Not
+    root (the control), each reaches uv unchanged and no line is printed."""
     runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root)
-    environment = {**_trust_env(tmp_path), **GIT_VARIABLES, NOT_A_GIT_VARIABLE: "kept"}
+    kept = {NOT_A_GIT_VARIABLE: "kept", NOT_A_GCM_VARIABLE: "kept"}
+    environment = {**_trust_env(tmp_path), **GIT_VARIABLES, **kept}
     result = _run_in(["sh"], runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     recorded = _recorded_variables(record)
-    assert recorded.get(NOT_A_GIT_VARIABLE) == "kept", recorded
+    assert {name: recorded.get(name) for name in kept} == kept, recorded
     for name, value in GIT_VARIABLES.items():
         dropped_line = f"pwshpy: ignoring {name}: " in result.stderr
         if as_root:

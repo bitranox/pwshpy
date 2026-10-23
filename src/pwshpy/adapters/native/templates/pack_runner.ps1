@@ -58,7 +58,8 @@
     UV_PYTHON_CACHE_DIR, UV_ENV_FILE, HTTPS_PROXY, HTTP_PROXY, ALL_PROXY (and their lower-case
     forms), SSL_CERT_FILE, SSL_CERT_DIR, SSL_CLIENT_CERT, UV_NATIVE_TLS, UV_SYSTEM_CERTS,
     UV_KEYRING_PROVIDER, every variable whose name starts with GIT_ (git, which uv runs for a git
-    source, reads them; on Windows in any case) and SSH_ASKPASS are ignored, each with a line on
+    source, reads them) or GCM_ (Git Credential Manager, the credential helper git runs, reads them;
+    both on Windows in any case), SSH_ASKPASS and PASSWORD_STORE_DIR are ignored, each with a line on
     stderr; git reads no global config file (GIT_CONFIG_GLOBAL is NUL on Windows, /dev/null on POSIX,
     so not the .gitconfig below the HOME, USERPROFILE or XDG_CONFIG_HOME it was given; git 2.32 or
     later); the user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file
@@ -1039,15 +1040,25 @@ function Clear-PwshPyInterpreterVariable {
     # GIT_SSH_COMMAND, GIT_PROXY_COMMAND, GIT_EXEC_PATH, GIT_ASKPASS or GIT_SSL_CAINFO name a command to
     # run or a CA to trust. Dropped by prefix, so a variable a later git adds is gone too, with
     # SSH_ASKPASS: git runs it for a password when GIT_ASKPASS and core.askPass are unset (it ran on an
-    # HTTP 401 from uv's git fetch, measured). Windows matches the prefix in any case, as its environment
-    # does (Git_Ssh_Command is GIT_SSH_COMMAND there); POSIX only in upper case, as the .sh runner.
+    # HTTP 401 from uv's git fetch, measured). The credential helper git runs on an authentication
+    # challenge reads its own: Git Credential Manager (Git for Windows' default helper) every GCM_
+    # variable (its docs/environment.md; GCM_GPG_PATH names the gpg it runs, GCM_PLAINTEXT_STORE_PATH
+    # and GCM_DPAPI_STORE_PATH the directory it reads credentials from, GCM_CREDENTIAL_STORE which
+    # store), dropped by prefix too, and PASSWORD_STORE_DIR, the directory its gpg store reads (its
+    # docs/credstores.md). Windows matches the prefixes in any case, as its environment does
+    # (Git_Ssh_Command is GIT_SSH_COMMAND there); POSIX only in upper case, as the .sh runner.
     $gitNames = @(foreach ($variable in @(Get-ChildItem -LiteralPath 'Env:')) {
-        $isGit = if ($PwshPyOnWindows) { $variable.Name -like 'GIT_*' } else { $variable.Name -clike 'GIT_*' }
-        if ($isGit) { $variable.Name }
+        $name = $variable.Name
+        $isGit = if ($PwshPyOnWindows) {
+            $name -like 'GIT_*' -or $name -like 'GCM_*'
+        } else {
+            $name -clike 'GIT_*' -or $name -clike 'GCM_*'
+        }
+        if ($isGit) { $name }
     })
-    foreach ($name in $gitNames + @('SSH_ASKPASS')) {
+    foreach ($name in $gitNames + @('SSH_ASKPASS', 'PASSWORD_STORE_DIR')) {
         if ($null -eq [Environment]::GetEnvironmentVariable($name)) { continue }
-        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run lets uv run git with none of the caller's git settings"
+        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run lets uv run git with none of the caller's git or credential-helper settings"
         Remove-Item -LiteralPath "Env:$name"
     }
 }

@@ -440,13 +440,19 @@ Details worth knowing:
   `core.fsmonitor` command named that way ran from uv's git fetch), others name a command to run
   (`GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND`, `GIT_ASKPASS`) or a CA to trust (`GIT_SSL_CAINFO`), and git
   runs `SSH_ASKPASS` for a password when `GIT_ASKPASS` and `core.askPass` are unset (measured on an
-  HTTP 401 from uv's git fetch). The drop goes by the prefix, so a variable a later git release adds
-  is dropped too. git's global configuration file is not read either: after the drop the runner sets
-  `GIT_CONFIG_GLOBAL` to `/dev/null` (POSIX) or the `NUL` device (Windows), with a line on stderr, so
-  neither the `.gitconfig` below the `HOME` (or, on Windows, `USERPROFILE`, which a UAC relaunch keeps
-  as the caller's) nor `git/config` below `XDG_CONFIG_HOME` that the run was given applies (a
-  `core.fsmonitor` command planted there ran from uv's git fetch before, measured; Git for Windows 2.55
-  reads `NUL` as empty, measured); the packed script inherits the variable, so a git it runs reads no
+  HTTP 401 from uv's git fetch). The credential helper git runs when a server asks for a password
+  reads variables of its own, so every variable whose name starts with `GCM_` (Git Credential
+  Manager, Git for Windows' default helper: `GCM_GPG_PATH` names the `gpg` it runs,
+  `GCM_PLAINTEXT_STORE_PATH` and `GCM_DPAPI_STORE_PATH` the directory it reads credentials from,
+  `GCM_CREDENTIAL_STORE` the store) and `PASSWORD_STORE_DIR` (where its `gpg` store reads
+  credentials) are dropped too. The drop goes by the prefix, so a variable a later git or Git
+  Credential Manager release adds is dropped too. git's global configuration file is not read
+  either: after the drop the runner sets `GIT_CONFIG_GLOBAL` to `/dev/null` (POSIX) or the `NUL`
+  device (Windows), with a line on stderr, so neither the `.gitconfig` below the `HOME` (or, on
+  Windows, `USERPROFILE`, which a UAC relaunch keeps as the caller's) nor `git/config` below
+  `XDG_CONFIG_HOME` that the run was given applies (a `core.fsmonitor` command planted there ran
+  from uv's git fetch before, measured; Git for Windows 2.55 reads `NUL` as empty, measured); the
+  packed script inherits the variable, so a git it runs reads no
   global configuration file either: no `user.name`/`user.email` and no `credential.helper` from the
   elevated account's own `.gitconfig` (an elevated 1.5.x run read them). A script that needs them
   passes them itself (`git -c user.name=... -c user.email=...`) or points `GIT_CONFIG_GLOBAL` at a

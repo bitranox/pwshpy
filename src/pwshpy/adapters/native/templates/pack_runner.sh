@@ -42,8 +42,9 @@
 # UV_FIND_LINKS, UV_INSECURE_HOST, UV_INSECURE_NO_ZIP_VALIDATION, UV_CACHE_DIR, UV_PYTHON_CACHE_DIR,
 # UV_ENV_FILE, HTTPS_PROXY, HTTP_PROXY, ALL_PROXY (and their lower-case forms), SSL_CERT_FILE,
 # SSL_CERT_DIR, SSL_CLIENT_CERT, UV_NATIVE_TLS, UV_SYSTEM_CERTS, UV_KEYRING_PROVIDER, every variable
-# whose name starts with GIT_ (git, which uv runs for a git source, reads them) and SSH_ASKPASS are
-# ignored, each with a line on stderr; git reads no global config file (GIT_CONFIG_GLOBAL=/dev/null,
+# whose name starts with GIT_ (git, which uv runs for a git source, reads them) or GCM_ (Git
+# Credential Manager, the credential helper git runs, reads them), SSH_ASKPASS and PASSWORD_STORE_DIR
+# are ignored, each with a line on stderr; git reads no global config file (GIT_CONFIG_GLOBAL=/dev/null,
 # so not the ~/.gitconfig or $XDG_CONFIG_HOME/git/config of the HOME it was given; git 2.32 or later);
 # the user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file (--no-env-file).
 # In a network that reaches the internet only through a proxy, a root run can download nothing: the
@@ -594,12 +595,20 @@ pwshpy_drop_interpreter_variables() {
     # GIT_SSH_COMMAND, GIT_PROXY_COMMAND, GIT_EXEC_PATH, GIT_ASKPASS or GIT_SSL_CAINFO name a command to
     # run or a CA to trust. Dropped by prefix, so a variable a later git adds is gone too, with
     # SSH_ASKPASS: git runs it for a password when GIT_ASKPASS and core.askPass are unset (it ran on an
-    # HTTP 401 from uv's git fetch, measured). Names are read from env, a line per variable; a line inside
-    # a multi-line value that only looks like one names nothing set, and is skipped.
+    # HTTP 401 from uv's git fetch, measured). The credential helper git runs on an authentication
+    # challenge reads its own: Git Credential Manager every GCM_ variable (its docs/environment.md;
+    # GCM_GPG_PATH names the gpg it runs, GCM_PLAINTEXT_STORE_PATH and GCM_DPAPI_STORE_PATH the
+    # directory it reads credentials from, GCM_CREDENTIAL_STORE which store), dropped by prefix too,
+    # and PASSWORD_STORE_DIR, the directory its gpg store reads (its docs/credstores.md). Names are read
+    # from env, a line per variable; a line inside a multi-line value that only looks like one names
+    # nothing set, and is skipped.
     _iv_env=$(env) || pwshpy_die "cannot list the environment to drop the caller's git variables" 70
-    for _iv in $(printf '%s\n' "$_iv_env" | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p') SSH_ASKPASS; do
+    _iv_names=$(printf '%s\n' "$_iv_env" | sed -n -e 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p' \
+        -e 's/^\(GCM_[A-Za-z0-9_]*\)=.*/\1/p')
+    for _iv in $_iv_names SSH_ASKPASS PASSWORD_STORE_DIR; do
         if eval "[ -n \"\${$_iv+set}\" ]"; then
-            printf '%s\n' "pwshpy: ignoring $_iv: as root uv runs git with none of the caller's git settings" >&2
+            _iv_text="as root uv runs git with none of the caller's git or credential-helper settings"
+            printf '%s\n' "pwshpy: ignoring $_iv: $_iv_text" >&2
             unset "$_iv"
         fi
     done

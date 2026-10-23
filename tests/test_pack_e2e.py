@@ -36,6 +36,7 @@ from elevation_doubles import (
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
     NETWORK_VARIABLES,
+    NOT_A_GCM_VARIABLE,
     NOT_A_GIT_VARIABLE,
     OTHER_UID,
     RUNNING_AS_ROOT,
@@ -2846,13 +2847,15 @@ def test_an_elevated_run_lets_no_git_variable_reach_uv(tmp_path: Path, elevated:
     any config key, a command-valued one included) and runs SSH_ASKPASS for a password. Elevated, every
     variable whose name starts with GIT_ (one no git reads included: the drop is by prefix) and
     SSH_ASKPASS is dropped with a line each, before uv python find already; one holding GIT_ elsewhere
-    in its name stays. The control passes each on unchanged and prints no line."""
+    in its name stays. [113]: the same for Git Credential Manager's GCM_ prefix and PASSWORD_STORE_DIR.
+    The control passes each on unchanged and prints no line."""
     runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
-    given = {**GIT_VARIABLES, NOT_A_GIT_VARIABLE: "kept"}
+    kept = {NOT_A_GIT_VARIABLE: "kept", NOT_A_GCM_VARIABLE: "kept"}
+    given = {**GIT_VARIABLES, **kept}
     result = _run_with_path(tmp_path, runner, "-PwshPyUv", str(uv), path_first=[], env=given, cwd=_clean_cwd(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     recorded = _recorded_variables(record)
-    assert recorded.get(NOT_A_GIT_VARIABLE) == "kept", recorded
+    assert {name: recorded.get(name) for name in kept} == kept, recorded
     for name, value in GIT_VARIABLES.items():
         dropped_line = _VARIABLE_DROPPED.format(name=name) in result.stderr
         if elevated == "$true":
@@ -2862,10 +2865,12 @@ def test_an_elevated_run_lets_no_git_variable_reach_uv(tmp_path: Path, elevated:
             assert recorded.get(name) == value and not dropped_line, (recorded, result.stderr)
 
 
-#: Prints the names of the variables the packed script got that git reads (GIT_ prefix, SSH_ASKPASS) or
-#: that hold GIT_ elsewhere, upper-cased: Python upper-cases os.environ's names on Windows.
+#: Prints the names of the variables the packed script got that git or its credential helper reads
+#: (GIT_ and GCM_ prefix, SSH_ASKPASS, PASSWORD_STORE_DIR) or that hold GIT_ or GCM_ elsewhere,
+#: upper-cased: Python upper-cases os.environ's names on Windows.
 _ENTRY_REPORTING_GIT = """import os
-names = sorted(name.upper() for name in os.environ if "GIT_" in name.upper() or name.upper() == "SSH_ASKPASS")
+exact = ("SSH_ASKPASS", "PASSWORD_STORE_DIR")
+names = sorted(n.upper() for n in os.environ if "GIT_" in n.upper() or "GCM_" in n.upper() or n.upper() in exact)
 print("git:" + ",".join(names))
 """
 
@@ -2876,21 +2881,24 @@ def test_an_elevated_run_lets_no_git_variable_reach_the_script(tmp_path: Path, e
     """[X23 G1], end to end with the real uv and on Windows too: elevated, no variable whose name
     starts with GIT_ and no SSH_ASKPASS reaches uv or the script it runs; on Windows the prefix matches
     in any case, as the environment's names do (Git_Mixed_Case is GIT_MIXED_CASE there). One holding
-    GIT_ elsewhere in its name reaches it in both arms; the control passes every one on."""
+    GIT_ elsewhere in its name reaches it in both arms; the control passes every one on. [113]: the
+    same for the GCM_ prefix (Gcm_Mixed_Case on Windows) and PASSWORD_STORE_DIR."""
     managed = _needs_managed_python()
     runner, head = _python_runner(tmp_path, elevated=elevated, source=_ENTRY_REPORTING_GIT)
-    given = {**GIT_VARIABLES, NOT_A_GIT_VARIABLE: "kept"}
+    kept = {NOT_A_GIT_VARIABLE.upper(), NOT_A_GCM_VARIABLE.upper()}
+    given = {**GIT_VARIABLES, **dict.fromkeys(kept, "kept")}
     if sys.platform == "win32":
         given["Git_Mixed_Case"] = "1"
+        given["Gcm_Mixed_Case"] = "1"
     environment = {**interpreter_probe_env(tmp_path, managed=managed), **given}
     result = _run_with_path(tmp_path, runner, path_first=head, env=environment, cwd=_clean_cwd(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     (line,) = [line for line in result.stdout.splitlines() if line.startswith("git:")]
     reached = set(filter(None, line[4:].strip().split(",")))
-    assert NOT_A_GIT_VARIABLE.upper() in reached, result.stdout
+    assert kept <= reached, result.stdout
     if elevated == "$true":
         # GIT_CONFIG_GLOBAL is the runner's own ([X24 G2]), set after the drop.
-        assert reached == {NOT_A_GIT_VARIABLE.upper(), "GIT_CONFIG_GLOBAL"}, (reached, result.stderr)
+        assert reached == {*kept, "GIT_CONFIG_GLOBAL"}, (reached, result.stderr)
     else:
         assert {name.upper() for name in given} <= reached, (reached, result.stderr)
         assert "GIT_CONFIG_GLOBAL" not in reached, (reached, result.stderr)

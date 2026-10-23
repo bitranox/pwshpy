@@ -1930,3 +1930,40 @@ def test_as_root_no_git_variable_reaches_uv(tmp_path: Path, as_root: bool) -> No
             assert name not in recorded and name not in found and dropped_line, (recorded, found, result.stderr)
         else:
             assert recorded.get(name) == value and not dropped_line, (recorded, result.stderr)
+
+
+def _git_source(tmp_path: Path) -> Path:
+    """A one-commit git repository holding a project uv can read from a git+file URL."""
+    repo = tmp_path / "git-source"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text('[project]\nname = "pwshpy-git-probe"\nversion = "0.1"\n', encoding="utf-8")
+    identity = ["-c", "user.name=t", "-c", "user.email=t@t"]
+    for argv in (["init", "-q", "."], ["add", "pyproject.toml"], [*identity, "commit", "-qm", "x"]):
+        subprocess.run(["git", *argv], cwd=repo, check=True, capture_output=True)  # noqa: S603, S607
+    return repo
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_a_git_config_command_from_the_environment_never_runs(tmp_path: Path, as_root: bool) -> None:
+    """[X23 G1], end to end with the real uv and git: a GIT_CONFIG_COUNT/KEY/VALUE triple naming a
+    core.fsmonitor command runs that command from uv's git fetch of a --with git source (the control,
+    not root, runs it). As root the triple is dropped: uv still fetches the source (its git database
+    appears in the cache), and the command never runs. Offline, so both arms then fail to build it."""
+    _needs_managed_python()
+    marker = tmp_path / "git-hook-ran.txt"
+    hook = tmp_path / "hook.sh"
+    hook.write_text(f'#!/bin/sh\necho ran >> "{marker}"\nexit 1\n', encoding="utf-8", newline="\n")
+    hook.chmod(0o755)
+    source = f"pwshpy-git-probe @ git+file://{_git_source(tmp_path)}"
+    runner, uv = _python_runner(tmp_path, as_root=as_root, with_packages=[source])
+    environment = {
+        **_trust_env(tmp_path, uv.parent),
+        "UV_OFFLINE": "1",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": str(hook),
+    }
+    result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert any(default_uv_cache_dir(tmp_path).glob("git-v*/db/*")), "uv fetched no git source: " + result.stderr
+    assert marker.exists() is not as_root, "git config command ran: " + str(marker.exists()) + result.stderr

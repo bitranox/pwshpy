@@ -640,23 +640,31 @@ _FIND_MANAGED = ("python", "find", "--system", "--no-project", "--python-prefere
 
 
 def _ask_uv(uv: str, *arguments: str) -> subprocess.CompletedProcess[str]:
-    """Run ``uv arguments`` with downloads off, no interpreter variables, outside any project."""
+    """Run ``uv arguments`` with downloads off, no interpreter variables, outside any project.
+
+    In a cache of its own, deleted on return: ``uv python find`` records what it learned about each
+    interpreter in uv's cache, and without UV_CACHE_DIR that is the default cache of whoever runs the
+    suite ([93]; root's own cache on a root run, [111]). Not :func:`session_uv_cache`, so no packed
+    run ever finds an interpreter this question already taught uv about.
+    """
     # UV_PYTHON_INSTALL_DIR stays: a run that isolates uv's managed Pythons (a CT, a CI job) names
     # them there, and the answer must be that directory, not the default the variable overrides.
     environment = {**os.environ, "UV_PYTHON_DOWNLOADS": "never"}
     for name in INTERPRETER_VARIABLES:
         if name != "UV_PYTHON_INSTALL_DIR":
             environment.pop(name, None)
-    return subprocess.run(  # noqa: S603 - fixed argv from a resolved uv
-        [uv, *arguments],
-        capture_output=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=60,
-        check=False,
-        env=environment,
-        cwd=Path(uv).parent,
-    )
+    with tempfile.TemporaryDirectory(prefix="pwshpy-uv-ask-", ignore_cleanup_errors=True) as cache:
+        environment["UV_CACHE_DIR"] = cache
+        return subprocess.run(  # noqa: S603 - fixed argv from a resolved uv
+            [uv, *arguments],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+            env=environment,
+            cwd=Path(uv).parent,
+        )
 
 
 @functools.lru_cache(maxsize=1)

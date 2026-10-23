@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from elevation_doubles import write_planted_venv
+from elevation_doubles import default_uv_cache_env, managed_python_dir, write_planted_venv
 
 #: Debian and Ubuntu ship a ``sitecustomize.py`` in the system Python's own library directory; it is
 #: found before one in a venv's site-packages, so a venv built from such a Python must not rely on one.
@@ -45,3 +45,22 @@ def test_a_venv_built_from_a_distro_python_still_records_its_start(tmp_path: Pat
     root = write_planted_venv(tmp_path / ".venv", marker, interpreter=interpreter)
     subprocess.run([str(_venv_python(root)), "-I", "-c", "pass"], check=True, timeout=60)  # noqa: S603
     assert marker.is_file(), f"a venv built from {interpreter} started without recording it"
+
+
+@pytest.mark.os_agnostic
+def test_asking_uv_for_the_managed_pythons_writes_no_default_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[111]: the question the helpers ask uv leaves the default cache of whoever runs the suite alone.
+
+    ``uv python find`` caches what it learned about every interpreter it ran, and with no UV_CACHE_DIR
+    that cache is the running account's own (root's real one on a root run of the suite)."""
+    monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+    for name, value in default_uv_cache_env(tmp_path).items():
+        monkeypatch.setenv(name, value)
+    # Unwrapped: the session's cached answer was asked before this test pointed the default cache here.
+    found = managed_python_dir.__wrapped__()
+    if found is None:
+        pytest.skip("no uv-managed Python on this host, so uv runs no interpreter to cache")
+    written = sorted(path for path in (tmp_path / "default-cache").rglob("*") if path.is_file())
+    assert written == [], written

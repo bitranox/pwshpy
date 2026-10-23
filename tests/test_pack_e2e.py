@@ -1194,15 +1194,22 @@ def _run_with_path(
     dropped unless ``env`` sets them, so uv's interpreter choice is the one the test arranged, and an
     env file a test plants can set PYTHONPATH: uv does not override a variable the environment already
     holds (measured: with PYTHONPATH in the suite's environment the env-file control under make test
-    never ran its plant). Python
-    downloads are off unless ``env`` says otherwise ([92]); a runner forced elevated runs on this
-    host's managed Python (read only), or the test skips when there is none, unless ``env`` names
-    the managed directory itself. ``real_probe`` keeps a plain runner's own elevation probe on an
-    elevated host (see :func:`_as_this_invoker`).
+    never ran its plant). Python downloads are off unless ``env`` says otherwise ([92]); a runner
+    forced elevated runs on this host's managed Python (read only), or the test skips when there is
+    none, unless ``env`` names the managed directory itself. ``real_probe`` keeps a plain runner's own
+    elevation probe on an elevated host (see :func:`_as_this_invoker`); there the probe says elevated
+    and the runner names uv's cache from its account ([X22 C1]), so a copy answers that lookup inside
+    ``tmp_path`` instead, never the real account's cache ([93], [111]).
     """
     assert _PWSH is not None
     if not real_probe:
         runner = _as_this_invoker(runner, arguments)
+    elif _host_elevated():
+        own_cache = runner.with_name(runner.stem + ".own-cache.ps1")
+        own_cache.write_text(
+            with_account_cache_home(runner.read_text(encoding="utf-8"), tmp_path, powershell=True), encoding="utf-8"
+        )
+        runner = own_cache
     child_env = {k: v for k, v in os.environ.items() if k not in (*INTERPRETER_VARIABLES, *LIBRARY_VARIABLES)}
     child_env.update({**_isolated_cache(tmp_path), "PYTHONIOENCODING": "utf-8", "UV_PYTHON_DOWNLOADS": "never"})
     if f"{_STAND_IN_PROBE}$true" in runner.read_text(encoding="utf-8") and "UV_PYTHON_INSTALL_DIR" not in (env or {}):

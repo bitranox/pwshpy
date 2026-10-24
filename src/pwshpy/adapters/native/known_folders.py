@@ -19,26 +19,36 @@ and ``PersistedFiles.Unix.cs``), so pwshpy answers what pwsh answers on the same
 Like .NET's default ``SpecialFolderOption.None``, a path that fails ``access(R_OK)`` is not
 returned: the resolver answers ``None`` where pwsh answers ``""``.
 
+- Windows (``Environment.Win32.cs``): ``SHGetKnownFolderPath(<FOLDERID>, 0, NULL)``, which
+  verifies the folder exists. When it reports the folder missing (``0x80070002`` /
+  ``0x80070003``), ApplicationData, LocalApplicationData and CommonApplicationData fall back to
+  ``APPDATA`` / ``LOCALAPPDATA`` / ``ProgramData`` like pwsh, but only to an existing directory;
+  every other member answers ``None``. Any other HRESULT raises :class:`NativeCallError` where
+  .NET would answer ``""`` silently.
+
 Contents:
     * :func:`posix_known_folder` - the Linux / macOS resolver.
+    * :func:`windows_known_folder` - the Windows resolver.
 """
 
 from __future__ import annotations
 
+import importlib
 import io
 import os
 import sys
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 from ...domain.enums import KnownFolder
-from ...domain.errors import PlatformUnsupportedError
+from ...domain.errors import NativeCallError, PlatformUnsupportedError
 
 if sys.platform != "win32":
     import pwd
 
-__all__ = ["posix_known_folder"]
+__all__ = ["posix_known_folder", "windows_known_folder"]
 
 _COMMON_APPLICATION_DATA = "/usr/share"
 _USER_DIRS_FILE = "user-dirs.dirs"
@@ -57,6 +67,26 @@ _MACOS_USER_DIRS: dict[KnownFolder, str] = {
     KnownFolder.ROAMING_APP_DATA: "Library/Application Support",
     KnownFolder.LOCAL_APP_DATA: "Library/Application Support",
 }
+
+#: Windows: each member's FOLDERID (KnownFolders.h; pywin32's ``shell.FOLDERID_<name>``).
+_FOLDER_IDS: dict[KnownFolder, str] = {
+    KnownFolder.DESKTOP: "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
+    KnownFolder.DOCUMENTS: "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}",
+    KnownFolder.LOCAL_APP_DATA: "{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}",
+    KnownFolder.ROAMING_APP_DATA: "{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}",
+    KnownFolder.PROGRAM_DATA: "{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}",
+    KnownFolder.PROGRAMS: "{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}",
+}
+
+#: Windows: the variable .NET answers when the shell does not find the folder.
+_ENV_FALLBACKS: dict[KnownFolder, str] = {
+    KnownFolder.LOCAL_APP_DATA: "LOCALAPPDATA",
+    KnownFolder.ROAMING_APP_DATA: "APPDATA",
+    KnownFolder.PROGRAM_DATA: "ProgramData",
+}
+
+#: ERROR_FILE_NOT_FOUND (the folder is missing) and ERROR_PATH_NOT_FOUND (its parent is too).
+_NOT_FOUND = frozenset({0x80070002, 0x80070003})
 
 #: .NET ``char.IsWhiteSpace`` for Latin-1; above it only the Unicode separator categories count.
 #: Python's ``str.isspace`` also accepts U+001C..U+001F, which .NET does not skip.
@@ -80,6 +110,10 @@ def posix_known_folder(
     platform: str | None = None,
 ) -> Path | None:
     """Return the folder pwsh's ``[Environment]::GetFolderPath`` names on Linux or macOS.
+
+    POSIX-only by contract: the caller dispatches by OS and sends Windows to
+    :func:`windows_known_folder`. Run on Windows it would build POSIX paths that mean nothing
+    there.
 
     Args:
         folder: The known folder to resolve.
@@ -323,3 +357,103 @@ def _readable(path: str) -> bool:
         return os.access(path, os.R_OK)
     except ValueError:  # an embedded NUL from user-dirs.dirs: no such path can exist
         return False
+
+
+def windows_known_folder(
+    folder: KnownFolder,
+    *,
+    environ: Mapping[str, str] | None = None,
+    load: Callable[[str], Any] | None = None,
+) -> Path | None:
+    """Return the folder pwsh's ``[Environment]::GetFolderPath`` names on Windows.
+
+    Asks ``SHGetKnownFolderPath(<FOLDERID>, 0, NULL)`` like .NET's ``Environment.Win32.cs``;
+    flags 0 makes the shell verify the folder exists. The call runs on the caller's thread with
+    no COM initialisation of its own: measured on Windows, it answers from a thread that has
+    no apartment at all, and pwshpy never initialises or uninitialises COM on a caller's thread.
+
+    A "not found" HRESULT (``0x80070002`` / ``0x80070003``) means the folder is missing. For the
+    three application-data members pwsh then answers the environment variable .NET falls back to
+    (``LOCALAPPDATA`` / ``APPDATA`` / ``ProgramData``); this resolver does the same only when the
+    variable is set and names an existing directory, and answers ``None`` otherwise. Desktop,
+    MyDocuments and Programs have no fallback: ``None``.
+
+    Args:
+        folder: The known folder to resolve.
+        environ: The environment to read the fallback variable from (names compared without
+            regard to case, as Windows does); ``None`` reads :data:`os.environ` at call time.
+        load: Module loader for ``win32com.shell.shell``; ``None`` imports the real pywin32
+            module (a test passes a double).
+
+    Returns:
+        The folder path, or ``None`` when the folder is missing (pwsh answers ``""``).
+
+    Raises:
+        NativeCallError: ``SHGetKnownFolderPath`` failed with any other HRESULT (an access
+            denied, ``0x80004005`` for a folder with no file-system path); the message carries
+            the unsigned HRESULT and the member name.
+        PlatformUnsupportedError: pywin32 is not installed (not Windows).
+
+    Example:
+        >>> sys.platform != "win32" or windows_known_folder(KnownFolder.PROGRAM_DATA) is not None
+        True
+    """
+    # Resolved per call, not as a default: a default is bound when the def runs.
+    loader = load if load is not None else _load
+    shell = loader("win32com.shell.shell")
+    try:
+        found: str = shell.SHGetKnownFolderPath(_FOLDER_IDS[folder], 0, None)
+    except Exception as exc:  # pywintypes.com_error; anything else is not a shell answer
+        if type(exc).__name__ != "com_error":
+            raise
+        code = _hresult(exc)
+        if code not in _NOT_FOUND:
+            shown = "without an HRESULT" if code is None else f"with HRESULT 0x{code:08X}"
+            raise NativeCallError(
+                f"SHGetKnownFolderPath for KnownFolder.{folder.name} ({folder.value}) failed {shown}"
+            ) from exc
+        return _env_fallback(folder, os.environ if environ is None else environ)
+    return Path(found)
+
+
+def _env_fallback(folder: KnownFolder, env: Mapping[str, str]) -> Path | None:
+    """Return the existing directory .NET's fallback variable names for ``folder``, else ``None``."""
+    name = _ENV_FALLBACKS.get(folder)
+    if name is None:
+        return None
+    value = _env_lookup(env, name)
+    if not value:  # Path("") is ".", the current directory: an empty value names nothing
+        return None
+    path = Path(value)
+    try:
+        return path if path.is_dir() else None
+    except OSError:  # before Python 3.14 is_dir() re-raises EACCES: unreadable counts as missing
+        return None
+
+
+def _env_lookup(env: Mapping[str, str], name: str) -> str | None:
+    """Return ``env[name]`` with the name compared without regard to case, as Windows does.
+
+    ``os.environ`` on Windows already folds case; a plain mapping a caller passes does not.
+    """
+    value = env.get(name)
+    if value is not None:
+        return value
+    wanted = name.upper()
+    return next((v for k, v in env.items() if k.upper() == wanted), None)
+
+
+def _hresult(exc: BaseException) -> int | None:
+    """Return the unsigned HRESULT a ``com_error`` carries (pywin32 reports it signed)."""
+    hresult = getattr(exc, "hresult", None)
+    return hresult & 0xFFFFFFFF if isinstance(hresult, int) else None
+
+
+def _load(module: str) -> Any:
+    """Import a pywin32 module lazily, so importing this module stays safe on every OS."""
+    try:
+        return importlib.import_module(module)
+    except ImportError as exc:  # pragma: no cover - only on a portable (non-Windows) install
+        raise PlatformUnsupportedError(
+            f"the Windows known folders need pywin32 (Windows only); {module} is unavailable."
+        ) from exc

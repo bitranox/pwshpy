@@ -327,13 +327,23 @@ def test_program_data_is_usr_share_whatever_the_environment(tmp_path: Path) -> N
 @pytest.mark.os_posix
 @_POSIX_ONLY
 @pytest.mark.parametrize("home_entry", [{"HOME": ""}, {}], ids=["empty-home", "unset-home"])
-def test_empty_or_unset_home_uses_the_effective_uids_passwd_entry(tmp_path: Path, home_entry: dict[str, str]) -> None:
-    """``"$HOME/."`` names the passwd home itself, so no subdirectory of it has to exist."""
+def test_empty_or_unset_home_uses_the_effective_uids_passwd_entry(
+    tmp_path: Path, home_entry: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``"$HOME/."`` names the passwd home itself, so no subdirectory of it has to exist.
+
+    The PROCESS ``HOME`` points at a readable decoy: on a normal login it equals the passwd
+    home, so a resolver falling back to it instead of the passwd entry would otherwise pass.
+    """
     if sys.platform == "win32":  # narrows for pyright; the skip marks keep Windows out at run time
         pytest.skip("POSIX only")
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    monkeypatch.setenv("HOME", str(decoy))
     config_home = tmp_path / "cfg"
     _write_user_dirs(config_home, b'XDG_DESKTOP_DIR="$HOME/."\n')
     passwd_home = pwd.getpwuid(os.geteuid()).pw_dir
+    assert passwd_home != str(decoy)
 
     result = _linux(KnownFolder.DESKTOP, {**home_entry, "XDG_CONFIG_HOME": str(config_home)})
 

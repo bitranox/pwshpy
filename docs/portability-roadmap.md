@@ -234,6 +234,11 @@ box (like the Windows mutating tests need a throwaway Windows VM).
   not worth faking.
 - **Hotfixes** (`get_hotfix`) - `dpkg -l` / `rpm -qa` is "installed packages", not "OS patches". Weak
   analog; if wanted, expose a separate `get_package` rather than pretend it is Get-Hotfix.
+- **Shortcuts** (`get_shortcut`, `new_shortcut`) - a `.lnk` is a Windows shell file format. A
+  freedesktop `.desktop` launcher is a different format with different fields (no icon index, an
+  `Exec` line with its own quoting rules), so writing one under the same verb would be a different
+  feature behind a familiar name. Both verbs raise `PlatformUnsupportedError` off Windows. (Known
+  folders are portable: `get_known_folder` follows .NET's own Linux and macOS rules.)
 
 ## Testing model
 

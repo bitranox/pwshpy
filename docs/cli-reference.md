@@ -129,8 +129,27 @@ configuration the caller may not query is still listed, with `start_type` null. 
 reports as not-found or masked (and stopped), aliases, templates and stale unit files are no services
 in either mode, and a single field that cannot be read keeps its default in both.
 
+**Known folders** - `pwshpy get_known_folder FOLDER [--json]` prints one well-known folder, the path
+pwsh's `[Environment]::GetFolderPath` prints on the same machine: the Windows shell's known folder
+(`SHGetKnownFolderPath`, so a redirected Desktop is found), the XDG user directories on Linux, the
+home's `Desktop`, `Documents` and `Library/Application Support` on macOS. `FOLDER` is the .NET
+`SpecialFolder` name, in any case: `Desktop`, `MyDocuments`, `LocalApplicationData`,
+`ApplicationData`, `CommonApplicationData` or `Programs`. It prints the bare path (with `--json` a
+JSON string). A folder that is missing or not readable, where pwsh prints an empty string, exits 1
+with a line on stderr naming it; `Programs` on Linux or macOS, which .NET maps to no folder, exits 1
+with `PlatformUnsupportedError`. The per-OS rules are in
+[Backends & Platforms](backends-and-platforms.md#known-folders).
+
 **Windows only** - no honest Linux analog: `pwshpy get_item_property KEY` / `pwshpy registry_keys KEY`,
-`pwshpy get_cim_instance CLASS`, `pwshpy get_hotfix`, `pwshpy get_windows_update`.
+`pwshpy get_cim_instance CLASS`, `pwshpy get_hotfix`, `pwshpy get_windows_update`,
+`pwshpy get_shortcut PATH`.
+
+`pwshpy get_shortcut PATH` shows a shortcut (`.lnk`) as Windows reads it: `target` with environment
+references expanded (`%SystemRoot%\notepad.exe` reads back as `C:\Windows\notepad.exe`),
+`arguments` as the one command-line string the shortcut stores, and `working_directory`, `icon`,
+`icon_index` and `description` raw; an unset field is empty (`icon_index` 0). A relative `PATH`
+resolves against the working directory. A missing file, an empty file or one that is no shortcut
+exits 1 with `NativeCallError`.
 
 `pwshpy get_windows_update` searches Windows Update (read-only: never downloads or installs).
 `--criteria` takes a WUA search string (default `IsInstalled=0 and Type='Software'`, the software
@@ -181,8 +200,30 @@ desktop keyring; the local-account verbs drive shadow-utils (`useradd` / `usermo
 account API), and a POSIX group has no description so `new_local_group`'s is ignored.
 
 **Windows only** (no honest Linux analog): the registry verbs (`set_item_property`,
-`remove_item_property`, `new_registry_key`, `remove_registry_key`) and `clear_event_log`. See
-[COMMANDS.md](../COMMANDS.md) for the full cmdlet-by-cmdlet table.
+`remove_item_property`, `new_registry_key`, `remove_registry_key`), `clear_event_log` and
+`new_shortcut`. See [COMMANDS.md](../COMMANDS.md) for the full cmdlet-by-cmdlet table.
+
+`pwshpy new_shortcut PATH --target TARGET [--working-directory D] [--icon I] [--icon-index N]
+[--description T] [-f] [-- ARGS...]` writes a shortcut (`.lnk`). The target's arguments go after
+`--`, one word per argument, as with `exec`; the shortcut stores them as one command line quoted
+the way `subprocess.list2cmdline` quotes it:
+
+```bash
+pwshpy new_shortcut 'C:\Users\alice\Desktop\Tool.lnk' --target 'C:\Tools\uv.exe' \
+    --description 'Run the tool' -- tool run --exclude-newer "7 days" mytool
+```
+
+`TARGET` must be an absolute Windows path or start with an environment reference
+(`%SystemRoot%\notepad.exe`). A value Windows would silently cut, wrap or rename is refused before
+anything is written (exit 1, `ConfigurationError`): a target or `.lnk` path over 259 characters (a
+relative `PATH` is made absolute first), arguments joining to over 32767, a description, working
+directory or icon over 260, NUL, CR or LF in any value, or a `PATH` not ending in `.lnk`. A target
+whose environment reference expands past 259 characters passes those checks but is refused by
+Windows (exit 1, `NativeCallError`, HRESULT 0x80004005), and no file is written. An existing `PATH` exits 1 with
+`NativeCallError` unless `--force` / `-f` is given, and a missing directory is not created. On
+success it prints `created shortcut PATH -> TARGET` (the target as Windows stored it, expanded), or
+with `--json` / `--jsonl` the stored record, the same one `get_shortcut` shows. Off Windows it exits
+1 with `PlatformUnsupportedError`.
 
 ### `register_scheduled_task`: principal, run level and triggers
 

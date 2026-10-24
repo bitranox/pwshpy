@@ -257,6 +257,42 @@ token.
 
 Always UTF-8, no BOM, LF by default - the same bytes on every OS (no `Out-File` UTF-16/BOM surprise).
 
+## Known folders & shortcuts  *(known folders: portable; shortcuts: Windows)*
+
+| PowerShell                                                        | pwshpy - Python (API)                                                                        | pwshpy - CLI                                   |
+|-------------------------------------------------------------------|----------------------------------------------------------------------------------------------|------------------------------------------------|
+| `[Environment]::GetFolderPath('Desktop')`                         | `ps.get_known_folder(KnownFolder.DESKTOP)`  -> `Path` or `None`                              | `pwshpy get_known_folder Desktop [--json]`     |
+| `$sc = $ws.CreateShortcut(P)`, set `TargetPath` ..., `$sc.Save()` | `ps.new_shortcut("P", target="T", arguments=["a", "b"], force=False)`  *(Windows, mutating)* | `pwshpy new_shortcut P --target T [-f] -- a b` |
+| `$ws.CreateShortcut(P)`  (read its fields)                        | `ps.get_shortcut("P")`  -> `ShortcutInfo`  *(Windows)*                                       | `pwshpy get_shortcut P [--json \| --jsonl]`    |
+
+`$ws` is `New-Object -ComObject WScript.Shell`.
+
+`get_known_folder` answers what pwsh's `[Environment]::GetFolderPath` answers on the same machine.
+The folder is a `KnownFolder` member or its value, the .NET `SpecialFolder` name: `Desktop`
+(`DESKTOP`), `MyDocuments` (`DOCUMENTS`), `LocalApplicationData` (`LOCAL_APP_DATA`),
+`ApplicationData` (`ROAMING_APP_DATA`), `CommonApplicationData` (`PROGRAM_DATA`) and `Programs`
+(`PROGRAMS`). The library matches the value exactly, case included; the CLI takes it in any case.
+On Windows the answer comes from the shell (`SHGetKnownFolderPath`), so a Desktop or Documents
+folder redirected elsewhere (OneDrive, folder redirection) is returned where a `~/Desktop` guess
+would miss it; Linux follows the XDG user directories and macOS the home's `Desktop`, `Documents`
+and `Library/Application Support`. A folder that is missing or not readable is `None` (pwsh: `""`;
+the CLI exits 1 with a line on stderr), and `Programs` off Windows raises `PlatformUnsupportedError`.
+The full per-OS mapping is in [Backends & Platforms](docs/backends-and-platforms.md#known-folders).
+
+`new_shortcut` writes the `.lnk` through `IShellLinkW`, so non-ASCII text survives in every field
+and in the file name. `target` must be an absolute Windows path or start with an environment
+reference (`%SystemRoot%\notepad.exe`); Windows reads it back expanded. `arguments` is an argv list,
+stored as the one command line `subprocess.list2cmdline` quotes; a bare string is refused, never
+split (the CLI takes the argv after `--`). A value Windows would silently cut, wrap or rename is
+refused with `ConfigurationError` before anything is written: a target or `.lnk` path over 259
+characters (the path made absolute first), arguments joining to over 32767, a description, working
+directory or icon over 260, or NUL/CR/LF in any field. A target whose environment reference
+*expands* past 259 characters passes those checks, but Windows refuses it with `NativeCallError`
+(0x80004005) and writes nothing. An existing file is refused with `NativeCallError` unless
+`force=True` (`-f`), and no directory is created. The call returns what Windows stored, as
+`get_shortcut` reads it; the CLI prints one `created shortcut PATH -> TARGET` line, or the record
+with `--json` / `--jsonl`. Off Windows both shortcut verbs raise `PlatformUnsupportedError`.
+
 ## Running an external program  *(portable)*
 
 | PowerShell                                       | pwshpy - Python (API)                                              | pwshpy - CLI                           |

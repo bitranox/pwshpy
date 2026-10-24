@@ -8,6 +8,27 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Added
 
+- `ps.get_known_folder(folder)` / `pwshpy get_known_folder FOLDER [--json]` (portable): a
+  well-known folder (`KnownFolder`: `DESKTOP`, `DOCUMENTS`, `LOCAL_APP_DATA`, `ROAMING_APP_DATA`,
+  `PROGRAM_DATA`, `PROGRAMS`; the values are the .NET `SpecialFolder` names, `Desktop`,
+  `MyDocuments`, ...) as the `Path` pwsh's `[Environment]::GetFolderPath` returns on the same OS:
+  `SHGetKnownFolderPath` on Windows (a redirected Desktop included), the XDG user directories on
+  Linux, the home's `Desktop` / `Documents` / `Library/Application Support` on macOS. A folder that
+  is missing or not readable is `None` (CLI: exit 1 with a stderr line) where pwsh returns `""`. On
+  Windows the three application-data folders fall back to `LOCALAPPDATA` / `APPDATA` /
+  `ProgramData` like pwsh, but only to an existing directory, and any shell failure other than "not
+  found" raises `NativeCallError`. `PROGRAMS` on Linux or macOS raises `PlatformUnsupportedError`.
+- `ps.new_shortcut(path, *, target, arguments=(), working_directory=None, icon=None, icon_index=0,
+  description=None, force=False)` / `pwshpy new_shortcut PATH --target T [-f] [-- ARGS...]` and
+  `ps.get_shortcut(path)` / `pwshpy get_shortcut PATH` (Windows): write and read a shortcut
+  (`.lnk`) through `IShellLinkW`, so non-ASCII text survives. Both return a `ShortcutInfo` record
+  (what Windows stored; `target` with environment references expanded). `target` must be an
+  absolute Windows path or start with `%NAME%\`; `arguments` is an argv sequence stored as the
+  command line `subprocess.list2cmdline` builds (a bare `str` is refused). Values Windows would
+  silently cut or rename raise `ConfigurationError` before anything is written; an existing file
+  needs `force=True`. A target whose environment reference expands past 259 characters is refused
+  by Windows with `NativeCallError` (0x80004005) and nothing is written. Off Windows both raise
+  `PlatformUnsupportedError`.
 - `get_windows_update` records carry `category_details`: one `UpdateCategory` (`category_id`, the
   lower-case GUID; `type`, such as `UpdateClassification` or `Product`; `name`) per category, so a
   caller can select Security or Definition updates without matching a localized name. The

@@ -145,8 +145,8 @@ ps.pack_script("setup.py")  # -> setup.ps1: one file that installs uv, unpacks, 
 Services, the event log, scheduled tasks, local accounts, ACLs, the credential vault, and the
 elevation *relaunch* all run natively on both Windows and Linux, verified on a real box on each. The
 only subsystems that stay Windows-only are the ones with no honest Linux analog - the registry,
-CIM/WMI, hotfixes and the Windows Update search (the [portability roadmap](docs/portability-roadmap.md)
-has the reasoning). The ambition is
+CIM/WMI, hotfixes, the Windows Update search and shortcuts (`.lnk`) (the
+[portability roadmap](docs/portability-roadmap.md) has the reasoning). The ambition is
 deliberately dull and rather large: one setup script, every machine.
 
 ## The same task, with and without the landmines
@@ -266,6 +266,13 @@ pwshpy get_current_identity --jsonl
 
 # "not listed" must mean "does not exist": fail on a task it cannot read instead of skipping it
 pwshpy get_scheduled_task --strict --jsonl
+
+# [Environment]::GetFolderPath on any OS: the real Desktop, even when it was redirected to OneDrive
+pwshpy get_known_folder Desktop
+
+# a desktop shortcut whose arguments keep their quoting (Windows); the argv goes after --
+pwshpy new_shortcut 'C:\Users\alice\Desktop\Tool.lnk' --target 'C:\Tools\uv.exe' \
+    -- tool run --exclude-newer "7 days" mytool
 ```
 
 The same in Python:
@@ -273,7 +280,7 @@ The same in Python:
 ```python
 from datetime import datetime, timedelta, timezone
 
-from pwshpy import BootTrigger, DailyTrigger, OperationTimeoutError, TaskPrincipal, ps
+from pwshpy import BootTrigger, DailyTrigger, KnownFolder, OperationTimeoutError, TaskPrincipal, ps
 
 images = ps.get_windows_image("install.wim").to_list()  # typed WindowsImage records
 ps.stop_service("wuauserv", wait=False)  # returns the state right after the stop
@@ -287,6 +294,9 @@ ps.register_scheduled_task(
     principal=TaskPrincipal.system(),  # SYSTEM, elevated
     triggers=[DailyTrigger(at=datetime(2026, 11, 1, 3, tzinfo=timezone(timedelta(hours=1)))), BootTrigger()],
 )
+desktop = ps.get_known_folder(KnownFolder.DESKTOP)  # a Path, or None when there is no such folder
+if desktop is not None:  # Windows: the arguments are an argv list, stored with their quoting intact
+    ps.new_shortcut(desktop / "Tool.lnk", target="C:\\Tools\\uv.exe", arguments=["tool", "run", "mytool"])
 ```
 
 A script can branch on the exit code without parsing stderr: **77** means an elevation was declined
@@ -314,7 +324,7 @@ green across Linux / macOS / Windows and CPython 3.10 through 3.15.
 Read it like a short book:
 
 1. **[Quick Start](docs/quickstart.md)** - install and the first five commands.
-2. **[Library & Pipeline](docs/library-usage.md)** - typed records, the lazy pipeline, the memory model, scheduled tasks, Windows images, deadlines and timeouts, the error types.
+2. **[Library & Pipeline](docs/library-usage.md)** - typed records, the lazy pipeline, the memory model, scheduled tasks, Windows images, known folders and desktop shortcuts, deadlines and timeouts, the error types.
 3. **[Power Tools](docs/power-tools.md)** - self-elevation, who-am-I, `exec` (timeouts, waiting for a whole process tree), the Windows Update search, predictable file I/O, credentials, script packing, .NET binding.
 4. **[CLI Reference](docs/cli-reference.md)** - the full command surface, the exit codes and the configuration commands.
 5. **[Backends & Platforms](docs/backends-and-platforms.md)** - native vs .NET, OS support, Python baseline, status.

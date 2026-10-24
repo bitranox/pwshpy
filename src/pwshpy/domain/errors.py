@@ -12,7 +12,8 @@ Contents:
     * :class:`OperationTimeoutError` - a native call outlived its timeout and its worker was killed.
     * :class:`PowerShellError` - a .NET hosted-PowerShell call failed.
     * :class:`FeatureUnavailableError` - .NET invoked without the ``[full]`` extra.
-    * :class:`PlatformUnsupportedError` - a Windows-only adapter used off Windows.
+    * :class:`PlatformUnsupportedError` - a Windows-only adapter used off Windows, or an input
+      the running OS has no analog for.
     * :class:`ElevationRequiredError` - an operation needs administrative rights it lacks.
     * :class:`ConfigurationError` - missing, invalid, or incomplete configuration.
     * :class:`PackError` - a script could not be packed into a self-extracting runner.
@@ -157,9 +158,10 @@ class FeatureUnavailableError(PwshPyError):
 class PlatformUnsupportedError(PwshPyError):
     """The running OS has no honest analog for the call or one of its inputs.
 
-    A Windows-only subsystem (registry, CIM/WMI, Windows Update, hotfixes) called off
-    Windows, or an input the running OS cannot honour, such as a decimal uid as a
-    scheduled-task principal on Windows, or a SID or a logon trigger on Linux.
+    A Windows-only subsystem (registry, CIM/WMI, Windows Update, hotfixes, shortcuts)
+    called off Windows, or an input the running OS cannot honour, such as a decimal uid
+    as a scheduled-task principal on Windows, a SID or a logon trigger on Linux, or
+    ``KnownFolder.PROGRAMS`` on Linux or macOS, where .NET maps it to no folder.
 
     Example:
         >>> issubclass(PlatformUnsupportedError, PwshPyError)
@@ -187,8 +189,11 @@ class ConfigurationError(PwshPyError):
     Raised when required configuration values are absent, malformed, or
     logically inconsistent, and for scheduled-task inputs that contradict each
     other (a logon type that does not fit the principal, a group SID as the
-    principal, a line break in the program text). Typically caught at CLI
-    boundaries to provide user-friendly error messages.
+    principal, a line break in the program text), and for shortcut values a
+    ``.lnk`` cannot store exactly (a relative target, a field over its length
+    limit, NUL/CR/LF in a field, a path not ending in ``.lnk``), refused before
+    anything is written. Typically caught at CLI boundaries to provide
+    user-friendly error messages.
 
     Example:
         >>> str(ConfigurationError("No output format configured"))

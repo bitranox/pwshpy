@@ -1626,7 +1626,11 @@ class Ps:
             ConfigurationError: A value breaks the shortcut rules (a relative target, a field too
                 long, NUL/CR/LF in a field, a path not ending in ``.lnk``); nothing is written.
             NativeCallError: ``path`` exists and ``force`` is False, or the shell failed (e.g. a
-                missing directory); the message names the HRESULT.
+                missing directory); the message names the HRESULT.  This includes a ``target``
+                whose environment reference expands past 259 characters: its raw text passes
+                the checks above, but Windows refuses it at ``SetPath`` with E_FAIL
+                (0x80004005) and no file is written (measured with LongPathsEnabled=0).  No
+                portable pre-check exists, because the expansion depends on the host.
 
         Example:
             A target that is not an absolute path is refused before anything is written (off

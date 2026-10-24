@@ -104,6 +104,10 @@ def _lnk_path(value: object) -> str:
 def _target(value: object) -> str:
     r"""Return ``value`` when it is an absolute Windows path or starts with ``%NAME%\``.
 
+    Only the raw text is bounded here: what an environment reference expands to depends on the
+    host, so the 259-character limit on the expansion is left to Windows (see
+    :attr:`ShortcutSpec.target`).
+
     Raises:
         ConfigurationError: Not a str, NUL/CR/LF, relative, or longer than 259 characters.
 
@@ -199,7 +203,11 @@ class ShortcutSpec:
             (any case), at most 259 characters.  A relative path is refused, not resolved.
         target: What the shortcut runs or opens: an absolute Windows path, or one starting with
             an environment reference and a backslash (``%SystemRoot%\notepad.exe``); at most
-            259 characters.
+            259 characters.  The expansion of such a reference must fit in 259 characters too:
+            a longer one is refused by Windows when the shortcut is written (``SetPath`` fails
+            with E_FAIL 0x80004005, raised as ``NativeCallError``; no file is written; measured
+            with LongPathsEnabled=0).  The spec cannot check that, because the expansion depends
+            on the host's environment.
         arguments: The argv passed to ``target``, stored as a tuple.  Any sequence of str is
             accepted; a bare str is refused, never split.  Joined with
             :func:`subprocess.list2cmdline` (see :attr:`joined_arguments`) it is at most 32767

@@ -37,7 +37,7 @@ Records include `ProcessInfo`, `NetConnection`, `NetAdapter`, `NetIpAddress`, `D
 `CurrentIdentity`, `WindowsImage`, `ProcessResult` (from `ps.exec`), the portable admin set
 (`ServiceInfo`, `EventLogEntry`, `ScheduledTaskInfo`, `LocalUser`, `LocalGroup`, `AclEntry`,
 `Credential`) and the Windows set (`RegistryValue`, `RegistryKey`, `CimInstance`, `Hotfix`,
-`WindowsUpdate`, ...). They serialize to JSON directly (`record.to_dict()`), and enum fields carry
+`WindowsUpdate`, `ShortcutInfo`, ...). They serialize to JSON directly (`record.to_dict()`), and enum fields carry
 canonical values regardless of the host locale.
 
 Compare an enum field with its member, never with a display string. All are exported from `pwshpy`:
@@ -45,7 +45,8 @@ Compare an enum field with its member, never with a display string. All are expo
 `TransportProtocol`, `AddressFamily`, `ServiceState` (`Running`), `ServiceStartType`, `ServiceKind`,
 `EventLevel` (`Error`), `TaskState`, `TaskRunLevel`, `TaskLogonType`, `RegistryHive`,
 `RegistryValueType`, `AceType`, `WellKnownSid` (the SID strings, `S-1-5-18`), `IntegrityLevel`,
-`ImageArchitecture` and `RunnerFormat`. In JSON an enum field is its value, so a `jq` filter on
+`ImageArchitecture`, `KnownFolder` (the .NET `SpecialFolder` names, `MyDocuments`) and
+`RunnerFormat`. In JSON an enum field is its value, so a `jq` filter on
 `--jsonl` output compares `.status == "Running"` for a service and `.status == "running"` for a
 process.
 
@@ -322,6 +323,63 @@ unreadable file, a file that is not a WIM, a compressed XML resource (resource f
 rather than guessed at) and an `index` the file does not hold all raise `NativeCallError` then. An
 `index` below 1 raises `ValueError` at the call.
 
+## Known folders and desktop shortcuts
+
+`ps.get_known_folder(folder)` returns a well-known folder as a `Path`, the one pwsh's
+`[Environment]::GetFolderPath` names on the same machine, on every OS. On Windows it asks the shell,
+so a Desktop redirected to OneDrive is found where `Path.home() / "Desktop"` would miss it. A folder
+that is missing or not readable is `None`, never a guessed path.
+`folder` is a `KnownFolder` member or its exact value: `DESKTOP` (`"Desktop"`), `DOCUMENTS`
+(`"MyDocuments"`), `LOCAL_APP_DATA`, `ROAMING_APP_DATA`, `PROGRAM_DATA` and `PROGRAMS`, which exists
+on Windows only (`PlatformUnsupportedError` elsewhere). The per-OS rules are in
+[Backends & Platforms](backends-and-platforms.md#known-folders).
+
+`ps.new_shortcut(path, *, target, ...)` writes a Windows shortcut (`.lnk`) and returns it as Windows
+stored it; `ps.get_shortcut(path)` reads one. Together they let a tool install a desktop shortcut to
+itself, for example one that starts it through `uv`:
+
+```python
+import shutil
+
+from pwshpy import KnownFolder, ps
+
+uv = shutil.which("uv")  # an absolute path: a bare "uv" target is refused
+desktop = ps.get_known_folder(KnownFolder.DESKTOP)
+if uv is None or desktop is None:
+    raise SystemExit("no uv on PATH, or this account has no Desktop folder")
+
+info = ps.new_shortcut(
+    desktop / "My Tool.lnk",
+    target=uv,
+    arguments=["tool", "run", "--exclude-newer", "7 days", "mytool"],  # an argv list, never one string
+    working_directory=str(desktop),
+    description="Start My Tool",
+    force=True,  # replace a shortcut an earlier install left behind
+)
+print(info.arguments)  # tool run --exclude-newer "7 days" mytool
+```
+
+The returned `ShortcutInfo` carries `path`, `target`, `arguments`, `working_directory`, `icon`,
+`icon_index` and `description`. `arguments` is the one command-line string Windows stores, joined
+with `subprocess.list2cmdline`, so the target's C runtime splits it back into the same argv; `target`
+reads back with environment references expanded (`%SystemRoot%\notepad.exe` as
+`C:\Windows\notepad.exe`), and an unset field is `""`. The write goes through `IShellLinkW`, so
+non-ASCII text survives in every field and in the file name. A relative `path` resolves against the
+working directory; no directory is created.
+
+What each refusal raises, all before anything is written unless noted:
+
+- `PlatformUnsupportedError`: not Windows.
+- `ConfigurationError`: `target` is not an absolute Windows path and does not start with an
+  environment reference (`%SystemRoot%\notepad.exe`); `arguments` is a bare `str`; a value Windows
+  would silently cut, wrap or rename (`target` or the absolute `path` over 259 characters, the joined
+  arguments over 32767, `description`, `working_directory` or `icon` over 260); NUL, CR or LF in any
+  value; or a `path` not ending in `.lnk`.
+- `NativeCallError`: `path` exists and `force` is False, or the shell failed (a missing directory, a
+  target whose environment reference expands past 259 characters, which Windows refuses with E_FAIL
+  0x80004005 while writing nothing; the expansion depends on the host, so pwshpy cannot check it
+  first). `get_shortcut` raises it for a missing file, an empty file or one that is no shortcut.
+
 ## Deadlines and long waits
 
 Calls that can wait take a `timeout` in seconds. What running out of it raises depends on the call:
@@ -413,9 +471,10 @@ Every failure across both backends raises a subclass of `PwshPyError`, all expor
 - `ElevationRequiredError` - `ps.require_elevation()` in a process that is not elevated.
 - `PowerShellError` - a .NET error record.
 - `FeatureUnavailableError` - a .NET call without the `[full]` extra.
-- `PlatformUnsupportedError` - a Windows-only call off Windows, or a scheduled-task input the running
-  OS has no analog for.
-- `ConfigurationError` - invalid configuration, or scheduled-task inputs that contradict each other.
+- `PlatformUnsupportedError` - a Windows-only call off Windows, a scheduled-task input the running
+  OS has no analog for, or `KnownFolder.PROGRAMS` on Linux or macOS.
+- `ConfigurationError` - invalid configuration, scheduled-task inputs that contradict each other, or
+  a shortcut value a `.lnk` cannot store exactly.
 - `PackError` - a script could not be packed or unpacked.
 
 No terminating-vs-non-terminating distinction, no `-ErrorAction Stop` to remember, no silently

@@ -6,6 +6,7 @@ import dataclasses
 import subprocess
 
 import pytest
+from pydantic import ValidationError
 
 from pwshpy.domain.errors import ConfigurationError
 from pwshpy.domain.records import ShortcutInfo
@@ -66,7 +67,7 @@ def test_shortcut_info_unset_fields_default_to_what_com_reads_back() -> None:
 @pytest.mark.os_agnostic
 def test_shortcut_info_is_frozen() -> None:
     info = ShortcutInfo(path=_LNK, target=_TARGET)
-    with pytest.raises(Exception):  # noqa: B017 - pydantic raises ValidationError on frozen setattr
+    with pytest.raises(ValidationError, match="frozen_instance"):
         info.target = "C:\\other.exe"  # pyright: ignore[reportAttributeAccessIssue] - assignment IS the test
 
 

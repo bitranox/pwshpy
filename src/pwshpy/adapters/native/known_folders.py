@@ -14,11 +14,9 @@ and ``PersistedFiles.Unix.cs``), so pwshpy answers what pwsh answers on the same
   real uid when that is root), and ``HOME`` only when neither exists. Desktop, Documents and
   ``Library/Application Support`` (both application-data members) sit under that home.
 - Both: CommonApplicationData is ``/usr/share``; Programs has no folder (.NET answers ``""``),
-  which this module refuses with :class:`PlatformUnsupportedError`.
-
-Like .NET's default ``SpecialFolderOption.None``, a path that fails ``access(R_OK)`` is not
-returned: the resolver answers ``None`` where pwsh answers ``""``.
-
+  which this module refuses with :class:`PlatformUnsupportedError`. Like .NET's default
+  ``SpecialFolderOption.None``, a path that fails ``access(R_OK)`` is not returned: the
+  resolver answers ``None`` where pwsh answers ``""``.
 - Windows (``Environment.Win32.cs``): ``SHGetKnownFolderPath(<FOLDERID>, 0, NULL)``, which
   verifies the folder exists. When it reports the folder missing (``0x80070002`` /
   ``0x80070003``), ApplicationData, LocalApplicationData and CommonApplicationData fall back to
@@ -260,6 +258,8 @@ def _scan_user_dirs(path: str, *, home: str, key: str) -> str | None:
     swallowed (.NET eats every exception here and takes the fallback).
     """
     try:
+        # A FIFO here blocks the open until a writer appears; left unguarded on purpose, because
+        # .NET's StreamReader blocks the same way and pwshpy answers what pwsh answers.
         with Path(path).open("rb") as raw:
             encoding = _stream_reader_encoding(raw.peek(4)[:4])
             text = io.TextIOWrapper(raw, encoding=encoding, errors="replace", newline=None)

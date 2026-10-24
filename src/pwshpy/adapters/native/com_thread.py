@@ -87,7 +87,13 @@ def run_in_com_thread(work: Callable[[], _T], *, load: Callable[[str], Any] | No
 
 
 def _run(work: Callable[[], _T], pythoncom: Any, outcome: _Outcome[_T]) -> None:
-    """Worker side: init the MTA, run ``work``, release its frames, uninit; never raise."""
+    """Worker side: init the MTA, run ``work``, release its frames, uninit.
+
+    What ``CoInitializeEx`` or ``work`` raises is recorded in ``outcome``, not raised. Only an
+    exception from ``CoUninitialize`` in the ``finally`` escapes: it ends this thread through
+    :func:`threading.excepthook` (a traceback on stderr), while the caller still receives the
+    result or the error already recorded.
+    """
     try:
         pythoncom.CoInitializeEx(pythoncom.COINIT_MULTITHREADED)
     except BaseException as exc:  # handed to the caller, which owns the error mapping

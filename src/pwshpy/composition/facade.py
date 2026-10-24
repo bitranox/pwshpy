@@ -1630,7 +1630,9 @@ class Ps:
                 whose environment reference expands past 259 characters: its raw text passes
                 the checks above, but Windows refuses it at ``SetPath`` with E_FAIL
                 (0x80004005) and no file is written (measured with LongPathsEnabled=0).  No
-                portable pre-check exists, because the expansion depends on the host.
+                portable pre-check exists, because the expansion depends on the host.  When
+                reading the saved shortcut back fails, the file at ``path`` may already be
+                written.
 
         Example:
             A target that is not an absolute path is refused before anything is written (off

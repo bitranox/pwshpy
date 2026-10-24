@@ -100,7 +100,8 @@ class NativeShortcutController:
         Raises:
             NativeCallError: ``spec.path`` exists and ``force`` is False; or a COM call failed
                 (the message names the call, the unsigned HRESULT and the path; e.g.
-                ``0x80070003`` for a missing directory); or the read-back failed.
+                ``0x80070003`` for a missing directory); or the read-back failed, in which case
+                the file at ``spec.path`` may already be written.
             PlatformUnsupportedError: pywin32 is not installed (not Windows).
         """
         if os.path.lexists(spec.path) and not force:

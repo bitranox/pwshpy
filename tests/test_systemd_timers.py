@@ -21,6 +21,7 @@ from pwshpy.adapters.native import systemd_dbus, systemd_timers
 from pwshpy.adapters.native.systemd_dbus import ActiveState, UnitFileState
 from pwshpy.adapters.native.systemd_timers import (
     SystemdScheduledTaskController,
+    TimerBase,
     arms_on_register,
     base_name,
     iter_timers,
@@ -115,14 +116,34 @@ def test_timer_task_state(active_state: str, enabled: bool, state: TaskState) ->
     ("bases", "starts"),
     [
         ([], True),
-        (["OnUnitActiveUSec", "OnActiveUSec"], True),  # relative to the timer/service, not to boot
-        (["OnBootUSec"], False),
-        (["OnUnitActiveUSec", "OnStartupUSec"], False),
+        ([TimerBase.ON_UNIT_ACTIVE, TimerBase.ON_ACTIVE], True),  # relative to the timer/service, not to boot
+        ([TimerBase.ON_UNIT_INACTIVE], True),
+        ([TimerBase.UNKNOWN], True),  # a base a later systemd adds is not boot-relative
+        ([TimerBase.ON_BOOT], False),
+        ([TimerBase.ON_UNIT_ACTIVE, TimerBase.ON_STARTUP], False),
     ],
 )
-def test_starts_when_armed(bases: list[str], starts: bool) -> None:
+def test_starts_when_armed(bases: list[TimerBase], starts: bool) -> None:
     """A timer with a boot-relative monotonic timer must not be started: it would elapse at once."""
     assert starts_when_armed(bases) is starts
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("wire", "base"),
+    [
+        ("OnActiveUSec", TimerBase.ON_ACTIVE),
+        ("OnBootUSec", TimerBase.ON_BOOT),
+        ("OnStartupUSec", TimerBase.ON_STARTUP),
+        ("OnUnitActiveUSec", TimerBase.ON_UNIT_ACTIVE),
+        ("OnUnitInactiveUSec", TimerBase.ON_UNIT_INACTIVE),
+        ("OnSomethingNewUSec", TimerBase.UNKNOWN),
+        ("", TimerBase.UNKNOWN),
+    ],
+)
+def test_timer_base_parses_the_wire_name(wire: str, base: TimerBase) -> None:
+    """Each TimersMonotonic base name parses to its member; a name this version does not know is UNKNOWN."""
+    assert TimerBase(wire) is base
 
 
 @pytest.mark.os_agnostic
@@ -731,6 +752,15 @@ def test_enable_a_calendar_timer_starts_it(monkeypatch: pytest.MonkeyPatch) -> N
     use_bus(monkeypatch, conn)
     SystemdScheduledTaskController().enable("cal")
     # Reload before StartUnit (as register does): the new timers.target link is in place when it starts.
+    assert conn.verbs == ["EnableUnitFiles", "Reload", "StartUnit"]
+
+
+@pytest.mark.os_agnostic
+def test_enable_starts_a_timer_whose_only_base_this_version_does_not_know(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A TimersMonotonic base a later systemd adds parses to UNKNOWN, which is not boot-relative: started."""
+    conn = FakeConn([], _enable_props("new", [("OnSomethingNewUSec", 60_000_000, 0)]), frozenset({"new.timer"}))
+    use_bus(monkeypatch, conn)
+    SystemdScheduledTaskController().enable("new")
     assert conn.verbs == ["EnableUnitFiles", "Reload", "StartUnit"]
 
 

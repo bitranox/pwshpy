@@ -29,6 +29,7 @@ Contents:
       of their own, so a listing skips them.
     * :func:`is_unlisted_unit` - the one skip rule for a ``ListUnits`` entry: not-found or masked,
       and not running.
+    * :func:`list_units` - the ``ListUnits`` reply parsed once into :class:`ListedUnit` entries.
 """
 
 from __future__ import annotations
@@ -238,6 +239,46 @@ def unit_path(bus: Bus, name: str) -> str | None:
     return str(path)
 
 
+class ListedUnit(NamedTuple):
+    """One ``ListUnits`` entry, its wire fields parsed: the fields the listings read, by name.
+
+    ``ListUnits`` answers ``a(ssssssouso)``: 0 name, 1 description, 2 LoadState, 3 ActiveState,
+    4 SubState, 5 following unit, 6 the unit object path, 7 job id, 8 job type, 9 job path.
+    """
+
+    name: str
+    description: str
+    load_state: LoadState
+    active_state: ActiveState
+    path: str
+
+
+def list_units(bus: Bus) -> list[ListedUnit]:
+    """Every unit systemd has loaded (``ListUnits``) as a :class:`ListedUnit`, in the order systemd lists them.
+
+    A state systemd added later reads as ``UNKNOWN`` (:class:`LoadState` / :class:`ActiveState`), so
+    an entry never fails the listing.
+
+    Raises:
+        NativeCallError: When systemd answers ``ListUnits`` with an error.
+
+    Example:
+        >>> ListedUnit("a.timer", "A", LoadState("loaded"), ActiveState("from-the-future"), "/u/a").active_state
+        <ActiveState.UNKNOWN: 'unknown'>
+    """
+    (units,) = call(bus, "ListUnits")
+    return [
+        ListedUnit(
+            name=str(unit[0]),
+            description=str(unit[1]),
+            load_state=LoadState(str(unit[2])),
+            active_state=ActiveState(str(unit[3])),
+            path=str(unit[6]),
+        )
+        for unit in units
+    ]
+
+
 class LoadedUnit(NamedTuple):
     """A unit :func:`load_unit_state` loaded: its object path and the ``LoadState`` read with it."""
 
@@ -414,8 +455,10 @@ __all__ = [
     "has_pending_job",
     "is_error",
     "is_unlisted_unit",
+    "ListedUnit",
     "LoadState",
     "LoadedUnit",
+    "list_units",
     "load_unit",
     "load_unit_path",
     "load_unit_state",

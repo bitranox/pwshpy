@@ -182,15 +182,12 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
     """
     bus = _dbus.open_bus()
     try:
-        (units,) = _dbus.call(bus, "ListUnits")
         seen: set[str] = set()
-        for unit in units:
-            name = str(unit[0])
+        for unit in _dbus.list_units(bus):
+            name = unit.name
             if not name.endswith(".service"):
                 continue
-            # ListUnits fields: 1 Description, 2 LoadState, 3 ActiveState.
-            active_state = ActiveState(str(unit[3]))
-            if _dbus.is_unlisted_unit(_dbus.LoadState(str(unit[2])), active_state):
+            if _dbus.is_unlisted_unit(unit.load_state, unit.active_state):
                 # Not marked seen: a cached not-found name whose file appeared since (no
                 # daemon-reload) is still listed by the unit-file pass, whose LoadUnit retries the
                 # load from disk on systemd >= 246: manager_load_unit_prepare (src/core/manager.c)
@@ -202,8 +199,8 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
             seen.add(name)
             yield ServiceInfo(
                 name=name,
-                display_name=str(unit[1]),
-                status=to_service_state(active_state),
+                display_name=unit.description,
+                status=to_service_state(unit.active_state),
                 start_type=_start_type_of(bus, name),
                 can_stop=True,
                 can_pause_continue=False,

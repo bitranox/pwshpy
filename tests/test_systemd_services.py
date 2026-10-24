@@ -122,6 +122,29 @@ def test_unknown_states_read_off_the_bus_keep_a_service_listed(monkeypatch: pyte
     ]
 
 
+@pytest.mark.os_agnostic
+def test_list_units_parses_each_listunits_entry_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """list_units names the ListUnits fields the listings read and parses both states; unknown ones are UNKNOWN."""
+    conn = FakeConn(
+        [("b.service", "B daemon", "active"), ("a.timer", "A timer", "from-the-future")],
+        {},
+        load_states={"a.timer": "from-the-future"},
+    )
+    use_bus(monkeypatch, conn)
+    assert systemd_dbus.list_units(systemd_dbus.open_bus()) == [
+        systemd_dbus.ListedUnit("b.service", "B daemon", LoadState.LOADED, ActiveState.ACTIVE, "/u/b.service"),
+        systemd_dbus.ListedUnit("a.timer", "A timer", LoadState.UNKNOWN, ActiveState.UNKNOWN, "/u/a.timer"),
+    ]
+
+
+@pytest.mark.os_agnostic
+def test_list_units_raises_when_listunits_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ListUnits the manager answers with an error is a NativeCallError naming the call."""
+    use_bus(monkeypatch, FakeConn([], {}, failing=frozenset({"ListUnits"})))
+    with pytest.raises(NativeCallError, match="systemd ListUnits failed"):
+        systemd_dbus.list_units(systemd_dbus.open_bus())
+
+
 @pytest.mark.os_linux
 @pytest.mark.skipif(not sys.platform.startswith("linux") or not _HAS_JEEPNEY, reason="needs Linux + jeepney")
 def test_live_read_yields_services() -> None:

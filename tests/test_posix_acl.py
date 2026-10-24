@@ -68,7 +68,8 @@ def test_acl_tag_keeps_an_unknown_tag_as_its_raw_value() -> None:
     """An unknown e_tag still parses (no error at read time), keeps its value, and has no kind or order.
 
     So, as with the bare integer before, it fails only where it is marshaled or written back: a
-    KeyError from the kind / canonical-order lookup.
+    KeyError from the kind / canonical-order lookup, whose text is the pseudo-member's repr
+    (the bare integer's was ``64``).
     """
     unknown = _AclTag(0x40)
     assert isinstance(unknown, _AclTag)
@@ -76,10 +77,11 @@ def test_acl_tag_keeps_an_unknown_tag_as_its_raw_value() -> None:
     assert unknown not in (*_AclTag,)
     kinds = posix_acl._KINDS  # pyright: ignore[reportPrivateUsage] - white-box test
     order = posix_acl._ORDER  # pyright: ignore[reportPrivateUsage] - white-box test
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError) as kind_miss:
         _ = kinds[unknown]
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError) as order_miss:
         _ = order[unknown]
+    assert str(kind_miss.value) == str(order_miss.value) == "<_AclTag.UNKNOWN_0x40: 64>"
 
 
 @pytest.mark.os_agnostic

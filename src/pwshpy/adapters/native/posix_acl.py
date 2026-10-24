@@ -48,7 +48,10 @@ class _AclTag(IntEnum):
     the six the kernel defines is kept as a pseudo-member carrying its raw value rather than
     refused at parse time: such an entry still reads in, and only marshaling it (``iter_acl``) or
     writing the ACL back (``add_ace`` / ``remove_ace``) fails, with a ``KeyError`` from the
-    :data:`_KINDS` / :data:`_ORDER` lookup, exactly where the bare integer failed.
+    :data:`_KINDS` / :data:`_ORDER` lookup - at the same place the bare integer failed, but the
+    ``KeyError`` text is now the pseudo-member's repr (``<_AclTag.UNKNOWN_0x40: 64>``) where it
+    used to be the bare number (``64``). The kernel validates an ACL xattr, so no real file
+    carries such a tag.
 
     Example:
         >>> _AclTag(0x02) is _AclTag.USER

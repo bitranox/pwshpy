@@ -51,7 +51,7 @@ class FakeConn:
     ``unit_files`` are the units with a unit file (GetUnitFileState answers ``enabled`` for them
     only, unless ``file_states`` names another state; ListUnitFiles[ByPatterns] lists them); the
     Manager verbs a controller sends (Reload, StopUnit, ...) are recorded and succeed, except
-    those listed in ``failing`` (which also fails the unit-file listings).
+    those listed in ``failing`` (which also fails ``ListUnits`` and the unit-file listings).
 
     A unit holding properties is LOADED unless it is in ``unloaded``: like systemd, GetUnit and
     property reads fail for an unloaded unit until ``LoadUnit`` loads it from its file. A
@@ -145,6 +145,8 @@ class FakeConn:
         return {unit for unit, _iface, _prop in self._props} - self._unloaded
 
     def _list_units(self, msg: Message) -> Reply:
+        if msg.method in self._failing:
+            return Reply(("org.freedesktop.DBus.Error.AccessDenied",), error=True)
         rows = [(n, d, self._load_states.get(n, "loaded"), a, "", "", f"/u/{n}", 0, "", "/") for n, d, a in self._units]
         return Reply((rows,))
 

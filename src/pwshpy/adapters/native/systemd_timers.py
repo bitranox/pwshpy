@@ -30,6 +30,8 @@ vendor unit under ``/lib``.
 
 Contents:
     * :func:`timer_to_task_state` / :func:`timer_enabled` - pure systemd -> domain mappers.
+    * :class:`TimerBase` / :func:`starts_when_armed` - a monotonic timer's base, and whether arming
+      a timer with those bases may start it now.
     * :func:`usec_to_datetime` / :func:`service_last_result` / :func:`latest_usec` - pure run-info
       mappers.
     * :func:`service_user_id` - a service's ``User=`` as a decimal uid.
@@ -167,12 +169,36 @@ def timer_task_state(active_state: ActiveState, *, enabled: bool) -> TaskState:
     return timer_to_task_state(active_state)
 
 
-#: Monotonic timer bases (Timer.TimersMonotonic names) that systemd fires at once when the timer
-#: is started after they have elapsed - OnBootSec= / OnStartupSec= (systemd.timer(5)).
-_BOOT_RELATIVE = frozenset({"OnBootUSec", "OnStartupUSec"})
+class TimerBase(str, Enum):
+    """A monotonic timer's base (the first field of a ``Timer.TimersMonotonic`` entry); else :attr:`UNKNOWN`.
+
+    systemd names each base after its ``On*Sec=`` setting with a ``USec`` suffix (systemd.timer(5)).
+    A base a later systemd adds reads as UNKNOWN, which is not boot-relative, as an unnamed text
+    value was not before the bases were typed.
+
+    Example:
+        >>> TimerBase("OnBootUSec") is TimerBase.ON_BOOT, TimerBase("OnFutureUSec") is TimerBase.UNKNOWN
+        (True, True)
+    """
+
+    ON_ACTIVE = "OnActiveUSec"
+    ON_BOOT = "OnBootUSec"
+    ON_STARTUP = "OnStartupUSec"
+    ON_UNIT_ACTIVE = "OnUnitActiveUSec"
+    ON_UNIT_INACTIVE = "OnUnitInactiveUSec"
+    UNKNOWN = "unknown"  # not a systemd value: the fallback for one this list does not name
+
+    @classmethod
+    def _missing_(cls, value: object) -> TimerBase:
+        return cls.UNKNOWN
 
 
-def starts_when_armed(monotonic_bases: Iterable[str]) -> bool:
+#: Monotonic timer bases that systemd fires at once when the timer is started after they have
+#: elapsed - OnBootSec= / OnStartupSec= (systemd.timer(5)).
+_BOOT_RELATIVE = frozenset({TimerBase.ON_BOOT, TimerBase.ON_STARTUP})
+
+
+def starts_when_armed(monotonic_bases: Iterable[TimerBase]) -> bool:
     """Whether arming a timer may also start it now: False when any monotonic timer is boot-relative.
 
     The one decision behind both ``register`` (from the triggers) and ``enable`` (from the
@@ -180,7 +206,7 @@ def starts_when_armed(monotonic_bases: Iterable[str]) -> bool:
     past runs its job immediately, so such a timer is only enabled and waits for the next boot.
 
     Example:
-        >>> starts_when_armed(["OnUnitActiveUSec"]), starts_when_armed(["OnBootUSec"])
+        >>> starts_when_armed([TimerBase.ON_UNIT_ACTIVE]), starts_when_armed([TimerBase.ON_BOOT])
         (True, False)
     """
     return _BOOT_RELATIVE.isdisjoint(monotonic_bases)
@@ -349,36 +375,34 @@ def _timer_run_info(bus: _dbus.Bus, timer_path: str | None, base: str) -> _RunIn
     )
 
 
-class _Listed(NamedTuple):
-    """What ``ListUnits`` already reports for a loaded unit, so no property read repeats it."""
-
-    active_state: ActiveState
-    description: str
-
-
 def _timer_task(
-    bus: _dbus.Bus, name: str, path: str | None, *, file_state: UnitFileState, listed: _Listed | None = None
+    bus: _dbus.Bus,
+    name: str,
+    path: str | None,
+    *,
+    file_state: UnitFileState,
+    listed: _dbus.ListedUnit | None = None,
 ) -> ScheduledTaskInfo:
     """The record for timer ``name`` at its resolved object ``path`` (None: unreadable, fields default).
 
-    ``listed`` carries ActiveState and Description from ``ListUnits``; without it (a unit read
-    through ``LoadUnit``) both are read from ``path``.
+    ``listed`` is the timer's ``ListUnits`` entry, whose ActiveState and Description no property
+    read repeats; without it (a unit read through ``LoadUnit``) both are read from ``path``.
     """
     if listed is None:
-        listed = _Listed(
-            active_state=_dbus.path_active_state(bus, path),
-            description=str(_dbus.path_property(bus, path, "Description", "")),
-        )
+        active_state = _dbus.path_active_state(bus, path)
+        description = str(_dbus.path_property(bus, path, "Description", ""))
+    else:
+        active_state, description = listed.active_state, listed.description
     base = name[: -len(".timer")]
     run = _timer_run_info(bus, path, base)
     enabled = timer_enabled(file_state)
     return ScheduledTaskInfo.model_construct(
         task_name=base,
         task_path=_ROOT,
-        state=timer_task_state(listed.active_state, enabled=enabled),
+        state=timer_task_state(active_state, enabled=enabled),
         enabled=enabled,
         author="",
-        description=listed.description,
+        description=description,
         user_id=run.user_id,
         run_level=None,  # systemd has no split token, so no run level to report
         last_run_time=run.last_run_time,
@@ -637,15 +661,12 @@ def iter_timers(
         return
     bus = _dbus.open_bus()
     try:
-        (units,) = _dbus.call(bus, "ListUnits")
         seen: set[str] = set()
-        for unit in units:
-            name = str(unit[0])
+        for unit in _dbus.list_units(bus):
+            name = unit.name
             if not name.endswith(".timer"):
                 continue
-            # ListUnits fields: 1 Description, 2 LoadState, 3 ActiveState, 6 the unit object path.
-            active_state = ActiveState(str(unit[3]))
-            if _dbus.is_unlisted_unit(LoadState(str(unit[2])), active_state):
+            if _dbus.is_unlisted_unit(unit.load_state, unit.active_state):
                 # Not marked seen: a cached not-found name whose file appeared since (no
                 # daemon-reload) is still listed by the unit-file pass, whose LoadUnit retries the
                 # load from disk on systemd >= 246: manager_load_unit_prepare (src/core/manager.c)
@@ -656,8 +677,7 @@ def iter_timers(
                 continue
             seen.add(name)
             state = _dbus.unit_file_state(bus, name) or UnitFileState.EMPTY
-            listed = _Listed(active_state=active_state, description=str(unit[1]))
-            yield _timer_task(bus, name, str(unit[6]), file_state=state, listed=listed)
+            yield _timer_task(bus, name, unit.path, file_state=state, listed=unit)
         for name, state in _timer_files(bus, strict=strict):
             if name in seen or state in _dbus.UNLISTED_FILE_STATES:
                 continue
@@ -957,7 +977,7 @@ def arms_on_register(triggers: Sequence[TaskTrigger]) -> bool:
             "cannot both wait for the next boot and run on schedule from now. Register them separately."
         )
     # A boot trigger renders as OnBootSec=, which systemd reports as the OnBootUSec monotonic base.
-    return starts_when_armed("OnBootUSec" for t in triggers if isinstance(t, BootTrigger))
+    return starts_when_armed(TimerBase.ON_BOOT for t in triggers if isinstance(t, BootTrigger))
 
 
 def linux_user(principal: TaskPrincipal) -> str | None:
@@ -982,7 +1002,7 @@ def linux_user(principal: TaskPrincipal) -> str | None:
     return principal.user_id
 
 
-def _monotonic_bases(bus: _dbus.Bus, timer: str) -> list[str] | None:
+def _monotonic_bases(bus: _dbus.Bus, timer: str) -> list[TimerBase] | None:
     """The base names of a timer's monotonic timers (``Timer.TimersMonotonic``), None if unreadable.
 
     ``LoadUnit`` rather than ``GetUnit``: a disabled, stopped timer is usually unloaded, and this
@@ -994,7 +1014,7 @@ def _monotonic_bases(bus: _dbus.Bus, timer: str) -> list[str] | None:
     if not isinstance(raw, list):
         return None
     entries = cast("list[tuple[Any, ...]]", raw)  # a(stt): (base, offset usec, next elapse usec)
-    return [str(entry[0]) for entry in entries]
+    return [TimerBase(str(entry[0])) for entry in entries]
 
 
 def _owned_unit_file(unit: str) -> bool:
@@ -1311,6 +1331,7 @@ __all__ = [
     "service_unit",
     "service_user_id",
     "starts_when_armed",
+    "TimerBase",
     "timer_enabled",
     "timer_task_state",
     "timer_to_task_state",

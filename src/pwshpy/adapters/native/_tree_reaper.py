@@ -58,11 +58,16 @@ _POSIX_ONLY = "the wait_tree helper runs on POSIX only"
 
 @dataclass(frozen=True)
 class _Request:
-    """The program to run, as the parent sent it on the control pipe."""
+    """The program to run, as the parent sent it on the control pipe.
 
-    argv: tuple[str, ...]
-    cwd: str | None
-    env: Mapping[str, str] | None
+    The element types stay ``object`` on purpose: the parent forwards the caller's argv, cwd and
+    env unchecked, and ``Popen`` is the one place that refuses a non-str element, with the
+    ``TypeError`` text the caller has always seen.  Checking them here would replace that text.
+    """
+
+    argv: tuple[object, ...]
+    cwd: object
+    env: dict[object, object] | None
 
 
 @dataclass(frozen=True)
@@ -101,29 +106,6 @@ class _Killed:
 _Status: TypeAlias = _Exited | _Failed | _Killed
 
 
-def _str_or_none(value: object, field: str) -> str | None:
-    if value is None or isinstance(value, str):
-        return value
-    raise TypeError(f"request {field} must be a string or null, not {type(value).__name__}")
-
-
-def _str_list(value: object, field: str) -> tuple[str, ...]:
-    # cast: isinstance() narrows a JSON value only to list[Unknown]; the loop checks each item.
-    items = cast("list[object]", value) if isinstance(value, list) else None
-    if items is None or not all(isinstance(item, str) for item in items):
-        raise TypeError(f"request {field} must be a list of strings")
-    return tuple(str(item) for item in items)
-
-
-def _str_map_or_none(value: object) -> dict[str, str] | None:
-    if value is None:
-        return None
-    pairs = cast("dict[object, object]", value) if isinstance(value, dict) else None
-    if pairs is None or not all(isinstance(k, str) and isinstance(v, str) for k, v in pairs.items()):
-        raise TypeError("request env must be an object of strings or null")
-    return {str(k): str(v) for k, v in pairs.items()}
-
-
 def decode_request(raw: bytes) -> _Request:
     """Decode the control-pipe request; undecodable argv/env bytes arrive surrogate-escaped.
 
@@ -136,7 +118,9 @@ def decode_request(raw: bytes) -> _Request:
     # Indexed env, argv, cwd: the order the fields were first read in, so a request missing one
     # reports the same KeyError (and a non-object the same TypeError) as it always did.
     env, argv, cwd = decoded["env"], decoded["argv"], decoded["cwd"]
-    return _Request(argv=_str_list(argv, "argv"), cwd=_str_or_none(cwd, "cwd"), env=_str_map_or_none(env))
+    # tuple()/dict() are the conversions the helper always applied before Popen, so a
+    # non-iterable argv or env still fails with their TypeError, in the same order.
+    return _Request(argv=tuple(argv), cwd=cwd, env=dict(env) if env is not None else None)
 
 
 def encode_status(status: _Status) -> str:
@@ -297,10 +281,12 @@ def _become_subreaper() -> bool:
 
 
 def _start(request: _Request, *, new_session: bool) -> subprocess.Popen[bytes]:
+    # cast: the types Popen requires.  It checks every element itself and raises its own
+    # TypeError for one that is not a str (see _Request), which is the error the caller gets.
     return subprocess.Popen(  # noqa: S603  # nosec B603 - the caller's argv list, no shell
-        list(request.argv),
-        cwd=request.cwd,
-        env=dict(request.env) if request.env is not None else None,
+        cast("list[str]", list(request.argv)),
+        cwd=cast("str | None", request.cwd),
+        env=cast("dict[str, str] | None", request.env),
         start_new_session=new_session,
     )
 

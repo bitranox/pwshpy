@@ -41,6 +41,8 @@ _FAILED_BYTES = (
     b'{"error": "FileNotFoundError", "message": "[Errno 2] No such file or directory: \'/nonexistent-\\\\udcff-prog\'"}'
 )
 _FAILED_MESSAGE = "[Errno 2] No such file or directory: '/nonexistent-\\udcff-prog'"
+#: Popen's own refusal of a non-str argv element, env value or cwd, as the helper reports it.
+_POPEN_INT_BYTES = b'{"error": "TypeError", "message": "expected str, bytes or os.PathLike object, not int"}'
 
 
 @pytest.mark.os_agnostic
@@ -70,7 +72,9 @@ def test_the_helper_decodes_a_non_utf8_argv_element_back_to_its_surrogate() -> N
     """The surrogate-escaped argv element arrives as the same str, so Popen re-encodes the original bytes."""
     decoded = decode_request(_REQUEST_BYTES)
     assert decoded.argv == (_BAD_NAME, "x")
-    assert os.fsencode(decoded.argv[0]) == b"/nonexistent-\xff-prog"
+    program = decoded.argv[0]
+    assert isinstance(program, str)
+    assert os.fsencode(program) == b"/nonexistent-\xff-prog"
     assert decoded.cwd is None
     assert decoded.env is None
 
@@ -82,15 +86,29 @@ def test_the_helper_decodes_a_non_utf8_argv_element_back_to_its_surrogate() -> N
         (b'{"argv": ["x"]}', KeyError),
         (b"[1]", TypeError),
         (b"not json", ValueError),
-        (b'{"argv": "x", "cwd": null, "env": null}', TypeError),
-        (b'{"argv": ["x"], "cwd": 1, "env": null}', TypeError),
-        (b'{"argv": ["x"], "cwd": null, "env": {"K": 1}}', TypeError),
+        (b'{"argv": 5, "cwd": null, "env": null}', TypeError),
+        (b'{"argv": ["x"], "cwd": null, "env": 5}', TypeError),
     ],
 )
-def test_a_malformed_request_is_refused(raw: bytes, error: type[Exception]) -> None:
-    """A request with a missing key, a non-object or a wrongly typed field raises before any program starts."""
+def test_a_structurally_malformed_request_is_refused(raw: bytes, error: type[Exception]) -> None:
+    """A missing key, a non-object, bad JSON or a non-iterable argv/env raises before any program starts."""
     with pytest.raises(error):
         decode_request(raw)
+
+
+@pytest.mark.os_agnostic
+def test_the_helper_leaves_element_types_to_popen() -> None:
+    """Non-str elements decode unchanged: Popen refuses them, with its own TypeError text, not the decoder."""
+    decoded = decode_request(b'{"argv": ["echo", 5], "cwd": 1, "env": {"A": 1}}')
+    assert decoded.argv == ("echo", 5)
+    assert decoded.cwd == 1
+    assert decoded.env == {"A": 1}
+
+
+@pytest.mark.os_agnostic
+def test_a_string_argv_is_split_into_characters_as_list_always_did() -> None:
+    """argv goes through the same sequence conversion as before, so a bare string becomes one argument per char."""
+    assert decode_request(b'{"argv": "ab", "cwd": null, "env": null}').argv == ("a", "b")
 
 
 @pytest.mark.os_agnostic
@@ -194,6 +212,17 @@ def test_the_real_helper_writes_the_old_bytes_for_each_variant(tmp_path: Path) -
         (b"not json", b'{"error": "JSONDecodeError", "message": "Expecting value: line 1 column 1 (char 0)"}'),
         (b'{"argv": ["x"]}', b'{"error": "KeyError", "message": "\'env\'"}'),
         (b"[1]", b'{"error": "TypeError", "message": "list indices must be integers or slices, not str"}'),
+        (
+            b'{"argv": 5, "cwd": null, "env": null}',
+            b'{"error": "TypeError", "message": "\'int\' object is not iterable"}',
+        ),
+        (
+            b'{"argv": ["x"], "cwd": null, "env": 5}',
+            b'{"error": "TypeError", "message": "\'int\' object is not iterable"}',
+        ),
+        (b'{"argv": ["echo", 5], "cwd": null, "env": null}', _POPEN_INT_BYTES),
+        (b'{"argv": ["echo"], "cwd": null, "env": {"A": 1}}', _POPEN_INT_BYTES),
+        (b'{"argv": ["echo"], "cwd": 1, "env": null}', _POPEN_INT_BYTES),
     ],
 )
 def test_the_real_helper_reports_a_malformed_request_as_before(request_bytes: bytes, status_bytes: bytes) -> None:

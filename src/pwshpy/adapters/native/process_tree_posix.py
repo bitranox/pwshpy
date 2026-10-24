@@ -64,8 +64,10 @@ class _HelperRequest(BaseModel):
             >>> _HelperRequest.model_construct(argv=["a"], cwd=None, env=None).wire()
             b'{"argv": ["a"], "cwd": null, "env": null}'
         """
-        # warnings=False: the model is built with model_construct, so a non-str argv element
-        # reaches json.dumps and raises its TypeError there, without a serializer warning first.
+        # warnings=False: the model is built with model_construct, so a non-str argv/env element
+        # reaches json.dumps unchanged and without a serializer warning: an int is written as a
+        # JSON number (the helper's Popen then refuses it), a bytes or other object raises
+        # json.dumps's own TypeError here.
         return json.dumps(self.model_dump(warnings=False), ensure_ascii=True).encode("ascii")
 
 
@@ -149,7 +151,8 @@ class PosixReaperTree:
             _close_quietly(control_r)
             _close_quietly(status_w)
         # model_construct: args/env are the caller's already-typed values, and validating them here
-        # would turn a non-str argv element's TypeError (json.dumps) into a ValidationError.
+        # would turn the TypeError a non-str argv/env element has always raised (json.dumps here,
+        # or Popen in the helper) into a ValidationError.
         request = _HelperRequest.model_construct(argv=list(args), cwd=cwd, env=dict(env) if env is not None else None)
         self._send_request(control_w, request)
         return self._popen

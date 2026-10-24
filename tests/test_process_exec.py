@@ -12,6 +12,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import psutil
 import pytest
@@ -241,6 +242,24 @@ def test_wait_tree_reports_a_signal_death_like_the_default_path() -> None:
     """A program killed by a signal reports -N, exactly as subprocess (and wait_tree=False) does."""
     argv = [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"]
     assert run_process(argv, wait_tree=True).exit_code == run_process(argv).exit_code == -9
+
+
+#: What Popen itself says about a non-str argv element, env value or cwd (the helper adds no wording).
+_POPEN_REFUSES_AN_INT = "Failed to run 'echo': TypeError: expected str, bytes or os.PathLike object, not int"
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the wait_tree helper runs on POSIX only")
+@pytest.mark.parametrize(
+    ("argv", "env"),
+    [(["echo", 5], None), (["echo"], {"A": 1})],
+    ids=["int-argv-element", "int-env-value"],
+)
+def test_wait_tree_reports_popens_own_refusal_of_a_non_str_element(argv: list[Any], env: dict[str, Any] | None) -> None:
+    """A non-str argv element or env value reaches the caller as Popen's own TypeError text."""
+    with pytest.raises(NativeCallError) as caught:
+        build_ps().exec(argv, env=env, wait_tree=True, timeout=60)
+    assert str(caught.value) == _POPEN_REFUSES_AN_INT
 
 
 def _platform_tree() -> ProcessTree:

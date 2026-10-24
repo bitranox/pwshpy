@@ -6,6 +6,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.7.0] 2026-10-24 23:57:13
+
 ### Added
 
 - `ps.get_known_folder(folder)` / `pwshpy get_known_folder FOLDER [--json]` (portable): a

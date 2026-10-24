@@ -17,7 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from pwshpy.adapters.native.known_folders import posix_known_folder
+from pwshpy.adapters.native.known_folders import (
+    _foundation_standardized,  # pyright: ignore[reportPrivateUsage] - white-box: /private and /var/automount cannot be created on a test host
+    posix_known_folder,
+)
 from pwshpy.domain.enums import KnownFolder
 from pwshpy.domain.errors import PlatformUnsupportedError
 
@@ -353,6 +356,19 @@ def test_empty_or_unset_home_uses_the_effective_uids_passwd_entry(
 # --- macOS ---------------------------------------------------------------------------------------
 
 
+def _foundation_spelling(path: Path) -> Path:
+    """Return ``path`` as Foundation spells it when the only applicable step is dropping ``/private``.
+
+    pytest's ``tmp_path`` on macOS is ``/private/var/folders/...``, which Foundation answers as
+    ``/var/folders/...`` (``/var`` is a symlink to ``/private/var`` there); elsewhere it is unchanged.
+    """
+    text = str(path)
+    if not text.startswith("/private/"):
+        return path
+    rest = Path(text[len("/private") :])
+    return rest if rest.exists() else path
+
+
 @pytest.mark.os_posix
 @_POSIX_ONLY
 def test_macos_table_under_cffixed_user_home(tmp_path: Path) -> None:
@@ -362,10 +378,75 @@ def test_macos_table_under_cffixed_user_home(tmp_path: Path) -> None:
     def mac(folder: KnownFolder) -> Path | None:
         return posix_known_folder(folder, environ=environ, platform="darwin")
 
-    assert mac(KnownFolder.DESKTOP) == home / "Desktop"
-    assert mac(KnownFolder.DOCUMENTS) == home / "Documents"
-    assert mac(KnownFolder.ROAMING_APP_DATA) == home / "Library" / "Application Support"
-    assert mac(KnownFolder.LOCAL_APP_DATA) == home / "Library" / "Application Support"
+    assert mac(KnownFolder.DESKTOP) == _foundation_spelling(home / "Desktop")
+    assert mac(KnownFolder.DOCUMENTS) == _foundation_spelling(home / "Documents")
+    assert mac(KnownFolder.ROAMING_APP_DATA) == _foundation_spelling(home / "Library" / "Application Support")
+    assert mac(KnownFolder.LOCAL_APP_DATA) == _foundation_spelling(home / "Library" / "Application Support")
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("prefix", ["/private/var/automount", "/var/automount", "/private"])
+def test_foundation_drops_a_leading_prefix_when_the_rest_exists(prefix: str) -> None:
+    existing = {"/Users/someone/Desktop"}
+
+    result = _foundation_standardized(f"{prefix}/Users/someone/Desktop", exists=existing.__contains__)
+
+    assert result == "/Users/someone/Desktop"
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("prefix", ["/private/var/automount", "/var/automount", "/private"])
+def test_foundation_keeps_the_prefix_when_the_rest_does_not_exist(prefix: str) -> None:
+    path = f"{prefix}/Users/someone/Desktop"
+
+    assert _foundation_standardized(path, exists=lambda _path: False) == path
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/privatex/var/folders/xx/T/Desktop",  # a longer first component is not /private
+        "/var/automountx/Desktop",
+        "/Users/someone/Desktop",  # nothing to drop
+        "/private",  # the prefix alone has no remainder to fall back to
+        "relative/private/Desktop",
+    ],
+)
+def test_foundation_leaves_other_paths_alone(path: str) -> None:
+    assert _foundation_standardized(path, exists=lambda _path: True) == path
+
+
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_macos_folder_under_a_private_spelled_home_is_answered_without_it(tmp_path: Path) -> None:
+    """The real filesystem decides: ``/private<home>`` does not exist here, ``<home>/Desktop`` does."""
+    home = _home(tmp_path, "Desktop")
+    environ = {"CFFIXED_USER_HOME": f"/private{home}"}
+
+    result = posix_known_folder(KnownFolder.DESKTOP, environ=environ, platform="darwin")
+
+    assert result == home / "Desktop"
+
+
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_macos_missing_folder_under_a_private_spelled_home_is_none(tmp_path: Path) -> None:
+    """With nothing left to exist the prefix stays, and access(R_OK) still answers ``None``."""
+    environ = {"CFFIXED_USER_HOME": f"/private{_home(tmp_path)}"}
+
+    result = posix_known_folder(KnownFolder.DESKTOP, environ=environ, platform="darwin")
+
+    assert result is None
+
+
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_linux_never_drops_a_private_prefix(tmp_path: Path) -> None:
+    """Linux .NET builds the path itself, with no Foundation to rewrite it."""
+    home = _home(tmp_path, "Desktop")
+
+    assert _linux(KnownFolder.DESKTOP, {"HOME": f"/private{home}"}) == _readable_or_none(f"/private{home}/Desktop")
 
 
 @pytest.mark.os_posix

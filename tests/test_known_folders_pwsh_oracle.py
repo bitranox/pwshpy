@@ -314,9 +314,9 @@ def test_macos_decoy_home_matches_pwsh(tmp_path: Path) -> None:
 def test_macos_cffixed_user_home_matches_pwsh(tmp_path: Path) -> None:
     """CFFIXED_USER_HOME set: every member equals pwsh's answer.
 
-    Whether .NET honours CFFIXED_USER_HOME is unmeasured, so this asserts only that pwshpy
-    agrees with pwsh; on a mismatch the message names the home pwsh followed, and that settles
-    whether ``posix_known_folder`` should keep the variable first.
+    The comparison is exact, spelling included: ``tmp_path`` is ``/private/var/folders/...``
+    on macOS, and pwsh answers it as Foundation standardizes it (``/var/folders/...``). On a
+    mismatch the message names the home pwsh followed, and whether only the spelling differs.
     """
     fixed = _macos_home(tmp_path / "fixed")
     env = _scratch_env({"CFFIXED_USER_HOME": str(fixed)}, drop=lambda _key: False)

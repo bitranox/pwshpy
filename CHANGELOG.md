@@ -13,11 +13,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `PROGRAM_DATA`, `PROGRAMS`; the values are the .NET `SpecialFolder` names, `Desktop`,
   `MyDocuments`, ...) as the `Path` pwsh's `[Environment]::GetFolderPath` returns on the same OS:
   `SHGetKnownFolderPath` on Windows (a redirected Desktop included), the XDG user directories on
-  Linux, the home's `Desktop` / `Documents` / `Library/Application Support` on macOS. A folder that
-  is missing or not readable is `None` (CLI: exit 1 with a stderr line) where pwsh returns `""`. On
-  Windows the three application-data folders fall back to `LOCALAPPDATA` / `APPDATA` /
-  `ProgramData` like pwsh, but only to an existing directory, and any shell failure other than "not
-  found" raises `NativeCallError`. `PROGRAMS` on Linux or macOS raises `PlatformUnsupportedError`.
+  Linux, the home's `Desktop` / `Documents` / `Library/Application Support` on macOS (spelled as
+  Foundation standardizes them, so a leading `/private` whose remainder exists is dropped). A
+  folder that is missing or not readable is `None` (CLI: exit 1 with a stderr line) where pwsh
+  returns `""`. On Windows the three application-data folders fall back to `LOCALAPPDATA` /
+  `APPDATA` / `ProgramData` like pwsh, but only to an existing directory, and any shell failure
+  other than "not found" raises `NativeCallError`. `PROGRAMS` on Linux or macOS raises
+  `PlatformUnsupportedError`.
 - `ps.new_shortcut(path, *, target, arguments=(), working_directory=None, icon=None, icon_index=0,
   description=None, force=False)` / `pwshpy new_shortcut PATH --target T [-f] [-- ARGS...]` and
   `ps.get_shortcut(path)` / `pwshpy get_shortcut PATH` (Windows): write and read a shortcut

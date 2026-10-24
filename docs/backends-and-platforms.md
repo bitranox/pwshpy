@@ -43,14 +43,14 @@ for Linux and macOS, and
 [`PersistedFiles.Unix.cs`](https://github.com/dotnet/runtime/blob/6aa72daa24f66c01c3d7b6a32519e9d21396deec/src/libraries/System.Private.CoreLib/src/System/IO/PersistedFiles.Unix.cs#L49-L85)
 for the Linux home. An oracle test runs pwsh on each OS and compares its answers with pwshpy's.
 
-| `KnownFolder` (value)                     | Windows (`SHGetKnownFolderPath`)               | Linux                                                                         | macOS                                |
-|-------------------------------------------|------------------------------------------------|-------------------------------------------------------------------------------|--------------------------------------|
-| `DESKTOP` (`Desktop`)                     | `FOLDERID_Desktop`                             | `$XDG_DESKTOP_DIR`, else its `user-dirs.dirs` line, else `<home>/Desktop`     | `<home>/Desktop`                     |
-| `DOCUMENTS` (`MyDocuments`)               | `FOLDERID_Documents`                           | `$XDG_DOCUMENTS_DIR`, else its `user-dirs.dirs` line, else `<home>/Documents` | `<home>/Documents`                   |
-| `LOCAL_APP_DATA` (`LocalApplicationData`) | `FOLDERID_LocalAppData`, else `%LOCALAPPDATA%` | `$XDG_DATA_HOME`, else `<home>/.local/share`                                  | `<home>/Library/Application Support` |
-| `ROAMING_APP_DATA` (`ApplicationData`)    | `FOLDERID_RoamingAppData`, else `%APPDATA%`    | `$XDG_CONFIG_HOME`, else `<home>/.config`                                     | `<home>/Library/Application Support` |
-| `PROGRAM_DATA` (`CommonApplicationData`)  | `FOLDERID_ProgramData`, else `%ProgramData%`   | `/usr/share`                                                                  | `/usr/share`                         |
-| `PROGRAMS` (`Programs`)                   | `FOLDERID_Programs`                            | `PlatformUnsupportedError`                                                    | `PlatformUnsupportedError`           |
+| `KnownFolder` (value)                     | Windows (`SHGetKnownFolderPath`)               | Linux                                                                         | macOS                                             |
+|-------------------------------------------|------------------------------------------------|-------------------------------------------------------------------------------|---------------------------------------------------|
+| `DESKTOP` (`Desktop`)                     | `FOLDERID_Desktop`                             | `$XDG_DESKTOP_DIR`, else its `user-dirs.dirs` line, else `<home>/Desktop`     | Foundation's `<home>/Desktop`                     |
+| `DOCUMENTS` (`MyDocuments`)               | `FOLDERID_Documents`                           | `$XDG_DOCUMENTS_DIR`, else its `user-dirs.dirs` line, else `<home>/Documents` | Foundation's `<home>/Documents`                   |
+| `LOCAL_APP_DATA` (`LocalApplicationData`) | `FOLDERID_LocalAppData`, else `%LOCALAPPDATA%` | `$XDG_DATA_HOME`, else `<home>/.local/share`                                  | Foundation's `<home>/Library/Application Support` |
+| `ROAMING_APP_DATA` (`ApplicationData`)    | `FOLDERID_RoamingAppData`, else `%APPDATA%`    | `$XDG_CONFIG_HOME`, else `<home>/.config`                                     | Foundation's `<home>/Library/Application Support` |
+| `PROGRAM_DATA` (`CommonApplicationData`)  | `FOLDERID_ProgramData`, else `%ProgramData%`   | `/usr/share`                                                                  | `/usr/share`                                      |
+| `PROGRAMS` (`Programs`)                   | `FOLDERID_Programs`                            | `PlatformUnsupportedError`                                                    | `PlatformUnsupportedError`                        |
 
 - **Windows:** `SHGetKnownFolderPath(<FOLDERID>, 0, NULL)` verifies the folder exists, and returns a
   redirected folder (OneDrive, folder redirection) at its real location. When the shell reports the
@@ -64,7 +64,10 @@ for the Linux home. An oracle test runs pwsh on each OS and compares its answers
   `KEY="/..."` line, as .NET parses it. `XDG_CONFIG_DIRS` is not consulted.
 - **macOS:** .NET asks Foundation, whose home is CoreFoundation's: `CFFIXED_USER_HOME`, else the
   passwd entry of the effective uid (the real uid when the effective one is root), and `HOME` only
-  when neither yields a directory.
+  when neither yields a directory. Foundation standardizes the path it returns: a leading
+  `/private/var/automount`, `/var/automount` or `/private` component is dropped when the rest still
+  exists (Apple's `stringByStandardizingPath` documentation), so a home under
+  `/private/var/folders/xx/...` answers `/var/folders/xx/...`, as pwsh does.
 - **Linux and macOS:** a path that fails `access(R_OK)` is `None`. `Programs` raises
   `PlatformUnsupportedError`, because .NET maps it to no folder there.
 

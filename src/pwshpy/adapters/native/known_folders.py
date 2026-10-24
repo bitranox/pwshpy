@@ -12,7 +12,11 @@ and ``PersistedFiles.Unix.cs``), so pwshpy answers what pwsh answers on the same
 - macOS: .NET asks Foundation (``NSFileManager URLsForDirectory``), which builds on
   CoreFoundation's home: ``CFFIXED_USER_HOME``, else the passwd entry of the effective uid (the
   real uid when that is root), and ``HOME`` only when neither exists. Desktop, Documents and
-  ``Library/Application Support`` (both application-data members) sit under that home.
+  ``Library/Application Support`` (both application-data members) sit under that home, spelled
+  as Foundation standardizes them: a leading ``/private/var/automount``, ``/var/automount`` or
+  ``/private`` component is dropped when the rest still exists (Apple's
+  ``stringByStandardizingPath`` documentation), so a home under ``/private/var/folders/xx/...``
+  answers ``/var/folders/xx/...``.
 - Both: CommonApplicationData is ``/usr/share``; Programs has no folder (.NET answers ``""``),
   which this module refuses with :class:`PlatformUnsupportedError`. Like .NET's default
   ``SpecialFolderOption.None``, a path that fails ``access(R_OK)`` is not returned: the
@@ -66,6 +70,9 @@ _MACOS_USER_DIRS: dict[KnownFolder, str] = {
     KnownFolder.ROAMING_APP_DATA: "Library/Application Support",
     KnownFolder.LOCAL_APP_DATA: "Library/Application Support",
 }
+
+#: The leading components Foundation's path standardization drops, in Apple's documented order.
+_FOUNDATION_PREFIXES = ("/private/var/automount", "/var/automount", "/private")
 
 #: Windows: each member's FOLDERID (KnownFolders.h; pywin32's ``shell.FOLDERID_<name>``).
 _FOLDER_IDS: dict[KnownFolder, str] = {
@@ -180,7 +187,44 @@ def _macos_folder(folder: KnownFolder, env: Mapping[str, str]) -> str:
     home = _corefoundation_home(env)
     if not home:
         return ""
-    return _join(home, _MACOS_USER_DIRS[folder])
+    # Foundation standardizes the URL it returns, so the whole joined path is what must exist.
+    return _foundation_standardized(_join(home, _MACOS_USER_DIRS[folder]))
+
+
+def _foundation_standardized(path: str, *, exists: Callable[[str], bool] = os.path.exists) -> str:
+    """Drop a leading component Foundation's path standardization removes, as NSURL ``path`` does.
+
+    Apple documents for ``-[NSString stringByStandardizingPath]`` that it removes an initial
+    ``/private/var/automount``, ``/var/automount`` or ``/private`` component "if the result still
+    indicates an existing file or directory (checked by consulting the file system)". The
+    existence condition is argued from that documentation; the drop itself was observed on a
+    macOS CI runner, where pwsh answered ``/var/folders/xx/.../Desktop`` for a
+    ``CFFIXED_USER_HOME`` of ``/private/var/folders/xx/...``. Of the documented steps only this
+    one changes an absolute path with no ``~``, ``.``, ``..``, doubled or trailing ``/``, and it is
+    the only one reproduced. A prefix matches whole components only, so ``/privatex`` stays.
+
+    Args:
+        path: The absolute path Foundation would answer before standardization.
+        exists: Whether a path names an existing file or directory (following symlinks, as
+            Foundation's check does); defaults to :func:`os.path.exists`.
+
+    Returns:
+        ``path`` without the first listed prefix whose remainder exists, else ``path`` unchanged.
+
+    Example:
+        >>> _foundation_standardized("/private/var/folders/xx/Desktop", exists=lambda p: True)
+        '/var/folders/xx/Desktop'
+        >>> _foundation_standardized("/private/var/folders/xx/Desktop", exists=lambda p: False)
+        '/private/var/folders/xx/Desktop'
+        >>> _foundation_standardized("/privatex/Desktop", exists=lambda p: True)
+        '/privatex/Desktop'
+    """
+    for prefix in _FOUNDATION_PREFIXES:
+        if path.startswith(prefix + "/"):
+            remainder = path[len(prefix) :]
+            if exists(remainder):
+                return remainder
+    return path
 
 
 def _dotnet_home(env: Mapping[str, str]) -> str:

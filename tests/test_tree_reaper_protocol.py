@@ -34,7 +34,10 @@ from pwshpy.adapters.native.process_tree_posix import (
 from pwshpy.domain.errors import NativeCallError
 
 _HELPER = Path(__file__).resolve().parents[1] / "src" / "pwshpy" / "adapters" / "native" / "_tree_reaper.py"
-_BAD_NAME = os.fsdecode(b"/nonexistent-\xff-prog")  # carries the lone surrogate U+DCFF
+# The POSIX decoding of a non-UTF-8 name (it carries the lone surrogate U+DCFF). Spelled out
+# rather than os.fsdecode, which is strict on Windows and would fail this module's collection
+# there, although its wire tests are OS-agnostic.
+_BAD_NAME = b"/nonexistent-\xff-prog".decode("utf-8", "surrogateescape")
 
 _REQUEST_BYTES = b'{"argv": ["/nonexistent-\\udcff-prog", "x"], "cwd": null, "env": null}'
 _FAILED_BYTES = (
@@ -74,7 +77,8 @@ def test_the_helper_decodes_a_non_utf8_argv_element_back_to_its_surrogate() -> N
     assert decoded.argv == (_BAD_NAME, "x")
     program = decoded.argv[0]
     assert isinstance(program, str)
-    assert os.fsencode(program) == b"/nonexistent-\xff-prog"
+    # The POSIX re-encoding the helper's Popen applies (os.fsencode is strict on Windows).
+    assert program.encode("utf-8", "surrogateescape") == b"/nonexistent-\xff-prog"
     assert decoded.cwd is None
     assert decoded.env is None
 

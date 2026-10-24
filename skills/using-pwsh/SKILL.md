@@ -187,7 +187,11 @@ then means this caller cannot tell; ask again elevated).
 `get_windows_update` runs the search in a `spawn` child that re-imports the calling script, so that
 script needs an `if __name__ == "__main__":` guard (without it: `NativeCallError`, "worker exited
 without a result"); the search returns its whole result on the first iteration, so `.take(n)` does
-not shorten it. `exec` drops the output written before a timeout.
+not shorten it. Select updates by category through `category_details[].category_id` (the
+category GUID, lower case, e.g. `0fa1201d-4330-4fa8-8ae9-b877473b6441` for Security Updates),
+never through `categories` or `title`, which the Windows Update agent localizes:
+`.where(lambda u: any(c.category_id == GUID for c in u.category_details))`. `exec` drops the output
+written before a timeout.
 
 CLI and packed-runner exit codes (an error also writes one `ErrorName: message` line, or a `pwshpy: ...`
 line from a runner, to stderr): 0 ok, 1 any other `PwshPyError`, 2 usage error, 22 a refused value

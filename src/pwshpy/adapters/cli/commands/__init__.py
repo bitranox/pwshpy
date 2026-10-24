@@ -36,6 +36,7 @@ from .processes import cli_processes
 from .registry import cli_get_item_property, cli_registry_keys
 from .scheduled_tasks import cli_scheduled_tasks
 from .services import cli_services
+from .shortcuts import SHORTCUT_COMMANDS
 from .system import SYSTEM_COMMANDS
 from .uptime import cli_uptime
 from .web import WEB_COMMANDS
@@ -48,6 +49,7 @@ __all__ = [
     "CREDENTIAL_COMMANDS",
     "FILEIO_COMMANDS",
     "PROC_COMMANDS",
+    "SHORTCUT_COMMANDS",
     "SYSTEM_COMMANDS",
     "DOTNET_COMMANDS",
     "WEB_COMMANDS",

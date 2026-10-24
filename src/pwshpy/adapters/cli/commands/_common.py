@@ -4,15 +4,20 @@ Contents:
     * :func:`resolve_format` - map the mutually-exclusive output flags to a format.
     * :func:`parse_pairs` - parse repeatable ``KEY=VALUE`` / ``Name: value`` options.
     * :data:`TIMEOUT_RANGE` - the ``--timeout`` range the facade accepts.
+    * :func:`enum_by_value` - map a case-insensitive ``click.Choice`` answer to its enum member.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
+from enum import Enum
+from typing import TypeVar
 
 import rich_click as click
 
 from ..output import RecordFormat
+
+_E = TypeVar("_E", bound=Enum)
 
 #: Mirrors the facade's accepted timeout range, ``(0, 2147483]`` seconds, so a bad value is a usage
 #: error (exit 2) before any child starts; NaN slips past a range check, and the facade refuses it.
@@ -68,4 +73,32 @@ def resolve_format(as_json: bool, as_jsonl: bool) -> RecordFormat:
     return RecordFormat.HUMAN
 
 
-__all__ = ["parse_pairs", "resolve_format"]
+def enum_by_value(enum_cls: type[_E], value: str) -> _E:
+    """Return the member of ``enum_cls`` whose value matches ``value`` case-insensitively.
+
+    ``click.Choice(case_sensitive=False)`` hands back the canonical spelling in current click,
+    but this does not depend on it.
+
+    Args:
+        enum_cls: The enum whose members' values the choice listed.
+        value: The spelling the user typed (or click handed back).
+
+    Returns:
+        The matching member.
+
+    Raises:
+        ValueError: No member's value matches (unreachable behind a ``click.Choice`` of the values).
+
+    Example:
+        >>> from pwshpy.domain.enums import KnownFolder
+        >>> enum_by_value(KnownFolder, "mydocuments") is KnownFolder.DOCUMENTS
+        True
+    """
+    folded = value.casefold()
+    match = next((member for member in enum_cls if str(member.value).casefold() == folded), None)
+    if match is None:  # unreachable behind click.Choice; a ValueError reaches the user as a usage error
+        raise ValueError(f"{value!r} is not one of {', '.join(str(member.value) for member in enum_cls)}")
+    return match
+
+
+__all__ = ["enum_by_value", "parse_pairs", "resolve_format"]

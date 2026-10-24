@@ -20,8 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime, timedelta
-from enum import Enum
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
 import rich_click as click
 from pydantic import ValidationError
@@ -30,12 +29,10 @@ from ....domain.enums import AceType, RegistryValueType, ServiceStartType, TaskL
 from ....domain.scheduling import BootTrigger, DailyTrigger, LogonTrigger, OnceTrigger, TaskPrincipal, TaskTrigger
 from ..context import get_cli_context
 from ..typed_click import argument, option
+from ._common import enum_by_value
 
 if TYPE_CHECKING:
     from pwshpy.composition import Ps
-
-
-_E = TypeVar("_E", bound=Enum)
 
 
 def _ps(ctx: click.Context) -> Ps:
@@ -333,23 +330,6 @@ def _run_as(value: str | None) -> str | None:
     return member.value if member is not None else value
 
 
-def _by_value(enum_cls: type[_E], value: str) -> _E:
-    """Return the member of ``enum_cls`` whose value matches ``value`` case-insensitively.
-
-    ``click.Choice(case_sensitive=False)`` hands back the canonical spelling in current click,
-    but this does not depend on it.
-
-    Example:
-        >>> _by_value(TaskRunLevel, "highest") is TaskRunLevel.HIGHEST
-        True
-    """
-    folded = value.casefold()
-    match = next((member for member in enum_cls if str(member.value).casefold() == folded), None)
-    if match is None:  # unreachable behind click.Choice; a ValueError reaches the user as a usage error
-        raise ValueError(f"{value!r} is not one of {', '.join(str(member.value) for member in enum_cls)}")
-    return match
-
-
 def _render(exc: ValueError) -> str:
     """One ``<field>: <reason>`` line per validation error, or the plain ValueError text.
 
@@ -516,8 +496,8 @@ def cli_register_scheduled_task(
         logon_user=logon_user,
     )
     try:
-        level = _by_value(TaskRunLevel, run_level)
-        logon = None if logon_type is None else _by_value(TaskLogonType, logon_type)
+        level = enum_by_value(TaskRunLevel, run_level)
+        logon = None if logon_type is None else enum_by_value(TaskLogonType, logon_type)
         principal = _principal(run_as, level, logon)
         triggers = _triggers(
             at_times=at_times,

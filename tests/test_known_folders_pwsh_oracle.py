@@ -298,8 +298,9 @@ def test_macos_decoy_home_matches_pwsh(tmp_path: Path) -> None:
     """HOME pointing at a decoy settles which home .NET uses on macOS.
 
     ``posix_known_folder`` follows CoreFoundation (CFFIXED_USER_HOME, then the passwd entry,
-    then HOME), inferred from source and never measured. The decoy holds every per-user
-    folder, so pwsh lands in it only if it follows HOME; the failure names the order pwsh took.
+    then HOME), as read in the .NET and CoreFoundation sources; this test is what pins that
+    order against pwsh. The decoy holds every per-user folder, so pwsh lands in it only if it
+    follows HOME; the failure names the order pwsh took.
     """
     decoy = _macos_home(tmp_path / "decoy")
     passwd_home = _passwd_home()

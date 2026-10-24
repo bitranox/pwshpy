@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 from pydantic import SecretStr
 
+import pwshpy
 from pwshpy import ps
+from pwshpy.adapters.native.known_folders import posix_known_folder, windows_known_folder
 from pwshpy.application.ports import WindowsImageSource
 from pwshpy.composition import Ps, build_ps
 from pwshpy.domain.enums import (
@@ -19,6 +22,7 @@ from pwshpy.domain.enums import (
     EventLevel,
     FileItemType,
     ImageArchitecture,
+    KnownFolder,
     RegistryHive,
     RegistryValueType,
     ServiceKind,
@@ -27,7 +31,13 @@ from pwshpy.domain.enums import (
     TaskState,
     TransportProtocol,
 )
-from pwshpy.domain.errors import ElevationRequiredError, FeatureUnavailableError, NativeCallError
+from pwshpy.domain.errors import (
+    ConfigurationError,
+    ElevationRequiredError,
+    FeatureUnavailableError,
+    NativeCallError,
+    PlatformUnsupportedError,
+)
 from pwshpy.domain.packing import DEFAULT_PACK_OPTIONS, PackOptions
 from pwshpy.domain.pipeline import Pipeline
 from pwshpy.domain.records import (
@@ -58,12 +68,18 @@ from pwshpy.domain.records import (
     RegistryValue,
     ScheduledTaskInfo,
     ServiceInfo,
+    ShortcutInfo,
     SystemUptime,
     WebResponse,
     WindowsImage,
     WindowsUpdate,
 )
 from pwshpy.domain.scheduling import BootTrigger, TaskPrincipal, TaskTrigger
+from pwshpy.domain.shortcuts import ShortcutSpec
+
+#: An opaque bool, as in the facade: a literal sys.platform test lets pyright prune one branch
+#: and report the other resolver's import unused.
+_ON_WINDOWS: bool = sys.platform == "win32"
 
 
 @pytest.mark.os_agnostic
@@ -622,6 +638,33 @@ class _FakePacker:
         )
 
 
+class _FakeKnownFolders:
+    """Known-folder source: records each member asked for and answers a path named after it."""
+
+    def __init__(self) -> None:
+        self.asked: list[object] = []
+
+    def __call__(self, folder: KnownFolder) -> Path | None:
+        self.asked.append(folder)
+        return None if folder is KnownFolder.PROGRAMS else Path("/known") / folder.value
+
+
+class _FakeShortcutController:
+    """Shortcut controller: records the spec or path it was given and echoes it back as a record."""
+
+    def __init__(self) -> None:
+        self.created: list[tuple[ShortcutSpec, bool]] = []
+        self.read_paths: list[str] = []
+
+    def create(self, spec: ShortcutSpec, *, force: bool) -> ShortcutInfo:
+        self.created.append((spec, force))
+        return ShortcutInfo(path=spec.path, target=spec.target, arguments=spec.joined_arguments)
+
+    def read(self, path: str) -> ShortcutInfo:
+        self.read_paths.append(path)
+        return ShortcutInfo(path=path, target="C:\\Windows\\notepad.exe")
+
+
 @dataclass
 class _InjectedPs:
     """A Ps wired over fresh fakes, plus the fakes that record what the facade delegated."""
@@ -640,6 +683,8 @@ class _InjectedPs:
     packer: _FakePacker = field(default_factory=_FakePacker)
     windows_image_source: WindowsImageSource = field(default=_fake_windows_images)
     windows_updates: _FakeWindowsUpdates = field(default_factory=_FakeWindowsUpdates)
+    known_folders: _FakeKnownFolders = field(default_factory=_FakeKnownFolders)
+    shortcut_controller: _FakeShortcutController | None = field(default_factory=_FakeShortcutController)
     facade: Ps = field(init=False)
 
     def __post_init__(self) -> None:
@@ -689,6 +734,8 @@ class _InjectedPs:
             windows_update_source=self.windows_updates,
             computer_info_source=_fake_computer_info,
             current_identity_source=_fake_current_identity,
+            known_folder_source=self.known_folders,
+            shortcut_controller=self.shortcut_controller,
             elevation_check=self.elevator.is_elevated,
             elevator=self.elevator.elevate,
             script_packer=self.packer.pack_script,
@@ -1085,3 +1132,175 @@ def test_exec_refuses_a_timeout_outside_the_waitable_range(injected: _InjectedPs
     before a child starts (it was: -1 a timeout at once, NaN an internal error, 1e12 an OverflowError)."""
     with pytest.raises(ValueError, match="timeout must be in"):
         injected.facade.exec(["prog"], timeout=bad)
+
+
+# --- Known folders and shortcuts ---------------------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+def test_get_known_folder_hands_the_member_to_the_source(injected: _InjectedPs) -> None:
+    """A member, or its .NET SpecialFolder name, reaches the source as the member; the answer comes back."""
+    facade = injected.facade
+    assert facade.get_known_folder(KnownFolder.DESKTOP) == Path("/known/Desktop")
+    assert facade.get_known_folder("CommonApplicationData") == Path("/known/CommonApplicationData")
+    assert facade.get_known_folder(KnownFolder.PROGRAMS) is None
+    assert injected.known_folders.asked == [KnownFolder.DESKTOP, KnownFolder.PROGRAM_DATA, KnownFolder.PROGRAMS]
+    assert all(type(asked) is KnownFolder for asked in injected.known_folders.asked)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("name", ["desktop", "Startup", "DESKTOP", ""])
+def test_get_known_folder_refuses_a_name_that_is_no_member_value(injected: _InjectedPs, name: str) -> None:
+    """Only the exact .NET SpecialFolder names are taken; anything else is refused before the source is asked."""
+    with pytest.raises(ValueError, match="KnownFolder"):
+        injected.facade.get_known_folder(name)
+    assert injected.known_folders.asked == []
+
+
+@pytest.mark.os_agnostic
+def test_build_ps_resolves_known_folders_with_the_running_oses_resolver() -> None:
+    """The production facade answers what the resolver for this OS answers, member by member."""
+    resolver = windows_known_folder if _ON_WINDOWS else posix_known_folder
+    facade = build_ps()
+    for member in KnownFolder:
+        if member is KnownFolder.PROGRAMS and sys.platform != "win32":
+            with pytest.raises(PlatformUnsupportedError, match="Programs"):
+                facade.get_known_folder(member)
+            continue
+        assert facade.get_known_folder(member) == resolver(member), member
+
+
+@pytest.mark.os_agnostic
+def test_new_shortcut_builds_the_spec_and_returns_the_controllers_record(injected: _InjectedPs) -> None:
+    """Every keyword reaches the spec, force reaches create, and the controller's record is returned."""
+    info = injected.facade.new_shortcut(
+        "C:\\Users\\me\\Desktop\\Tool.lnk",
+        target="%SystemRoot%\\notepad.exe",
+        arguments=["C:\\notes\\a b.txt", "-x"],
+        working_directory="C:\\notes",
+        icon="C:\\Windows\\notepad.exe",
+        icon_index=-2,
+        description="Notes",
+        force=True,
+    )
+    assert injected.shortcut_controller is not None
+    [(spec, force)] = injected.shortcut_controller.created
+    assert force is True
+    assert spec == ShortcutSpec(
+        path="C:\\Users\\me\\Desktop\\Tool.lnk",
+        target="%SystemRoot%\\notepad.exe",
+        arguments=("C:\\notes\\a b.txt", "-x"),
+        working_directory="C:\\notes",
+        icon="C:\\Windows\\notepad.exe",
+        icon_index=-2,
+        description="Notes",
+    )
+    assert info == ShortcutInfo(
+        path="C:\\Users\\me\\Desktop\\Tool.lnk",
+        target="%SystemRoot%\\notepad.exe",
+        arguments='"C:\\notes\\a b.txt" -x',
+    )
+
+
+@pytest.mark.os_agnostic
+def test_new_shortcut_defaults_leave_the_optional_fields_unset_and_do_not_force(injected: _InjectedPs) -> None:
+    """Without the optional keywords the spec carries no arguments, no optional text and force False."""
+    injected.facade.new_shortcut("C:\\Tool.lnk", target="C:\\Tools\\tool.exe")
+    assert injected.shortcut_controller is not None
+    assert injected.shortcut_controller.created == [
+        (ShortcutSpec(path="C:\\Tool.lnk", target="C:\\Tools\\tool.exe"), False)
+    ]
+
+
+@pytest.mark.os_agnostic
+def test_new_shortcut_normalises_the_path_before_the_length_limit(injected: _InjectedPs) -> None:
+    """The .lnk path is made absolute and normalised first, so the 259 limit applies to what COM receives.
+
+    The given text is 262 characters; normalised it is ``C:\\Tool.lnk``, which the spec accepts. A
+    path-like is taken as well, and its forward slashes come out as backslashes.
+    """
+    long_detour = "C:\\" + "x" * 250 + "\\..\\Tool.lnk"
+    assert len(long_detour) > 259
+    injected.facade.new_shortcut(long_detour, target="C:\\Tools\\tool.exe")
+    injected.facade.new_shortcut(PureWindowsPath("C:/Users/me/Tool.lnk"), target="C:\\Tools\\tool.exe")
+    assert injected.shortcut_controller is not None
+    assert [spec.path for spec, _force in injected.shortcut_controller.created] == [
+        "C:\\Tool.lnk",
+        "C:\\Users\\me\\Tool.lnk",
+    ]
+
+
+@pytest.mark.os_agnostic
+def test_new_shortcut_lets_the_specs_configuration_error_through_before_the_controller(
+    injected: _InjectedPs,
+) -> None:
+    """A refused field surfaces as the spec's own ConfigurationError, and nothing is written."""
+    with pytest.raises(ConfigurationError, match="target"):
+        injected.facade.new_shortcut("C:\\Tool.lnk", target="notepad.exe")
+    assert injected.shortcut_controller is not None
+    assert injected.shortcut_controller.created == []
+
+
+@pytest.mark.os_agnostic
+def test_get_shortcut_reads_the_normalised_path(injected: _InjectedPs) -> None:
+    """get_shortcut hands the controller the absolute, normalised path and returns its record."""
+    info = injected.facade.get_shortcut("C:\\Users\\me\\..\\Public\\Tool.lnk")
+    assert info.path == "C:\\Users\\Public\\Tool.lnk"
+    assert injected.shortcut_controller is not None
+    assert injected.shortcut_controller.read_paths == ["C:\\Users\\Public\\Tool.lnk"]
+
+
+@pytest.mark.os_agnostic
+def test_without_a_shortcut_controller_both_verbs_are_platform_unsupported_before_the_spec() -> None:
+    """No controller (not Windows): PlatformUnsupportedError, even for input the spec would refuse."""
+    facade = _InjectedPs(shortcut_controller=None).facade
+    with pytest.raises(PlatformUnsupportedError, match="new_shortcut"):
+        facade.new_shortcut("relative.txt", target="notepad.exe")
+    with pytest.raises(PlatformUnsupportedError, match="get_shortcut"):
+        facade.get_shortcut("C:\\Tool.lnk")
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the off-Windows refusal of the production facade")
+def test_production_shortcut_verbs_are_platform_unsupported_off_windows(tmp_path: Path) -> None:
+    """Off Windows the facade refuses before the adapter's own file checks, which would say NativeCallError.
+
+    An existing file would be "already exists" for new_shortcut and a missing one "does not exist"
+    for get_shortcut, were the adapter reached.
+    """
+    existing = tmp_path / "Tool.lnk"
+    existing.write_bytes(b"not a shortcut")
+    missing = tmp_path / "Missing.lnk"
+    facade = build_ps()
+    with pytest.raises(PlatformUnsupportedError, match="Windows"):
+        facade.new_shortcut(existing, target="C:\\Windows\\notepad.exe")
+    with pytest.raises(PlatformUnsupportedError, match="Windows"):
+        facade.get_shortcut(missing)
+    with pytest.raises(PlatformUnsupportedError, match="Windows"):
+        facade.get_shortcut(existing)
+    assert existing.read_bytes() == b"not a shortcut"
+
+
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="writes and reads a real .lnk through IShellLinkW")
+def test_production_shortcut_round_trip_from_a_relative_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A relative .lnk path is resolved against the working directory, written, and read back."""
+    monkeypatch.chdir(tmp_path)
+    facade = build_ps()
+    created = facade.new_shortcut("Tool.lnk", target="%SystemRoot%\\notepad.exe", arguments=["a b"])
+    assert (tmp_path / "Tool.lnk").is_file()
+    assert created.path == str(tmp_path / "Tool.lnk")
+    assert created.target.lower().endswith("\\notepad.exe")
+    assert created.arguments == '"a b"'
+    assert facade.get_shortcut("Tool.lnk") == created
+    with pytest.raises(NativeCallError, match="already exists"):
+        facade.new_shortcut("Tool.lnk", target="%SystemRoot%\\notepad.exe")
+
+
+@pytest.mark.os_agnostic
+def test_the_package_exports_the_known_folder_and_shortcut_types() -> None:
+    """KnownFolder and ShortcutInfo are public; ShortcutSpec stays internal (no facade method takes it)."""
+    assert pwshpy.KnownFolder is KnownFolder
+    assert pwshpy.ShortcutInfo is ShortcutInfo
+    assert {"KnownFolder", "ShortcutInfo"} <= set(pwshpy.__all__)
+    assert "ShortcutSpec" not in pwshpy.__all__

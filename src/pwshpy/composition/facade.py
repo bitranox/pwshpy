@@ -12,6 +12,8 @@ Contents:
 
 from __future__ import annotations
 
+import ntpath
+import os
 import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
@@ -26,6 +28,7 @@ from ..adapters.native import NativeProcessControl as _NativeProcessControl
 from ..adapters.native import NativeRegistryController as _NativeRegistryController
 from ..adapters.native import NativeScheduledTaskController as _NativeScheduledTaskController
 from ..adapters.native import NativeServiceController as _NativeServiceController
+from ..adapters.native import NativeShortcutController as _NativeShortcutController
 from ..adapters.native import PosixAclController as _PosixAclController
 from ..adapters.native import PosixLocalAccountController as _PosixLocalAccountController
 from ..adapters.native import SecretServiceCredentialStore as _SecretServiceCredentialStore
@@ -62,6 +65,7 @@ from ..adapters.native import posix_current_identity as _posix_current_identity
 from ..adapters.native import posix_iter_acl as _posix_iter_acl
 from ..adapters.native import posix_iter_local_groups as _posix_iter_local_groups
 from ..adapters.native import posix_iter_local_users as _posix_iter_local_users
+from ..adapters.native import posix_known_folder as _posix_known_folder
 from ..adapters.native import prompt_credential as _prompt_credential
 from ..adapters.native import resolve as _resolve
 from ..adapters.native import run_process as _run_process
@@ -71,6 +75,7 @@ from ..adapters.native import systemd_iter_timers as _systemd_iter_timers
 from ..adapters.native import test_connection as _test_connection
 from ..adapters.native import unpack_script as _unpack_script
 from ..adapters.native import windows_current_identity as _windows_current_identity
+from ..adapters.native import windows_known_folder as _windows_known_folder
 from ..adapters.native import write_records as _write_records
 from ..adapters.native import write_text as _write_text
 from ..adapters.native import write_text_stream as _write_text_stream
@@ -98,6 +103,7 @@ from ..application.ports import (
     FileDownloader,
     FileSystem,
     HotfixSource,
+    KnownFolderSource,
     LocalAccountController,
     LocalGroupSource,
     LocalUserSource,
@@ -120,6 +126,7 @@ from ..application.ports import (
     ScriptUnpacker,
     ServiceController,
     ServiceSource,
+    ShortcutController,
     TextStreamWriter,
     TextWriter,
     UptimeSource,
@@ -127,8 +134,8 @@ from ..application.ports import (
     WindowsImageSource,
     WindowsUpdateSource,
 )
-from ..domain.enums import AceType, FileItemType, RegistryValueType, ServiceStartType
-from ..domain.errors import ElevationRequiredError, NativeCallError
+from ..domain.enums import AceType, FileItemType, KnownFolder, RegistryValueType, ServiceStartType
+from ..domain.errors import ElevationRequiredError, NativeCallError, PlatformUnsupportedError
 from ..domain.packing import DEFAULT_PACK_OPTIONS, PackOptions
 from ..domain.pipeline import Pipeline
 from ..domain.records import (
@@ -159,12 +166,14 @@ from ..domain.records import (
     RegistryValue,
     ScheduledTaskInfo,
     ServiceInfo,
+    ShortcutInfo,
     SystemUptime,
     WebResponse,
     WindowsImage,
     WindowsUpdate,
 )
 from ..domain.scheduling import TaskPrincipal, TaskTrigger
+from ..domain.shortcuts import ShortcutSpec
 
 #: Platform switch for the local-accounts backend. Stored as an opaque bool so the type
 #: checker does not statically prune the "other OS" branch (and flag its import unused).
@@ -225,6 +234,20 @@ def _only_image(images: Iterable[WindowsImage], index: int, path: Path) -> Itera
     raise NativeCallError(f"{path}: no image with index {index}")
 
 
+def _absolute_windows_path(path: str | os.PathLike[str]) -> str:
+    r"""Return ``path`` made absolute and normalised the way Windows resolves it.
+
+    :func:`ntpath.abspath` is :func:`os.path.abspath` on Windows, the only OS that reaches a
+    shortcut controller in production; naming it keeps the Windows rules (drive letters,
+    backslashes, ``..``) when a test drives the facade on another OS.
+
+    Example:
+        >>> _absolute_windows_path("C:/Users/me/../Public/Tool.lnk")
+        'C:\\Users\\Public\\Tool.lnk'
+    """
+    return ntpath.abspath(os.fspath(path))
+
+
 class Ps:
     """Fluent facade over both backends, returning the same typed pipeline.
 
@@ -281,6 +304,8 @@ class Ps:
         windows_update_source: WindowsUpdateSource,
         computer_info_source: ComputerInfoSource,
         current_identity_source: CurrentIdentitySource,
+        known_folder_source: KnownFolderSource,
+        shortcut_controller: ShortcutController | None,
         elevation_check: ElevationCheck,
         elevator: Elevator,
         script_packer: ScriptPacker,
@@ -332,6 +357,9 @@ class Ps:
         self._windows_update_source = windows_update_source
         self._computer_info_source = computer_info_source
         self._current_identity_source = current_identity_source
+        self._known_folder_source = known_folder_source
+        # None where the OS has no shortcuts (anything but Windows): both verbs refuse up front.
+        self._shortcut_controller = shortcut_controller
         self._elevation_check = elevation_check
         self._elevator = elevator
 
@@ -1530,6 +1558,134 @@ class Ps:
         """
         return self._current_identity_source()
 
+    def get_known_folder(self, folder: KnownFolder | str) -> Path | None:
+        """Return a well-known folder as pwsh's ``[Environment]::GetFolderPath`` names it (native, portable).
+
+        Windows asks the shell (``SHGetKnownFolderPath``); Linux follows the XDG user dirs and
+        macOS the CoreFoundation home, as .NET does there.  The answer is the folder pwsh
+        reports on the same machine, or ``None`` where pwsh reports ``""``.
+
+        Args:
+            folder: A :class:`KnownFolder` member, or its value: the .NET ``SpecialFolder``
+                name (``"Desktop"``, ``"MyDocuments"``, ...), matched exactly, case included.
+
+        Returns:
+            The folder's path, or ``None`` when it is missing or not readable.
+
+        Raises:
+            ValueError: ``folder`` is neither a member nor a member's value.
+            PlatformUnsupportedError: ``KnownFolder.PROGRAMS`` on Linux or macOS, where .NET maps
+                it to no folder.
+            NativeCallError: Windows: ``SHGetKnownFolderPath`` failed with anything but "not
+                found" (the message carries the HRESULT).
+
+        Example:
+            >>> found = build_ps().get_known_folder(KnownFolder.PROGRAM_DATA)
+            >>> found is None or found.is_absolute()
+            True
+            >>> build_ps().get_known_folder("CommonApplicationData") == found
+            True
+        """
+        return self._known_folder_source(KnownFolder(folder))
+
+    def new_shortcut(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        target: str,
+        arguments: Sequence[str] = (),
+        working_directory: str | None = None,
+        icon: str | None = None,
+        icon_index: int = 0,
+        description: str | None = None,
+        force: bool = False,
+    ) -> ShortcutInfo:
+        r"""Write a Windows shortcut (``.lnk``) and return what Windows stored (native, Windows, **mutating**).
+
+        Like WScript's ``CreateShortcut(...).Save()``, through ``IShellLinkW`` so non-ASCII text
+        survives.  ``path`` is made absolute against the working directory first, so the
+        259-character limit applies to the path Windows receives.  No directory is created.
+
+        Args:
+            path: The ``.lnk`` file to write; relative paths resolve against the working directory.
+            target: What the shortcut runs or opens: an absolute Windows path, or one starting
+                with an environment reference (``%SystemRoot%\notepad.exe``).
+            arguments: The argv passed to ``target``, stored as one command line joined with
+                :func:`subprocess.list2cmdline`; a bare ``str`` is refused, never split.
+            working_directory: The directory ``target`` starts in.
+            icon: The file the icon is taken from.
+            icon_index: Which icon in ``icon`` (negative selects a resource id).
+            description: The tooltip Explorer shows.
+            force: Overwrite an existing file at ``path``.
+
+        Returns:
+            The shortcut as Windows reads it back (``target`` with environment references expanded).
+
+        Raises:
+            PlatformUnsupportedError: Not Windows (raised before anything is checked or touched).
+            ConfigurationError: A value breaks the shortcut rules (a relative target, a field too
+                long, NUL/CR/LF in a field, a path not ending in ``.lnk``); nothing is written.
+            NativeCallError: ``path`` exists and ``force`` is False, or the shell failed (e.g. a
+                missing directory); the message names the HRESULT.
+
+        Example:
+            A target that is not an absolute path is refused before anything is written (off
+            Windows the call itself is refused):
+
+            >>> from pwshpy.domain.errors import ConfigurationError
+            >>> try:
+            ...     build_ps().new_shortcut("C:\\Tool.lnk", target="notepad.exe")
+            ... except (ConfigurationError, PlatformUnsupportedError):
+            ...     print("refused")
+            refused
+        """
+        controller = self._require_shortcuts("new_shortcut")
+        spec = ShortcutSpec(
+            path=_absolute_windows_path(path),
+            target=target,
+            arguments=arguments,
+            working_directory=working_directory,
+            icon=icon,
+            icon_index=icon_index,
+            description=description,
+        )
+        return controller.create(spec, force=force)
+
+    def get_shortcut(self, path: str | os.PathLike[str]) -> ShortcutInfo:
+        r"""Return the fields of a Windows shortcut (``.lnk``) as Windows reads them (native, Windows).
+
+        Args:
+            path: The ``.lnk`` file; relative paths resolve against the working directory.
+
+        Returns:
+            The shortcut; an unset field reads ``""`` (an unset icon index ``0``), and
+            ``target`` comes back with environment references expanded.
+
+        Raises:
+            PlatformUnsupportedError: Not Windows (raised before the file is looked at).
+            NativeCallError: ``path`` is missing, empty or no shortcut, or the shell failed (the
+                message names the HRESULT).
+
+        Example:
+            A missing file is refused (off Windows the call itself is):
+
+            >>> try:
+            ...     build_ps().get_shortcut("C:\\pwshpy-missing\\Tool.lnk")
+            ... except (NativeCallError, PlatformUnsupportedError):
+            ...     print("refused")
+            refused
+        """
+        return self._require_shortcuts("get_shortcut").read(_absolute_windows_path(path))
+
+    def _require_shortcuts(self, verb: str) -> ShortcutController:
+        """Return the shortcut controller, or refuse ``verb`` on an OS that has none."""
+        if self._shortcut_controller is None:
+            raise PlatformUnsupportedError(
+                f"ps.{verb} needs Windows: shortcuts (.lnk) are a Windows shell feature, "
+                f"not available on {sys.platform}"
+            )
+        return self._shortcut_controller
+
     def get_credential(
         self, username: str | None = None, *, prompt: str = "Password: ", target: str = ""
     ) -> Credential:
@@ -1692,6 +1848,10 @@ def build_ps() -> Ps:
         computer_info_source=_get_computer_info,
         # The current identity is portable: the process token on Windows, the euid + pwd on POSIX.
         current_identity_source=_windows_current_identity if _ON_WINDOWS else _posix_current_identity,
+        # Known folders are portable: SHGetKnownFolderPath on Windows, the .NET XDG/macOS rules elsewhere.
+        known_folder_source=_windows_known_folder if _ON_WINDOWS else _posix_known_folder,
+        # Shortcuts (.lnk) are Windows-only: no controller elsewhere, so the facade refuses up front.
+        shortcut_controller=_NativeShortcutController() if _ON_WINDOWS else None,
         elevation_check=_is_elevated,
         elevator=_elevate,
         script_packer=_pack_script,

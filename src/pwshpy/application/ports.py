@@ -16,7 +16,15 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from ..domain.enums import AceType, DeployTarget, FileItemType, OutputFormat, RegistryValueType, ServiceStartType
+from ..domain.enums import (
+    AceType,
+    DeployTarget,
+    FileItemType,
+    KnownFolder,
+    OutputFormat,
+    RegistryValueType,
+    ServiceStartType,
+)
 from ..domain.packing import PackOptions
 from ..domain.records import (
     AclEntry,
@@ -46,12 +54,14 @@ from ..domain.records import (
     RegistryValue,
     ScheduledTaskInfo,
     ServiceInfo,
+    ShortcutInfo,
     SystemUptime,
     WebResponse,
     WindowsImage,
     WindowsUpdate,
 )
 from ..domain.scheduling import TaskPrincipal, TaskTrigger
+from ..domain.shortcuts import ShortcutSpec
 
 if TYPE_CHECKING:
     from lib_layered_config import Config
@@ -435,6 +445,22 @@ class AclController(Protocol):
     def set_owner(self, path: str, owner: str) -> None: ...
 
 
+class KnownFolderSource(Protocol):
+    """Resolve a :class:`KnownFolder` to its path on this OS, ``None`` when it is missing (native)."""
+
+    def __call__(self, folder: KnownFolder) -> Path | None: ...
+
+
+class ShortcutController(Protocol):
+    """Write and read Windows shortcuts (``.lnk``) as :class:`ShortcutInfo` records (native, Windows).
+
+    ``create`` refuses an existing file unless ``force``; both take an absolute ``.lnk`` path.
+    """
+
+    def create(self, spec: ShortcutSpec, *, force: bool) -> ShortcutInfo: ...
+    def read(self, path: str) -> ShortcutInfo: ...
+
+
 class PowerShellRunner(Protocol):
     """Run a PowerShell script in the hosted engine and marshal the result (.NET)."""
 
@@ -530,6 +556,7 @@ __all__ = [
     "EnvironmentSource",
     "EventLogController",
     "InitLogging",
+    "KnownFolderSource",
     "LocalAccountController",
     "NetAdapterSource",
     "NetConnectionSource",
@@ -554,6 +581,7 @@ __all__ = [
     "ScheduledTaskSource",
     "ServiceController",
     "ServiceSource",
+    "ShortcutController",
     "UptimeSource",
     "WindowsImageSource",
 ]

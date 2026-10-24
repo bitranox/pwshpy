@@ -1,4 +1,4 @@
-"""native adapters — typed facades over direct OS bindings.
+"""native adapters - typed facades over direct OS bindings.
 
 Each module wraps one substrate (``psutil``, ``winreg``, ``win32*``, ``wmi``)
 behind a fully-typed surface and marshals its values into domain records via
@@ -6,18 +6,20 @@ behind a fully-typed surface and marshals its values into domain records via
 modules are Windows-only.
 
 Contents:
-    * :func:`iter_processes` — portable process source (psutil).
-    * :func:`iter_connections` — portable network-connection source (psutil).
-    * :func:`iter_disks` — portable disk-usage source (psutil).
-    * :func:`get_uptime` — portable system uptime (psutil).
-    * :func:`resolve` — portable DNS resolver (stdlib socket).
-    * :func:`test_connection` — portable TCP reachability probe (stdlib socket).
-    * :func:`iter_env` — portable environment-variable source (os.environ).
-    * :func:`iter_registry_values` — Windows registry values (lib_registry, win32-gated).
-    * :func:`iter_registry_keys` — Windows registry subkeys (lib_registry, win32-gated).
+    * :func:`iter_processes` - portable process source (psutil).
+    * :func:`iter_connections` - portable network-connection source (psutil).
+    * :func:`iter_disks` - portable disk-usage source (psutil).
+    * :func:`get_uptime` - portable system uptime (psutil).
+    * :func:`resolve` - portable DNS resolver (stdlib socket).
+    * :func:`test_connection` - portable TCP reachability probe (stdlib socket).
+    * :func:`iter_env` - portable environment-variable source (os.environ).
+    * :func:`iter_registry_values` - Windows registry values (lib_registry, win32-gated).
+    * :func:`iter_registry_keys` - Windows registry subkeys (lib_registry, win32-gated).
     * :func:`iter_wim_images` - portable WIM image list (header + XML resource, no DISM).
     * :func:`search_updates` - Windows Update search in a killable child (Windows-only).
     * :func:`windows_current_identity` / :func:`posix_current_identity` - who this process runs as.
+    * :func:`windows_known_folder` / :func:`posix_known_folder` - well-known folders as pwsh names them.
+    * :class:`NativeShortcutController` - Windows shortcuts (``.lnk``) through IShellLinkW.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from .filesystem import NativeFileSystem
 from .identity import posix_current_identity, windows_current_identity
 from .inventory import get_computer_info, iter_hotfixes
 from .journald import iter_event_log as journald_iter_event_log
+from .known_folders import posix_known_folder, windows_known_folder
 from .local_account_control import NativeLocalAccountController
 from .local_accounts import iter_local_groups, iter_local_users
 from .netcheck import test_connection
@@ -59,6 +62,7 @@ from .scheduled_tasks import iter_scheduled_tasks
 from .secret_service import SecretServiceCredentialStore
 from .service_control import NativeServiceController
 from .services import iter_services
+from .shortcuts import NativeShortcutController
 from .systemd_services import SystemdServiceController
 from .systemd_services import iter_services as systemd_iter_services
 from .systemd_timers import SystemdScheduledTaskController
@@ -81,6 +85,7 @@ __all__ = [
     "NativeRegistryController",
     "NativeScheduledTaskController",
     "NativeServiceController",
+    "NativeShortcutController",
     "elevate",
     "get_computer_info",
     "get_uptime",
@@ -115,6 +120,8 @@ __all__ = [
     "posix_iter_local_users",
     "posix_current_identity",
     "windows_current_identity",
+    "posix_known_folder",
+    "windows_known_folder",
     "prompt_credential",
     "pack_script",
     "resolve",

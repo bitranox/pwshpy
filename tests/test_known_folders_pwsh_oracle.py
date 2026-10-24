@@ -36,6 +36,7 @@ import pytest
 from known_folder_oracle_labels import home_followed
 
 from pwshpy.adapters.native.known_folders import posix_known_folder, windows_known_folder
+from pwshpy.composition import build_ps
 from pwshpy.domain.enums import KnownFolder
 from pwshpy.domain.errors import PlatformUnsupportedError
 
@@ -336,6 +337,25 @@ def test_windows_all_six_match_pwsh() -> None:
     theirs = _pwsh_folders(_scratch_env({}, drop=lambda _key: False))
     ours = _ours(windows_known_folder)
     expected = _expected(theirs, posix=False)
+
+    assert ours == expected, _differences(ours, expected)
+    assert theirs[KnownFolder.PROGRAM_DATA] is not None, "pwsh answered no ProgramData: the oracle compared nothing"
+
+
+# --- The facade, on every OS ------------------------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+def test_facade_matches_pwsh_on_this_os() -> None:
+    """``ps.get_known_folder`` answers pwsh's ``GetFolderPath`` for every member, whatever the OS.
+
+    The production facade picks the resolver for the running OS, so this is the one oracle that
+    proves the dispatch: on Windows the SHGetKnownFolderPath resolver, elsewhere the POSIX one
+    (with Programs refused).
+    """
+    theirs = _pwsh_folders(_scratch_env({}, drop=lambda _key: False))
+    ours = _ours(build_ps().get_known_folder)
+    expected = _expected(theirs, posix=sys.platform != "win32")
 
     assert ours == expected, _differences(ours, expected)
     assert theirs[KnownFolder.PROGRAM_DATA] is not None, "pwsh answered no ProgramData: the oracle compared nothing"

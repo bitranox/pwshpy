@@ -13,8 +13,11 @@ are compared as :class:`~pathlib.Path`, never as raw strings.
 
 The pwsh child runs first and pwshpy second: pwsh creates ``$HOME/.local/share/powershell``
 at startup (measured), which makes LocalApplicationData exist for the second reader in a
-scratch home. Each Linux scenario also pins what it was built to produce, so a scenario whose
-setup pwsh ignores fails instead of passing with both sides agreeing on something else.
+scratch home. For the same reason the oracle cannot observe an ABSENT LocalApplicationData: by
+the time pwsh asks, its own start-up has created it, so that branch (``None``) is pinned only by
+the unit tests in ``test_known_folders_posix.py``. Each Linux scenario also pins what it was
+built to produce, so a scenario whose setup pwsh ignores fails instead of passing with both
+sides agreeing on something else.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from pathlib import Path
 from typing import Any, TypeAlias, cast
 
 import pytest
+from known_folder_oracle_labels import home_followed
 
 from pwshpy.adapters.native.known_folders import posix_known_folder, windows_known_folder
 from pwshpy.domain.enums import KnownFolder
@@ -277,14 +281,14 @@ def _passwd_home() -> Path:
     return Path(pwd.getpwuid(os.geteuid()).pw_dir)
 
 
-def _home_pwsh_followed(theirs: Mapping[KnownFolder, Path | None], *, decoy: Path, passwd_home: Path) -> str:
-    """Name the home pwsh's per-user answers sit under: HOME (the decoy), the passwd entry, or neither."""
-    homes = {parent for answer in theirs.values() if answer is not None for parent in answer.parents}
-    if decoy in homes:
-        return f"HOME ({decoy})"
-    if passwd_home in homes:
-        return f"the passwd entry ({passwd_home})"
-    return "neither HOME nor the passwd entry"
+def _compare_macos(env: Mapping[str, str], homes: Mapping[str, Path]) -> None:
+    """Assert pwshpy equals pwsh under ``env``; a mismatch names which of ``homes`` pwsh followed."""
+    theirs = _pwsh_folders(env)
+    ours = _ours(lambda member: posix_known_folder(member, environ=env))
+    expected = _expected(theirs, posix=True)
+
+    followed = home_followed(theirs.values(), homes)
+    assert ours == expected, f"pwsh followed {followed}; {_differences(ours, expected)}"
 
 
 @pytest.mark.os_macos
@@ -301,26 +305,25 @@ def test_macos_decoy_home_matches_pwsh(tmp_path: Path) -> None:
     assert passwd_home != decoy
     env = _scratch_env({"HOME": str(decoy)}, drop=lambda key: key == "CFFIXED_USER_HOME")
 
-    theirs = _pwsh_folders(env)
-    ours = _ours(lambda member: posix_known_folder(member, environ=env))
-    expected = _expected(theirs, posix=True)
-
-    followed = _home_pwsh_followed(theirs, decoy=decoy, passwd_home=passwd_home)
-    assert ours == expected, f"pwsh followed {followed}; {_differences(ours, expected)}"
+    _compare_macos(env, {"HOME": decoy, "the passwd entry": passwd_home})
 
 
 @pytest.mark.os_macos
 @pytest.mark.skipif(sys.platform != "darwin", reason="the macOS (CoreFoundation home) rules")
 def test_macos_cffixed_user_home_matches_pwsh(tmp_path: Path) -> None:
-    """CFFIXED_USER_HOME set: every member equals pwsh's answer (pwshpy puts it first)."""
+    """CFFIXED_USER_HOME set: every member equals pwsh's answer.
+
+    Whether .NET honours CFFIXED_USER_HOME is unmeasured, so this asserts only that pwshpy
+    agrees with pwsh; on a mismatch the message names the home pwsh followed, and that settles
+    whether ``posix_known_folder`` should keep the variable first.
+    """
     fixed = _macos_home(tmp_path / "fixed")
     env = _scratch_env({"CFFIXED_USER_HOME": str(fixed)}, drop=lambda _key: False)
+    homes = {"CFFIXED_USER_HOME": fixed, "the passwd entry": _passwd_home()}
+    if env.get("HOME"):
+        homes["HOME"] = Path(env["HOME"])
 
-    theirs = _compare_posix(env)
-
-    passwd_home = _passwd_home()
-    followed = _home_pwsh_followed(theirs, decoy=fixed, passwd_home=passwd_home)
-    assert theirs[KnownFolder.DESKTOP] == fixed / "Desktop", f"pwsh followed {followed}"
+    _compare_macos(env, homes)
 
 
 # --- Windows ----------------------------------------------------------------------------------

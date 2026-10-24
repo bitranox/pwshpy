@@ -42,8 +42,9 @@ from ._common import enum_by_value, resolve_format
 def cli_get_known_folder(ctx: click.Context, folder: str, as_json: bool) -> None:
     """Print a well-known folder's path (native, portable; like [Environment]::GetFolderPath).
 
-    FOLDER is a .NET SpecialFolder name, in any case.  Exit 1 with a message on stderr when the
-    folder is missing or not readable (where pwsh returns an empty string).
+    FOLDER is a .NET SpecialFolder name, in any case: ApplicationData, CommonApplicationData,
+    Desktop, LocalApplicationData, MyDocuments or Programs (Windows only).  Exit 1 with a message
+    on stderr when the folder is missing or not readable (where pwsh returns an empty string).
 
     \f
     Example:

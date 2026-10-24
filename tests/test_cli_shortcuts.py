@@ -135,6 +135,13 @@ def test_get_known_folder_accepts_exactly_the_dotnet_names() -> None:
 
 
 @pytest.mark.os_agnostic
+def test_get_known_folder_help_names_every_folder_in_its_dotnet_spelling() -> None:
+    """click 8.5 shows a case-insensitive choice lowercased, so the help text lists the real spellings."""
+    help_text = _invoke(_FakePs(), ["get_known_folder", "--help"]).output
+    assert [member.value for member in KnownFolder if member.value not in help_text] == []
+
+
+@pytest.mark.os_agnostic
 def test_get_known_folder_refuses_an_unknown_folder_as_a_usage_error() -> None:
     """An unknown FOLDER is click's usage error (exit 2) and never reaches the facade."""
     fake = _FakePs(folder=Path("/x"))

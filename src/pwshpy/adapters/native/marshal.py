@@ -13,6 +13,8 @@ Contents:
       Task Scheduler principal run level, COM dates and ``LastTaskResult``.
     * :func:`to_integrity_level` - mandatory-label RID -> :class:`IntegrityLevel`.
     * :func:`skip_or_raise` - the lenient/strict contract for an item a listing cannot read.
+    * :func:`is_com_error` / :func:`com_hresult` - recognise a pywin32 COM error and read its
+      unsigned HRESULT.
 """
 
 from __future__ import annotations
@@ -532,11 +534,69 @@ def skip_or_raise(what: str, exc: Exception, *, strict: bool, log: logging.Logge
     log.warning("skipped (pass strict=True to raise instead) - %s: %s", what, exc)
 
 
+#: pywin32's ``pywintypes.com_error`` and ``pywintypes.error``. Matched by class name because
+#: pywintypes is importable only on Windows, and a portable module must not import it.
+_COM_ERROR_NAMES = frozenset({"com_error", "error"})
+_HRESULT_MASK = 0xFFFFFFFF
+
+
+def is_com_error(exc: BaseException) -> bool:
+    """Return whether ``exc`` is a pywin32 COM/Win32 error (``com_error`` or ``error``).
+
+    A caller uses it to tell a native failure, which it wraps in
+    :class:`~pwshpy.domain.errors.NativeCallError`, from any other exception, which is not
+    pwshpy's to translate and propagates unchanged.
+
+    Args:
+        exc: Any exception a pywin32 call raised.
+
+    Returns:
+        True when the exception's class is named ``com_error`` or ``error``.
+
+    Example:
+        >>> is_com_error(RuntimeError("x"))
+        False
+    """
+    return type(exc).__name__ in _COM_ERROR_NAMES
+
+
+def com_hresult(exc: BaseException) -> int | None:
+    """Return the HRESULT a pywin32 COM error carries, as an unsigned 32-bit int.
+
+    pywin32 reports an HRESULT signed (``0x80070002`` arrives as ``-2147024894``), so it is
+    masked to 32 bits, ready for ``0x%08X``. ``None`` means no status could be read: either
+    ``exc`` is not a COM error (see :func:`is_com_error`, which a caller asks first when the
+    two cases must be told apart) or it carries no int ``hresult``.
+
+    Args:
+        exc: Any exception a pywin32 call raised.
+
+    Returns:
+        The unsigned HRESULT, or ``None``.
+
+    Example:
+        >>> class com_error(Exception):
+        ...     hresult = -2147024894
+        >>> f"0x{com_hresult(com_error()):08X}"
+        '0x80070002'
+        >>> com_hresult(ValueError()) is None
+        True
+    """
+    if not is_com_error(exc):
+        return None
+    hresult: object = getattr(exc, "hresult", None)
+    if isinstance(hresult, bool) or not isinstance(hresult, int):
+        return None
+    return hresult & _HRESULT_MASK
+
+
 __all__ = [
     "com_date_to_datetime",
+    "com_hresult",
     "epoch_to_datetime",
     "from_registry_value_type",
     "from_service_start_type",
+    "is_com_error",
     "normalize_registry_data",
     "parse_event_time",
     "skip_or_raise",

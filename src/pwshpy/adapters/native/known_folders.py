@@ -44,6 +44,7 @@ from typing import Any
 
 from ...domain.enums import KnownFolder
 from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from .marshal import com_hresult, is_com_error
 
 if sys.platform != "win32":
     import pwd
@@ -403,10 +404,10 @@ def windows_known_folder(
     shell = loader("win32com.shell.shell")
     try:
         found: str = shell.SHGetKnownFolderPath(_FOLDER_IDS[folder], 0, None)
-    except Exception as exc:  # pywintypes.com_error; anything else is not a shell answer
-        if type(exc).__name__ != "com_error":
+    except Exception as exc:  # a pywin32 COM error; anything else is not a shell answer
+        if not is_com_error(exc):
             raise
-        code = _hresult(exc)
+        code = com_hresult(exc)
         if code not in _NOT_FOUND:
             shown = "without an HRESULT" if code is None else f"with HRESULT 0x{code:08X}"
             raise NativeCallError(
@@ -441,12 +442,6 @@ def _env_lookup(env: Mapping[str, str], name: str) -> str | None:
         return value
     wanted = name.upper()
     return next((v for k, v in env.items() if k.upper() == wanted), None)
-
-
-def _hresult(exc: BaseException) -> int | None:
-    """Return the unsigned HRESULT a ``com_error`` carries (pywin32 reports it signed)."""
-    hresult = getattr(exc, "hresult", None)
-    return hresult & 0xFFFFFFFF if isinstance(hresult, int) else None
 
 
 def _load(module: str) -> Any:

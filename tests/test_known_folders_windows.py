@@ -234,6 +234,21 @@ def test_com_error_without_an_hresult_raises_native_call_error(tmp_path: Path) -
         _resolve(KnownFolder.PROGRAM_DATA, error, {"ProgramData": str(tmp_path)})
 
 
+class error(Exception):  # noqa: N801, N818 - pywin32's class name is what the resolver recognises
+    """A stand-in for ``pywintypes.error``: a Win32 failure with no ``.hresult``."""
+
+
+@pytest.mark.os_agnostic
+def test_pywintypes_error_raises_native_call_error(tmp_path: Path) -> None:
+    """A Win32 error is a native failure too: wrapped, never read as "missing"."""
+    failure = error(5, "SHGetKnownFolderPath", "localized text")
+
+    with pytest.raises(NativeCallError) as info:
+        _resolve(KnownFolder.PROGRAM_DATA, failure, {"ProgramData": str(tmp_path)})
+
+    assert info.value.__cause__ is failure
+
+
 @pytest.mark.os_agnostic
 def test_non_com_exception_propagates_unchanged() -> None:
     error = RuntimeError("not a COM failure")

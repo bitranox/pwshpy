@@ -877,6 +877,41 @@ class WindowsUpdate(PSRecord):
     category_details: tuple[UpdateCategory, ...] = ()
 
 
+class ShortcutInfo(PSRecord):
+    """A Windows shortcut (``.lnk``) as Windows stored it (the ``get_shortcut`` record).
+
+    Each field holds what the shell's ``IShellLink`` reads back, so an unset field is ``""`` (an
+    unset icon index ``0``), never None.  ``target`` is read with environment references
+    expanded (``%SystemRoot%\\notepad.exe`` reads back as ``C:\\Windows\\notepad.exe``), the same
+    value WScript's ``TargetPath`` reports; ``arguments``, ``working_directory`` and ``icon`` are
+    stored and read back raw.  ``arguments`` is the single command-line string Windows keeps, not
+    an argv list.
+
+    Attributes:
+        path: The ``.lnk`` file.
+        target: What the shortcut runs or opens.
+        arguments: The command-line arguments passed to ``target``.
+        working_directory: The directory ``target`` starts in.
+        icon: The file the icon is taken from.
+        icon_index: Which icon in ``icon``; negative values select a resource id.
+        description: The comment Explorer shows as the tooltip.
+
+    Example:
+        >>> info = ShortcutInfo(path="C:\\\\Users\\\\me\\\\Desktop\\\\Tool.lnk", target="C:\\\\Tools\\\\tool.exe",
+        ...                     arguments='--mode "a b"')
+        >>> info.arguments, info.working_directory, info.icon_index
+        ('--mode "a b"', '', 0)
+    """
+
+    path: str
+    target: str
+    arguments: str = ""
+    working_directory: str = ""
+    icon: str = ""
+    icon_index: int = 0
+    description: str = ""
+
+
 __all__ = [
     "AclEntry",
     "CimInstance",
@@ -907,6 +942,7 @@ __all__ = [
     "RegistryValue",
     "ScheduledTaskInfo",
     "ServiceInfo",
+    "ShortcutInfo",
     "SystemUptime",
     "UpdateCategory",
     "WebResponse",

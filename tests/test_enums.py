@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from pwshpy.domain.enums import DeployTarget, OutputFormat
+from pwshpy.domain.enums import DeployTarget, KnownFolder, OutputFormat
 
 # ======================== OutputFormat ========================
 
@@ -76,3 +76,30 @@ def test_deploy_target_string_equality(member: DeployTarget, expected_str: str) 
 def test_deploy_target_member_count() -> None:
     """DeployTarget must have exactly 3 members."""
     assert len(DeployTarget) == 3
+
+
+# ======================== KnownFolder ========================
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("member", "expected_value"),
+    [
+        (KnownFolder.DESKTOP, "Desktop"),
+        (KnownFolder.DOCUMENTS, "MyDocuments"),
+        (KnownFolder.LOCAL_APP_DATA, "LocalApplicationData"),
+        (KnownFolder.ROAMING_APP_DATA, "ApplicationData"),
+        (KnownFolder.PROGRAM_DATA, "CommonApplicationData"),
+        (KnownFolder.PROGRAMS, "Programs"),
+    ],
+)
+def test_known_folder_values_are_the_dotnet_special_folder_names(member: KnownFolder, expected_value: str) -> None:
+    """Each value is the .NET Environment.SpecialFolder name pwsh's GetFolderPath takes."""
+    assert member.value == expected_value
+    assert KnownFolder(expected_value) is member
+
+
+@pytest.mark.os_agnostic
+def test_known_folder_member_count() -> None:
+    """KnownFolder must have exactly 6 members."""
+    assert len(KnownFolder) == 6

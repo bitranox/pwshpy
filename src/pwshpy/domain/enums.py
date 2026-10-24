@@ -459,6 +459,38 @@ class ImageArchitecture(str, Enum):
     UNKNOWN = "Unknown"
 
 
+class KnownFolder(str, Enum):
+    """A well-known per-user or machine folder that ``get_known_folder`` resolves on every OS.
+
+    Each value is the name of the .NET ``Environment.SpecialFolder`` member pwsh's
+    ``[Environment]::GetFolderPath`` takes, and the resolver returns the path that call returns
+    on the same OS: the Windows known folder there, the XDG user directory (Desktop, Documents)
+    or XDG base directory (application data) on Linux, and the macOS home layout on macOS.
+
+    Attributes:
+        DESKTOP: The user's desktop.
+        DOCUMENTS: The user's documents folder (.NET calls it ``MyDocuments``).
+        LOCAL_APP_DATA: Per-user, per-machine application data (``%LOCALAPPDATA%``).
+        ROAMING_APP_DATA: Per-user application data that roams with the profile (``%APPDATA%``).
+        PROGRAM_DATA: Machine-wide application data (``%ProgramData%``).
+        PROGRAMS: The user's Start-menu Programs folder; Windows only, since .NET maps it to no
+            folder on Linux or macOS.
+
+    Example:
+        >>> KnownFolder.DOCUMENTS.value
+        'MyDocuments'
+        >>> KnownFolder("ApplicationData") is KnownFolder.ROAMING_APP_DATA
+        True
+    """
+
+    DESKTOP = "Desktop"
+    DOCUMENTS = "MyDocuments"
+    LOCAL_APP_DATA = "LocalApplicationData"
+    ROAMING_APP_DATA = "ApplicationData"
+    PROGRAM_DATA = "CommonApplicationData"
+    PROGRAMS = "Programs"
+
+
 __all__ = [
     "AceType",
     "AclEntryKind",
@@ -469,6 +501,7 @@ __all__ = [
     "FileItemType",
     "ImageArchitecture",
     "ImportKind",
+    "KnownFolder",
     "IntegrityLevel",
     "OutputFormat",
     "ProcessStatus",

@@ -160,6 +160,9 @@ def write_records(path: str | Path, records: Iterable[PSRecord], *, jsonl: bool 
         >>> Path(p).read_bytes()
         b'{"name":"A","value":"1"}\\n'
     """
+    # orjson.dumps(to_dict()) rather than model_dump_json(): the same bytes for every ordinary
+    # record, but the two disagree on integers beyond 64 bits, lone surrogates and non-UTF-8
+    # bytes (tests/test_record_json_bytes.py), and the CLI's --json/--jsonl use this chain too.
     destination = Path(path)
     with destination.open("wb") as handle:
         if jsonl:

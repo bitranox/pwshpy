@@ -17,9 +17,10 @@ from __future__ import annotations
 import multiprocessing
 import sys
 from collections.abc import Callable
+from enum import Enum
 from multiprocessing.connection import wait
 from multiprocessing.context import SpawnContext, SpawnProcess
-from typing import Any
+from typing import Any, NamedTuple
 
 from ...domain.errors import NativeCallError, OperationTimeoutError
 
@@ -36,13 +37,31 @@ else:
 _KILL_GRACE_SECONDS = 5.0
 
 
+class _MessageKind(str, Enum):
+    """What the child's one message carries: the target's result, or the text of its failure.
+
+    Module-level so it pickles by name across the spawn pipe; an Enum member unpickles to the
+    same singleton, so the parent compares it with ``is``.
+    """
+
+    OK = "ok"
+    ERROR = "error"
+
+
+class _Message(NamedTuple):
+    """The child's one message: ``payload`` is the result for OK, ``"<Type>: <text>"`` for ERROR."""
+
+    kind: _MessageKind
+    payload: Any
+
+
 def _child(conn: PipeEnd, target: Callable[..., Any], args: tuple[Any, ...]) -> None:
     try:
-        conn.send(("ok", target(*args)))
+        conn.send(_Message(_MessageKind.OK, target(*args)))
     # BaseException, not Exception: every failure (SystemExit and KeyboardInterrupt included)
     # must cross the pipe as data, or the parent sees only an EOF with no cause.
     except BaseException as exc:
-        conn.send(("error", f"{type(exc).__name__}: {exc}"))
+        conn.send(_Message(_MessageKind.ERROR, f"{type(exc).__name__}: {exc}"))
     finally:
         conn.close()
 
@@ -76,12 +95,12 @@ def run_bounded(target: Callable[..., Any], args: tuple[Any, ...], *, timeout: f
     parent, child = context.Pipe(duplex=False)
     try:
         process = _start(context, child, target, args)
-        kind, payload = _await_result(parent, process, name=name, timeout=timeout)
+        message = _await_result(parent, process, name=name, timeout=timeout)
     finally:
         parent.close()
-    if kind == "error":
-        raise NativeCallError(str(payload))
-    return payload
+    if message.kind is _MessageKind.ERROR:
+        raise NativeCallError(str(message.payload))
+    return message.payload
 
 
 def _refuse_in_daemonic_process(name: str) -> None:
@@ -119,8 +138,8 @@ def _start(context: SpawnContext, child: PipeEnd, target: Callable[..., Any], ar
     return process
 
 
-def _await_result(parent: PipeEnd, process: SpawnProcess, *, name: str, timeout: float) -> tuple[str, Any]:
-    """Return the child's ``(kind, payload)`` message; the child is reaped on every path."""
+def _await_result(parent: PipeEnd, process: SpawnProcess, *, name: str, timeout: float) -> _Message:
+    """Return the child's message; the child is reaped on every path."""
     try:
         # Wait on the process sentinel too, not only the pipe: on Windows the parent holds a
         # duplicate of the child's write end until the child unpickles it, so a child that dies
@@ -133,7 +152,7 @@ def _await_result(parent: PipeEnd, process: SpawnProcess, *, name: str, timeout:
         # Windows the duplicate keeps the pipe open, so report the dead child directly.
         if not parent.poll():
             raise EOFError
-        message: tuple[str, Any] = parent.recv()
+        message: _Message = parent.recv()
     # A child that dies sends nothing; the parent sees its write end close.  recv() reports that
     # as EOFError on every OS, but on Windows PipeConnection.poll calls PeekNamedPipe unwrapped,
     # which raises BrokenPipeError instead when the child died before the parent reached poll.

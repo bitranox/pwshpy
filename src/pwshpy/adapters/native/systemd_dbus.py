@@ -6,11 +6,14 @@ base Linux dependency) is loaded lazily through ``importlib``: importing this mo
 safe on Windows/macOS; calling it without jeepney raises :class:`PlatformUnsupportedError`.
 
 Contents:
+    * :class:`LoadState` / :class:`ActiveState` / :class:`UnitFileState` - the systemd unit states,
+      parsed once where they are read off the bus; a value systemd adds later reads as ``UNKNOWN``.
     * :class:`Bus` - a live system-bus connection plus the jeepney handles.
     * :func:`open_bus` - open the system bus (the caller closes it).
     * :func:`call` - one Manager method call, mapping a D-Bus error to :class:`NativeCallError`.
     * :func:`unit_property` / :func:`active_state` - read a ``Unit`` (or, with ``interface``, a
       ``Timer`` / ``Service``) property of a loaded unit.
+    * :func:`path_active_state` - the ``ActiveState`` of a unit object already resolved.
     * :func:`has_pending_job` - whether a unit still has a job queued or running.
     * :func:`unit_path` / :func:`path_property` - resolve a unit's object path once, then read
       several properties from it (one ``GetUnit`` instead of one per property).
@@ -20,7 +23,7 @@ Contents:
       ``LoadState`` read fails, for a caller that must tell "no such unit" from "could not ask".
     * :func:`load_unit_state` - :func:`load_unit` that also returns the ``LoadState`` it read
       (:class:`LoadedUnit`).
-    * :func:`unit_files` - every unit file of one type with its UnitFileState: the units
+    * :func:`unit_files` - every unit file of one type with its UnitFileState (:class:`UnitFile`): the units
       ``ListUnits`` omits because nothing has loaded them (a stopped, disabled service or timer).
     * :data:`UNLISTED_LOAD_STATES` / :data:`UNLISTED_FILE_STATES` - the states that are no unit
       of their own, so a listing skips them.
@@ -31,6 +34,7 @@ Contents:
 from __future__ import annotations
 
 import importlib
+from enum import Enum
 from typing import Any, NamedTuple, cast
 
 from ...domain.errors import NativeCallError, PlatformUnsupportedError
@@ -43,22 +47,112 @@ TIMER_IFACE = "org.freedesktop.systemd1.Timer"  # LastTriggerUSec, NextElapseUSe
 SERVICE_IFACE = "org.freedesktop.systemd1.Service"  # ExecMainCode, ExecMainStatus, ExecMainStartTimestamp
 _PROPERTIES_IFACE = "org.freedesktop.DBus.Properties"
 
+
+class LoadState(str, Enum):
+    """A unit's ``LoadState`` (org.freedesktop.systemd1(5)); a value not named here is :attr:`UNKNOWN`.
+
+    systemd grows its state lists between releases, so an unnamed value must not fail a listing:
+    it reads as UNKNOWN, which no rule here matches - a unit in it is listed and loaded, as before
+    these states were typed.
+
+    Example:
+        >>> LoadState("not-found") is LoadState.NOT_FOUND, LoadState("from-the-future") is LoadState.UNKNOWN
+        (True, True)
+    """
+
+    STUB = "stub"
+    LOADED = "loaded"
+    NOT_FOUND = "not-found"
+    BAD_SETTING = "bad-setting"
+    ERROR = "error"
+    MERGED = "merged"
+    MASKED = "masked"
+    UNKNOWN = "unknown"  # not a systemd value: the fallback for one this list does not name
+
+    @classmethod
+    def _missing_(cls, value: object) -> LoadState:
+        return cls.UNKNOWN
+
+
+class ActiveState(str, Enum):
+    """A unit's ``ActiveState`` (org.freedesktop.systemd1(5)); a value not named here is :attr:`UNKNOWN`.
+
+    ``maintenance`` and ``refreshing`` are named but, like UNKNOWN, fall to every mapping's default:
+    no rule or table here lists them, so they read as they did while the states were plain text.
+
+    Example:
+        >>> ActiveState("failed") is ActiveState.FAILED, ActiveState("from-the-future") is ActiveState.UNKNOWN
+        (True, True)
+    """
+
+    ACTIVE = "active"
+    RELOADING = "reloading"
+    INACTIVE = "inactive"
+    FAILED = "failed"
+    ACTIVATING = "activating"
+    DEACTIVATING = "deactivating"
+    MAINTENANCE = "maintenance"
+    REFRESHING = "refreshing"
+    UNKNOWN = "unknown"  # not a systemd value: the fallback for one this list does not name
+
+    @classmethod
+    def _missing_(cls, value: object) -> ActiveState:
+        return cls.UNKNOWN
+
+
+class UnitFileState(str, Enum):
+    """A unit file's ``UnitFileState`` (org.freedesktop.systemd1(5)); a value not named here is :attr:`UNKNOWN`.
+
+    :attr:`EMPTY` is systemd's ``""`` (no unit file state to report), which callers also use for a
+    ``GetUnitFileState`` that did not answer. UNKNOWN matches no rule or table, as an unnamed text
+    value did before these states were typed.
+
+    Example:
+        >>> UnitFileState("enabled-runtime") is UnitFileState.ENABLED_RUNTIME, UnitFileState("") is UnitFileState.EMPTY
+        (True, True)
+        >>> UnitFileState("from-the-future") is UnitFileState.UNKNOWN
+        True
+    """
+
+    ENABLED = "enabled"
+    ENABLED_RUNTIME = "enabled-runtime"
+    LINKED = "linked"
+    LINKED_RUNTIME = "linked-runtime"
+    ALIAS = "alias"
+    MASKED = "masked"
+    MASKED_RUNTIME = "masked-runtime"
+    STATIC = "static"
+    INDIRECT = "indirect"
+    DISABLED = "disabled"
+    GENERATED = "generated"
+    TRANSIENT = "transient"
+    BAD = "bad"
+    EMPTY = ""
+    UNKNOWN = "unknown"  # not a systemd value: the fallback for one this list does not name
+
+    @classmethod
+    def _missing_(cls, value: object) -> UnitFileState:
+        return cls.UNKNOWN
+
+
 #: ListUnits LoadStates that are no unit to list while stopped: not-found is a name some unit
 #: references with no unit file behind it; masked is made unstartable on purpose. A running unit in
 #: either state is still listed (:func:`is_unlisted_unit`).
-UNLISTED_LOAD_STATES = frozenset({"not-found", "masked"})
+UNLISTED_LOAD_STATES = frozenset({LoadState.NOT_FOUND, LoadState.MASKED})
 
 #: ActiveStates of a unit that runs or is changing state. A unit whose file was deleted under it, or
 #: that was masked without ``--now``, keeps running in one of these; Get-Service keeps listing such a
 #: service (marked for deletion, or Disabled/Running), so the listings keep it too.
-RUNNING_ACTIVE_STATES = frozenset({"active", "activating", "deactivating", "reloading"})
+RUNNING_ACTIVE_STATES = frozenset(
+    {ActiveState.ACTIVE, ActiveState.ACTIVATING, ActiveState.DEACTIVATING, ActiveState.RELOADING}
+)
 
 #: UnitFileStates of a unit file that is no unit of its own: masked is made unstartable on purpose;
 #: alias is a second name for a unit listed under its real name.
-UNLISTED_FILE_STATES = frozenset({"masked", "masked-runtime", "alias"})
+UNLISTED_FILE_STATES = frozenset({UnitFileState.MASKED, UnitFileState.MASKED_RUNTIME, UnitFileState.ALIAS})
 
 
-def is_unlisted_unit(load_state: str, active_state: str) -> bool:
+def is_unlisted_unit(load_state: LoadState, active_state: ActiveState) -> bool:
     """Whether a ``ListUnits`` entry is no unit to list: not-found or masked, and not running.
 
     Args:
@@ -70,8 +164,10 @@ def is_unlisted_unit(load_state: str, active_state: str) -> bool:
         True for a stopped (inactive or failed) not-found or masked unit, else False.
 
     Example:
-        >>> is_unlisted_unit("not-found", "inactive"), is_unlisted_unit("masked", "active")
-        (True, False)
+        >>> is_unlisted_unit(LoadState.NOT_FOUND, ActiveState.INACTIVE)
+        True
+        >>> is_unlisted_unit(LoadState.MASKED, ActiveState.ACTIVE)
+        False
     """
     return load_state in UNLISTED_LOAD_STATES and active_state not in RUNNING_ACTIVE_STATES
 
@@ -146,7 +242,7 @@ class LoadedUnit(NamedTuple):
     """A unit :func:`load_unit_state` loaded: its object path and the ``LoadState`` read with it."""
 
     path: str
-    load_state: str
+    load_state: LoadState
 
 
 def load_unit_state(bus: Bus, name: str) -> LoadedUnit | None:
@@ -172,9 +268,10 @@ def load_unit_state(bus: Bus, name: str) -> LoadedUnit | None:
     load_state = path_property(bus, resolved, "LoadState", None)
     if load_state is None:
         raise NativeCallError(f"cannot read the LoadState of '{name}'")
-    if load_state == "not-found":
+    state = LoadState(str(load_state))
+    if state is LoadState.NOT_FOUND:
         return None
-    return LoadedUnit(resolved, str(load_state))
+    return LoadedUnit(resolved, state)
 
 
 def load_unit(bus: Bus, name: str) -> str | None:
@@ -198,8 +295,15 @@ def load_unit_path(bus: Bus, name: str) -> str | None:
         return None  # an invalid unit name or an unreadable unit: nothing to read
 
 
-def unit_files(bus: Bus, suffix: str) -> list[tuple[str, str]]:
-    """Every unit file named ``*<suffix>`` as (unit name, UnitFileState), templates excluded.
+class UnitFile(NamedTuple):
+    """One entry of a unit-file listing: the unit name and its file's ``UnitFileState``."""
+
+    name: str
+    state: UnitFileState
+
+
+def unit_files(bus: Bus, suffix: str) -> list[UnitFile]:
+    """Every unit file named ``*<suffix>`` as a :class:`UnitFile`, templates excluded.
 
     ``ListUnitFilesByPatterns`` lets systemd filter (systemd >= 230); an older manager lacks it, so
     the full ``ListUnitFiles`` is filtered here instead. A template (``name@.service``) is no unit
@@ -210,8 +314,12 @@ def unit_files(bus: Bus, suffix: str) -> list[tuple[str, str]]:
         (files,) = call(bus, "ListUnitFilesByPatterns", "asas", ([], [f"*{suffix}"]))
     except NativeCallError:
         (files,) = call(bus, "ListUnitFiles")
-    named = ((str(path).rsplit("/", 1)[-1], str(state)) for path, state in files)
-    return [(name, state) for name, state in named if name.endswith(suffix) and not name.endswith(f"@{suffix}")]
+    named = ((str(path).rsplit("/", 1)[-1], state) for path, state in files)
+    return [
+        UnitFile(name, UnitFileState(str(state)))
+        for name, state in named
+        if name.endswith(suffix) and not name.endswith(f"@{suffix}")
+    ]
 
 
 def unit_property(bus: Bus, name: str, prop: str, default: Any, *, interface: str = UNIT_IFACE) -> Any:
@@ -254,9 +362,19 @@ def path_property(bus: Bus, path: str | None, prop: str, default: Any, *, interf
     return value
 
 
-def active_state(bus: Bus, name: str) -> str:
-    """The unit's ActiveState, or ``"inactive"`` when it is not loaded."""
-    return str(unit_property(bus, name, "ActiveState", "inactive"))
+def path_active_state(bus: Bus, path: str | None) -> ActiveState:
+    """The ActiveState of the unit object ``path``; INACTIVE for a None path or an unanswered read.
+
+    Example:
+        >>> path_active_state(None, None) is ActiveState.INACTIVE
+        True
+    """
+    return ActiveState(str(path_property(bus, path, "ActiveState", ActiveState.INACTIVE.value)))
+
+
+def active_state(bus: Bus, name: str) -> ActiveState:
+    """The unit's ActiveState, or INACTIVE when it is not loaded."""
+    return path_active_state(bus, unit_path(bus, name))
 
 
 def has_pending_job(bus: Bus, name: str) -> bool:
@@ -272,16 +390,17 @@ def has_pending_job(bus: Bus, name: str) -> bool:
     return int(cast("Any", job[0])) != 0
 
 
-def unit_file_state(bus: Bus, name: str) -> str | None:
+def unit_file_state(bus: Bus, name: str) -> UnitFileState | None:
     """GetUnitFileState for one unit; ``None`` for a transient unit that has no unit file."""
     try:
         (state,) = call(bus, "GetUnitFileState", "s", (name,))
     except NativeCallError:
         return None
-    return str(state)
+    return UnitFileState(str(state))
 
 
 __all__ = [
+    "ActiveState",
     "Bus",
     "MANAGER_BUS",
     "RUNNING_ACTIVE_STATES",
@@ -295,12 +414,16 @@ __all__ = [
     "has_pending_job",
     "is_error",
     "is_unlisted_unit",
+    "LoadState",
     "LoadedUnit",
     "load_unit",
     "load_unit_path",
     "load_unit_state",
     "open_bus",
+    "path_active_state",
     "path_property",
+    "UnitFile",
+    "UnitFileState",
     "unit_file_state",
     "unit_files",
     "unit_path",

@@ -245,9 +245,42 @@ def test_get_command_dispatches_and_builds(monkeypatch: pytest.MonkeyPatch) -> N
 @pytest.mark.os_agnostic
 def test_marshal_value_collection_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     """When an IEnumerable .NET type is cached, a matching value marshals element-wise."""
-    ps_types: dict[str, Any] = hosted._ps_types  # pyright: ignore[reportPrivateUsage] - white-box test
+    ps_types = hosted._PSTypes(  # pyright: ignore[reportPrivateUsage] - white-box test
+        ps_object=type(None), dictionary=type(None), enumerable=tuple
+    )
     marshal_value = hosted._marshal_value  # pyright: ignore[reportPrivateUsage] - white-box test of an engine helper
-    monkeypatch.setitem(ps_types, "IEnumerable", tuple)
-    monkeypatch.setitem(ps_types, "PSObject", type(None))
-    monkeypatch.setitem(ps_types, "IDictionary", type(None))
+    monkeypatch.setattr(hosted, "_ps_types", ps_types)
     assert marshal_value((1, "a", 2)) == [1, "a", 2]
+
+
+class _FakeDictionary:
+    """An IDictionary stand-in: ``Keys`` plus item access, as pythonnet exposes a .NET Hashtable."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+
+    @property
+    def Keys(self) -> list[str]:
+        return list(self._data)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._data[key]
+
+
+@pytest.mark.os_agnostic
+def test_marshal_value_dictionary_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When an IDictionary .NET type is cached, a matching value marshals into a dict (recursively)."""
+    ps_types = hosted._PSTypes(  # pyright: ignore[reportPrivateUsage] - white-box test
+        ps_object=type(None), dictionary=_FakeDictionary, enumerable=tuple
+    )
+    marshal_value = hosted._marshal_value  # pyright: ignore[reportPrivateUsage] - white-box test of an engine helper
+    monkeypatch.setattr(hosted, "_ps_types", ps_types)
+    assert marshal_value(_FakeDictionary({"a": (1, 2), "b": None})) == {"a": [1, 2], "b": None}
+
+
+@pytest.mark.os_agnostic
+def test_marshal_value_stringifies_before_the_sdk_is_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no .NET types resolved yet, a non-primitive value (even a tuple) falls back to str()."""
+    marshal_value = hosted._marshal_value  # pyright: ignore[reportPrivateUsage] - white-box test of an engine helper
+    monkeypatch.setattr(hosted, "_ps_types", None)
+    assert marshal_value((1, 2)) == "(1, 2)"

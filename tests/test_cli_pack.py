@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -117,6 +118,28 @@ def test_pack_refuses_to_overwrite_without_force(
     assert again.exit_code != 0
     forced = cli_runner.invoke(cli, ["pack", str(entry), "--force"], obj=production_factory)
     assert forced.exit_code == 0, forced.output
+
+
+@pytest.mark.os_agnostic
+def test_pack_format_option_accepts_exactly_the_runner_formats_and_defaults_to_auto() -> None:
+    """--format offers the lower-case RunnerFormat values in [auto|ps1|sh] order, defaulting to auto."""
+    pack = cli.commands["pack"]
+    option = next(param for param in pack.params if param.name == "runner_format")
+    assert isinstance(option.type, click.Choice)
+    assert list(option.type.choices) == ["auto", "ps1", "sh"]
+    assert option.default == "auto"
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("value", ["PS1", "AUTO", "zip"])
+def test_pack_format_refuses_anything_but_a_runner_format_value(
+    cli_runner: CliRunner, production_factory: Callable[[], AppServices], tmp_path: Path, value: str
+) -> None:
+    """An enum member NAME (upper case) or an unknown format is a usage error, not a pack."""
+    entry = _project(tmp_path)
+    result = cli_runner.invoke(cli, ["pack", str(entry), "--format", value], obj=production_factory)
+    assert result.exit_code == 2
+    assert not (tmp_path / "app.ps1").exists()
 
 
 @pytest.mark.os_agnostic

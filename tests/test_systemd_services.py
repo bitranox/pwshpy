@@ -18,6 +18,7 @@ import pytest
 from systemd_fake_bus import FakeConn, use_bus
 
 from pwshpy.adapters.native import systemd_dbus, systemd_services
+from pwshpy.adapters.native.systemd_dbus import ActiveState, LoadState, UnitFileState
 from pwshpy.adapters.native.systemd_services import (
     SystemdServiceController,
     iter_services,
@@ -41,12 +42,14 @@ _HAS_JEEPNEY = importlib.util.find_spec("jeepney") is not None
         ("activating", ServiceState.START_PENDING),
         ("deactivating", ServiceState.STOP_PENDING),
         ("reloading", ServiceState.CONTINUE_PENDING),
+        ("maintenance", ServiceState.STOPPED),  # named by systemd, mapped by no table here
+        ("refreshing", ServiceState.STOPPED),
         ("nonsense", ServiceState.STOPPED),
     ],
 )
 def test_active_state_maps(active_state: str, state: ServiceState) -> None:
-    """systemd ActiveState maps to the canonical ServiceState (unknown -> Stopped)."""
-    assert to_service_state(active_state) is state
+    """A wire ActiveState, parsed, maps to the canonical ServiceState (unmapped or unknown -> Stopped)."""
+    assert to_service_state(ActiveState(active_state)) is state
 
 
 @pytest.mark.os_agnostic
@@ -62,14 +65,61 @@ def test_active_state_maps(active_state: str, state: ServiceState) -> None:
     ],
 )
 def test_unit_file_state_maps(unit_file_state: str, start_type: ServiceStartType) -> None:
-    """systemd UnitFileState maps to a ServiceStartType."""
-    assert to_start_type(unit_file_state) is start_type
+    """A wire UnitFileState, parsed, maps to a ServiceStartType."""
+    assert to_start_type(UnitFileState(unit_file_state)) is start_type
 
 
 @pytest.mark.os_agnostic
-def test_unknown_unit_file_state_is_none() -> None:
-    """An unrecognized UnitFileState yields None (unknown), not a wrong guess."""
-    assert to_start_type("something-new") is None
+@pytest.mark.parametrize("unit_file_state", ["something-new", "", "alias", "bad"])
+def test_unknown_unit_file_state_is_none(unit_file_state: str) -> None:
+    """An unrecognized or unmapped UnitFileState yields None (unknown), not a wrong guess."""
+    assert to_start_type(UnitFileState(unit_file_state)) is None
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("enum", "wire", "member"),
+    [
+        (ActiveState, "maintenance", ActiveState.MAINTENANCE),
+        (ActiveState, "something-new", ActiveState.UNKNOWN),
+        (LoadState, "bad-setting", LoadState.BAD_SETTING),
+        (LoadState, "something-new", LoadState.UNKNOWN),
+        (UnitFileState, "", UnitFileState.EMPTY),
+        (UnitFileState, "linked-runtime", UnitFileState.LINKED_RUNTIME),
+        (UnitFileState, "something-new", UnitFileState.UNKNOWN),
+    ],
+)
+def test_a_wire_state_parses_to_its_member_and_an_unknown_one_to_unknown(
+    enum: type[ActiveState] | type[LoadState] | type[UnitFileState], wire: str, member: Any
+) -> None:
+    """A systemd state systemd adds later parses to UNKNOWN instead of failing the listing."""
+    assert enum(wire) is member
+
+
+@pytest.mark.os_agnostic
+def test_unknown_states_read_off_the_bus_keep_a_service_listed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ListUnits row and a unit file whose states this version does not know still list as Stopped.
+
+    The unknown LoadState matches no skip rule and the unknown UnitFileState no start type, as when
+    the states were compared as text.
+    """
+    props: dict[tuple[str, str, str], Any] = {
+        ("cold.service", _UNIT, "ActiveState"): "from-the-future",
+        ("cold.service", _UNIT, "Description"): "Cold daemon",
+    }
+    conn = FakeConn(
+        [("new.service", "New daemon", "from-the-future")],
+        props,
+        frozenset({"cold.service"}),
+        file_states={"cold.service": "from-the-future"},
+        load_states={"new.service": "from-the-future"},
+        unloaded=frozenset({"cold.service"}),
+    )
+    use_bus(monkeypatch, conn)
+    assert [(s.name, s.display_name, s.status, s.start_type) for s in iter_services()] == [
+        ("new.service", "New daemon", ServiceState.STOPPED, None),
+        ("cold.service", "Cold daemon", ServiceState.STOPPED, None),
+    ]
 
 
 @pytest.mark.os_linux

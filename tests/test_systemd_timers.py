@@ -18,6 +18,7 @@ from elevation_doubles import RUNNING_AS_ROOT
 from systemd_fake_bus import Address, FakeConn, FakeCore, use_bus
 
 from pwshpy.adapters.native import systemd_dbus, systemd_timers
+from pwshpy.adapters.native.systemd_dbus import ActiveState, UnitFileState
 from pwshpy.adapters.native.systemd_timers import (
     SystemdScheduledTaskController,
     arms_on_register,
@@ -63,12 +64,14 @@ _HAS_JEEPNEY = importlib.util.find_spec("jeepney") is not None
         ("inactive", TaskState.DISABLED),
         ("deactivating", TaskState.DISABLED),
         ("failed", TaskState.DISABLED),
+        ("reloading", TaskState.UNKNOWN),  # a timer never reloads: mapped by no table
+        ("maintenance", TaskState.UNKNOWN),
         ("nonsense", TaskState.UNKNOWN),
     ],
 )
 def test_timer_state_maps(active_state: str, state: TaskState) -> None:
-    """A systemd timer ActiveState maps to a TaskState (unknown -> Unknown, not a wrong guess)."""
-    assert timer_to_task_state(active_state) is state
+    """A wire timer ActiveState, parsed, maps to a TaskState (unknown -> Unknown, not a wrong guess)."""
+    assert timer_to_task_state(ActiveState(active_state)) is state
 
 
 @pytest.mark.os_agnostic
@@ -80,11 +83,13 @@ def test_timer_state_maps(active_state: str, state: TaskState) -> None:
         ("static", True),  # no [Install]: cannot be disabled, and it runs (systemd-tmpfiles-clean)
         ("disabled", False),
         ("masked", False),
+        ("", False),  # GetUnitFileState did not answer
+        ("something-new", False),
     ],
 )
 def test_timer_enabled_maps(unit_file_state: str, enabled: bool) -> None:
-    """timer_enabled is True for the enabled UnitFileStates and for a static timer."""
-    assert timer_enabled(unit_file_state) is enabled
+    """timer_enabled is True for the enabled UnitFileStates and for a static timer, False for an unknown one."""
+    assert timer_enabled(UnitFileState(unit_file_state)) is enabled
 
 
 @pytest.mark.os_agnostic
@@ -97,11 +102,12 @@ def test_timer_enabled_maps(unit_file_state: str, enabled: bool) -> None:
         ("failed", True, TaskState.DISABLED),  # every other mapping is timer_to_task_state's
         ("deactivating", True, TaskState.DISABLED),
         ("activating", False, TaskState.QUEUED),
+        ("something-new", True, TaskState.UNKNOWN),  # only inactive counts as armed
     ],
 )
 def test_timer_task_state(active_state: str, enabled: bool, state: TaskState) -> None:
     """An enabled, inactive timer is Ready (it arms at the next boot); the rest maps by ActiveState."""
-    assert timer_task_state(active_state, enabled=enabled) is state
+    assert timer_task_state(ActiveState(active_state), enabled=enabled) is state
 
 
 @pytest.mark.os_agnostic
@@ -127,11 +133,13 @@ def test_starts_when_armed(bases: list[str], starts: bool) -> None:
         ("failed", TaskState.READY),
         ("active", TaskState.RUNNING),
         ("activating", TaskState.RUNNING),
+        ("deactivating", TaskState.READY),
+        ("something-new", TaskState.READY),
     ],
 )
 def test_service_task_state(active_state: str, state: TaskState) -> None:
     """An on-demand service task is RUNNING while executing, else READY (it can always be run)."""
-    assert service_task_state(active_state) is state
+    assert service_task_state(ActiveState(active_state)) is state
 
 
 @pytest.mark.os_agnostic
@@ -1017,6 +1025,45 @@ def test_enable_and_disable_refuse_a_static_timer(monkeypatch: pytest.MonkeyPatc
     assert ("mask" in str(refused.value)) is (verb == "disable"), str(refused.value)
 
 
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("verb", ["enable", "disable"])
+def test_schedule_refusals_name_the_verb_as_a_plain_word(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, verb: str
+) -> None:
+    """The refusals spell the verb as the word itself on every Python (never an enum member's repr)."""
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)  # filesystem edge: no adhoc.timer under /etc
+    props = _enable_props("tmpfiles", [("OnBootUSec", 900_000_000, 0)])
+    static = FakeConn([], props, frozenset({"tmpfiles.timer"}), file_states={"tmpfiles.timer": "static"})
+    use_bus(monkeypatch, static)
+    with pytest.raises(NativeCallError) as refused:
+        getattr(SystemdScheduledTaskController(), verb)("tmpfiles")
+    assert f"so systemd has nothing to {verb} - " in str(refused.value)
+    use_bus(monkeypatch, FakeConn([], {}))
+    with pytest.raises(NativeCallError) as on_demand:
+        getattr(SystemdScheduledTaskController(), verb)("adhoc")
+    assert str(on_demand.value) == (
+        f"task 'adhoc' is on-demand (no .timer); nothing to {verb} - run it directly, or unregister it."
+    )
+
+
+@pytest.mark.os_agnostic
+def test_iter_timers_lists_a_timer_whose_states_this_version_does_not_know(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unknown ListUnits and unit-file states keep a timer listed: state Unknown, not enabled.
+
+    The unknown LoadState matches no skip rule and the unknown UnitFileState counts as not enabled,
+    as when the states were compared as text.
+    """
+    conn = FakeConn(
+        [("new.timer", "New job", "from-the-future")],
+        {("new.timer", _TIMER, "Unit"): "new.service"},
+        frozenset({"new.timer"}),
+        file_states={"new.timer": "from-the-future"},
+        load_states={"new.timer": "from-the-future"},
+    )
+    use_bus(monkeypatch, conn)
+    assert [(t.task_name, t.state, t.enabled) for t in iter_timers()] == [("new", TaskState.UNKNOWN, False)]
+
+
 _RUNNING_STATES = ["active", "activating", "deactivating", "reloading"]
 
 
@@ -1047,7 +1094,7 @@ def test_iter_timers_lists_a_running_timer_whose_unit_is_gone_or_masked(
     use_bus(monkeypatch, conn)
     tasks = list(iter_timers())
     assert [(t.task_name, t.description, t.enabled) for t in tasks] == [("orphan", "Orphan job", False)]
-    assert tasks[0].state is timer_to_task_state(active_state)
+    assert tasks[0].state is timer_to_task_state(ActiveState(active_state))
 
 
 @pytest.mark.os_agnostic
@@ -1630,7 +1677,7 @@ def test_lookup_by_name_agrees_with_the_controller_read_back(monkeypatch: pytest
 
 
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize("state", sorted(systemd_dbus.UNLISTED_FILE_STATES))
+@pytest.mark.parametrize("state", sorted(s.value for s in systemd_dbus.UNLISTED_FILE_STATES))
 def test_lookup_by_name_treats_a_masked_or_alias_timer_as_absent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: str
 ) -> None:

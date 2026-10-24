@@ -27,6 +27,7 @@ Stdlib only, and started with ``-I``: the helper must not import pwshpy or anyth
 
 Contents:
     * :func:`parse_ppid`, :func:`descendants` - pure helpers for the Linux tree kill.
+    * :func:`decode_request`, :func:`encode_status` - the two ends of the wire contract.
     * :func:`main` - the helper's entry point.
 """
 
@@ -41,9 +42,10 @@ import subprocess  # nosec B404 - starts the caller's argv list, shell=False by 
 import sys
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
-from typing import Any, TextIO
+from typing import Any, TextIO, TypeAlias, cast
 
 _PR_SET_CHILD_SUBREAPER = 36  # <linux/prctl.h>
 _POLL_SECONDS = 0.05
@@ -52,6 +54,104 @@ _POLL_SECONDS = 0.05
 _KILL_DEADLINE_SECONDS = 10.0
 # The helper only ever runs on POSIX; the guards using this narrow the platform for pyright.
 _POSIX_ONLY = "the wait_tree helper runs on POSIX only"
+
+
+@dataclass(frozen=True)
+class _Request:
+    """The program to run, as the parent sent it on the control pipe."""
+
+    argv: tuple[str, ...]
+    cwd: str | None
+    env: Mapping[str, str] | None
+
+
+@dataclass(frozen=True)
+class _Exited:
+    """The program ran; ``exit_code`` is its own (``-N`` for a death by signal ``N``)."""
+
+    exit_code: int
+
+    def wire(self) -> dict[str, Any]:
+        return {"exit_code": self.exit_code}
+
+
+@dataclass(frozen=True)
+class _Failed:
+    """The program could not be started, or the helper itself failed before it could run it."""
+
+    error: str
+    message: str
+
+    @classmethod
+    def of(cls, exc: Exception) -> _Failed:
+        return cls(error=type(exc).__name__, message=str(exc))
+
+    def wire(self) -> dict[str, Any]:
+        return {"error": self.error, "message": self.message}
+
+
+@dataclass(frozen=True)
+class _Killed:
+    """The caller's timeout (SIGTERM) arrived; the tree was killed."""
+
+    def wire(self) -> dict[str, Any]:
+        return {"killed": True}
+
+
+_Status: TypeAlias = _Exited | _Failed | _Killed
+
+
+def _str_or_none(value: object, field: str) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    raise TypeError(f"request {field} must be a string or null, not {type(value).__name__}")
+
+
+def _str_list(value: object, field: str) -> tuple[str, ...]:
+    # cast: isinstance() narrows a JSON value only to list[Unknown]; the loop checks each item.
+    items = cast("list[object]", value) if isinstance(value, list) else None
+    if items is None or not all(isinstance(item, str) for item in items):
+        raise TypeError(f"request {field} must be a list of strings")
+    return tuple(str(item) for item in items)
+
+
+def _str_map_or_none(value: object) -> dict[str, str] | None:
+    if value is None:
+        return None
+    pairs = cast("dict[object, object]", value) if isinstance(value, dict) else None
+    if pairs is None or not all(isinstance(k, str) and isinstance(v, str) for k, v in pairs.items()):
+        raise TypeError("request env must be an object of strings or null")
+    return {str(k): str(v) for k, v in pairs.items()}
+
+
+def decode_request(raw: bytes) -> _Request:
+    """Decode the control-pipe request; undecodable argv/env bytes arrive surrogate-escaped.
+
+    Example:
+        >>> request = decode_request(b'{"argv": ["a\\\\udcffb"], "cwd": null, "env": {"K": "v"}}')
+        >>> request.argv == ("a" + chr(0xDCFF) + "b",), request.cwd, dict(request.env or {})
+        (True, None, {'K': 'v'})
+    """
+    decoded: Any = json.loads(raw)
+    # Indexed env, argv, cwd: the order the fields were first read in, so a request missing one
+    # reports the same KeyError (and a non-object the same TypeError) as it always did.
+    env, argv, cwd = decoded["env"], decoded["argv"], decoded["cwd"]
+    return _Request(argv=_str_list(argv, "argv"), cwd=_str_or_none(cwd, "cwd"), env=_str_map_or_none(env))
+
+
+def encode_status(status: _Status) -> str:
+    """Return the status-pipe JSON for ``status``: only the keys its variant carries.
+
+    ``json.dumps`` defaults (``ensure_ascii``, ``", "`` separators) are the wire format the
+    parent reads; a surrogate-escaped message stays intact as ``\\udcXX``.
+
+    Example:
+        >>> encode_status(_Exited(exit_code=3))
+        '{"exit_code": 3}'
+        >>> encode_status(_Killed())
+        '{"killed": true}'
+    """
+    return json.dumps(status.wire())
 
 
 class _TerminateRequestedError(Exception):
@@ -196,38 +296,37 @@ def _become_subreaper() -> bool:
     return True
 
 
-def _start(request: Mapping[str, Any], *, new_session: bool) -> subprocess.Popen[bytes]:
-    env = request["env"]
+def _start(request: _Request, *, new_session: bool) -> subprocess.Popen[bytes]:
     return subprocess.Popen(  # noqa: S603  # nosec B603 - the caller's argv list, no shell
-        list(request["argv"]),
-        cwd=request["cwd"],
-        env=dict(env) if env is not None else None,
+        list(request.argv),
+        cwd=request.cwd,
+        env=dict(request.env) if request.env is not None else None,
         start_new_session=new_session,
     )
 
 
-def _run(request: Mapping[str, Any]) -> dict[str, Any]:
+def _run(request: _Request) -> _Status:
     linux = _become_subreaper()
     child: subprocess.Popen[bytes] | None = None
     try:
         try:
             child = _start(request, new_session=not linux)
         except OSError as exc:
-            return {"error": type(exc).__name__, "message": str(exc)}
+            return _Failed.of(exc)
         code = _wait_tree_linux(child.pid) if linux else _wait_group(child)
         child.returncode = code  # reaped by waitpid(-1); keeps Popen from waiting again
-        return {"exit_code": code}
+        return _Exited(exit_code=code)
     except _TerminateRequestedError:
         if linux:
             _kill_tree_linux()
         else:
             _kill_group(child)
-        return {"killed": True}
+        return _Killed()
 
 
-def _report(status: TextIO, payload: Mapping[str, Any]) -> None:
-    status.write(json.dumps(payload))
-    status.flush()
+def _report(status_pipe: TextIO, status: _Status) -> None:
+    status_pipe.write(encode_status(status))
+    status_pipe.flush()
 
 
 def main(argv: Sequence[str]) -> int:
@@ -244,14 +343,14 @@ def main(argv: Sequence[str]) -> int:
     with os.fdopen(int(argv[2]), "w", encoding="utf-8") as status:
         try:
             with os.fdopen(int(argv[1]), "rb") as control:
-                request = json.loads(control.read())
+                request = decode_request(control.read())
             _report(status, _run(request))
         except _TerminateRequestedError:
-            _report(status, {"killed": True})  # the timeout hit before the program started
+            _report(status, _Killed())  # the timeout hit before the program started
         # Exception, not BaseException: SIGTERM is mapped to _TerminateRequestedError above, and the
         # helper must never print a traceback into the program's (captured) stderr.
         except Exception as exc:
-            _report(status, {"error": type(exc).__name__, "message": str(exc)})
+            _report(status, _Failed.of(exc))
     return 0
 
 

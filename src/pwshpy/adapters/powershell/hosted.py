@@ -42,7 +42,7 @@ import shutil
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ...domain.errors import FeatureUnavailableError, PowerShellError
 
@@ -60,8 +60,23 @@ _lock = threading.Lock()
 _runspace: Any = None  # a shared, opened Runspace reused across calls (single-runspace mode)
 _pool: Any = None  # an opened RunspacePool (pool mode; concurrent, no shared $global state)
 _powershell_cls: Any = None  # System.Management.Automation.PowerShell
-_ps_types: dict[str, Any] = {}  # cached .NET type refs for output marshaling (PSObject, IEnumerable, ...)
 _ready = False
+
+
+class _PSTypes(NamedTuple):
+    """The .NET types output marshaling tests a value against, resolved once by :func:`_init`.
+
+    Example:
+        >>> _PSTypes(ps_object=int, dictionary=dict, enumerable=list).dictionary is dict
+        True
+    """
+
+    ps_object: Any  # System.Management.Automation.PSObject
+    dictionary: Any  # System.Collections.IDictionary
+    enumerable: Any  # System.Collections.IEnumerable
+
+
+_ps_types: _PSTypes | None = None  # None until _init has loaded the SDK
 
 
 def _pool_size() -> int:
@@ -135,7 +150,7 @@ def _powershell_home() -> Path:
 
 def _init() -> None:
     """Load the CLR + PowerShell SDK and open the shared runspace/pool (once, under the lock)."""
-    global _runspace, _pool, _powershell_cls, _ready  # noqa: PLW0603 - intentional one-time host singleton
+    global _runspace, _pool, _powershell_cls, _ps_types, _ready  # noqa: PLW0603 - intentional one-time host singleton
     if _ready:
         return
     home = _powershell_home()
@@ -183,7 +198,7 @@ def _init() -> None:
         runspace.Open()
         _runspace = runspace
     _powershell_cls = PowerShell
-    _ps_types.update({"PSObject": PSObject, "IEnumerable": IEnumerable, "IDictionary": IDictionary})
+    _ps_types = _PSTypes(ps_object=PSObject, dictionary=IDictionary, enumerable=IEnumerable)
     _ready = True
 
 
@@ -224,14 +239,14 @@ def _marshal_value(value: Any) -> Any:
     """
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
-    pso = _ps_types.get("PSObject")
-    if pso is not None and isinstance(value, pso):
+    types = _ps_types
+    if types is None:  # the SDK is not loaded, so no value can be one of its types
+        return str(value)
+    if isinstance(value, types.ps_object):
         return _marshal(value)
-    idict = _ps_types.get("IDictionary")
-    if idict is not None and isinstance(value, idict):
+    if isinstance(value, types.dictionary):
         return {str(key): _marshal_value(value[key]) for key in value.Keys}
-    ienum = _ps_types.get("IEnumerable")
-    if ienum is not None and isinstance(value, ienum):
+    if isinstance(value, types.enumerable):
         return [_marshal_value(item) for item in value]
     return str(value)  # DateTime, Guid, and other .NET types we do not model -> string
 
@@ -249,26 +264,24 @@ def _marshal(obj: Any) -> Any:
     return PSObjectRecord(type_name=type_name, properties=properties)
 
 
-def _collect_streams(shell: Any) -> dict[str, list[str]]:
-    """Render every non-output PowerShell stream to a list of strings."""
-    streams = shell.Streams
-    return {
-        "errors": [str(record) for record in streams.Error],
-        "warnings": [str(record) for record in streams.Warning],
-        "verbose": [str(record) for record in streams.Verbose],
-        "debug": [str(record) for record in streams.Debug],
-        "information": [str(record) for record in streams.Information],
-    }
+def _render_stream(records: Any) -> list[str]:
+    """Render one non-output PowerShell stream (a PSDataCollection) to its records' text."""
+    return [str(record) for record in records]
 
 
 def _build_result(shell: Any, results: Any) -> Any:
     """Assemble a PSInvocationResult from a completed shell (output + all streams)."""
     from ...domain.records import PSInvocationResult
 
+    streams = shell.Streams
     return PSInvocationResult(
         output=[_marshal(obj) for obj in results],
         had_errors=bool(shell.HadErrors),
-        **_collect_streams(shell),
+        errors=_render_stream(streams.Error),
+        warnings=_render_stream(streams.Warning),
+        verbose=_render_stream(streams.Verbose),
+        debug=_render_stream(streams.Debug),
+        information=_render_stream(streams.Information),
     )
 
 

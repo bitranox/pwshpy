@@ -122,15 +122,15 @@ def _coerce_registry_data(data: str, value_type: RegistryValueType) -> str | int
     "--type",
     "value_type",
     type=click.Choice([e.value for e in RegistryValueType]),
-    default="REG_SZ",
-    help="Registry value type (default REG_SZ).",
+    default=RegistryValueType.REG_SZ.value,
+    help=f"Registry value type (default {RegistryValueType.REG_SZ.value}).",
 )
 @click.pass_context
 def cli_set_registry_value(ctx: click.Context, key: str, name: str, data: str, value_type: str) -> None:
     """Create or overwrite a registry value (mutating)."""
     vtype = RegistryValueType(value_type)
     _ps(ctx).set_item_property(key, name, _coerce_registry_data(data, vtype), vtype)
-    click.echo(f"set {key}\\{name} ({value_type})")
+    click.echo(f"set {key}\\{name} ({vtype.value})")
 
 
 @click.command("remove_item_property")
@@ -366,23 +366,20 @@ def _render(exc: ValueError) -> str:
     return "\n".join(line.removeprefix(": ") for line in lines)
 
 
-def _principal(run_as: str | None, run_level: str, logon_type: str | None) -> TaskPrincipal | None:
+def _principal(run_as: str | None, run_level: TaskRunLevel, logon_type: TaskLogonType | None) -> TaskPrincipal | None:
     """Build the principal, or None when no principal option moved off its default.
 
     None keeps the adapter's own default: the interactive caller on Windows, root on Linux.
 
     Example:
-        >>> _principal(None, "Limited", None) is None
+        >>> _principal(None, TaskRunLevel.LIMITED, None) is None
+        True
+        >>> _principal(None, TaskRunLevel.HIGHEST, None).run_level is TaskRunLevel.HIGHEST
         True
     """
-    level = _by_value(TaskRunLevel, run_level)
-    if run_as is None and logon_type is None and level is TaskRunLevel.LIMITED:
+    if run_as is None and logon_type is None and run_level is TaskRunLevel.LIMITED:
         return None
-    return TaskPrincipal(
-        user_id=_run_as(run_as),
-        run_level=level,
-        logon_type=None if logon_type is None else _by_value(TaskLogonType, logon_type),
-    )
+    return TaskPrincipal(user_id=_run_as(run_as), run_level=run_level, logon_type=logon_type)
 
 
 def _principal_label(user_id: str) -> str:
@@ -519,7 +516,9 @@ def cli_register_scheduled_task(
         logon_user=logon_user,
     )
     try:
-        principal = _principal(run_as, run_level, logon_type)
+        level = _by_value(TaskRunLevel, run_level)
+        logon = None if logon_type is None else _by_value(TaskLogonType, logon_type)
+        principal = _principal(run_as, level, logon)
         triggers = _triggers(
             at_times=at_times,
             daily_times=daily_times,

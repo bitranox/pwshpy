@@ -23,7 +23,8 @@ import sys
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ...domain.errors import NativeCallError
 
@@ -43,11 +44,76 @@ def _interpreter() -> str:
     return sys.executable
 
 
-def _status_error(args: Sequence[str], status: Mapping[str, Any]) -> NativeCallError:
-    message = str(status.get("message", ""))
-    if status.get("error") == "FileNotFoundError":
-        return NativeCallError(f"Executable not found: {args[0]!r} ({message})")
-    return NativeCallError(f"Failed to run {args[0]!r}: {status.get('error')}: {message}")
+class _HelperRequest(BaseModel):
+    """The control-pipe request: the program to run, exactly as the caller gave it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    argv: list[str]
+    cwd: str | None
+    env: dict[str, str] | None
+
+    def wire(self) -> bytes:
+        """Return the request as the helper reads it.
+
+        ``json.dumps`` rather than ``model_dump_json``: ``ensure_ascii`` writes an undecodable
+        (surrogate-escaped) argv/env byte as ``\\udcXX``, which survives the pipe, while
+        pydantic's JSON encoder refuses a lone surrogate outright.
+
+        Example:
+            >>> _HelperRequest.model_construct(argv=["a"], cwd=None, env=None).wire()
+            b'{"argv": ["a"], "cwd": null, "env": null}'
+        """
+        # warnings=False: the model is built with model_construct, so a non-str argv element
+        # reaches json.dumps and raises its TypeError there, without a serializer warning first.
+        return json.dumps(self.model_dump(warnings=False), ensure_ascii=True).encode("ascii")
+
+
+class _HelperStatus(BaseModel):
+    """The helper's one status report; every field is absent from the variants that do not carry it.
+
+    The helper writes ``{"exit_code": N}``, ``{"error": ..., "message": ...}`` or
+    ``{"killed": true}``; a missing, undecodable or malformed report parses as the empty status.
+
+    Example:
+        >>> _HelperStatus.from_wire(b'{"exit_code": 3}').exit_code
+        3
+        >>> _HelperStatus.from_wire(b"not json") == _HelperStatus()
+        True
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    exit_code: int | None = None
+    error: str | None = None
+    message: str = ""
+    killed: bool = False
+
+    @classmethod
+    def from_wire(cls, raw: bytes) -> _HelperStatus:
+        """Parse the status-pipe bytes once; anything unreadable is the empty status."""
+        if not raw:
+            return cls()
+        # json.loads, not model_validate_json: pydantic's JSON parser rejects the lone-surrogate
+        # escape a non-UTF-8 program name puts into the message.
+        try:
+            return cls.model_validate(json.loads(raw))
+        except (ValueError, ValidationError):
+            return cls()
+
+
+def _status_error(args: Sequence[str], status: _HelperStatus) -> NativeCallError:
+    if status.error == "FileNotFoundError":
+        return NativeCallError(f"Executable not found: {args[0]!r} ({status.message})")
+    return NativeCallError(f"Failed to run {args[0]!r}: {status.error}: {status.message}")
+
+
+def _no_status_error(args: Sequence[str], status: _HelperStatus) -> NativeCallError:
+    # A killed report carries no exit code: exit_code() is only asked after a wait that ended on
+    # its own, so it means the tree was killed under us.  The text quotes the report as the
+    # helper wrote it ({'killed': True}, or {} when nothing readable arrived).
+    received = {"killed": True} if status.killed else {}
+    return NativeCallError(f"The wait_tree helper for {args[0]!r} ended without a status: {received!r}")
 
 
 class PosixReaperTree:
@@ -82,12 +148,14 @@ class PosixReaperTree:
         finally:
             _close_quietly(control_r)
             _close_quietly(status_w)
-        self._send_request(control_w, {"argv": list(args), "cwd": cwd, "env": dict(env) if env is not None else None})
+        # model_construct: args/env are the caller's already-typed values, and validating them here
+        # would turn a non-str argv element's TypeError (json.dumps) into a ValidationError.
+        request = _HelperRequest.model_construct(argv=list(args), cwd=cwd, env=dict(env) if env is not None else None)
+        self._send_request(control_w, request)
         return self._popen
 
-    def _send_request(self, control_w: int, request: Mapping[str, Any]) -> None:
-        # ensure_ascii keeps undecodable (surrogate-escaped) argv/env bytes intact through JSON.
-        payload = json.dumps(request, ensure_ascii=True).encode("ascii")
+    def _send_request(self, control_w: int, request: _HelperRequest) -> None:
+        payload = request.wire()
         try:
             with os.fdopen(control_w, "wb") as control:
                 control.write(payload)
@@ -117,21 +185,17 @@ class PosixReaperTree:
     def exit_code(self, args: Sequence[str]) -> int:
         """Return the program's exit code from the helper's status, or raise its start failure."""
         status = self._read_status()
-        if "exit_code" in status:
-            return int(status["exit_code"])
-        if "error" in status:
+        if status.exit_code is not None:
+            return status.exit_code
+        if status.error is not None:
             raise _status_error(args, status)
-        raise NativeCallError(f"The wait_tree helper for {args[0]!r} ended without a status: {status!r}")
+        raise _no_status_error(args, status)
 
-    def _read_status(self) -> dict[str, Any]:
+    def _read_status(self) -> _HelperStatus:
         with os.fdopen(self._status_fd, "rb") as status_pipe:
             self._status_fd = -1
             raw = status_pipe.read()
-        try:
-            parsed: Any = json.loads(raw) if raw else {}
-        except ValueError:
-            parsed = {}
-        return cast("dict[str, Any]", parsed) if isinstance(parsed, dict) else {}
+        return _HelperStatus.from_wire(raw)
 
     def _require_popen(self) -> subprocess.Popen[bytes]:
         if self._popen is None:

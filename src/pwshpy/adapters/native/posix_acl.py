@@ -23,6 +23,7 @@ import importlib
 import os
 import struct
 from collections.abc import Iterator
+from enum import IntEnum
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -37,24 +38,60 @@ _ACL_VERSION = 2  # POSIX_ACL_XATTR_VERSION
 _HEADER = struct.Struct("<I")  # a_version
 _ENTRY = struct.Struct("<HHI")  # e_tag, e_perm, e_id
 
-_TAG_USER_OBJ = 0x01
-_TAG_USER = 0x02
-_TAG_GROUP_OBJ = 0x04
-_TAG_GROUP = 0x08
-_TAG_MASK = 0x10
-_TAG_OTHER = 0x20
 _UNDEFINED_ID = 0xFFFFFFFF
 
+
+class _AclTag(IntEnum):
+    """The ``e_tag`` of one kernel ACL entry (``ACL_USER_OBJ`` ... ``ACL_OTHER`` in ``<sys/acl.h>``).
+
+    An IntEnum so ``struct.pack`` writes the same bytes as the bare integer did. A tag outside
+    the six the kernel defines is kept as a pseudo-member carrying its raw value rather than
+    refused at parse time: such an entry still reads in, and only marshaling it (``iter_acl``) or
+    writing the ACL back (``add_ace`` / ``remove_ace``) fails, with a ``KeyError`` from the
+    :data:`_KINDS` / :data:`_ORDER` lookup, exactly where the bare integer failed.
+
+    Example:
+        >>> _AclTag(0x02) is _AclTag.USER
+        True
+        >>> unknown = _AclTag(0x40)
+        >>> int(unknown), unknown in _KINDS
+        (64, False)
+    """
+
+    USER_OBJ = 0x01
+    USER = 0x02
+    GROUP_OBJ = 0x04
+    GROUP = 0x08
+    MASK = 0x10
+    OTHER = 0x20
+
+    @classmethod
+    def _missing_(cls, value: object) -> _AclTag | None:
+        if not isinstance(value, int):
+            return None
+        pseudo = int.__new__(cls, value)
+        pseudo._name_ = f"UNKNOWN_{value:#x}"
+        pseudo._value_ = value
+        return pseudo
+
+
 #: Canonical serialization order of the ACL tags (the kernel validates a well-formed ACL).
-_ORDER = {_TAG_USER_OBJ: 0, _TAG_USER: 1, _TAG_GROUP_OBJ: 2, _TAG_GROUP: 3, _TAG_MASK: 4, _TAG_OTHER: 5}
-#: ACL tag -> (entry kind, whether the entry names a specific uid/gid).
+_ORDER = {
+    _AclTag.USER_OBJ: 0,
+    _AclTag.USER: 1,
+    _AclTag.GROUP_OBJ: 2,
+    _AclTag.GROUP: 3,
+    _AclTag.MASK: 4,
+    _AclTag.OTHER: 5,
+}
+#: ACL tag -> the entry kind it reports as.
 _KINDS = {
-    _TAG_USER_OBJ: AclEntryKind.OWNER,
-    _TAG_USER: AclEntryKind.USER,
-    _TAG_GROUP_OBJ: AclEntryKind.OWNING_GROUP,
-    _TAG_GROUP: AclEntryKind.GROUP,
-    _TAG_MASK: AclEntryKind.MASK,
-    _TAG_OTHER: AclEntryKind.OTHER,
+    _AclTag.USER_OBJ: AclEntryKind.OWNER,
+    _AclTag.USER: AclEntryKind.USER,
+    _AclTag.GROUP_OBJ: AclEntryKind.OWNING_GROUP,
+    _AclTag.GROUP: AclEntryKind.GROUP,
+    _AclTag.MASK: AclEntryKind.MASK,
+    _AclTag.OTHER: AclEntryKind.OTHER,
 }
 
 
@@ -64,7 +101,7 @@ class _XattrAclEntry(NamedTuple):
     ``entry_id`` is ``_UNDEFINED_ID`` for the base (owner/owning-group/other) and mask entries.
     """
 
-    tag: int
+    tag: _AclTag
     perm: int
     entry_id: int
 
@@ -101,9 +138,9 @@ def _group_name(gid: int) -> str:
 def _base_entries(mode: int) -> list[_XattrAclEntry]:
     """The three base ACL entries a file always has, synthesized from its mode bits."""
     return [
-        _XattrAclEntry(_TAG_USER_OBJ, (mode >> 6) & 7, _UNDEFINED_ID),
-        _XattrAclEntry(_TAG_GROUP_OBJ, (mode >> 3) & 7, _UNDEFINED_ID),
-        _XattrAclEntry(_TAG_OTHER, mode & 7, _UNDEFINED_ID),
+        _XattrAclEntry(_AclTag.USER_OBJ, (mode >> 6) & 7, _UNDEFINED_ID),
+        _XattrAclEntry(_AclTag.GROUP_OBJ, (mode >> 3) & 7, _UNDEFINED_ID),
+        _XattrAclEntry(_AclTag.OTHER, mode & 7, _UNDEFINED_ID),
     ]
 
 
@@ -117,7 +154,7 @@ def _read_raw(path: str) -> list[_XattrAclEntry] | None:
     offset = _HEADER.size
     while offset < len(blob):
         tag, perm, eid = _ENTRY.unpack_from(blob, offset)
-        entries.append(_XattrAclEntry(int(tag), int(perm), int(eid)))
+        entries.append(_XattrAclEntry(_AclTag(tag), int(perm), int(eid)))
         offset += _ENTRY.size
     return entries
 
@@ -135,16 +172,16 @@ def _current_acl(path: str) -> list[_XattrAclEntry]:
 
 def _to_entry(path: str, info: os.stat_result, entry: _XattrAclEntry) -> AclEntry:
     """Marshal one ACL entry into an :class:`AclEntry`, resolving the principal uid/gid + name."""
-    if entry.tag == _TAG_USER_OBJ:
+    if entry.tag is _AclTag.USER_OBJ:
         trustee_sid, trustee_name = str(info.st_uid), _user_name(info.st_uid)
-    elif entry.tag == _TAG_USER:
+    elif entry.tag is _AclTag.USER:
         trustee_sid, trustee_name = str(entry.entry_id), _user_name(entry.entry_id)
-    elif entry.tag == _TAG_GROUP_OBJ:
+    elif entry.tag is _AclTag.GROUP_OBJ:
         trustee_sid, trustee_name = str(info.st_gid), _group_name(info.st_gid)
-    elif entry.tag == _TAG_GROUP:
+    elif entry.tag is _AclTag.GROUP:
         trustee_sid, trustee_name = str(entry.entry_id), _group_name(entry.entry_id)
     else:  # mask / other - no principal
-        trustee_sid, trustee_name = "", ("mask" if entry.tag == _TAG_MASK else "other")
+        trustee_sid, trustee_name = "", ("mask" if entry.tag is _AclTag.MASK else "other")
     return AclEntry.model_construct(
         path=path,
         owner_sid=str(info.st_uid),
@@ -194,25 +231,25 @@ def _resolve_gid(group: str) -> int:
         raise NativeCallError(f"no such group {group!r}") from exc
 
 
-def _parse_trustee(trustee: str) -> tuple[int, int]:
+def _parse_trustee(trustee: str) -> tuple[_AclTag, int]:
     """A ``user:NAME`` / ``group:NAME`` (or bare -> user) trustee -> (named tag, resolved id)."""
     if trustee.startswith("group:"):
-        return _TAG_GROUP, _resolve_gid(trustee[len("group:") :])
+        return _AclTag.GROUP, _resolve_gid(trustee[len("group:") :])
     name = trustee[len("user:") :] if trustee.startswith("user:") else trustee
-    return _TAG_USER, _resolve_uid(name)
+    return _AclTag.USER, _resolve_uid(name)
 
 
 def _with_recomputed_mask(entries: list[_XattrAclEntry]) -> list[_XattrAclEntry]:
     """Re-derive the ACL mask: the union of every group-class entry's perms, dropped if no named entries."""
-    without_mask = [e for e in entries if e.tag != _TAG_MASK]
-    named = [e for e in without_mask if e.tag in (_TAG_USER, _TAG_GROUP)]
+    without_mask = [e for e in entries if e.tag is not _AclTag.MASK]
+    named = [e for e in without_mask if e.tag in (_AclTag.USER, _AclTag.GROUP)]
     if not named:
         return without_mask  # a minimal ACL (base entries only) carries no mask
-    group_class = [e for e in without_mask if e.tag in (_TAG_USER, _TAG_GROUP, _TAG_GROUP_OBJ)]
+    group_class = [e for e in without_mask if e.tag in (_AclTag.USER, _AclTag.GROUP, _AclTag.GROUP_OBJ)]
     mask_perm = 0
     for entry in group_class:
         mask_perm |= entry.perm
-    return [*without_mask, _XattrAclEntry(_TAG_MASK, mask_perm, _UNDEFINED_ID)]
+    return [*without_mask, _XattrAclEntry(_AclTag.MASK, mask_perm, _UNDEFINED_ID)]
 
 
 def _write_acl(path: str, entries: list[_XattrAclEntry]) -> None:

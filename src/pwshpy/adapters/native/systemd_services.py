@@ -20,59 +20,70 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterator
+from enum import Enum
 
 from ...domain.enums import ServiceStartType, ServiceState
 from ...domain.errors import NativeCallError, OperationTimeoutError
 from ...domain.records import ServiceInfo
 from . import systemd_dbus as _dbus
 from .marshal import skip_or_raise
+from .systemd_dbus import ActiveState, UnitFileState
 
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 0.1  # seconds between polls while a start/stop/restart settles
 #: A stop also counts as settled at these ActiveStates, even with its job record not yet gone.
-_STOPPED_STATES = frozenset({"inactive", "failed"})
+_STOPPED_STATES = frozenset({ActiveState.INACTIVE, ActiveState.FAILED})
+
+
+class _Job(str, Enum):
+    """The systemd Manager method that queues a unit's start, stop or restart job."""
+
+    START = "StartUnit"
+    STOP = "StopUnit"
+    RESTART = "RestartUnit"
+
 
 #: systemd ActiveState -> canonical ServiceState (Windows has no failed/reloading, mapped to nearest).
 _ACTIVE_STATE = {
-    "active": ServiceState.RUNNING,
-    "inactive": ServiceState.STOPPED,
-    "failed": ServiceState.STOPPED,
-    "activating": ServiceState.START_PENDING,
-    "deactivating": ServiceState.STOP_PENDING,
-    "reloading": ServiceState.CONTINUE_PENDING,
+    ActiveState.ACTIVE: ServiceState.RUNNING,
+    ActiveState.INACTIVE: ServiceState.STOPPED,
+    ActiveState.FAILED: ServiceState.STOPPED,
+    ActiveState.ACTIVATING: ServiceState.START_PENDING,
+    ActiveState.DEACTIVATING: ServiceState.STOP_PENDING,
+    ActiveState.RELOADING: ServiceState.CONTINUE_PENDING,
 }
 #: systemd UnitFileState -> ServiceStartType (static/indirect/... have no exact Windows twin -> Manual).
 _UNIT_FILE_STATE = {
-    "enabled": ServiceStartType.AUTOMATIC,
-    "enabled-runtime": ServiceStartType.AUTOMATIC,
-    "disabled": ServiceStartType.DISABLED,
-    "masked": ServiceStartType.DISABLED,
-    "masked-runtime": ServiceStartType.DISABLED,
-    "static": ServiceStartType.MANUAL,
-    "indirect": ServiceStartType.MANUAL,
-    "generated": ServiceStartType.MANUAL,
-    "transient": ServiceStartType.MANUAL,
-    "linked": ServiceStartType.MANUAL,
-    "linked-runtime": ServiceStartType.MANUAL,
+    UnitFileState.ENABLED: ServiceStartType.AUTOMATIC,
+    UnitFileState.ENABLED_RUNTIME: ServiceStartType.AUTOMATIC,
+    UnitFileState.DISABLED: ServiceStartType.DISABLED,
+    UnitFileState.MASKED: ServiceStartType.DISABLED,
+    UnitFileState.MASKED_RUNTIME: ServiceStartType.DISABLED,
+    UnitFileState.STATIC: ServiceStartType.MANUAL,
+    UnitFileState.INDIRECT: ServiceStartType.MANUAL,
+    UnitFileState.GENERATED: ServiceStartType.MANUAL,
+    UnitFileState.TRANSIENT: ServiceStartType.MANUAL,
+    UnitFileState.LINKED: ServiceStartType.MANUAL,
+    UnitFileState.LINKED_RUNTIME: ServiceStartType.MANUAL,
 }
 
 
-def to_service_state(active_state: str) -> ServiceState:
-    """Map a systemd ``ActiveState`` to the canonical :class:`ServiceState`.
+def to_service_state(active_state: ActiveState) -> ServiceState:
+    """Map a systemd ``ActiveState`` to the canonical :class:`ServiceState` (an unmapped one is Stopped).
 
     Example:
-        >>> to_service_state("active").value, to_service_state("inactive").value
+        >>> to_service_state(ActiveState.ACTIVE).value, to_service_state(ActiveState.INACTIVE).value
         ('Running', 'Stopped')
     """
     return _ACTIVE_STATE.get(active_state, ServiceState.STOPPED)
 
 
-def to_start_type(unit_file_state: str) -> ServiceStartType | None:
-    """Map a systemd ``UnitFileState`` to a :class:`ServiceStartType` (``None`` if unknown).
+def to_start_type(unit_file_state: UnitFileState) -> ServiceStartType | None:
+    """Map a systemd ``UnitFileState`` to a :class:`ServiceStartType` (``None`` if unmapped).
 
     Example:
-        >>> to_start_type("enabled").value, to_start_type("disabled").value
+        >>> to_start_type(UnitFileState.ENABLED).value, to_start_type(UnitFileState.DISABLED).value
         ('Automatic', 'Disabled')
     """
     return _UNIT_FILE_STATE.get(unit_file_state)
@@ -91,10 +102,7 @@ def _service_at(bus: _dbus.Bus, name: str, path: str | None, *, start_type: Serv
     file was deleted under it as not-found, yet it can still run, and GetUnit answers for any loaded
     unit whatever its LoadState (an absent one reads inactive).
     """
-    if path is None:
-        active_state = _dbus.active_state(bus, name)
-    else:
-        active_state = str(_dbus.path_property(bus, path, "ActiveState", "inactive"))
+    active_state = _dbus.active_state(bus, name) if path is None else _dbus.path_active_state(bus, path)
     return ServiceInfo(
         name=name,
         display_name=str(_dbus.path_property(bus, path, "Description", "")),
@@ -105,8 +113,8 @@ def _service_at(bus: _dbus.Bus, name: str, path: str | None, *, start_type: Serv
     )
 
 
-def _service_files(bus: _dbus.Bus, *, strict: bool) -> list[tuple[str, str]]:
-    """Every ``.service`` unit file as (unit name, UnitFileState); [] when no listing answers.
+def _service_files(bus: _dbus.Bus, *, strict: bool) -> list[_dbus.UnitFile]:
+    """Every ``.service`` unit file as a :class:`~.systemd_dbus.UnitFile`; [] when no listing answers.
 
     When no unit-file listing answers, the default keeps the loaded services with a WARNING (every
     unloaded service is then missing); ``strict`` raises instead.
@@ -181,7 +189,8 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
             if not name.endswith(".service"):
                 continue
             # ListUnits fields: 1 Description, 2 LoadState, 3 ActiveState.
-            if _dbus.is_unlisted_unit(str(unit[2]), str(unit[3])):
+            active_state = ActiveState(str(unit[3]))
+            if _dbus.is_unlisted_unit(_dbus.LoadState(str(unit[2])), active_state):
                 # Not marked seen: a cached not-found name whose file appeared since (no
                 # daemon-reload) is still listed by the unit-file pass, whose LoadUnit retries the
                 # load from disk on systemd >= 246: manager_load_unit_prepare (src/core/manager.c)
@@ -194,7 +203,7 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
             yield ServiceInfo(
                 name=name,
                 display_name=str(unit[1]),
-                status=to_service_state(str(unit[3])),
+                status=to_service_state(active_state),
                 start_type=_start_type_of(bus, name),
                 can_stop=True,
                 can_pause_continue=False,
@@ -246,7 +255,7 @@ class SystemdServiceController:
             NativeCallError: systemd refused the job, or the unit settled at ``failed``.
             OperationTimeoutError: the unit did not settle within ``timeout`` seconds.
         """
-        return self._transition(name, "StartUnit", timeout)
+        return self._transition(name, _Job.START, timeout)
 
     def stop(self, name: str, *, timeout: float = 30.0, wait: bool = True) -> ServiceInfo:
         """Stop a unit; wait until inactive/failed or its job is done; return its state (like Stop-Service).
@@ -254,7 +263,7 @@ class SystemdServiceController:
         With ``wait=False`` the StopUnit job is queued and the unit is read back at once
         (typically ``deactivating``, so ``StopPending``) without polling; ``timeout`` is unused.
         """
-        return self._transition(name, "StopUnit", timeout, wait=wait)
+        return self._transition(name, _Job.STOP, timeout, wait=wait)
 
     def restart(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
         """Restart a unit; wait until its restart job is done; return its state (like Restart-Service).
@@ -263,7 +272,7 @@ class SystemdServiceController:
             NativeCallError: systemd refused the job, or the unit settled at ``failed``.
             OperationTimeoutError: the unit did not settle within ``timeout`` seconds.
         """
-        return self._transition(name, "RestartUnit", timeout)
+        return self._transition(name, _Job.RESTART, timeout)
 
     def set_startup(self, name: str, start_type: ServiceStartType) -> ServiceInfo:
         """Enable/disable a unit to match ``start_type`` (like Set-Service -StartupType)."""
@@ -285,20 +294,20 @@ class SystemdServiceController:
     def _transition(
         self,
         name: str,
-        method: str,
+        job: _Job,
         timeout: float,
         *,
         wait: bool = True,
     ) -> ServiceInfo:
-        """Send ``method`` for ``name``; unless ``wait`` is False, poll until it settles.
+        """Send ``job`` for ``name``; unless ``wait`` is False, poll until it settles.
 
         A stop also settles at inactive or failed (both mean stopped); a start or restart that
         settles at ``failed`` raises instead (:func:`_refuse_a_failed_unit`).
         """
-        stopping = method == "StopUnit"
+        stopping = job is _Job.STOP
         bus = _dbus.open_bus()
         try:
-            _dbus.call(bus, method, "ss", (name, "replace"))
+            _dbus.call(bus, job.value, "ss", (name, "replace"))
             if wait:
                 _wait_until_settled(bus, name, _STOPPED_STATES if stopping else frozenset(), timeout)
                 if not stopping:
@@ -316,21 +325,21 @@ def _refuse_a_failed_unit(bus: _dbus.Bus, name: str) -> None:
     success. ``Service.Result`` names why (``exit-code``, ``signal``, ``timeout``, ...); an
     unreadable one only leaves the reason unnamed, never the failure unreported.
     """
-    if _dbus.active_state(bus, name) != "failed":
+    if _dbus.active_state(bus, name) is not ActiveState.FAILED:
         return
     result = _dbus.unit_property(bus, name, "Result", None, interface=_dbus.SERVICE_IFACE)
     reason = f" (Result={result})" if isinstance(result, str) and result else ""
     raise NativeCallError(f"unit {name!r} failed{reason}: systemd ended its job with the unit in the failed state.")
 
 
-def _is_settled(bus: _dbus.Bus, name: str, settled_states: frozenset[str]) -> bool:
+def _is_settled(bus: _dbus.Bus, name: str, settled_states: frozenset[ActiveState]) -> bool:
     """Whether the unit's job is done, or its ActiveState is already one of ``settled_states``."""
     if not _dbus.has_pending_job(bus, name):
         return True
     return bool(settled_states) and _dbus.active_state(bus, name) in settled_states
 
 
-def _wait_until_settled(bus: _dbus.Bus, name: str, settled_states: frozenset[str], timeout: float) -> None:
+def _wait_until_settled(bus: _dbus.Bus, name: str, settled_states: frozenset[ActiveState], timeout: float) -> None:
     """Poll until the unit has no pending job (or reads a ``settled_states`` state); raise at ``timeout``.
 
     Settling on the job, not on one target state, lets a start whose unit legitimately ends

@@ -170,6 +170,9 @@ class _Utf8Writer:
 
 
 def _dumps(record: PSRecord) -> bytes:
+    # Not record.model_dump_json(): its bytes match for every ordinary record, but it writes an
+    # integer outside orjson's 64-bit range where this raises, and refuses a lone surrogate or
+    # non-UTF-8 bytes with a different exception. tests/test_record_json_bytes.py pins each case.
     return orjson.dumps(record.to_dict())
 
 

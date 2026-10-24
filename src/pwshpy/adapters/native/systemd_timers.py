@@ -47,6 +47,7 @@ import logging
 import re
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
@@ -59,6 +60,7 @@ from ...domain.records import ScheduledTaskInfo
 from ...domain.scheduling import BootTrigger, DailyTrigger, OnceTrigger, TaskPrincipal, TaskTrigger
 from . import systemd_dbus as _dbus
 from .marshal import skip_or_raise
+from .systemd_dbus import ActiveState, LoadState, UnitFileState
 
 logger = logging.getLogger(__name__)
 
@@ -110,25 +112,31 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 #: systemd timer ActiveState -> TaskState. An armed timer is READY (waiting to fire); a stopped
 #: or failed timer is DISABLED. RUNNING (the triggered job executing) is Windows-only granularity.
 _TIMER_STATE = {
-    "active": TaskState.READY,
-    "activating": TaskState.QUEUED,
-    "inactive": TaskState.DISABLED,
-    "deactivating": TaskState.DISABLED,
-    "failed": TaskState.DISABLED,
+    ActiveState.ACTIVE: TaskState.READY,
+    ActiveState.ACTIVATING: TaskState.QUEUED,
+    ActiveState.INACTIVE: TaskState.DISABLED,
+    ActiveState.DEACTIVATING: TaskState.DISABLED,
+    ActiveState.FAILED: TaskState.DISABLED,
 }
 
+#: UnitFileStates of an armed timer (:func:`timer_enabled`).
+_ENABLED_FILE_STATES = frozenset({UnitFileState.ENABLED, UnitFileState.ENABLED_RUNTIME, UnitFileState.STATIC})
 
-def timer_to_task_state(active_state: str) -> TaskState:
-    """Map a systemd timer ``ActiveState`` to a :class:`TaskState`.
+#: ActiveStates in which an on-demand service task is RUNNING (:func:`service_task_state`).
+_SERVICE_RUNNING_STATES = frozenset({ActiveState.ACTIVE, ActiveState.ACTIVATING})
+
+
+def timer_to_task_state(active_state: ActiveState) -> TaskState:
+    """Map a systemd timer ``ActiveState`` to a :class:`TaskState` (an unmapped one is Unknown).
 
     Example:
-        >>> timer_to_task_state("active").value, timer_to_task_state("inactive").value
+        >>> timer_to_task_state(ActiveState.ACTIVE).value, timer_to_task_state(ActiveState.INACTIVE).value
         ('Ready', 'Disabled')
     """
     return _TIMER_STATE.get(active_state, TaskState.UNKNOWN)
 
 
-def timer_enabled(unit_file_state: str) -> bool:
+def timer_enabled(unit_file_state: UnitFileState) -> bool:
     """Whether a timer's ``UnitFileState`` counts as enabled (armed, it runs on schedule).
 
     ``static`` counts as enabled: a static timer has no ``[Install]`` section, so it cannot be
@@ -136,23 +144,25 @@ def timer_enabled(unit_file_state: str) -> bool:
     ``disabled`` and ``masked`` are not enabled.
 
     Example:
-        >>> timer_enabled("enabled"), timer_enabled("static"), timer_enabled("disabled")
-        (True, True, False)
+        >>> timer_enabled(UnitFileState.STATIC), timer_enabled(UnitFileState.DISABLED)
+        (True, False)
     """
-    return unit_file_state in ("enabled", "enabled-runtime", "static")
+    return unit_file_state in _ENABLED_FILE_STATES
 
 
-def timer_task_state(active_state: str, *, enabled: bool) -> TaskState:
+def timer_task_state(active_state: ActiveState, *, enabled: bool) -> TaskState:
     """A timer task's state: an enabled but inactive timer is READY, else :func:`timer_to_task_state`.
 
     An enabled timer that is not running is armed for the next boot (timers.target starts it),
     which is what a freshly registered boot task looks like - waiting to fire, not disabled.
 
     Example:
-        >>> timer_task_state("inactive", enabled=True).value, timer_task_state("inactive", enabled=False).value
-        ('Ready', 'Disabled')
+        >>> timer_task_state(ActiveState.INACTIVE, enabled=True).value
+        'Ready'
+        >>> timer_task_state(ActiveState.INACTIVE, enabled=False).value
+        'Disabled'
     """
-    if active_state == "inactive" and enabled:
+    if active_state is ActiveState.INACTIVE and enabled:
         return TaskState.READY
     return timer_to_task_state(active_state)
 
@@ -176,9 +186,9 @@ def starts_when_armed(monotonic_bases: Iterable[str]) -> bool:
     return _BOOT_RELATIVE.isdisjoint(monotonic_bases)
 
 
-def service_task_state(active_state: str) -> TaskState:
+def service_task_state(active_state: ActiveState) -> TaskState:
     """State for an on-demand ``.service`` task: running -> RUNNING, else READY (it can always be run)."""
-    if active_state in ("active", "activating"):
+    if active_state in _SERVICE_RUNNING_STATES:
         return TaskState.RUNNING
     return TaskState.READY
 
@@ -342,12 +352,12 @@ def _timer_run_info(bus: _dbus.Bus, timer_path: str | None, base: str) -> _RunIn
 class _Listed(NamedTuple):
     """What ``ListUnits`` already reports for a loaded unit, so no property read repeats it."""
 
-    active_state: str
+    active_state: ActiveState
     description: str
 
 
 def _timer_task(
-    bus: _dbus.Bus, name: str, path: str | None, *, file_state: str, listed: _Listed | None = None
+    bus: _dbus.Bus, name: str, path: str | None, *, file_state: UnitFileState, listed: _Listed | None = None
 ) -> ScheduledTaskInfo:
     """The record for timer ``name`` at its resolved object ``path`` (None: unreadable, fields default).
 
@@ -356,7 +366,7 @@ def _timer_task(
     """
     if listed is None:
         listed = _Listed(
-            active_state=str(_dbus.path_property(bus, path, "ActiveState", "inactive")),
+            active_state=_dbus.path_active_state(bus, path),
             description=str(_dbus.path_property(bus, path, "Description", "")),
         )
     base = name[: -len(".timer")]
@@ -387,7 +397,7 @@ def _service_task(bus: _dbus.Bus, base: str, path: str | None) -> ScheduledTaskI
     return ScheduledTaskInfo.model_construct(
         task_name=base,
         task_path=_ROOT,
-        state=service_task_state(str(_dbus.path_property(bus, path, "ActiveState", "inactive"))),
+        state=service_task_state(_dbus.path_active_state(bus, path)),
         enabled=True,  # an on-demand oneshot has no schedule to disable; it can always be run
         author="",
         description=str(_dbus.path_property(bus, path, "Description", "")),
@@ -448,7 +458,7 @@ def _check_task_name(task_name: str) -> None:
         )
 
 
-def _is_absent(bus: _dbus.Bus, loaded: _dbus.LoadedUnit, file_state: str) -> bool:
+def _is_absent(bus: _dbus.Bus, loaded: _dbus.LoadedUnit, file_state: UnitFileState) -> bool:
     """Whether the ``loaded`` unit is no task, by the listing's rule: masked counts unless running.
 
     The listing lists a ``ListUnits`` entry unless :func:`~.systemd_dbus.is_unlisted_unit` says no, and
@@ -457,9 +467,8 @@ def _is_absent(bus: _dbus.Bus, loaded: _dbus.LoadedUnit, file_state: str) -> boo
     ``GetUnitFileState`` failed. A masked file state with a stale LoadState (masked after it was
     loaded) is masked too.
     """
-    load_state = "masked" if file_state in _dbus.UNLISTED_FILE_STATES else loaded.load_state
-    active_state = str(_dbus.path_property(bus, loaded.path, "ActiveState", "inactive"))
-    return _dbus.is_unlisted_unit(load_state, active_state)
+    load_state = LoadState.MASKED if file_state in _dbus.UNLISTED_FILE_STATES else loaded.load_state
+    return _dbus.is_unlisted_unit(load_state, _dbus.path_active_state(bus, loaded.path))
 
 
 def _load_named_unit(bus: _dbus.Bus, unit: str) -> _dbus.LoadedUnit | None:
@@ -522,8 +531,8 @@ def _lookup_unit(bus: _dbus.Bus, base: str, *, strict: bool) -> Iterator[Schedul
     stand in for a timer that may exist.
     """
     for unit in (f"{base}.timer", f"{base}.service"):
-        state = _dbus.unit_file_state(bus, unit) or ""
-        if state == "alias":  # the name of another unit: the listing reports that unit, never the alias
+        state = _dbus.unit_file_state(bus, unit) or UnitFileState.EMPTY
+        if state is UnitFileState.ALIAS:  # the name of another unit: the listing reports that unit, never the alias
             continue
         try:
             loaded = _load_named_unit(bus, unit)
@@ -539,8 +548,8 @@ def _lookup_unit(bus: _dbus.Bus, base: str, *, strict: bool) -> Iterator[Schedul
         return
 
 
-def _timer_files(bus: _dbus.Bus, *, strict: bool) -> list[tuple[str, str]]:
-    """Every ``.timer`` unit file as (unit name, UnitFileState); [] when no listing answers.
+def _timer_files(bus: _dbus.Bus, *, strict: bool) -> list[_dbus.UnitFile]:
+    """Every ``.timer`` unit file as a :class:`~.systemd_dbus.UnitFile`; [] when no listing answers.
 
     When no unit-file listing answers, the default keeps the loaded timers with a WARNING (every
     unloaded timer is then missing); ``strict`` raises instead.
@@ -635,7 +644,8 @@ def iter_timers(
             if not name.endswith(".timer"):
                 continue
             # ListUnits fields: 1 Description, 2 LoadState, 3 ActiveState, 6 the unit object path.
-            if _dbus.is_unlisted_unit(str(unit[2]), str(unit[3])):
+            active_state = ActiveState(str(unit[3]))
+            if _dbus.is_unlisted_unit(LoadState(str(unit[2])), active_state):
                 # Not marked seen: a cached not-found name whose file appeared since (no
                 # daemon-reload) is still listed by the unit-file pass, whose LoadUnit retries the
                 # load from disk on systemd >= 246: manager_load_unit_prepare (src/core/manager.c)
@@ -645,8 +655,8 @@ def iter_timers(
                 # there the unit-file pass skips the name as well.
                 continue
             seen.add(name)
-            state = _dbus.unit_file_state(bus, name) or ""
-            listed = _Listed(active_state=str(unit[3]), description=str(unit[1]))
+            state = _dbus.unit_file_state(bus, name) or UnitFileState.EMPTY
+            listed = _Listed(active_state=active_state, description=str(unit[1]))
             yield _timer_task(bus, name, str(unit[6]), file_state=state, listed=listed)
         for name, state in _timer_files(bus, strict=strict):
             if name in seen or state in _dbus.UNLISTED_FILE_STATES:
@@ -1027,6 +1037,13 @@ def _has_timer(bus: _dbus.Bus, base: str) -> bool:
     return _dbus.unit_file_state(bus, f"{base}.timer") is not None or (_UNIT_DIR / f"{base}.timer").exists()
 
 
+class _ScheduleVerb(str, Enum):
+    """The verb that toggles a task's schedule; its value is the word refusals name."""
+
+    ENABLE = "enable"
+    DISABLE = "disable"
+
+
 class SystemdScheduledTaskController:
     """Register/unregister, run/stop and enable/disable systemd timer tasks (Linux, **mutating**).
 
@@ -1202,7 +1219,7 @@ class SystemdScheduledTaskController:
         timer = f"{base}.timer"
         bus = _dbus.open_bus()
         try:
-            self._require_timer(bus, base, "enable")
+            self._require_timer(bus, base, _ScheduleVerb.ENABLE)
             bases = _monotonic_bases(bus, timer)
             _dbus.call(bus, "EnableUnitFiles", "asbb", ([timer], False, False))
             _dbus.call(bus, "Reload")  # as register does: the new timers.target link is loaded before the start
@@ -1223,7 +1240,7 @@ class SystemdScheduledTaskController:
         base = existing_unit_base(task_path)
         bus = _dbus.open_bus()
         try:
-            self._require_timer(bus, base, "disable")
+            self._require_timer(bus, base, _ScheduleVerb.DISABLE)
             _dbus.call(bus, "StopUnit", "ss", (f"{base}.timer", "replace"))
             _dbus.call(bus, "DisableUnitFiles", "asb", ([f"{base}.timer"], False))
             _dbus.call(bus, "Reload")
@@ -1232,7 +1249,7 @@ class SystemdScheduledTaskController:
             bus.conn.close()
 
     @staticmethod
-    def _require_timer(bus: _dbus.Bus, base: str, verb: str) -> None:
+    def _require_timer(bus: _dbus.Bus, base: str, verb: _ScheduleVerb) -> None:
         """Refuse enable/disable for a task whose schedule systemd cannot toggle.
 
         A task with no ``.timer`` is on-demand: there is nothing to toggle. A static timer has no
@@ -1242,19 +1259,19 @@ class SystemdScheduledTaskController:
         """
         if not _has_timer(bus, base):
             raise NativeCallError(
-                f"task {base!r} is on-demand (no .timer); nothing to {verb} - run it directly, or unregister it."
+                f"task {base!r} is on-demand (no .timer); nothing to {verb.value} - run it directly, or unregister it."
             )
-        if _dbus.unit_file_state(bus, f"{base}.timer") == "static":
+        if _dbus.unit_file_state(bus, f"{base}.timer") is UnitFileState.STATIC:
             # What does work differs by verb: a static timer runs whenever the unit that wants it starts,
             # so only that unit (or an [Install] section) arms it, and only a mask keeps it from running.
             remedy = (
                 "it runs whenever the unit that wants it starts; give it an [Install] section to enable it on its own"
-                if verb == "enable"
+                if verb is _ScheduleVerb.ENABLE
                 else "change the unit that wants it, or mask the timer to keep it from running"
             )
             raise NativeCallError(
                 f"task {base!r} is a static timer (no [Install] section; another unit pulls it in), so systemd "
-                f"has nothing to {verb} - {remedy}."
+                f"has nothing to {verb.value} - {remedy}."
             )
 
     def _start_stop(self, base: str, method: str) -> None:
@@ -1274,7 +1291,7 @@ class SystemdScheduledTaskController:
         """
         if _has_timer(bus, base):
             unit = f"{base}.timer"
-            state = _dbus.unit_file_state(bus, unit) or ""
+            state = _dbus.unit_file_state(bus, unit) or UnitFileState.EMPTY
             return _timer_task(bus, unit, _dbus.load_unit_path(bus, unit), file_state=state)
         return _service_task(bus, base, _dbus.load_unit_path(bus, f"{base}.service"))
 

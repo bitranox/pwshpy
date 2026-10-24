@@ -214,6 +214,17 @@ def test_set_item_property_coerces_dword() -> None:
     )
     assert result.exit_code == 0
     assert fake.calls[0] == ("set_item_property", "HKCU/S", "N", 42, RegistryValueType.REG_DWORD)
+    assert result.output == "set HKCU/S\\N (REG_DWORD)\n"
+
+
+@pytest.mark.os_agnostic
+def test_set_item_property_defaults_to_reg_sz() -> None:
+    """Without --type the value is written as REG_SZ and the echo names the plain value, not the member."""
+    fake = _FakePs()
+    result = CliRunner().invoke(cli, ["set_item_property", "HKCU/S", "N", "text"], obj=_factory(fake))
+    assert result.exit_code == 0, result.output
+    assert fake.calls[0] == ("set_item_property", "HKCU/S", "N", "text", RegistryValueType.REG_SZ)
+    assert result.output == "set HKCU/S\\N (REG_SZ)\n"
 
 
 @pytest.mark.os_agnostic

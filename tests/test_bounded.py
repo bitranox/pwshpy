@@ -31,6 +31,12 @@ def test_returns_the_child_result() -> None:
 
 
 @pytest.mark.os_agnostic
+def test_a_result_shaped_like_a_failure_message_comes_back_as_data() -> None:
+    """The child tags its message outside the payload, so a result that reads like an error is not one."""
+    assert run_bounded(echo, (("error", "kaputt"),), timeout=30) == ("error", "kaputt")
+
+
+@pytest.mark.os_agnostic
 def test_a_hang_is_killed_and_reported_as_a_timeout() -> None:
     started = time.monotonic()
     with pytest.raises(OperationTimeoutError) as caught:

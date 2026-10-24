@@ -38,8 +38,9 @@ from ._common import resolve_format
 @option(
     "--format",
     "runner_format",
-    type=click.Choice(["auto", "ps1", "sh"]),
-    default="auto",
+    # sorted: the enum declares AUTO last, while --help has always listed [auto|ps1|sh]
+    type=click.Choice(sorted(fmt.value for fmt in RunnerFormat)),
+    default=RunnerFormat.AUTO.value,
     help="Runner format: 'ps1' (PowerShell), 'sh' (POSIX shell), or 'auto' (by the -o extension).",
 )
 @option("--force", "-f", is_flag=True, default=False, help="Overwrite the output if it already exists.")

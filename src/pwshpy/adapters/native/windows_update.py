@@ -3,10 +3,11 @@
 ``IUpdateSearcher.Search`` is synchronous and was measured to sit 25+ minutes against an
 empty update datastore, and a thread cannot stop a blocked COM call, so the search runs in
 a killable ``spawn`` child (:func:`~pwshpy.adapters.native.bounded.run_bounded`).  COM
-objects cannot cross a process boundary, so the child flattens each ``IUpdate`` to a plain
-dict and the parent builds the records.
+objects cannot cross a process boundary, so the child reads each ``IUpdate`` into a
+:class:`~pwshpy.domain.records.WindowsUpdate` record, which pickles by its importable class
+and crosses the pipe as plain data.
 
-The child returns a COM failure as DATA (an error message beside empty rows) rather than
+The child returns a COM failure as DATA (an error message beside no updates) rather than
 raising it: ``run_bounded`` keeps only the text of a child exception, so a raised error would
 arrive as ``"NativeCallError: ..."`` with its HRESULT buried; returned, the parent raises one
 clean :class:`~pwshpy.domain.errors.NativeCallError` naming the HRESULT.  Anything else the
@@ -23,7 +24,7 @@ from __future__ import annotations
 import importlib
 import sys
 from collections.abc import Iterator
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from ...domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
 from ...domain.records import UpdateCategory, WindowsUpdate
@@ -34,8 +35,12 @@ from .bounded import run_bounded
 # read "Exception occurred" for every failure.
 _DISP_E_EXCEPTION = -2147352567
 
-# (error message, rows): an empty message means the search succeeded.
-_Outcome = tuple[str, list[dict[str, Any]]]
+
+class _Outcome(NamedTuple):
+    """What the child sends back; module-level so it pickles by name across the spawn pipe."""
+
+    error: str  # empty means the search succeeded
+    updates: tuple[WindowsUpdate, ...]
 
 
 def _strings(collection: Any) -> list[str]:
@@ -43,35 +48,40 @@ def _strings(collection: Any) -> list[str]:
     return [str(collection.Item(i)) for i in range(int(collection.Count))]
 
 
-def _category(category: Any) -> dict[str, str]:
-    """One ICategory as plain data.
+def _category(category: Any) -> UpdateCategory:
+    """One ICategory as a record; trusted native data, so validation is skipped.
 
     The GUID is lower-cased so it compares equal however the agent spelled it: the WSUS
     classification table publishes these GUIDs in upper case, the agent was read returning
     lower case, and a caller filtering on either must match.
     """
-    return {"category_id": str(category.CategoryID).lower(), "type": str(category.Type), "name": str(category.Name)}
+    return UpdateCategory.model_construct(
+        category_id=str(category.CategoryID).lower(), type=str(category.Type), name=str(category.Name)
+    )
 
 
-def _flatten(update: Any) -> dict[str, Any]:
-    """One IUpdate as plain data (only picklable values cross the pipe)."""
+def _to_update(update: Any) -> WindowsUpdate:
+    """One IUpdate as a record of plain values only (no COM object may cross the pipe).
+
+    Trusted native data, so validation is skipped.
+    """
     categories = update.Categories
-    details = [_category(categories.Item(c)) for c in range(int(categories.Count))]
-    return {
-        "update_id": str(update.Identity.UpdateID),
-        "revision_number": int(update.Identity.RevisionNumber),
-        "title": str(update.Title),
-        "kb_article_ids": _strings(update.KBArticleIDs),
-        "is_installed": bool(update.IsInstalled),
-        "is_downloaded": bool(update.IsDownloaded),
-        "is_hidden": bool(update.IsHidden),
-        "is_mandatory": bool(update.IsMandatory),
-        "msrc_severity": str(update.MsrcSeverity or ""),
+    details = tuple(_category(categories.Item(c)) for c in range(int(categories.Count)))
+    return WindowsUpdate.model_construct(
+        update_id=str(update.Identity.UpdateID),
+        revision_number=int(update.Identity.RevisionNumber),
+        title=str(update.Title),
+        kb_article_ids=tuple(_strings(update.KBArticleIDs)),
+        is_installed=bool(update.IsInstalled),
+        is_downloaded=bool(update.IsDownloaded),
+        is_hidden=bool(update.IsHidden),
+        is_mandatory=bool(update.IsMandatory),
+        msrc_severity=str(update.MsrcSeverity or ""),
         # MaxDownloadSize is a COM DECIMAL, which pywin32 hands over as decimal.Decimal.
-        "max_download_size": int(update.MaxDownloadSize),
-        "categories": [detail["name"] for detail in details],
-        "category_details": details,
-    }
+        max_download_size=int(update.MaxDownloadSize),
+        categories=tuple(detail.name for detail in details),
+        category_details=details,
+    )
 
 
 def _com_failure_message(exc: BaseException) -> str:
@@ -103,22 +113,22 @@ def _callee_failure(excepinfo: object, *, code: int, text: str) -> tuple[int, st
 
 
 def _windows_update_search(criteria: str) -> _Outcome:
-    """Child-side: run the COM search; return (error message, rows), never raise a COM error."""
+    """Child-side: run the COM search; return its outcome, never raise a COM error."""
     pythoncom: Any = importlib.import_module("pythoncom")
     pythoncom.CoInitialize()
     try:
-        return _search_rows(criteria)
+        return _search_updates(criteria)
     except Exception as exc:
         # Matched by name: pywintypes is importable only on Windows, and cim.py does the same.
         if type(exc).__name__ != "com_error":
             raise
-        return _com_failure_message(exc), []
+        return _Outcome(error=_com_failure_message(exc), updates=())
     finally:
         pythoncom.CoUninitialize()
 
 
-def _search_rows(criteria: str) -> _Outcome:
-    """Search and flatten; every COM object is local to this frame.
+def _search_updates(criteria: str) -> _Outcome:
+    """Search and read each update into a record; every COM object is local to this frame.
 
     So all of them are released when it returns, BEFORE the caller's ``CoUninitialize``: a COM
     reference still alive at that point is released into a torn-down apartment, and pywin32
@@ -126,33 +136,14 @@ def _search_rows(criteria: str) -> _Outcome:
     """
     client: Any = importlib.import_module("win32com.client")
     updates = client.Dispatch("Microsoft.Update.Session").CreateUpdateSearcher().Search(criteria).Updates
-    return "", [_flatten(updates.Item(i)) for i in range(int(updates.Count))]
+    return _Outcome(error="", updates=tuple(_to_update(updates.Item(i)) for i in range(int(updates.Count))))
 
 
-def _rows_or_raise(outcome: _Outcome) -> list[dict[str, Any]]:
-    """The child's rows, or its COM failure raised as NativeCallError."""
-    error, rows = outcome
-    if error:
-        raise NativeCallError(error)
-    return rows
-
-
-def _to_update(row: dict[str, Any]) -> WindowsUpdate:
-    """A child row as a record; trusted native data, so validation is skipped."""
-    return WindowsUpdate.model_construct(
-        update_id=row["update_id"],
-        revision_number=row["revision_number"],
-        title=row["title"],
-        kb_article_ids=tuple(row["kb_article_ids"]),
-        is_installed=row["is_installed"],
-        is_downloaded=row["is_downloaded"],
-        is_hidden=row["is_hidden"],
-        is_mandatory=row["is_mandatory"],
-        msrc_severity=row["msrc_severity"],
-        max_download_size=row["max_download_size"],
-        categories=tuple(row["categories"]),
-        category_details=tuple(UpdateCategory.model_construct(**detail) for detail in row["category_details"]),
-    )
+def _updates_or_raise(outcome: _Outcome) -> tuple[WindowsUpdate, ...]:
+    """The child's updates, or its COM failure raised as NativeCallError."""
+    if outcome.error:
+        raise NativeCallError(outcome.error)
+    return outcome.updates
 
 
 def search_updates(criteria: str, *, timeout: float) -> Iterator[WindowsUpdate]:
@@ -188,8 +179,7 @@ def search_updates(criteria: str, *, timeout: float) -> Iterator[WindowsUpdate]:
         raise OperationTimeoutError(
             f"Windows Update search timed out after {exc.timeout:g}s", timeout=exc.timeout
         ) from exc
-    for row in _rows_or_raise(outcome):
-        yield _to_update(row)
+    yield from _updates_or_raise(outcome)
 
 
 __all__ = ["search_updates"]

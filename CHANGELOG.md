@@ -29,6 +29,15 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Changed
 
+- `exec(..., wait_tree=True)` on POSIX: a status the process-tree helper wrote in a shape it never
+  writes (a field of the wrong type, a document that is not an object) now raises
+  `NativeCallError("... ended without a status: {}")` instead of a bare `TypeError` or
+  `ValueError`. Every status the helper does write, and every refusal of a bad request, is reported
+  as before.
+- `get_acl` / `add_acl_ace` / `remove_acl_ace` on Linux: an ACL entry with a tag the kernel does not
+  define (the kernel validates ACL xattrs, so no real file carries one) still raises `KeyError` at
+  the same point, but its text is now the tag's enum repr (`<_AclTag.UNKNOWN_0x40: 64>`) instead of
+  the bare number (`64`).
 - When piped or redirected, `exec` (the program's stdout and stderr), `invoke_web_request` (the
   body), `get_content` (the lines) and `download_file` (its `downloaded URL -> DEST` line) write
   UTF-8 bytes, like `--json`. A character the console code page cannot hold no longer fails the

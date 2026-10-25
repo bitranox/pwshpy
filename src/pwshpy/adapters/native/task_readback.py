@@ -85,6 +85,7 @@ def _read_settings(definition: Any) -> TaskSettings:
             "MultipleInstances", lambda: to_task_multiple_instances(int(settings.MultipleInstances)), None
         ),
         allow_hard_terminate=_soft("AllowHardTerminate", lambda: _com_bool(settings.AllowHardTerminate), None),
+        allow_demand_start=_soft("AllowDemandStart", lambda: _com_bool(settings.AllowDemandStart), None),
     )
 
 

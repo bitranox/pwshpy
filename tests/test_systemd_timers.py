@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 from elevation_doubles import RUNNING_AS_ROOT
-from systemd_fake_bus import Address, FakeConn, FakeCore, use_bus
+from systemd_fake_bus import Address, FakeConn, FakeCore, Message, Reply, use_bus
 
 from pwshpy import __init__conf__
 from pwshpy.adapters.native import systemd_dbus, systemd_timers
@@ -1980,8 +1980,9 @@ def _sections(text: str) -> dict[str, list[str]]:
         TaskSettings(stop_if_going_on_batteries=False),
         TaskSettings(multiple_instances=TaskMultipleInstances.IGNORE_NEW),
         TaskSettings(allow_hard_terminate=True),
+        TaskSettings(allow_demand_start=True),
     ],
-    ids=["none", "empty", "allow-battery-start", "no-stop-on-battery", "ignore-new", "hard-terminate"],
+    ids=["none", "empty", "allow-battery-start", "no-stop-on-battery", "ignore-new", "hard-terminate", "demand-start"],
 )
 def test_service_unit_writes_nothing_for_unset_or_default_settings(settings: TaskSettings | None) -> None:
     """A None field, and a value systemd already has, add no key: the text is byte-identical to before."""
@@ -1996,14 +1997,16 @@ def test_service_unit_renders_each_setting_in_its_section() -> None:
         execution_time_limit=timedelta(minutes=90),
         multiple_instances=TaskMultipleInstances.IGNORE_NEW,
         allow_hard_terminate=False,
+        allow_demand_start=False,
     )
     sections = _sections(_rendered(settings))
     assert "ConditionACPower=true" in sections["Unit"]
+    assert "RefuseManualStart=yes" in sections["Unit"]
     assert "TimeoutStartSec=5400" in sections["Service"]
     assert "SendSIGKILL=no" in sections["Service"]
     # Never RuntimeMaxSec: it has no effect on Type=oneshot (systemd-analyze verify, 259).
     assert not any(line.startswith("RuntimeMaxSec") for lines in sections.values() for line in lines)
-    added = {"ConditionACPower=true", "TimeoutStartSec=5400", "SendSIGKILL=no"}
+    added = {"ConditionACPower=true", "RefuseManualStart=yes", "TimeoutStartSec=5400", "SendSIGKILL=no"}
     kept = [line for line in _rendered(settings).split("\n") if line not in added]
     assert "\n".join(kept) == _PLAIN_SERVICE  # each key appends to its section; the rest is unchanged
 
@@ -2021,6 +2024,14 @@ def test_service_unit_renders_each_setting_in_its_section() -> None:
 def test_service_unit_renders_the_time_limit_in_seconds(limit: timedelta, line: str) -> None:
     """Zero means no limit; systemd reads TimeoutStartSec=0 as infinity too, the word says it."""
     assert _sections(_rendered(TaskSettings(execution_time_limit=limit)))["Service"][-1] == line
+
+
+@pytest.mark.os_agnostic
+def test_service_unit_refuses_a_manual_start_for_allow_demand_start_false() -> None:
+    """RefuseManualStart=yes makes StartUnit fail while the timer still starts the service (measured, 259)."""
+    text = _rendered(TaskSettings(allow_demand_start=False))
+    assert _sections(text)["Unit"][-1] == "RefuseManualStart=yes"
+    assert text.replace("RefuseManualStart=yes\n", "") == _PLAIN_SERVICE
 
 
 _REFUSED_SETTINGS = [
@@ -2074,6 +2085,7 @@ def test_check_settings_accepts_none_and_every_supported_value() -> None:
             stop_if_going_on_batteries=False,
             execution_time_limit=timedelta(0),
             allow_hard_terminate=False,
+            allow_demand_start=False,
         ),
         [DailyTrigger(at=_AT)],
     )
@@ -2107,10 +2119,12 @@ def _settings_props(
     timeout_usec: int = _UINT64_MAX,
     send_sigkill: bool = True,
     service_type: str = "oneshot",
+    refuse_manual_start: bool = False,
 ) -> dict[tuple[str, str, str], Any]:
     """The properties a service's settings are read from, as systemd 259 reports them (busctl)."""
     return {
         (unit, _UNIT, "Conditions"): conditions or [],
+        (unit, _UNIT, "RefuseManualStart"): refuse_manual_start,
         (unit, _SERVICE, "Type"): service_type,
         (unit, _SERVICE, "TimeoutStartUSec"): timeout_usec,
         (unit, _SERVICE, "SendSIGKILL"): send_sigkill,
@@ -2148,7 +2162,13 @@ def test_register_writes_the_settings_and_reads_back_the_effective_values(
 ) -> None:
     props = {
         **_job_props("job", user=""),
-        **_settings_props("job.service", conditions=[_AC_ONLY], timeout_usec=7_200_000_000, send_sigkill=False),
+        **_settings_props(
+            "job.service",
+            conditions=[_AC_ONLY],
+            timeout_usec=7_200_000_000,
+            send_sigkill=False,
+            refuse_manual_start=True,
+        ),
     }
     conn = FakeConn([], props, frozenset({"job.timer"}), pending=_NEW_JOB)
     use_bus(monkeypatch, conn)
@@ -2159,21 +2179,24 @@ def test_register_writes_the_settings_and_reads_back_the_effective_values(
         execution_time_limit=timedelta(hours=2),
         multiple_instances=TaskMultipleInstances.IGNORE_NEW,
         allow_hard_terminate=False,
+        allow_demand_start=False,
     )
     info = SystemdScheduledTaskController().register(
         "job", program="/bin/true", triggers=[OnceTrigger(at=_AT)], settings=settings
     )
     service = _sections((tmp_path / "job.service").read_text(encoding="utf-8"))
-    assert "ConditionACPower=true" in service["Unit"]
+    assert {"ConditionACPower=true", "RefuseManualStart=yes"} <= set(service["Unit"])
     assert {"TimeoutStartSec=7200", "SendSIGKILL=no"} <= set(service["Service"])
     timer = (tmp_path / "job.timer").read_text(encoding="utf-8")
     assert "ConditionACPower" not in timer  # a timer condition gates arming, not each run
+    assert "RefuseManualStart" not in timer  # the timer itself must stay startable: register starts it
     assert info.settings == TaskSettings(
         allow_start_if_on_batteries=False,
         stop_if_going_on_batteries=False,
         execution_time_limit=timedelta(hours=2),
         multiple_instances=None,  # a repeating timer's catch-up run is none of the four policies
         allow_hard_terminate=False,
+        allow_demand_start=False,
     )
 
 
@@ -2181,7 +2204,13 @@ def test_register_writes_the_settings_and_reads_back_the_effective_values(
 def test_listing_reads_the_effective_settings_of_each_timer_task(monkeypatch: pytest.MonkeyPatch) -> None:
     props: dict[tuple[str, str, str], Any] = {
         ("limited.timer", _TIMER, "Unit"): "limited.service",
-        **_settings_props("limited.service", conditions=[_AC_ONLY], timeout_usec=30_000_000, send_sigkill=False),
+        **_settings_props(
+            "limited.service",
+            conditions=[_AC_ONLY],
+            timeout_usec=30_000_000,
+            send_sigkill=False,
+            refuse_manual_start=True,
+        ),
         ("plain.timer", _TIMER, "Unit"): "plain.service",
         **_settings_props("plain.service"),  # unset: TimeoutStartUSec reads UINT64_MAX on a oneshot
     }
@@ -2194,38 +2223,47 @@ def test_listing_reads_the_effective_settings_of_each_timer_task(monkeypatch: py
         stop_if_going_on_batteries=False,
         execution_time_limit=timedelta(seconds=30),
         allow_hard_terminate=False,
+        allow_demand_start=False,
     )
     assert plain.settings == TaskSettings(
         allow_start_if_on_batteries=True,
         stop_if_going_on_batteries=False,
         execution_time_limit=timedelta(0),  # UINT64_MAX: no limit
         allow_hard_terminate=True,
+        allow_demand_start=True,
     )
 
 
 @pytest.mark.os_agnostic
-def test_listing_cost_of_the_settings_is_four_property_reads_per_task(monkeypatch: pytest.MonkeyPatch) -> None:
-    """[45] Risks: the settings add Conditions, Type, TimeoutStartUSec and SendSIGKILL - one Get each.
+def test_listing_cost_of_the_settings_is_five_property_reads_per_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[45] Risks: the settings add Conditions, RefuseManualStart, Type, TimeoutStartUSec and SendSIGKILL.
 
-    A timer task cost 10 calls before (GetUnitFileState, the service's LoadUnit and 8 Gets); now 14.
+    One Get each. A timer task cost 10 calls before (GetUnitFileState, the service's LoadUnit and 8
+    Gets); now 15.
     """
     props = {("job.timer", _TIMER, "Unit"): "job.service", **_settings_props("job.service")}
     conn = FakeConn([("job.timer", "", "active")], props, frozenset({"job.timer"}))
     use_bus(monkeypatch, conn)
     list(iter_timers())
     service_reads = sorted(prop for unit, prop in conn.reads if unit == "job.service")
-    assert {"Conditions", "Type", "TimeoutStartUSec", "SendSIGKILL"} <= set(service_reads)
+    assert {"Conditions", "RefuseManualStart", "Type", "TimeoutStartUSec", "SendSIGKILL"} <= set(service_reads)
     per_task = [m for m in conn.methods if m not in _LISTING_CALLS]
-    assert len(per_task) == 14
-    assert per_task.count("Get") == 12
+    assert len(per_task) == 15
+    assert per_task.count("Get") == 13
 
 
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize("refused", ["Conditions", "Type", "TimeoutStartUSec", "SendSIGKILL"])
+@pytest.mark.parametrize("refused", ["Conditions", "RefuseManualStart", "Type", "TimeoutStartUSec", "SendSIGKILL"])
 def test_an_unreadable_settings_property_unknowns_only_its_field(monkeypatch: pytest.MonkeyPatch, refused: str) -> None:
     props = {
         ("job.timer", _TIMER, "Unit"): "job.service",
-        **_settings_props("job.service", conditions=[_AC_ONLY], timeout_usec=5_000_000, send_sigkill=False),
+        **_settings_props(
+            "job.service",
+            conditions=[_AC_ONLY],
+            timeout_usec=5_000_000,
+            send_sigkill=False,
+            refuse_manual_start=True,
+        ),
     }
     conn = FakeConn(
         [("job.timer", "", "active")],
@@ -2240,9 +2278,11 @@ def test_an_unreadable_settings_property_unknowns_only_its_field(monkeypatch: py
         stop_if_going_on_batteries=False,
         execution_time_limit=timedelta(seconds=5),
         allow_hard_terminate=False,
+        allow_demand_start=False,
     )
     unknown = {
         "Conditions": "allow_start_if_on_batteries",
+        "RefuseManualStart": "allow_demand_start",
         "Type": "execution_time_limit",
         "TimeoutStartUSec": "execution_time_limit",
         "SendSIGKILL": "allow_hard_terminate",
@@ -2280,6 +2320,7 @@ def test_lookup_of_an_on_demand_task_reads_its_settings(monkeypatch: pytest.Monk
         stop_if_going_on_batteries=False,
         execution_time_limit=timedelta(0),
         allow_hard_terminate=False,
+        allow_demand_start=True,
     )
 
 
@@ -2342,3 +2383,43 @@ def test_a_send_sigkill_that_is_no_boolean_reads_unknown(monkeypatch: pytest.Mon
     assert task.settings is not None
     assert task.settings.allow_hard_terminate is None
     assert task.settings.execution_time_limit == timedelta(0)  # the other fields still read
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("refuse", ["yes", 0, 1, None], ids=["string", "int-zero", "int-one", "null"])
+def test_a_refuse_manual_start_that_is_no_boolean_reads_unknown(monkeypatch: pytest.MonkeyPatch, refuse: Any) -> None:
+    """Only a D-Bus ``b`` has a reading; anything else leaves allow_demand_start unknown."""
+    props = {("job.timer", _TIMER, "Unit"): "job.service", **_settings_props("job.service")}
+    props["job.service", _UNIT, "RefuseManualStart"] = refuse
+    use_bus(monkeypatch, FakeConn([("job.timer", "", "active")], props, frozenset({"job.timer"})))
+    (task,) = iter_timers()
+    assert task.settings is not None
+    assert task.settings.allow_demand_start is None
+    assert task.settings.allow_hard_terminate is True  # the other fields still read
+
+
+#: systemd 259's answer to StartUnit on a RefuseManualStart=yes service (busctl call, measured on CT 24001).
+_MANUAL_START_REFUSED = (
+    "Operation refused, unit job.service may be requested by dependency only "
+    "(it is configured to refuse manual start/stop)."
+)
+
+
+class _RefusingStartConn(FakeConn):
+    """A bus whose StartUnit of the service is refused the way systemd refuses a RefuseManualStart unit."""
+
+    def _verb(self, msg: Message) -> Reply:
+        if msg.method == "StartUnit" and msg.body[0] == "job.service":
+            self.verbs.append(msg.method)
+            return Reply((_MANUAL_START_REFUSED,), error=True)
+        return super()._verb(msg)
+
+
+@pytest.mark.os_agnostic
+def test_running_a_task_that_refuses_a_demand_start_raises_naming_the_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """start_scheduled_task on an allow_demand_start=False task fails as NativeCallError with systemd's reason."""
+    conn = _RefusingStartConn([], {}, frozenset({"job.service"}))
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeCallError, match="refuse manual start"):
+        SystemdScheduledTaskController().run("job")
+    assert conn.verbs == ["StartUnit"]

@@ -9,7 +9,8 @@ Contents:
     * :class:`TaskPrincipal` - who the task runs as, and with which token.
     * :class:`OnceTrigger`, :class:`DailyTrigger`, :class:`BootTrigger`, :class:`LogonTrigger`.
     * :data:`TaskTrigger` - the discriminated union of the four.
-    * :class:`TaskSettings` - battery, time-limit, multiple-instances and hard-terminate switches.
+    * :class:`TaskSettings` - battery, time-limit, multiple-instances, hard-terminate and demand-start
+      switches.
 """
 
 from __future__ import annotations
@@ -274,10 +275,15 @@ class TaskSettings(BaseModel):
         multiple_instances: What happens when a run is requested while one is already running
             (:class:`~pwshpy.domain.enums.TaskMultipleInstances`).
         allow_hard_terminate: Whether a run that ignores a stop request may be killed.
+        allow_demand_start: Whether the task may be started on demand (``start_scheduled_task``,
+            ``Start-ScheduledTask``) besides its triggers; False is PowerShell's
+            ``-DisallowDemandStart``.
 
     Example:
         >>> TaskSettings().execution_time_limit is None
         True
+        >>> TaskSettings(allow_demand_start=False).allow_demand_start
+        False
         >>> TaskSettings(execution_time_limit=timedelta(hours=72)).execution_time_limit.total_seconds()
         259200.0
     """
@@ -289,6 +295,7 @@ class TaskSettings(BaseModel):
     execution_time_limit: timedelta | None = None
     multiple_instances: TaskMultipleInstances | None = None
     allow_hard_terminate: bool | None = None
+    allow_demand_start: bool | None = None
 
     @field_validator("execution_time_limit")
     @classmethod

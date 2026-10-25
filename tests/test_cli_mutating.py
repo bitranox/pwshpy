@@ -434,6 +434,8 @@ def _register_settings(flags: list[str]) -> tuple[_FakePs, Any]:
         ),
         (["--allow-hard-terminate"], TaskSettings(allow_hard_terminate=True)),
         (["--disallow-hard-terminate"], TaskSettings(allow_hard_terminate=False)),
+        (["--allow-demand-start"], TaskSettings(allow_demand_start=True)),
+        (["--disallow-demand-start"], TaskSettings(allow_demand_start=False)),
     ],
 )
 def test_register_scheduled_task_cli_maps_each_settings_flag_to_its_field(
@@ -509,6 +511,7 @@ def test_register_scheduled_task_cli_builds_pve_winrepairs_settings() -> None:
             "--multiple-instances",
             "IgnoreNew",
             "--allow-hard-terminate",
+            "--allow-demand-start",
         ]
     )
     assert result.exit_code == 0, result.output
@@ -518,6 +521,7 @@ def test_register_scheduled_task_cli_builds_pve_winrepairs_settings() -> None:
         execution_time_limit=timedelta(hours=72),
         multiple_instances=TaskMultipleInstances.IGNORE_NEW,
         allow_hard_terminate=True,
+        allow_demand_start=True,
     )
 
 

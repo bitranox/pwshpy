@@ -47,6 +47,7 @@ class _FakeSettings:
         self.ExecutionTimeLimit: Any = "PT72H"
         self.MultipleInstances: Any = 2
         self.AllowHardTerminate: Any = True
+        self.AllowDemandStart: Any = True
 
 
 class _FakeDef:
@@ -248,6 +249,7 @@ def test_listing_reads_a_fresh_tasks_settings(monkeypatch: pytest.MonkeyPatch) -
         execution_time_limit=timedelta(hours=72),
         multiple_instances=TaskMultipleInstances.IGNORE_NEW,
         allow_hard_terminate=True,
+        allow_demand_start=True,
     )
 
 
@@ -261,6 +263,7 @@ def test_listing_reads_changed_settings_in_the_normalised_form(monkeypatch: pyte
     settings.ExecutionTimeLimit = "PT1M30S"
     settings.MultipleInstances = 3
     settings.AllowHardTerminate = False
+    settings.AllowDemandStart = False
     info = _list_one(monkeypatch, task)
     assert info.settings == TaskSettings(
         allow_start_if_on_batteries=True,
@@ -268,6 +271,7 @@ def test_listing_reads_changed_settings_in_the_normalised_form(monkeypatch: pyte
         execution_time_limit=timedelta(seconds=90),
         multiple_instances=TaskMultipleInstances.STOP_EXISTING,
         allow_hard_terminate=False,
+        allow_demand_start=False,
     )
 
 
@@ -293,6 +297,8 @@ class _RefusingSettings(_FakeSettings):
         pytest.param("MultipleInstances", "two", "multiple_instances", id="policy-not-a-number"),
         pytest.param("DisallowStartIfOnBatteries", None, "allow_start_if_on_batteries", id="battery-null"),
         pytest.param("AllowHardTerminate", 1, "allow_hard_terminate", id="kill-not-a-bool"),
+        pytest.param("AllowDemandStart", 0, "allow_demand_start", id="demand-not-a-bool"),
+        pytest.param("AllowDemandStart", None, "allow_demand_start", id="demand-null"),
     ],
 )
 def test_listing_reads_an_unusable_setting_as_unknown(
@@ -305,7 +311,7 @@ def test_listing_reads_an_unusable_setting_as_unknown(
     assert info.settings is not None
     readings = info.settings.model_dump()
     assert readings.pop(field) is None
-    assert None not in readings.values()  # the other four still read
+    assert None not in readings.values()  # the other five still read
 
 
 @pytest.mark.os_agnostic

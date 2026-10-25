@@ -246,6 +246,8 @@ def _apply_settings(definition: Any, settings: TaskSettings) -> None:
 
     A None field writes nothing, so the OS default stays (``TaskSettings()`` changes nothing).
     Every value the domain accepts has a Task Scheduler analog, so nothing is refused here.
+    ``allow_demand_start`` is not written here: ``register`` always writes AllowDemandStart
+    itself (:func:`_allow_demand_start`).
 
     Example:
         >>> callable(_apply_settings)
@@ -263,6 +265,21 @@ def _apply_settings(definition: Any, settings: TaskSettings) -> None:
         com.MultipleInstances = from_task_multiple_instances(settings.multiple_instances)
     if settings.allow_hard_terminate is not None:
         com.AllowHardTerminate = settings.allow_hard_terminate
+
+
+def _allow_demand_start(settings: TaskSettings | None) -> bool:
+    """The AllowDemandStart ``register`` writes: True unless ``settings`` say False.
+
+    ``register`` always writes this one property, so an unset field (or no settings) writes True,
+    the Task Scheduler default, and a set field is that single write rather than a second one.
+
+    Example:
+        >>> _allow_demand_start(None), _allow_demand_start(TaskSettings(allow_demand_start=False))
+        (True, False)
+    """
+    if settings is None or settings.allow_demand_start is None:
+        return True
+    return settings.allow_demand_start
 
 
 class NativeScheduledTaskController:
@@ -343,9 +360,10 @@ class NativeScheduledTaskController:
             description: Registration description.
             principal: Who the task runs as, and with which token and run level.
             triggers: When the task fires; empty means on demand only.
-            settings: Battery, time-limit, multiple-instances and hard-terminate switches; only
-                the fields that are set are written, so None (or ``TaskSettings()``) keeps every
-                Task Scheduler default.
+            settings: Battery, time-limit, multiple-instances, hard-terminate and demand-start
+                switches; only the fields that are set are written, so None (or ``TaskSettings()``)
+                keeps every Task Scheduler default. AllowDemandStart is written in any case, True
+                unless ``allow_demand_start`` is False.
 
         Returns:
             The registered task, read back, its effective settings included.
@@ -376,7 +394,7 @@ class NativeScheduledTaskController:
             definition = service.NewTask(0)
             definition.RegistrationInfo.Description = description
             definition.Settings.Enabled = True
-            definition.Settings.AllowDemandStart = True
+            definition.Settings.AllowDemandStart = _allow_demand_start(settings)
             action = definition.Actions.Create(_TASK_ACTION_EXEC)
             action.Path = program
             action.Arguments = arguments

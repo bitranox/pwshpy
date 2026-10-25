@@ -175,7 +175,14 @@ def test_empty_task_settings_change_nothing() -> None:
         "execution_time_limit": None,
         "multiple_instances": None,
         "allow_hard_terminate": None,
+        "allow_demand_start": None,
     }
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("allowed", [True, False])
+def test_allow_demand_start_takes_a_bool(allowed: bool) -> None:
+    assert TaskSettings(allow_demand_start=allowed).allow_demand_start is allowed
 
 
 @pytest.mark.os_agnostic

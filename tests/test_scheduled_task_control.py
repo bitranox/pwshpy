@@ -609,13 +609,14 @@ def test_register_without_settings_writes_no_setting(monkeypatch: pytest.MonkeyP
 
 
 # pve-winrepair's registration: runs on battery, never stopped by one, a 72 h ceiling, an
-# overlapping start ignored, and a hung run killable.
+# overlapping start ignored, a hung run killable, and an on-demand start allowed.
 _PVE_WINREPAIR = TaskSettings(
     allow_start_if_on_batteries=True,
     stop_if_going_on_batteries=False,
     execution_time_limit=timedelta(hours=72),
     multiple_instances=TaskMultipleInstances.IGNORE_NEW,
     allow_hard_terminate=True,
+    allow_demand_start=True,
 )
 
 
@@ -686,6 +687,23 @@ def test_register_writes_only_the_fields_set(
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("allowed", "written"),
+    [pytest.param(None, True, id="unset-keeps-true"), (True, True), (False, False)],
+)
+def test_register_writes_allow_demand_start_once(
+    monkeypatch: pytest.MonkeyPatch, allowed: bool | None, written: bool
+) -> None:
+    """AllowDemandStart is the one setting register always writes: True unless the caller says False."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    NativeScheduledTaskController().register(
+        "\\T", program="cmd.exe", settings=TaskSettings(allow_demand_start=allowed)
+    )
+    assert svc.folder.tasks["T"].Definition.Settings.writes == [("Enabled", True), ("AllowDemandStart", written)]
+
+
+@pytest.mark.os_agnostic
 def test_register_reads_back_the_effective_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """The returned record carries what the definition holds, the untouched OS defaults included."""
     svc = _FakeService()
@@ -699,6 +717,7 @@ def test_register_reads_back_the_effective_settings(monkeypatch: pytest.MonkeyPa
         execution_time_limit=timedelta(hours=72),
         multiple_instances=TaskMultipleInstances.QUEUE,
         allow_hard_terminate=True,
+        allow_demand_start=True,
     )
 
 

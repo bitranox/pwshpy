@@ -477,6 +477,7 @@ def _settings(
     execution_time_limit: str | None,
     multiple_instances: str | None,
     allow_hard_terminate: bool | None,
+    allow_demand_start: bool | None,
 ) -> TaskSettings | None:
     """Build the task settings, or None when no settings flag was given (every OS default kept).
 
@@ -485,7 +486,8 @@ def _settings(
 
     Example:
         >>> unset = dict(allow_start_if_on_batteries=None, stop_if_going_on_batteries=None,
-        ...              execution_time_limit=None, multiple_instances=None, allow_hard_terminate=None)
+        ...              execution_time_limit=None, multiple_instances=None, allow_hard_terminate=None,
+        ...              allow_demand_start=None)
         >>> _settings(**unset) is None
         True
         >>> _settings(**{**unset, "multiple_instances": "ignorenew"}).multiple_instances.value
@@ -497,6 +499,7 @@ def _settings(
         execution_time_limit,
         multiple_instances,
         allow_hard_terminate,
+        allow_demand_start,
     )
     if all(flag is None for flag in given):
         return None
@@ -508,6 +511,7 @@ def _settings(
         if multiple_instances is None
         else enum_by_value(TaskMultipleInstances, multiple_instances),
         allow_hard_terminate=allow_hard_terminate,
+        allow_demand_start=allow_demand_start,
     )
 
 
@@ -572,6 +576,11 @@ def _settings(
     default=None,
     help="Whether a run that ignores a stop request may be killed. Default: the OS default.",
 )
+@option(
+    "--allow-demand-start/--disallow-demand-start",
+    default=None,
+    help="Whether the task may be started on demand (start_scheduled_task) besides its triggers. Default: allowed.",
+)
 @click.pass_context
 def cli_register_scheduled_task(
     ctx: click.Context,
@@ -594,6 +603,7 @@ def cli_register_scheduled_task(
     execution_time_limit: str | None,
     multiple_instances: str | None,
     allow_hard_terminate: bool | None,
+    allow_demand_start: bool | None,
 ) -> None:
     """Register a task with an optional principal, triggers and settings; no trigger means run on demand (mutating).
 
@@ -635,6 +645,7 @@ def cli_register_scheduled_task(
             execution_time_limit=execution_time_limit,
             multiple_instances=multiple_instances,
             allow_hard_terminate=allow_hard_terminate,
+            allow_demand_start=allow_demand_start,
         )
     except ValueError as exc:  # ValidationError is a ValueError; fromisoformat raises a plain one
         raise click.BadParameter(_render(exc)) from exc

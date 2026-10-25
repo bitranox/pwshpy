@@ -804,12 +804,15 @@ class Ps:
                 None runs it as the interactive caller on Windows and as root on Linux.
             triggers: When it runs (:class:`OnceTrigger`, :class:`DailyTrigger`,
                 :class:`BootTrigger`, :class:`LogonTrigger`); empty means on demand only.
-            settings: Battery, time-limit, multiple-instances and hard-terminate switches
-                (:class:`TaskSettings`). None, like ``TaskSettings()`` or any field left None,
-                writes nothing, so the OS default applies. It is validated again here, so a
-                record's read-back ``settings`` can be passed on. Linux refuses a value systemd
-                has no analog for (stopping a run on battery, any multiple-instances policy but
-                IgnoreNew, IgnoreNew with a daily trigger).
+            settings: Battery, time-limit, multiple-instances, hard-terminate and demand-start
+                switches (:class:`TaskSettings`). None, like ``TaskSettings()`` or any field left
+                None, writes nothing, so the OS default applies (a start on demand stays allowed).
+                With ``allow_demand_start=False`` only the triggers start the task: on Linux
+                :meth:`start_scheduled_task` then raises :class:`NativeCallError` with systemd's
+                refusal. It is validated again here, so a record's read-back ``settings`` can be
+                passed on. Linux refuses a value systemd has no analog for (stopping a run on
+                battery, any multiple-instances policy but IgnoreNew, IgnoreNew with a daily
+                trigger).
 
         Returns:
             The task as the scheduler reads it back (:class:`ScheduledTaskInfo`): its

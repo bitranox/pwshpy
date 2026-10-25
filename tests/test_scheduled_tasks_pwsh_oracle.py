@@ -104,13 +104,14 @@ _SETTINGS_SCRIPT = (
     " if ($s.ExecutionTimeLimit) { try { $limit = [System.Xml.XmlConvert]::ToTimeSpan($s.ExecutionTimeLimit)"
     ".TotalSeconds } catch { $limit = $null } };"
     " [pscustomobject]@{ Key = $_.TaskPath + $_.TaskName; Disallow = [bool]$s.DisallowStartIfOnBatteries;"
-    " Stop = [bool]$s.StopIfGoingOnBatteries; Kill = [bool]$s.AllowHardTerminate; Limit = $limit;"
+    " Stop = [bool]$s.StopIfGoingOnBatteries; Kill = [bool]$s.AllowHardTerminate;"
+    " Demand = [bool]$s.AllowDemandStart; Limit = $limit;"
     " Policy = [string]$s.MultipleInstances } } | ConvertTo-Json -Compress -AsArray"
 )
 
 
 def _expected_settings(row: dict[str, Any]) -> tuple[object, ...]:
-    """One Get-ScheduledTask row as the (battery, stop, limit, policy, kill) tuple pwshpy should read."""
+    """One Get-ScheduledTask row as the (battery, stop, limit, policy, kill, demand) tuple pwshpy should read."""
     limit = row["Limit"]
     policy = str(row["Policy"])
     return (
@@ -119,6 +120,7 @@ def _expected_settings(row: dict[str, Any]) -> tuple[object, ...]:
         None if limit is None else timedelta(seconds=float(limit)),
         TaskMultipleInstances.STOP_EXISTING if policy == "" else TaskMultipleInstances(policy),
         bool(row["Kill"]),
+        bool(row["Demand"]),
     )
 
 
@@ -139,5 +141,6 @@ def test_settings_match_get_scheduledtask() -> None:
             settings.execution_time_limit,
             settings.multiple_instances,
             settings.allow_hard_terminate,
+            settings.allow_demand_start,
         )
         assert got == _expected_settings(theirs[key]), key

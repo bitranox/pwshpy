@@ -24,8 +24,9 @@ The portable counterpart to the Task Scheduler adapter. On systemd a scheduled t
   default); a Windows SID, a logon type or HIGHEST for a non-root uid has no Linux meaning and
   is refused. Read back, ``user_id`` is the triggered service's ``User=`` as a decimal uid.
 * **settings** (:class:`TaskSettings`) become keys of the ``.service``: ``ConditionACPower=true``
-  (no start on battery), ``TimeoutStartSec=`` (the time limit; a oneshot's start job lasts the
-  whole run) and ``SendSIGKILL=no`` (no hard terminate). A value systemd has no key for is refused
+  (no start on battery), ``RefuseManualStart=yes`` (no start on demand; the timer still starts
+  it), ``TimeoutStartSec=`` (the time limit; a oneshot's start job lasts the whole run) and
+  ``SendSIGKILL=no`` (no hard terminate). A value systemd has no key for is refused
   (:func:`check_settings`); a None field writes nothing. Read back, each record carries the
   effective values from the triggered service, each field unknown (None) on its own when its
   property cannot be read.
@@ -409,6 +410,7 @@ def _service_settings(bus: _dbus.Bus, service_path: str | None) -> TaskSettings:
     power source changes. ``multiple_instances`` is None: a repeating timer's catch-up run after an
     overrun (measured on 259) is none of the four policies. ``TimeoutStartUSec`` is read only for a
     oneshot (:func:`start_time_limit`), saving the read where it would mean nothing.
+    ``allow_demand_start`` is the inverse of ``RefuseManualStart``.
     """
 
     def read(prop: str, interface: str = _dbus.SERVICE_IFACE) -> object:
@@ -416,6 +418,7 @@ def _service_settings(bus: _dbus.Bus, service_path: str | None) -> TaskSettings:
 
     service_type = read("Type")
     send_sigkill = read("SendSIGKILL")
+    refuse_manual_start = read("RefuseManualStart", _dbus.UNIT_IFACE)
     # model_construct: these are systemd's values, not a caller's; the input bounds describe what
     # register writes, not every value a hand-written unit can hold.
     return TaskSettings.model_construct(
@@ -426,6 +429,7 @@ def _service_settings(bus: _dbus.Bus, service_path: str | None) -> TaskSettings:
         ),
         multiple_instances=None,
         allow_hard_terminate=send_sigkill if isinstance(send_sigkill, bool) else None,
+        allow_demand_start=not refuse_manual_start if isinstance(refuse_manual_start, bool) else None,
     )
 
 
@@ -987,10 +991,11 @@ def check_settings(settings: TaskSettings | None, triggers: Sequence[TaskTrigger
     """Refuse a :class:`TaskSettings` value systemd has no key for, given the task's ``triggers``.
 
     Accepted, and written as nothing because systemd already behaves so: a start allowed on
-    battery, no stop when going on battery, hard terminate allowed, and IgnoreNew for a task
-    without a daily trigger - a start requested while the oneshot runs joins the running start
-    job, so one run happens (measured on 259 for StartUnit); a once or boot timer does not repeat,
-    so no catch-up run can follow an overrun.
+    battery, no stop when going on battery, hard terminate allowed, a start on demand allowed, and
+    IgnoreNew for a task without a daily trigger - a start requested while the oneshot runs joins
+    the running start job, so one run happens (measured on 259 for StartUnit); a once or boot
+    timer does not repeat, so no catch-up run can follow an overrun. ``allow_demand_start=False``
+    has a key (``RefuseManualStart=yes``), so it is accepted too.
 
     Raises:
         PlatformUnsupportedError: ``stop_if_going_on_batteries`` is True, ``multiple_instances``
@@ -1032,6 +1037,11 @@ def _settings_keys(settings: TaskSettings | None) -> tuple[str, str]:
     if settings is None:
         return "", ""
     unit = "ConditionACPower=true\n" if settings.allow_start_if_on_batteries is False else ""
+    if settings.allow_demand_start is False:
+        # StartUnit (the run verb) is then refused, "Operation refused, unit ... may be requested by
+        # dependency only"; the timer still starts the service (both measured on 259). StopUnit
+        # stays allowed: only RefuseManualStop= gates it.
+        unit += "RefuseManualStart=yes\n"
     service = ""
     limit = settings.execution_time_limit
     if limit is not None:
@@ -1298,9 +1308,10 @@ class SystemdScheduledTaskController:
             description: The units' ``Description=``.
             principal: Who the task runs as; None or SYSTEM is root, a decimal uid is ``User=``.
             triggers: When the task fires; empty means on demand only.
-            settings: Battery, time-limit, multiple-instances and hard-terminate switches, written
-                as keys of the ``.service``; only a set field that differs from systemd's own
-                behaviour adds a key, so None (or ``TaskSettings()``) writes the unit as before.
+            settings: Battery, time-limit, multiple-instances, hard-terminate and demand-start
+                switches, written as keys of the ``.service``; only a set field that differs from
+                systemd's own behaviour adds a key, so None (or ``TaskSettings()``) writes the unit
+                as before.
 
         Returns:
             The registered task, read back, its effective settings included.
@@ -1414,7 +1425,9 @@ class SystemdScheduledTaskController:
 
         Raises:
             ConfigurationError: ``task_path`` is no systemd unit name, or a bare template (:func:`existing_unit_base`).
-            NativeCallError: the D-Bus call failed.
+            NativeCallError: the D-Bus call failed, systemd's reason in the message - for a task
+                registered with ``allow_demand_start=False`` it is "Operation refused, unit ...
+                may be requested by dependency only".
         """
         self._start_stop(existing_unit_base(task_path), "StartUnit")
 

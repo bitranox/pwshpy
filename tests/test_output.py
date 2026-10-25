@@ -336,12 +336,13 @@ def test_human_table_renders_nested_settings_as_key_value_pairs(
         execution_time_limit=timedelta(hours=72),
         multiple_instances=TaskMultipleInstances.IGNORE_NEW,
         allow_hard_terminate=True,
+        allow_demand_start=False,
     )
     emit([_task_with(full), _task_with(TaskSettings(allow_hard_terminate=False)), _task_with(None)], RecordFormat.HUMAN)
     out = capsys.readouterr().out
     assert (
         "allow_start_if_on_batteries=True, stop_if_going_on_batteries=False, execution_time_limit=P3D, "
-        "multiple_instances=IgnoreNew, allow_hard_terminate=True"
+        "multiple_instances=IgnoreNew, allow_hard_terminate=True, allow_demand_start=False"
     ) in out
     assert "allow_hard_terminate=False" in out
     assert "{" not in out
@@ -359,4 +360,5 @@ def test_json_keeps_nested_settings_as_an_object(capsys: pytest.CaptureFixture[s
         "execution_time_limit": None,
         "multiple_instances": None,
         "allow_hard_terminate": False,
+        "allow_demand_start": None,
     }

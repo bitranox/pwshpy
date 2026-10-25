@@ -931,6 +931,7 @@ def test_register_scheduled_task_forwards_principal_and_triggers(injected: _Inje
             execution_time_limit=timedelta(hours=72),
             multiple_instances=TaskMultipleInstances.IGNORE_NEW,
             allow_hard_terminate=True,
+            allow_demand_start=False,
         ),
     ],
 )

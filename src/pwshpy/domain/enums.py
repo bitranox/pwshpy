@@ -321,6 +321,23 @@ class TaskLogonType(str, Enum):
     S4U = "S4U"
 
 
+class TaskMultipleInstances(str, Enum):
+    """What a scheduled task does when a run is requested while one is already running.
+
+    Mirrors Task Scheduler's ``TASK_INSTANCES_POLICY`` and the values PowerShell's
+    ``New-ScheduledTaskSettingsSet -MultipleInstances`` takes.
+
+    Example:
+        >>> TaskMultipleInstances.IGNORE_NEW.value
+        'IgnoreNew'
+    """
+
+    PARALLEL = "Parallel"  # TASK_INSTANCES_PARALLEL = 0
+    QUEUE = "Queue"  # TASK_INSTANCES_QUEUE = 1
+    IGNORE_NEW = "IgnoreNew"  # TASK_INSTANCES_IGNORE_NEW = 2
+    STOP_EXISTING = "StopExisting"  # TASK_INSTANCES_STOP_EXISTING = 3
+
+
 class WellKnownSid(str, Enum):
     """Stable, locale-independent SIDs for well-known Windows principals.
 
@@ -512,6 +529,7 @@ __all__ = [
     "ServiceStartType",
     "ServiceState",
     "TaskLogonType",
+    "TaskMultipleInstances",
     "TaskRunLevel",
     "TaskState",
     "TransportProtocol",

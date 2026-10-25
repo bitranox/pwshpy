@@ -40,6 +40,7 @@ from .domain.enums import (
     ServiceStartType,
     ServiceState,
     TaskLogonType,
+    TaskMultipleInstances,
     TaskRunLevel,
     TaskState,
     TransportProtocol,
@@ -102,6 +103,7 @@ from .domain.scheduling import (
     LogonTrigger,
     OnceTrigger,
     TaskPrincipal,
+    TaskSettings,
     TaskTrigger,
 )
 
@@ -145,6 +147,7 @@ __all__ = [
     "CommandParameter",
     "ScheduledTaskInfo",
     "TaskPrincipal",
+    "TaskSettings",
     "TaskTrigger",
     "OnceTrigger",
     "DailyTrigger",
@@ -168,6 +171,7 @@ __all__ = [
     "TaskState",
     "TaskRunLevel",
     "TaskLogonType",
+    "TaskMultipleInstances",
     "ImageArchitecture",
     "IntegrityLevel",
     "KnownFolder",

@@ -1,4 +1,4 @@
-"""Principal and trigger value objects for register_scheduled_task (pure domain, os_agnostic)."""
+"""Principal, trigger and settings value objects for register_scheduled_task (pure domain, os_agnostic)."""
 
 from __future__ import annotations
 
@@ -7,13 +7,16 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from pwshpy.domain.enums import TaskLogonType, TaskRunLevel, WellKnownSid
+import pwshpy
+from pwshpy.domain.enums import TaskLogonType, TaskMultipleInstances, TaskRunLevel, TaskState, WellKnownSid
+from pwshpy.domain.records import ScheduledTaskInfo
 from pwshpy.domain.scheduling import (
     BootTrigger,
     DailyTrigger,
     LogonTrigger,
     OnceTrigger,
     TaskPrincipal,
+    TaskSettings,
     TaskTrigger,
 )
 
@@ -160,3 +163,116 @@ def test_the_union_refuses_an_unknown_kind() -> None:
     adapter: TypeAdapter[TaskTrigger] = TypeAdapter(TaskTrigger)
     with pytest.raises(ValidationError):
         adapter.validate_python({"kind": "weekly", "at": _AT})
+
+
+@pytest.mark.os_agnostic
+def test_empty_task_settings_change_nothing() -> None:
+    # Unset means untouched: every field None, so no adapter writes a setting.
+    s = TaskSettings()
+    assert s.model_dump() == {
+        "allow_start_if_on_batteries": None,
+        "stop_if_going_on_batteries": None,
+        "execution_time_limit": None,
+        "multiple_instances": None,
+        "allow_hard_terminate": None,
+    }
+
+
+@pytest.mark.os_agnostic
+def test_task_settings_refuse_an_unknown_key() -> None:
+    # A misspelt key silently dropped would leave the OS default the caller meant to change.
+    with pytest.raises(ValidationError):
+        TaskSettings.model_validate({"allow_hard_terminate": True, "multiple_instance": "IgnoreNew"})
+
+
+@pytest.mark.os_agnostic
+def test_a_zero_execution_time_limit_means_no_limit_and_is_accepted() -> None:
+    assert TaskSettings(execution_time_limit=timedelta(0)).execution_time_limit == timedelta(0)
+
+
+@pytest.mark.os_agnostic
+def test_a_whole_second_execution_time_limit_is_accepted() -> None:
+    assert TaskSettings(execution_time_limit=timedelta(hours=72)).execution_time_limit == timedelta(hours=72)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("limit", [timedelta(seconds=-1), timedelta(microseconds=-1), timedelta(days=-3)])
+def test_a_negative_execution_time_limit_is_refused(limit: timedelta) -> None:
+    with pytest.raises(ValidationError):
+        TaskSettings(execution_time_limit=limit)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("limit", [timedelta(seconds=1, microseconds=1), timedelta(milliseconds=500), 1.5])
+def test_a_sub_second_execution_time_limit_is_refused(limit: object) -> None:
+    # Task Scheduler and systemd are written in whole seconds; a fraction would be dropped silently.
+    with pytest.raises(ValidationError):
+        TaskSettings(execution_time_limit=limit)  # pyright: ignore[reportArgumentType] - a float IS the input under test
+
+
+@pytest.mark.os_agnostic
+def test_the_largest_execution_time_limit_is_accepted() -> None:
+    limit = timedelta(seconds=2147483647)
+    assert TaskSettings(execution_time_limit=limit).execution_time_limit == limit
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("seconds", [2147483648, 4294967295, 4294967296])
+def test_an_execution_time_limit_past_int32_is_refused(seconds: int) -> None:
+    # Measured on Windows: 2**31..2**32-1 is refused (0x80041318) and 2**32 wraps to PT0S = no limit.
+    with pytest.raises(ValidationError):
+        TaskSettings(execution_time_limit=timedelta(seconds=seconds))
+
+
+@pytest.mark.os_agnostic
+def test_task_settings_are_frozen() -> None:
+    s = TaskSettings()
+    with pytest.raises(ValidationError):
+        s.allow_hard_terminate = True  # pyright: ignore[reportAttributeAccessIssue] - assignment IS the test
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("member", "value"),
+    [
+        (TaskMultipleInstances.PARALLEL, "Parallel"),
+        (TaskMultipleInstances.QUEUE, "Queue"),
+        (TaskMultipleInstances.IGNORE_NEW, "IgnoreNew"),
+        (TaskMultipleInstances.STOP_EXISTING, "StopExisting"),
+    ],
+)
+def test_multiple_instances_values_mirror_powershell(member: TaskMultipleInstances, value: str) -> None:
+    assert member.value == value
+    assert TaskSettings.model_validate({"multiple_instances": value}).multiple_instances is member
+
+
+@pytest.mark.os_agnostic
+def test_multiple_instances_has_exactly_the_four_policies() -> None:
+    assert [m.value for m in TaskMultipleInstances] == ["Parallel", "Queue", "IgnoreNew", "StopExisting"]
+
+
+@pytest.mark.os_agnostic
+def test_an_unknown_multiple_instances_policy_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        TaskSettings.model_validate({"multiple_instances": "Ignore"})
+
+
+@pytest.mark.os_agnostic
+def test_a_scheduled_task_record_has_no_settings_by_default() -> None:
+    t = ScheduledTaskInfo(task_name="Backup", task_path="\\", state=TaskState.READY)
+    assert t.settings is None
+
+
+@pytest.mark.os_agnostic
+def test_a_scheduled_task_record_carries_settings() -> None:
+    s = TaskSettings(multiple_instances=TaskMultipleInstances.IGNORE_NEW, allow_hard_terminate=True)
+    t = ScheduledTaskInfo(task_name="Backup", task_path="\\", state=TaskState.READY, settings=s)
+    assert t.settings == s
+    assert t.model_dump(mode="json")["settings"]["multiple_instances"] == "IgnoreNew"
+
+
+@pytest.mark.os_agnostic
+def test_the_package_exports_the_task_settings_types() -> None:
+    assert pwshpy.TaskSettings is TaskSettings
+    assert pwshpy.TaskMultipleInstances is TaskMultipleInstances
+    assert {"TaskSettings", "TaskMultipleInstances"} <= set(pwshpy.__all__)

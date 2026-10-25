@@ -40,6 +40,7 @@ from .enums import (
     TransportProtocol,
 )
 from .errors import NativeCallError
+from .scheduling import TaskSettings
 
 
 class PSRecord(BaseModel):
@@ -594,13 +595,16 @@ class ScheduledTaskInfo(PSRecord):
     ``last_run_time`` tells the two apart: it is None for a task that never ran (or whose run
     time cannot be read) and set once a run has started, an on-demand start included on both
     backends (Linux takes the later of the timer's last trigger and the service's last start).
+    ``settings`` holds the task's effective :class:`~pwshpy.domain.scheduling.TaskSettings`
+    (OS defaults included); it is None where the backend did not read them, and a field inside
+    it is None where that one value cannot be read.
 
     Example:
         >>> t = ScheduledTaskInfo(task_name="Backup", task_path="Root", state=TaskState.READY, enabled=True)
         >>> t.task_name, t.state.value, t.enabled
         ('Backup', 'Ready', True)
-        >>> t.user_id, t.run_level, t.last_task_result
-        ('', None, None)
+        >>> t.user_id, t.run_level, t.last_task_result, t.settings
+        ('', None, None, None)
     """
 
     task_name: str
@@ -614,6 +618,7 @@ class ScheduledTaskInfo(PSRecord):
     last_run_time: datetime | None = None
     last_task_result: int | None = None
     next_run_time: datetime | None = None
+    settings: TaskSettings | None = None
 
 
 class LocalUser(PSRecord):

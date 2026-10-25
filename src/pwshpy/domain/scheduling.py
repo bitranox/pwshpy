@@ -1,4 +1,4 @@
-"""Principal and trigger value objects for registering a scheduled task (pure domain).
+"""Principal, trigger and settings value objects for registering a scheduled task (pure domain).
 
 These are INPUTS to ``register_scheduled_task``, validated at the boundary, so they are
 plain frozen Pydantic models rather than :class:`~pwshpy.domain.records.PSRecord` output
@@ -9,6 +9,7 @@ Contents:
     * :class:`TaskPrincipal` - who the task runs as, and with which token.
     * :class:`OnceTrigger`, :class:`DailyTrigger`, :class:`BootTrigger`, :class:`LogonTrigger`.
     * :data:`TaskTrigger` - the discriminated union of the four.
+    * :class:`TaskSettings` - battery, time-limit, multiple-instances and hard-terminate switches.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
-from .enums import TaskLogonType, TaskRunLevel, WellKnownSid
+from .enums import TaskLogonType, TaskMultipleInstances, TaskRunLevel, WellKnownSid
 
 # fullmatch + [0-9]: '$' would accept a trailing newline and '\d' accepts non-ASCII digits.
 _SID = re.compile(r"S-1-[0-9]+(?:-[0-9]+)+")
@@ -38,6 +39,8 @@ _SERVICE_SIDS = frozenset(
 # extra="forbid": these are user-supplied inputs, and a silently dropped misspelt key widens
 # the task (LogonTrigger "user" instead of "user_id" would mean "any user logs on").
 _INPUT_CONFIG = ConfigDict(frozen=True, extra="forbid")
+# The largest execution time limit both backends store faithfully (signed 32-bit seconds).
+_MAX_EXECUTION_TIME_LIMIT = timedelta(seconds=2147483647)
 
 
 def _is_uid(text: str) -> bool:
@@ -251,8 +254,66 @@ class LogonTrigger(BaseModel):
         return self.user_id is not None and _is_uid(self.user_id)
 
 
+class TaskSettings(BaseModel):
+    """How a scheduled task behaves around batteries, overruns and overlapping runs.
+
+    Every field defaults to None, which means "leave the OS default": an adapter writes nothing
+    for a None field, so ``TaskSettings()`` changes nothing.  Names mirror PowerShell's
+    ``New-ScheduledTaskSettingsSet``.  An unknown key is refused.
+
+    Attributes:
+        allow_start_if_on_batteries: Whether a run may start while the machine is on battery.
+        stop_if_going_on_batteries: Whether a running task is stopped when the machine switches
+            to battery.
+        execution_time_limit: How long a run may last before it is stopped, in whole seconds;
+            ``timedelta(0)`` means no limit.  A negative value, a sub-second part or more than
+            2147483647 seconds is refused.
+        multiple_instances: What happens when a run is requested while one is already running
+            (:class:`~pwshpy.domain.enums.TaskMultipleInstances`).
+        allow_hard_terminate: Whether a run that ignores a stop request may be killed.
+
+    Example:
+        >>> TaskSettings().execution_time_limit is None
+        True
+        >>> TaskSettings(execution_time_limit=timedelta(hours=72)).execution_time_limit.total_seconds()
+        259200.0
+    """
+
+    model_config = _INPUT_CONFIG
+
+    allow_start_if_on_batteries: bool | None = None
+    stop_if_going_on_batteries: bool | None = None
+    execution_time_limit: timedelta | None = None
+    multiple_instances: TaskMultipleInstances | None = None
+    allow_hard_terminate: bool | None = None
+
+    @field_validator("execution_time_limit")
+    @classmethod
+    def _whole_non_negative_seconds(cls, value: timedelta | None) -> timedelta | None:
+        # Both backends write whole seconds (Task Scheduler PT{n}S, systemd TimeoutStartSec);
+        # a fraction would be truncated silently rather than honoured.
+        if value is None:
+            return None
+        if value < timedelta(0):
+            raise ValueError("execution_time_limit must not be negative")
+        if value.microseconds:
+            raise ValueError("execution_time_limit must be whole seconds")
+        # Task Scheduler refuses 2**31..2**32-1 s (0x80041318) and wraps 2**32 s to PT0S (= no limit).
+        if value > _MAX_EXECUTION_TIME_LIMIT:
+            raise ValueError("execution_time_limit must not exceed 2147483647 seconds")
+        return value
+
+
 # PEP 604 '|' between classes is a runtime types.UnionType from 3.10 on, which is this
 # package's floor, and Pydantic accepts it as a discriminated union.
 TaskTrigger = Annotated[OnceTrigger | DailyTrigger | BootTrigger | LogonTrigger, Field(discriminator="kind")]
 
-__all__ = ["BootTrigger", "DailyTrigger", "LogonTrigger", "OnceTrigger", "TaskPrincipal", "TaskTrigger"]
+__all__ = [
+    "BootTrigger",
+    "DailyTrigger",
+    "LogonTrigger",
+    "OnceTrigger",
+    "TaskPrincipal",
+    "TaskSettings",
+    "TaskTrigger",
+]

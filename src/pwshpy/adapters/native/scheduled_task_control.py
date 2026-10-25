@@ -3,8 +3,8 @@
 Register / Unregister a task, Enable / Disable it, and Run / Stop it - the mutating
 counterpart of the read-only :mod:`~pwshpy.adapters.native.scheduled_tasks` source.
 Tasks are addressed by their full path (``\\Folder\\Name``; ``\\Name`` at the root).
-``register`` creates an EXEC task (a program + arguments) with an optional principal
-and triggers.  ``win32com`` is imported lazily; every COM call is wrapped in
+``register`` creates an EXEC task (a program + arguments) with an optional principal,
+triggers and settings.  ``win32com`` is imported lazily; every COM call is wrapped in
 :class:`~pwshpy.domain.errors.NativeCallError`.
 
 **MUTATING** - see CLAUDE.md "Development Safety": real tests use a scratch task
@@ -25,8 +25,16 @@ from typing import Any, NoReturn
 from ...domain.enums import TaskLogonType, TaskRunLevel
 from ...domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
-from ...domain.scheduling import BootTrigger, DailyTrigger, LogonTrigger, OnceTrigger, TaskPrincipal, TaskTrigger
-from .marshal import to_task_state
+from ...domain.scheduling import (
+    BootTrigger,
+    DailyTrigger,
+    LogonTrigger,
+    OnceTrigger,
+    TaskPrincipal,
+    TaskSettings,
+    TaskTrigger,
+)
+from .marshal import from_task_multiple_instances, to_task_state
 from .task_readback import read_task_extras
 
 _TASK_ACTION_EXEC = 0
@@ -84,6 +92,7 @@ def _task_info(task: Any, folder_path: str) -> ScheduledTaskInfo:
         last_run_time=extras.last_run_time,
         last_task_result=extras.last_task_result,
         next_run_time=extras.next_run_time,
+        settings=extras.settings,
     )
 
 
@@ -232,6 +241,30 @@ def _apply_principal(definition: Any, principal: TaskPrincipal) -> int:
     return logon
 
 
+def _apply_settings(definition: Any, settings: TaskSettings) -> None:
+    """Write each field of ``settings`` that is set onto the definition's ITaskSettings.
+
+    A None field writes nothing, so the OS default stays (``TaskSettings()`` changes nothing).
+    Every value the domain accepts has a Task Scheduler analog, so nothing is refused here.
+
+    Example:
+        >>> callable(_apply_settings)
+        True
+    """
+    com = definition.Settings
+    if settings.allow_start_if_on_batteries is not None:
+        com.DisallowStartIfOnBatteries = not settings.allow_start_if_on_batteries
+    if settings.stop_if_going_on_batteries is not None:
+        com.StopIfGoingOnBatteries = settings.stop_if_going_on_batteries
+    if settings.execution_time_limit is not None:
+        # PT{n}S; Windows stores it normalised (PT259200S reads back PT72H), PT0S = no limit.
+        com.ExecutionTimeLimit = _iso_duration(settings.execution_time_limit)
+    if settings.multiple_instances is not None:
+        com.MultipleInstances = from_task_multiple_instances(settings.multiple_instances)
+    if settings.allow_hard_terminate is not None:
+        com.AllowHardTerminate = settings.allow_hard_terminate
+
+
 class NativeScheduledTaskController:
     """Mutating scheduled-task control over the Task Scheduler COM API."""
 
@@ -296,8 +329,9 @@ class NativeScheduledTaskController:
         description: str = "",
         principal: TaskPrincipal | None = None,
         triggers: Sequence[TaskTrigger] = (),
+        settings: TaskSettings | None = None,
     ) -> ScheduledTaskInfo:
-        """Register an EXEC task (``program`` + ``arguments``) with an optional principal and triggers.
+        """Register an EXEC task (``program`` + ``arguments``) with an optional principal, triggers and settings.
 
         With no ``principal`` the task runs as the interactive caller; with no ``triggers``
         it runs only on demand (``start_scheduled_task``).
@@ -309,9 +343,12 @@ class NativeScheduledTaskController:
             description: Registration description.
             principal: Who the task runs as, and with which token and run level.
             triggers: When the task fires; empty means on demand only.
+            settings: Battery, time-limit, multiple-instances and hard-terminate switches; only
+                the fields that are set are written, so None (or ``TaskSettings()``) keeps every
+                Task Scheduler default.
 
         Returns:
-            The registered task, read back.
+            The registered task, read back, its effective settings included.
 
         Raises:
             PlatformUnsupportedError: a principal or logon trigger names a POSIX uid, or
@@ -346,6 +383,8 @@ class NativeScheduledTaskController:
             logon = _apply_principal(definition, principal)
             for trigger in triggers:
                 _add_trigger(definition, trigger)
+            if settings is not None:
+                _apply_settings(definition, settings)
             task = folder.RegisterTaskDefinition(
                 name, definition, _TASK_CREATE_OR_UPDATE, principal.user_id, None, logon
             )

@@ -11,6 +11,9 @@ Contents:
     * :func:`to_process_status` - raw status string -> :class:`ProcessStatus`.
     * :func:`to_task_run_level` / :func:`com_date_to_datetime` / :func:`to_task_result` -
       Task Scheduler principal run level, COM dates and ``LastTaskResult``.
+    * :func:`to_task_duration` / :func:`to_task_multiple_instances` /
+      :func:`from_task_multiple_instances` - Task Scheduler ``ExecutionTimeLimit`` and
+      ``MultipleInstances``.
     * :func:`to_integrity_level` - mandatory-label RID -> :class:`IntegrityLevel`.
     * :func:`skip_or_raise` - the lenient/strict contract for an item a listing cannot read.
     * :func:`is_com_error` / :func:`com_hresult` - recognise a pywin32 COM error and read its
@@ -22,7 +25,7 @@ from __future__ import annotations
 import logging
 import re
 import socket
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ...domain.enums import (
     AceType,
@@ -36,6 +39,7 @@ from ...domain.enums import (
     ServiceKind,
     ServiceStartType,
     ServiceState,
+    TaskMultipleInstances,
     TaskRunLevel,
     TaskState,
     TransportProtocol,
@@ -488,6 +492,68 @@ def to_task_result(value: int) -> int | None:
     return None if code in _TASK_NO_RESULT else code
 
 
+# The ISO 8601 duration subset Task Scheduler stores: it normalises a written PT{n}S into days,
+# hours, minutes and seconds (PT90S reads back PT1M30S, 2**31-1 s reads back P24855DT3H14M7S;
+# measured on Windows 11, 2026-10-25). Years and months are refused: their length depends on
+# the calendar. [0-9] with a digit cap, not \d: \d takes non-ASCII digits, and an uncapped run
+# reaches int()'s 4300-digit limit.
+_TASK_DURATION = re.compile(
+    r"P(?:(?P<days>[0-9]{1,10})D)?(?:T(?=[0-9])(?:(?P<hours>[0-9]{1,12})H)?"
+    r"(?:(?P<minutes>[0-9]{1,14})M)?(?:(?P<seconds>[0-9]{1,16})S)?)?"
+)
+
+
+def to_task_duration(value: str) -> timedelta | None:
+    """Parse a Task Scheduler duration (``PnDTnHnMnS``, whole seconds) into a ``timedelta``.
+
+    Returns None for anything outside that form - a fraction, years or months, weeks, an
+    empty string, a value beyond ``timedelta`` - so an unknown value is reported unknown,
+    never guessed. ``"PT0S"`` is ``timedelta(0)``, which Task Scheduler reads as "no limit".
+
+    Example:
+        >>> to_task_duration("PT1M30S"), to_task_duration("PT0S"), to_task_duration("P1Y")
+        (datetime.timedelta(seconds=90), datetime.timedelta(0), None)
+    """
+    match = _TASK_DURATION.fullmatch(value)
+    if match is None or not any(match.groupdict().values()):
+        return None
+    parts = {name: int(digits) for name, digits in match.groupdict().items() if digits is not None}
+    try:
+        return timedelta(**parts)
+    except OverflowError:  # more days than timedelta holds
+        return None
+
+
+# Task Scheduler TASK_INSTANCES_POLICY ids <-> TaskMultipleInstances.
+_TASK_INSTANCES_BY_INT: dict[int, TaskMultipleInstances] = {
+    0: TaskMultipleInstances.PARALLEL,
+    1: TaskMultipleInstances.QUEUE,
+    2: TaskMultipleInstances.IGNORE_NEW,
+    3: TaskMultipleInstances.STOP_EXISTING,
+}
+_TASK_INSTANCES_TO_INT: dict[TaskMultipleInstances, int] = {v: k for k, v in _TASK_INSTANCES_BY_INT.items()}
+
+
+def to_task_multiple_instances(value: int) -> TaskMultipleInstances | None:
+    """Map a ``TASK_INSTANCES_POLICY`` id to :class:`TaskMultipleInstances`; an unknown id -> None.
+
+    Example:
+        >>> to_task_multiple_instances(2) is TaskMultipleInstances.IGNORE_NEW, to_task_multiple_instances(9)
+        (True, None)
+    """
+    return _TASK_INSTANCES_BY_INT.get(value)
+
+
+def from_task_multiple_instances(policy: TaskMultipleInstances) -> int:
+    """Map a :class:`TaskMultipleInstances` to the ``TASK_INSTANCES_POLICY`` id ITaskSettings takes.
+
+    Example:
+        >>> from_task_multiple_instances(TaskMultipleInstances.STOP_EXISTING)
+        3
+    """
+    return _TASK_INSTANCES_TO_INT[policy]
+
+
 # Win32 ACCESS_DENIED_* ACE type ids (all other DACL ACE types grant access).
 _DENY_ACE_TYPES = frozenset({1, 6, 10, 12})
 
@@ -596,6 +662,7 @@ __all__ = [
     "epoch_to_datetime",
     "from_registry_value_type",
     "from_service_start_type",
+    "from_task_multiple_instances",
     "is_com_error",
     "normalize_registry_data",
     "parse_event_time",
@@ -612,6 +679,8 @@ __all__ = [
     "to_service_kind",
     "to_service_start_type",
     "to_service_state",
+    "to_task_duration",
+    "to_task_multiple_instances",
     "to_task_result",
     "to_task_run_level",
     "to_task_state",

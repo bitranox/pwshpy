@@ -1,4 +1,4 @@
-"""Task Scheduler marshaling: TASK_STATE, TASK_RUNLEVEL, COM dates and LastTaskResult (pure, os-agnostic)."""
+"""Task Scheduler marshaling: TASK_STATE, TASK_RUNLEVEL, COM dates, LastTaskResult and settings (pure, os-agnostic)."""
 
 from __future__ import annotations
 
@@ -9,8 +9,16 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from pwshpy.adapters.native.marshal import com_date_to_datetime, to_task_result, to_task_run_level, to_task_state
-from pwshpy.domain.enums import TaskRunLevel, TaskState
+from pwshpy.adapters.native.marshal import (
+    com_date_to_datetime,
+    from_task_multiple_instances,
+    to_task_duration,
+    to_task_multiple_instances,
+    to_task_result,
+    to_task_run_level,
+    to_task_state,
+)
+from pwshpy.domain.enums import TaskMultipleInstances, TaskRunLevel, TaskState
 
 
 @pytest.mark.os_agnostic
@@ -123,3 +131,74 @@ def test_to_task_result(value: int, expected: int | None) -> None:
     (measured on a throwaway Windows VM): no result exists yet, so it is not a result code.
     """
     assert to_task_result(value) == expected
+
+
+# What Task Scheduler hands back for ExecutionTimeLimit (measured on Windows 11, 2026-10-25): it
+# normalises what it stores, so PT90S reads back PT1M30S, 2147483647 s reads back
+# P24855DT3H14M7S, an empty string reads back PT72H, and PT0S ("no limit") round-trips.
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("PT0S", timedelta(0)),
+        ("PT1M30S", timedelta(seconds=90)),
+        ("P24855DT3H14M7S", timedelta(seconds=2147483647)),
+        ("PT72H", timedelta(hours=72)),
+        ("P3D", timedelta(days=3)),
+        ("PT259200S", timedelta(hours=72)),  # the un-normalised form pwshpy writes
+        ("P1DT2H", timedelta(days=1, hours=2)),
+    ],
+)
+def test_to_task_duration_reads_the_normalised_forms(value: str, expected: timedelta) -> None:
+    """Days, hours, minutes and whole seconds in any combination Task Scheduler stores."""
+    assert to_task_duration(value) == expected
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("P", id="no-component"),
+        pytest.param("PT", id="time-designator-only"),
+        pytest.param("P1DT", id="dangling-time-designator"),
+        pytest.param("PT1.5S", id="fractional-seconds"),
+        pytest.param("P1Y", id="years-are-ambiguous"),
+        pytest.param("P1M", id="months-are-ambiguous"),
+        pytest.param("P1W", id="weeks"),
+        pytest.param("-PT1S", id="negative"),
+        pytest.param("PT1S\n", id="trailing-newline"),
+        pytest.param("pt1s", id="lowercase"),
+        pytest.param("PT" + chr(0x0662) + "S", id="non-ascii-digit"),
+        pytest.param("P9999999999D", id="beyond-timedelta"),
+        pytest.param("PT" + "9" * 5000 + "S", id="huge-digit-run"),
+        pytest.param("None", id="com-null-rendered"),
+    ],
+)
+def test_to_task_duration_degrades_an_unparseable_value_to_none(value: str) -> None:
+    """A form the parser does not know reads None (unknown), never an exception and never a guess."""
+    assert to_task_duration(value) is None
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (0, TaskMultipleInstances.PARALLEL),
+        (1, TaskMultipleInstances.QUEUE),
+        (2, TaskMultipleInstances.IGNORE_NEW),
+        (3, TaskMultipleInstances.STOP_EXISTING),
+        (4, None),
+        (-1, None),
+    ],
+)
+def test_to_task_multiple_instances(value: int, expected: TaskMultipleInstances | None) -> None:
+    """TASK_INSTANCES_POLICY 0-3 maps to its member; any other number is unknown (None)."""
+    assert to_task_multiple_instances(value) is expected
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("policy", list(TaskMultipleInstances))
+def test_from_task_multiple_instances_round_trips(policy: TaskMultipleInstances) -> None:
+    """Every member writes the number it reads back from."""
+    assert to_task_multiple_instances(from_task_multiple_instances(policy)) is policy

@@ -1,7 +1,7 @@
 """Scheduled-tasks oracle: pwshpy vs a real Get-ScheduledTask on Windows.
 
-Compares the task set (folder path + name) and the stable ``Enabled`` flag - both
-locale-independent.  ``State`` is dynamic (a task may run between reads), so the listing
+Compares the task set (folder path + name), the stable ``Enabled`` flag and the [45]
+settings - all locale-independent.  ``State`` is dynamic (a task may run between reads), so the listing
 does not assert it; the by-name lookup reads one task right after the cmdlet and compares
 its state by number.  ``local_only`` + ``os_windows``; read-only, safe.
 """
@@ -12,12 +12,14 @@ import json
 import subprocess
 import sys
 import uuid
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from pwshpy import ps
+from pwshpy.domain.enums import TaskMultipleInstances
 
 pytestmark = [pytest.mark.local_only, pytest.mark.os_windows]
 
@@ -91,3 +93,51 @@ def test_lookup_by_name_matches_get_scheduledtask_for_that_task() -> None:
     )
     missing = f"pwshpy-no-such-task-{uuid.uuid4().hex}"
     assert ps.get_scheduled_task(path, task_name=missing, strict=True).to_list() == []
+
+
+# The settings as Get-ScheduledTask reports them. ExecutionTimeLimit goes through .NET's own ISO 8601
+# parser (XmlConvert), independent of pwshpy's; MultipleInstances is the CIM enum's NAME (the same
+# words as TaskMultipleInstances' values, never localized). The CIM enum has no StopExisting
+# member, so such a task reads "" (measured 2026-10-25): it is compared through that gap.
+_SETTINGS_SCRIPT = (
+    "Get-ScheduledTask | ForEach-Object { $s = $_.Settings; $limit = $null;"
+    " if ($s.ExecutionTimeLimit) { try { $limit = [System.Xml.XmlConvert]::ToTimeSpan($s.ExecutionTimeLimit)"
+    ".TotalSeconds } catch { $limit = $null } };"
+    " [pscustomobject]@{ Key = $_.TaskPath + $_.TaskName; Disallow = [bool]$s.DisallowStartIfOnBatteries;"
+    " Stop = [bool]$s.StopIfGoingOnBatteries; Kill = [bool]$s.AllowHardTerminate; Limit = $limit;"
+    " Policy = [string]$s.MultipleInstances } } | ConvertTo-Json -Compress -AsArray"
+)
+
+
+def _expected_settings(row: dict[str, Any]) -> tuple[object, ...]:
+    """One Get-ScheduledTask row as the (battery, stop, limit, policy, kill) tuple pwshpy should read."""
+    limit = row["Limit"]
+    policy = str(row["Policy"])
+    return (
+        not row["Disallow"],
+        bool(row["Stop"]),
+        None if limit is None else timedelta(seconds=float(limit)),
+        TaskMultipleInstances.STOP_EXISTING if policy == "" else TaskMultipleInstances(policy),
+        bool(row["Kill"]),
+    )
+
+
+def test_settings_match_get_scheduledtask() -> None:
+    """[45] every task's effective settings read like Get-ScheduledTask's Settings, OS defaults included."""
+    ours = {task.task_path + task.task_name: task for task in ps.get_scheduled_task().to_list()}
+    rows = cast("list[dict[str, Any]]", _run_ps_json(_SETTINGS_SCRIPT))
+    theirs = {str(row["Key"]): row for row in rows}
+
+    common = set(ours) & set(theirs)
+    assert len(common) >= len(theirs) - 3  # the two reads run moments apart
+    for key in common:
+        settings = ours[key].settings
+        assert settings is not None, key
+        got = (
+            settings.allow_start_if_on_batteries,
+            settings.stop_if_going_on_batteries,
+            settings.execution_time_limit,
+            settings.multiple_instances,
+            settings.allow_hard_terminate,
+        )
+        assert got == _expected_settings(theirs[key]), key

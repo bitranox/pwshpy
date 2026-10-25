@@ -82,6 +82,7 @@ def _to_task_info(task: Any, folder_path: str) -> ScheduledTaskInfo:
         last_run_time=extras.last_run_time,
         last_task_result=extras.last_task_result,
         next_run_time=extras.next_run_time,
+        settings=extras.settings,
     )
 
 

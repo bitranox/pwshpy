@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -19,9 +19,10 @@ import pytest
 from pwshpy.adapters.native import scheduled_tasks as st_mod
 from pwshpy.adapters.native import task_readback
 from pwshpy.adapters.native.scheduled_tasks import iter_scheduled_tasks
-from pwshpy.domain.enums import TaskRunLevel, TaskState
+from pwshpy.domain.enums import TaskMultipleInstances, TaskRunLevel, TaskState
 from pwshpy.domain.errors import ConfigurationError, NativeCallError
 from pwshpy.domain.records import ScheduledTaskInfo
+from pwshpy.domain.scheduling import TaskSettings
 
 
 class _FakeReg:
@@ -37,10 +38,22 @@ class _FakePrincipal:
         self.RunLevel = run_level
 
 
+class _FakeSettings:
+    """ITaskSettings as a fresh task reads it (measured on Windows 11, 2026-10-25)."""
+
+    def __init__(self) -> None:
+        self.DisallowStartIfOnBatteries: Any = True
+        self.StopIfGoingOnBatteries: Any = True
+        self.ExecutionTimeLimit: Any = "PT72H"
+        self.MultipleInstances: Any = 2
+        self.AllowHardTerminate: Any = True
+
+
 class _FakeDef:
     def __init__(self, registration: _FakeReg, principal: _FakePrincipal | None = None) -> None:
         self.RegistrationInfo = registration
         self.Principal = principal or _FakePrincipal()
+        self.Settings: Any = _FakeSettings()
 
 
 class _FakeTask:
@@ -215,6 +228,145 @@ def test_listing_reads_principal_run_level_and_run_info(monkeypatch: pytest.Monk
     assert first.next_run_time == datetime(2026, 10, 22, 3, 0).astimezone(timezone.utc)
     assert (second.user_id, second.run_level) == ("", TaskRunLevel.LIMITED)
     assert (second.last_run_time, second.last_task_result, second.next_run_time) == (None, None, None)
+
+
+def _list_one(monkeypatch: pytest.MonkeyPatch, task: _FakeTask) -> ScheduledTaskInfo:
+    """List a root folder holding only ``task`` and return its record."""
+    root = _FakeFolder("\\", [task], [])
+    monkeypatch.setattr(st_mod, "_connect_scheduler", lambda: _FakeService(root))
+    (info,) = list(iter_scheduled_tasks())
+    return info
+
+
+@pytest.mark.os_agnostic
+def test_listing_reads_a_fresh_tasks_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh task's OS defaults read back as effective settings: on AC only, 72 h, ignore a new run."""
+    info = _list_one(monkeypatch, _FakeTask("Fresh", 3, True))
+    assert info.settings == TaskSettings(
+        allow_start_if_on_batteries=False,
+        stop_if_going_on_batteries=True,
+        execution_time_limit=timedelta(hours=72),
+        multiple_instances=TaskMultipleInstances.IGNORE_NEW,
+        allow_hard_terminate=True,
+    )
+
+
+@pytest.mark.os_agnostic
+def test_listing_reads_changed_settings_in_the_normalised_form(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The form Windows stores (PT1M30S for a PT90S write) and each other COM value map to the domain."""
+    task = _FakeTask("Changed", 3, True)
+    settings = task.Definition.Settings
+    settings.DisallowStartIfOnBatteries = False
+    settings.StopIfGoingOnBatteries = False
+    settings.ExecutionTimeLimit = "PT1M30S"
+    settings.MultipleInstances = 3
+    settings.AllowHardTerminate = False
+    info = _list_one(monkeypatch, task)
+    assert info.settings == TaskSettings(
+        allow_start_if_on_batteries=True,
+        stop_if_going_on_batteries=False,
+        execution_time_limit=timedelta(seconds=90),
+        multiple_instances=TaskMultipleInstances.STOP_EXISTING,
+        allow_hard_terminate=False,
+    )
+
+
+class _RefusingSettings(_FakeSettings):
+    """ITaskSettings whose StopIfGoingOnBatteries COM refuses to read."""
+
+    @property
+    def StopIfGoingOnBatteries(self) -> Any:  # noqa: N802 - COM API name
+        raise OSError("access denied")
+
+    @StopIfGoingOnBatteries.setter
+    def StopIfGoingOnBatteries(self, value: Any) -> None:  # noqa: N802 - COM API name
+        del value  # the base __init__ assigns it; this double refuses to read it back
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("prop", "raw", "field"),
+    [
+        pytest.param("ExecutionTimeLimit", "P1Y", "execution_time_limit", id="limit-in-years"),
+        pytest.param("ExecutionTimeLimit", None, "execution_time_limit", id="limit-null"),
+        pytest.param("MultipleInstances", 7, "multiple_instances", id="unknown-policy"),
+        pytest.param("MultipleInstances", "two", "multiple_instances", id="policy-not-a-number"),
+        pytest.param("DisallowStartIfOnBatteries", None, "allow_start_if_on_batteries", id="battery-null"),
+        pytest.param("AllowHardTerminate", 1, "allow_hard_terminate", id="kill-not-a-bool"),
+    ],
+)
+def test_listing_reads_an_unusable_setting_as_unknown(
+    monkeypatch: pytest.MonkeyPatch, prop: str, raw: Any, field: str
+) -> None:
+    """A value COM hands back that has no domain meaning reads None for that one field."""
+    task = _FakeTask("Odd", 3, True)
+    setattr(task.Definition.Settings, prop, raw)
+    info = _list_one(monkeypatch, task)
+    assert info.settings is not None
+    readings = info.settings.model_dump()
+    assert readings.pop(field) is None
+    assert None not in readings.values()  # the other four still read
+
+
+@pytest.mark.os_agnostic
+def test_listing_keeps_a_task_whose_setting_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A setting COM refuses reads None for that field only; the other settings and the task stay."""
+    task = _FakeTask("Half", 3, True)
+    task.Definition.Settings = _RefusingSettings()
+    info = _list_one(monkeypatch, task)
+    assert info.task_name == "Half"
+    assert info.settings is not None
+    assert info.settings.stop_if_going_on_batteries is None
+    assert info.settings.execution_time_limit == timedelta(hours=72)
+
+
+@pytest.mark.os_agnostic
+def test_listing_keeps_a_task_whose_settings_object_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No readable ITaskSettings at all reads every setting None; the task is still listed."""
+
+    class _NoSettingsDef(_FakeDef):
+        @property
+        def Settings(self) -> Any:  # noqa: N802 - COM API name
+            raise OSError("access denied")
+
+        @Settings.setter
+        def Settings(self, value: Any) -> None:  # noqa: N802 - COM API name
+            del value
+
+    task = _FakeTask("Bare", 3, True, author="me")
+    task.Definition = _NoSettingsDef(_FakeReg("me", ""))
+    info = _list_one(monkeypatch, task)
+    assert (info.task_name, info.author) == ("Bare", "me")
+    assert info.settings == TaskSettings()
+
+
+class _CountingTask(_FakeTask):
+    """A task counting its Definition fetches: each is a COM call that parses the task, the costliest read."""
+
+    def __init__(self) -> None:
+        self._definition = _FakeDef(_FakeReg("", ""), _FakePrincipal("S-1-5-18", 1))
+        super().__init__("Counted", 3, True)
+        self.definition_reads = 0
+
+    @property
+    def Definition(self) -> Any:  # noqa: N802 - COM API name
+        self.definition_reads += 1
+        return self._definition
+
+    @Definition.setter
+    def Definition(self, value: Any) -> None:  # noqa: N802 - COM API name
+        del value  # the base __init__ assigns one; this double keeps its own
+
+
+@pytest.mark.os_agnostic
+def test_read_task_extras_fetches_the_definition_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The principal and every setting come from ONE Definition fetch, the costly part of a task's read."""
+    monkeypatch.setattr(task_readback, "sid_string", _sid_as_given)  # external edge: LookupAccountName
+    task = _CountingTask()
+    extras = task_readback.read_task_extras(task)
+    assert task.definition_reads == 1
+    assert (extras.user_id, extras.run_level) == ("S-1-5-18", TaskRunLevel.HIGHEST)
+    assert extras.settings.execution_time_limit == timedelta(hours=72)
 
 
 # An account name that resolves nowhere: off Windows sid_string cannot resolve any name

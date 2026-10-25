@@ -27,9 +27,16 @@ import pytest
 from pwshpy.adapters.native import scheduled_task_control as mod
 from pwshpy.adapters.native import task_readback
 from pwshpy.adapters.native.scheduled_task_control import NativeScheduledTaskController
-from pwshpy.domain.enums import TaskLogonType, TaskRunLevel, TaskState, WellKnownSid
+from pwshpy.domain.enums import TaskLogonType, TaskMultipleInstances, TaskRunLevel, TaskState, WellKnownSid
 from pwshpy.domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError, PwshPyError
-from pwshpy.domain.scheduling import BootTrigger, DailyTrigger, LogonTrigger, OnceTrigger, TaskPrincipal
+from pwshpy.domain.scheduling import (
+    BootTrigger,
+    DailyTrigger,
+    LogonTrigger,
+    OnceTrigger,
+    TaskPrincipal,
+    TaskSettings,
+)
 
 
 class _FakeRegInfo:
@@ -80,10 +87,47 @@ class _FakeTriggers:
         return trigger
 
 
+# What ITaskSettings reads on a fresh definition (measured on Windows 11, 2026-10-25).
+_FRESH_SETTINGS: dict[str, Any] = {
+    "Enabled": True,
+    "AllowDemandStart": True,
+    "DisallowStartIfOnBatteries": True,
+    "StopIfGoingOnBatteries": True,
+    "ExecutionTimeLimit": "PT72H",
+    "MultipleInstances": 2,
+    "AllowHardTerminate": True,
+}
+
+
 class _FakeSettings:
+    """ITaskSettings with a fresh definition's values; ``writes`` records every property set after that."""
+
+    writes: list[tuple[str, Any]]
+    Enabled: bool
+    AllowDemandStart: bool
+    DisallowStartIfOnBatteries: bool
+    StopIfGoingOnBatteries: bool
+    ExecutionTimeLimit: str
+    MultipleInstances: int
+    AllowHardTerminate: bool
+
     def __init__(self) -> None:
-        self.Enabled = True
-        self.AllowDemandStart = True
+        object.__setattr__(self, "writes", [])
+        for name, value in _FRESH_SETTINGS.items():
+            object.__setattr__(self, name, value)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self.writes.append((name, value))
+        object.__setattr__(self, name, value)
+
+
+class _ExecutionTimeLimitRefused(_FakeSettings):
+    """A COM fault writing ExecutionTimeLimit (the scheduler refusing the value)."""
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "ExecutionTimeLimit":
+            raise RuntimeError("ExecutionTimeLimit refused")
+        super().__setattr__(name, value)
 
 
 class _FakeDefinition:
@@ -538,6 +582,144 @@ def test_register_wraps_a_com_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     _use(monkeypatch, svc)
     with pytest.raises(NativeCallError, match=r"Triggers\.Create failed"):
         NativeScheduledTaskController().register("\\T", program="cmd.exe", triggers=[BootTrigger()])
+    assert svc.folder.registered == []
+
+
+# What register writes itself, whatever settings it is given (the pre-[45] behaviour).
+_BASE_SETTINGS_WRITES = [("Enabled", True), ("AllowDemandStart", True)]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({}, id="omitted"),
+        pytest.param({"settings": None}, id="none"),
+        pytest.param({"settings": TaskSettings()}, id="all-fields-unset"),
+    ],
+)
+def test_register_without_settings_writes_no_setting(monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any]) -> None:
+    """No settings, None, and a TaskSettings with every field unset all leave the definition as before."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    NativeScheduledTaskController().register("\\T", program="cmd.exe", **kwargs)
+    settings = svc.folder.tasks["T"].Definition.Settings
+    assert settings.writes == _BASE_SETTINGS_WRITES
+    assert {name: getattr(settings, name) for name in _FRESH_SETTINGS} == _FRESH_SETTINGS
+
+
+# pve-winrepair's registration: runs on battery, never stopped by one, a 72 h ceiling, an
+# overlapping start ignored, and a hung run killable.
+_PVE_WINREPAIR = TaskSettings(
+    allow_start_if_on_batteries=True,
+    stop_if_going_on_batteries=False,
+    execution_time_limit=timedelta(hours=72),
+    multiple_instances=TaskMultipleInstances.IGNORE_NEW,
+    allow_hard_terminate=True,
+)
+
+
+@pytest.mark.os_agnostic
+def test_register_writes_pve_winrepairs_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every field set reaches ITaskSettings; the limit as PT{n}S, which Windows stores as PT72H."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    NativeScheduledTaskController().register("\\T", program="cmd.exe", settings=_PVE_WINREPAIR)
+    settings = svc.folder.tasks["T"].Definition.Settings
+    assert settings.Enabled is True
+    assert settings.AllowDemandStart is True
+    assert settings.AllowHardTerminate is True
+    assert settings.ExecutionTimeLimit == "PT259200S"
+    assert settings.MultipleInstances == 2
+    assert settings.DisallowStartIfOnBatteries is False
+    assert settings.StopIfGoingOnBatteries is False
+    assert [name for name, _value in settings.writes] == [
+        "Enabled",
+        "AllowDemandStart",
+        "DisallowStartIfOnBatteries",
+        "StopIfGoingOnBatteries",
+        "ExecutionTimeLimit",
+        "MultipleInstances",
+        "AllowHardTerminate",
+    ]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("settings", "write"),
+    [
+        pytest.param(
+            TaskSettings(allow_start_if_on_batteries=False), ("DisallowStartIfOnBatteries", True), id="ac-only"
+        ),
+        pytest.param(
+            TaskSettings(allow_start_if_on_batteries=True), ("DisallowStartIfOnBatteries", False), id="battery"
+        ),
+        pytest.param(TaskSettings(stop_if_going_on_batteries=True), ("StopIfGoingOnBatteries", True), id="stop"),
+        pytest.param(TaskSettings(execution_time_limit=timedelta(0)), ("ExecutionTimeLimit", "PT0S"), id="no-limit"),
+        pytest.param(
+            TaskSettings(execution_time_limit=timedelta(seconds=2147483647)),
+            ("ExecutionTimeLimit", "PT2147483647S"),
+            id="largest-limit",
+        ),
+        pytest.param(
+            TaskSettings(multiple_instances=TaskMultipleInstances.PARALLEL), ("MultipleInstances", 0), id="par"
+        ),
+        pytest.param(
+            TaskSettings(multiple_instances=TaskMultipleInstances.QUEUE), ("MultipleInstances", 1), id="queue"
+        ),
+        pytest.param(
+            TaskSettings(multiple_instances=TaskMultipleInstances.STOP_EXISTING),
+            ("MultipleInstances", 3),
+            id="stop-old",
+        ),
+        pytest.param(TaskSettings(allow_hard_terminate=False), ("AllowHardTerminate", False), id="no-kill"),
+    ],
+)
+def test_register_writes_only_the_fields_set(
+    monkeypatch: pytest.MonkeyPatch, settings: TaskSettings, write: tuple[str, Any]
+) -> None:
+    """One field set writes exactly that one ITaskSettings property, with its COM value."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    NativeScheduledTaskController().register("\\T", program="cmd.exe", settings=settings)
+    assert svc.folder.tasks["T"].Definition.Settings.writes == [*_BASE_SETTINGS_WRITES, write]
+
+
+@pytest.mark.os_agnostic
+def test_register_reads_back_the_effective_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The returned record carries what the definition holds, the untouched OS defaults included."""
+    svc = _FakeService()
+    _use(monkeypatch, svc)
+    info = NativeScheduledTaskController().register(
+        "\\T", program="cmd.exe", settings=TaskSettings(multiple_instances=TaskMultipleInstances.QUEUE)
+    )
+    assert info.settings == TaskSettings(
+        allow_start_if_on_batteries=False,  # DisallowStartIfOnBatteries True: the OS default
+        stop_if_going_on_batteries=True,
+        execution_time_limit=timedelta(hours=72),
+        multiple_instances=TaskMultipleInstances.QUEUE,
+        allow_hard_terminate=True,
+    )
+
+
+class _SettingsRefusingService(_FakeService):
+    """A service whose new definitions refuse an ExecutionTimeLimit write."""
+
+    def NewTask(self, flags: int) -> _FakeDefinition:
+        definition = _FakeDefinition()
+        definition.Settings = _ExecutionTimeLimitRefused()
+        return definition
+
+
+@pytest.mark.os_agnostic
+def test_register_wraps_a_settings_write_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A COM fault writing a setting surfaces as NativeCallError, and nothing is registered."""
+    svc = _SettingsRefusingService()
+    _use(monkeypatch, svc)
+    with pytest.raises(NativeCallError, match="ExecutionTimeLimit refused"):
+        NativeScheduledTaskController().register(
+            "\\T", program="cmd.exe", settings=TaskSettings(execution_time_limit=timedelta(minutes=5))
+        )
     assert svc.folder.registered == []
 
 

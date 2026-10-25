@@ -5,11 +5,11 @@ from __future__ import annotations
 import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 import pwshpy
 from pwshpy import ps
@@ -28,6 +28,7 @@ from pwshpy.domain.enums import (
     ServiceKind,
     ServiceStartType,
     ServiceState,
+    TaskMultipleInstances,
     TaskState,
     TransportProtocol,
 )
@@ -74,7 +75,7 @@ from pwshpy.domain.records import (
     WindowsImage,
     WindowsUpdate,
 )
-from pwshpy.domain.scheduling import BootTrigger, TaskPrincipal, TaskTrigger
+from pwshpy.domain.scheduling import BootTrigger, TaskPrincipal, TaskSettings, TaskTrigger
 from pwshpy.domain.shortcuts import ShortcutSpec
 
 #: An opaque bool, as in the facade: a literal sys.platform test lets pyright prune one branch
@@ -597,8 +598,9 @@ class _FakeScheduledTaskController:
         description: str = "",
         principal: TaskPrincipal | None = None,
         triggers: Sequence[TaskTrigger] = (),
+        settings: TaskSettings | None = None,
     ) -> ScheduledTaskInfo:
-        self.calls.append(("register", task_path, program, principal, tuple(triggers)))
+        self.calls.append(("register", task_path, program, principal, tuple(triggers), settings))
         return self._task(task_path)
 
 
@@ -894,7 +896,7 @@ def test_injected_scheduled_task_adapters(injected: _InjectedPs) -> None:
     facade.start_scheduled_task("\\T")
     facade.stop_scheduled_task("\\T")
     assert fake_scheduled_task_controller.calls == [
-        ("register", "\\T", "cmd.exe", None, ()),
+        ("register", "\\T", "cmd.exe", None, (), None),
         ("unregister", "\\T"),
         ("enable", "\\T"),
         ("disable", "\\T"),
@@ -914,7 +916,47 @@ def test_register_scheduled_task_forwards_principal_and_triggers(injected: _Inje
         "x",
         TaskPrincipal.system(),
         (trigger,),
+        None,
     )
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "settings",
+    [
+        TaskSettings(),
+        TaskSettings(
+            allow_start_if_on_batteries=True,
+            stop_if_going_on_batteries=False,
+            execution_time_limit=timedelta(hours=72),
+            multiple_instances=TaskMultipleInstances.IGNORE_NEW,
+            allow_hard_terminate=True,
+        ),
+    ],
+)
+def test_register_scheduled_task_forwards_the_settings(injected: _InjectedPs, settings: TaskSettings) -> None:
+    """[45] The facade hands an equal TaskSettings to the controller; TaskSettings() stays all-None."""
+    injected.facade.register_scheduled_task("\\T", program="x", settings=settings)
+    assert injected.scheduled_task_controller.calls[-1][-1] == settings
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("limit", "reason"),
+    [
+        (timedelta(seconds=1.5), "whole seconds"),
+        (timedelta(seconds=2147483648), "2147483647"),
+        (timedelta(seconds=-1), "negative"),
+    ],
+)
+def test_register_scheduled_task_revalidates_unvalidated_settings(
+    injected: _InjectedPs, limit: timedelta, reason: str
+) -> None:
+    """[45] A model_construct-built TaskSettings (as read back onto a record) is validated before the controller."""
+    unvalidated = TaskSettings.model_construct(execution_time_limit=limit)
+    with pytest.raises(ValidationError, match=reason):
+        injected.facade.register_scheduled_task("\\T", program="x", settings=unvalidated)
+    assert injected.scheduled_task_controller.calls == []
 
 
 @pytest.mark.os_agnostic

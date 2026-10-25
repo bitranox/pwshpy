@@ -44,10 +44,11 @@ import itertools
 import os
 import sys
 from collections.abc import Generator, Iterable
-from typing import BinaryIO, TextIO
+from typing import Any, BinaryIO, TextIO
 
 import orjson
 import rich_click as click
+from pydantic import BaseModel
 from rich.console import Console
 from rich.measure import Measurement
 from rich.table import Table
@@ -222,6 +223,33 @@ def _cell(value: object) -> Text:
     return Text("" if value is None else str(value))
 
 
+def _table_row(record: PSRecord) -> dict[str, Any]:
+    """The record's JSON-mode fields, with a nested model compacted to ``field=value`` pairs.
+
+    A nested model (``ScheduledTaskInfo.settings``) would otherwise print as a dict repr, braces,
+    quotes and every unset ``None`` included, in one wide cell. Only its set fields are kept, in
+    their JSON form, so the cell reads like the ``--json`` object it stands for.  ``--json`` and
+    ``--jsonl`` dump the record themselves and are unaffected.  Only fields holding a model are
+    touched: a plain mapping (``CimInstance.properties``) keeps its rendering.
+
+    Example:
+        >>> from pwshpy.domain.enums import TaskState
+        >>> from pwshpy.domain.records import ScheduledTaskInfo
+        >>> from pwshpy.domain.scheduling import TaskSettings
+        >>> task = ScheduledTaskInfo(task_name="T", task_path="Root", state=TaskState.READY,
+        ...                          settings=TaskSettings(allow_hard_terminate=False))
+        >>> _table_row(task)["settings"]
+        'allow_hard_terminate=False'
+    """
+    row = record.to_dict()
+    for name in row:
+        nested: object = getattr(record, name)
+        if isinstance(nested, BaseModel):
+            dumped = nested.model_dump(mode="json")
+            row[name] = ", ".join(f"{key}={value}" for key, value in dumped.items() if value is not None)
+    return row
+
+
 def _is_terminal(stream: TextIO | None) -> bool:
     """Whether ``stream`` is a real terminal (a closed, missing or odd stream counts as not one).
 
@@ -295,7 +323,7 @@ def _render_table(records: Iterable[PSRecord]) -> None:
     # stay lazy like --jsonl. Bound memory with a soft cap: render the first
     # _MAX_TABLE_ROWS and, if more remain, point the user at the streaming path.
     iterator = iter(records)
-    materialized = [record.to_dict() for record in itertools.islice(iterator, _MAX_TABLE_ROWS)]
+    materialized = [_table_row(record) for record in itertools.islice(iterator, _MAX_TABLE_ROWS)]
     truncated = next(iterator, None) is not None
     if not materialized:
         Console().print("[dim]No records.[/dim]")

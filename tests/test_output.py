@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,8 +17,9 @@ from pwshpy.adapters.cli.output import (
     RecordFormat,
     emit,
 )
-from pwshpy.domain.enums import ProcessStatus
-from pwshpy.domain.records import EnvVar, ProcessInfo
+from pwshpy.domain.enums import ProcessStatus, TaskMultipleInstances, TaskState
+from pwshpy.domain.records import EnvVar, ProcessInfo, ScheduledTaskInfo
+from pwshpy.domain.scheduling import TaskSettings
 
 if TYPE_CHECKING:
     from pwshpy.composition import AppServices
@@ -315,3 +317,46 @@ def test_piped_table_sizes_a_markup_like_value_by_its_literal_width(
     value = "[link=https://example.invalid/" + _LONG_VALUE + "]" + _LONG_VALUE + "[/link]"
     lines = _emit_piped_table(capsys, [EnvVar(name="LINKISH", value=value), EnvVar(name="A", value="1")])
     assert sum(value in line for line in lines) == 1
+
+
+def _task_with(settings: TaskSettings | None) -> ScheduledTaskInfo:
+    return ScheduledTaskInfo(task_name="T", task_path="\\", state=TaskState.READY, settings=settings)
+
+
+@pytest.mark.os_agnostic
+def test_human_table_renders_nested_settings_as_key_value_pairs(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[45] A nested settings model reads as 'field=value' pairs of its set fields, never a dict repr."""
+    monkeypatch.delenv("COLUMNS", raising=False)
+    full = TaskSettings(
+        allow_start_if_on_batteries=True,
+        stop_if_going_on_batteries=False,
+        execution_time_limit=timedelta(hours=72),
+        multiple_instances=TaskMultipleInstances.IGNORE_NEW,
+        allow_hard_terminate=True,
+    )
+    emit([_task_with(full), _task_with(TaskSettings(allow_hard_terminate=False)), _task_with(None)], RecordFormat.HUMAN)
+    out = capsys.readouterr().out
+    assert (
+        "allow_start_if_on_batteries=True, stop_if_going_on_batteries=False, execution_time_limit=P3D, "
+        "multiple_instances=IgnoreNew, allow_hard_terminate=True"
+    ) in out
+    assert "allow_hard_terminate=False" in out
+    assert "{" not in out
+    assert "None" not in out
+
+
+@pytest.mark.os_agnostic
+def test_json_keeps_nested_settings_as_an_object(capsys: pytest.CaptureFixture[str]) -> None:
+    """[45] The compact table cell does not reach --jsonl: settings stays a full JSON object, None fields included."""
+    emit([_task_with(TaskSettings(allow_hard_terminate=False))], RecordFormat.JSONL)
+    settings = json.loads(capsys.readouterr().out)["settings"]
+    assert settings == {
+        "allow_start_if_on_batteries": None,
+        "stop_if_going_on_batteries": None,
+        "execution_time_limit": None,
+        "multiple_instances": None,
+        "allow_hard_terminate": False,
+    }

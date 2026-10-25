@@ -24,12 +24,13 @@ from pwshpy.domain.enums import (
     ServiceStartType,
     ServiceState,
     TaskLogonType,
+    TaskMultipleInstances,
     TaskRunLevel,
     TaskState,
 )
 from pwshpy.domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
 from pwshpy.domain.records import LocalGroup, LocalUser, RegistryKey, ScheduledTaskInfo, ServiceInfo
-from pwshpy.domain.scheduling import TaskPrincipal, TaskTrigger
+from pwshpy.domain.scheduling import TaskPrincipal, TaskSettings, TaskTrigger
 
 
 def _svc(name: str) -> ServiceInfo:
@@ -133,10 +134,11 @@ class _FakePs:
         description: str = "",
         principal: TaskPrincipal | None = None,
         triggers: Sequence[TaskTrigger] = (),
+        settings: TaskSettings | None = None,
     ) -> ScheduledTaskInfo:
         if self._register_error is not None:
             raise self._register_error
-        self._rec("register_scheduled_task", task_path, principal, tuple(triggers))
+        self._rec("register_scheduled_task", task_path, principal, tuple(triggers), settings)
         user_id = principal.user_id if principal is not None and principal.user_id is not None else ""
         return ScheduledTaskInfo(
             task_name="t", task_path=task_path, state=TaskState.READY, enabled=True, user_id=user_id
@@ -264,7 +266,7 @@ def test_register_scheduled_task_cli_builds_principal_and_triggers() -> None:
     ]
     result = CliRunner().invoke(cli, args, obj=_factory(fake))
     assert result.exit_code == 0, result.output
-    _name, _path, principal, triggers = fake.calls[-1]
+    _name, _path, principal, triggers, _settings = fake.calls[-1]
     assert principal == TaskPrincipal(user_id="S-1-5-18", run_level=TaskRunLevel.HIGHEST)
     assert [t.kind for t in triggers] == ["once", "daily", "boot", "logon"]
     assert triggers[0].at == datetime(2026, 10, 21, 21, 59, tzinfo=timezone.utc)
@@ -278,11 +280,11 @@ def test_register_scheduled_task_cli_builds_principal_and_triggers() -> None:
 
 @pytest.mark.os_agnostic
 def test_register_scheduled_task_cli_without_schedule_options_passes_no_principal() -> None:
-    """With none of the new options the call is the old run-on-demand one: no principal, no triggers."""
+    """With none of the new options the call is the old run-on-demand one: no principal, triggers or settings."""
     fake = _FakePs()
     result = CliRunner().invoke(cli, ["register_scheduled_task", "\\T", "--program", "x"], obj=_factory(fake))
     assert result.exit_code == 0, result.output
-    assert fake.calls[-1] == ("register_scheduled_task", "\\T", None, ())
+    assert fake.calls[-1] == ("register_scheduled_task", "\\T", None, (), None)
     assert "registered \\T as an unknown principal" in result.output
 
 
@@ -406,6 +408,131 @@ def test_register_scheduled_task_cli_reports_an_adapter_refusal_on_one_line(caps
     captured = capsys.readouterr()
     assert rc == 1
     assert captured.err.strip() == "PlatformUnsupportedError: logon triggers are Windows-only"
+    assert "Traceback" not in captured.err + captured.out
+
+
+def _register_settings(flags: list[str]) -> tuple[_FakePs, Any]:
+    """Run register_scheduled_task with ``flags``; return the fake and the click result."""
+    fake = _FakePs()
+    args = ["register_scheduled_task", "\\T", "--program", "x", *flags]
+    return fake, CliRunner().invoke(cli, args, obj=_factory(fake))
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        (["--allow-start-if-on-batteries"], TaskSettings(allow_start_if_on_batteries=True)),
+        (["--disallow-start-if-on-batteries"], TaskSettings(allow_start_if_on_batteries=False)),
+        (["--stop-if-going-on-batteries"], TaskSettings(stop_if_going_on_batteries=True)),
+        (["--dont-stop-if-going-on-batteries"], TaskSettings(stop_if_going_on_batteries=False)),
+        (["--execution-time-limit", "259200"], TaskSettings(execution_time_limit=timedelta(hours=72))),
+        (["--multiple-instances", "Queue"], TaskSettings(multiple_instances=TaskMultipleInstances.QUEUE)),
+        (
+            ["--multiple-instances", "stopexisting"],
+            TaskSettings(multiple_instances=TaskMultipleInstances.STOP_EXISTING),
+        ),
+        (["--allow-hard-terminate"], TaskSettings(allow_hard_terminate=True)),
+        (["--disallow-hard-terminate"], TaskSettings(allow_hard_terminate=False)),
+    ],
+)
+def test_register_scheduled_task_cli_maps_each_settings_flag_to_its_field(
+    flags: list[str], expected: TaskSettings
+) -> None:
+    """[45] Each settings flag sets exactly its own field; every flag left out stays None (untouched)."""
+    fake, result = _register_settings(flags)
+    assert result.exit_code == 0, result.output
+    assert fake.calls[-1][4] == expected
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("value", "seconds"),
+    [("259200", 259200), ("72:00:00", 259200), ("0", 0), ("00:00:00", 0), ("100:00:00", 360000), ("1:02:03", 3723)],
+)
+def test_register_scheduled_task_cli_accepts_an_execution_time_limit_form(value: str, seconds: int) -> None:
+    """[45] --execution-time-limit takes whole seconds or HH:MM:SS (hours past 23); 0 means no limit."""
+    fake, result = _register_settings(["--execution-time-limit", value])
+    assert result.exit_code == 0, result.output
+    assert fake.calls[-1][4] == TaskSettings(execution_time_limit=timedelta(seconds=seconds))
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "value",
+    [
+        "1.5",
+        "-1",
+        "1:2",
+        "72:60:00",
+        "72:00:60",
+        "2147483648",
+        "596524:00:00",
+        "1" + chr(0x0662),  # ARABIC-INDIC DIGIT TWO: '\d' and int() accept it, [0-9] does not
+        chr(0x0662),
+        "",
+        "259200\n",
+        " 259200",
+        "1:00:00:00",
+        "P3D",
+    ],
+)
+def test_register_scheduled_task_cli_refuses_a_malformed_execution_time_limit(value: str) -> None:
+    """[45] Anything but whole seconds or HH:MM:SS within the cap is a usage error before any facade call."""
+    fake, result = _register_settings(["--execution-time-limit", value])
+    assert result.exit_code == 2, result.output
+    assert "No such option" not in result.output
+    assert "execution_time_limit" in result.output or "--execution-time-limit" in result.output
+    assert "errors.pydantic.dev" not in result.output
+    assert fake.calls == []
+
+
+@pytest.mark.os_agnostic
+def test_register_scheduled_task_cli_refuses_an_unknown_multiple_instances_value() -> None:
+    """[45] --multiple-instances is a Choice of the four policies; anything else is a usage error."""
+    fake, result = _register_settings(["--multiple-instances", "Always"])
+    assert result.exit_code == 2
+    assert "No such option" not in result.output
+    assert "Always" in result.output
+    assert fake.calls == []
+
+
+@pytest.mark.os_agnostic
+def test_register_scheduled_task_cli_builds_pve_winrepairs_settings() -> None:
+    """[45] The flag set pve-winrepair registers its task with arrives as that exact TaskSettings."""
+    fake, result = _register_settings(
+        [
+            "--allow-start-if-on-batteries",
+            "--dont-stop-if-going-on-batteries",
+            "--execution-time-limit",
+            "72:00:00",
+            "--multiple-instances",
+            "IgnoreNew",
+            "--allow-hard-terminate",
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    assert fake.calls[-1][4] == TaskSettings(
+        allow_start_if_on_batteries=True,
+        stop_if_going_on_batteries=False,
+        execution_time_limit=timedelta(hours=72),
+        multiple_instances=TaskMultipleInstances.IGNORE_NEW,
+        allow_hard_terminate=True,
+    )
+
+
+@pytest.mark.os_agnostic
+def test_register_scheduled_task_cli_reports_a_settings_refusal_on_one_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """[45] A settings value the OS has no analog for leaves like any PlatformUnsupportedError: one line, exit 1."""
+    refusal = PlatformUnsupportedError("multiple_instances Queue has no systemd analog")
+    services = services_with_ps(_FakePs(register_error=refusal))
+    argv = ["register_scheduled_task", "\\T", "--program", "x", "--multiple-instances", "Queue"]
+    rc = main(argv, services_factory=lambda: services)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.err.strip() == "PlatformUnsupportedError: multiple_instances Queue has no systemd analog"
     assert "Traceback" not in captured.err + captured.out
 
 

@@ -18,6 +18,7 @@ Contents:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -25,8 +26,24 @@ from typing import TYPE_CHECKING
 import rich_click as click
 from pydantic import ValidationError
 
-from ....domain.enums import AceType, RegistryValueType, ServiceStartType, TaskLogonType, TaskRunLevel, WellKnownSid
-from ....domain.scheduling import BootTrigger, DailyTrigger, LogonTrigger, OnceTrigger, TaskPrincipal, TaskTrigger
+from ....domain.enums import (
+    AceType,
+    RegistryValueType,
+    ServiceStartType,
+    TaskLogonType,
+    TaskMultipleInstances,
+    TaskRunLevel,
+    WellKnownSid,
+)
+from ....domain.scheduling import (
+    BootTrigger,
+    DailyTrigger,
+    LogonTrigger,
+    OnceTrigger,
+    TaskPrincipal,
+    TaskSettings,
+    TaskTrigger,
+)
 from ..context import get_cli_context
 from ..typed_click import argument, option
 from ._common import enum_by_value
@@ -424,6 +441,76 @@ def _triggers(
     return triggers
 
 
+# fullmatch + [0-9]: '$' would accept a trailing newline and '\d' (or int()) non-ASCII digits. The digit
+# counts cover the 2147483647 s cap (10 digits, 596523 hours) and keep int() off a long input; the cap
+# itself is TaskSettings' rule, so a value past it is refused there with the same message as the library.
+_LIMIT_SECONDS = re.compile(r"[0-9]{1,10}")
+_LIMIT_CLOCK = re.compile(r"([0-9]{1,6}):([0-5][0-9]):([0-5][0-9])")
+
+
+def _parse_time_limit(value: str) -> timedelta:
+    """Parse ``--execution-time-limit``: whole seconds (``259200``) or ``HH:MM:SS`` (``72:00:00``).
+
+    Hours may exceed 23; ``0`` and ``00:00:00`` mean no limit.  Parsed here rather than by
+    Pydantic, whose lax mode would also take a float, an ISO 8601 duration or a non-ASCII digit.
+
+    Raises:
+        ValueError: ``value`` is neither form.
+
+    Example:
+        >>> _parse_time_limit("72:00:00") == _parse_time_limit("259200") == timedelta(hours=72)
+        True
+    """
+    if _LIMIT_SECONDS.fullmatch(value):
+        return timedelta(seconds=int(value))
+    clock = _LIMIT_CLOCK.fullmatch(value)
+    if clock is None:
+        raise ValueError(f"--execution-time-limit {value!r} is neither whole seconds (259200) nor HH:MM:SS (72:00:00)")
+    hours, minutes, seconds = (int(part) for part in clock.groups())
+    return timedelta(hours=hours, minutes=minutes, seconds=seconds)
+
+
+def _settings(
+    *,
+    allow_start_if_on_batteries: bool | None,
+    stop_if_going_on_batteries: bool | None,
+    execution_time_limit: str | None,
+    multiple_instances: str | None,
+    allow_hard_terminate: bool | None,
+) -> TaskSettings | None:
+    """Build the task settings, or None when no settings flag was given (every OS default kept).
+
+    Raises:
+        ValueError: The time limit is malformed, or a value breaks a :class:`TaskSettings` rule.
+
+    Example:
+        >>> unset = dict(allow_start_if_on_batteries=None, stop_if_going_on_batteries=None,
+        ...              execution_time_limit=None, multiple_instances=None, allow_hard_terminate=None)
+        >>> _settings(**unset) is None
+        True
+        >>> _settings(**{**unset, "multiple_instances": "ignorenew"}).multiple_instances.value
+        'IgnoreNew'
+    """
+    given = (
+        allow_start_if_on_batteries,
+        stop_if_going_on_batteries,
+        execution_time_limit,
+        multiple_instances,
+        allow_hard_terminate,
+    )
+    if all(flag is None for flag in given):
+        return None
+    return TaskSettings(
+        allow_start_if_on_batteries=allow_start_if_on_batteries,
+        stop_if_going_on_batteries=stop_if_going_on_batteries,
+        execution_time_limit=None if execution_time_limit is None else _parse_time_limit(execution_time_limit),
+        multiple_instances=None
+        if multiple_instances is None
+        else enum_by_value(TaskMultipleInstances, multiple_instances),
+        allow_hard_terminate=allow_hard_terminate,
+    )
+
+
 @click.command("register_scheduled_task")
 @argument("task_path")
 @option("--program", required=True, help="Executable to run.")
@@ -457,6 +544,34 @@ def _triggers(
 @option("--boot-delay", type=int, default=0, show_default=True, help="Seconds after boot (with --at-boot).")
 @option("--at-logon", is_flag=True, help="Run at logon (Windows only).")
 @option("--logon-user", default=None, help="SID whose logon triggers the task (with --at-logon; default any user).")
+@option(
+    "--allow-start-if-on-batteries/--disallow-start-if-on-batteries",
+    default=None,
+    help="Whether a run may start on battery power. Default: the OS default.",
+)
+@option(
+    "--stop-if-going-on-batteries/--dont-stop-if-going-on-batteries",
+    default=None,
+    help="Whether a running task is stopped when the machine switches to battery; Linux accepts only the "
+    "--dont- form. Default: the OS default.",
+)
+@option(
+    "--execution-time-limit",
+    default=None,
+    help="Longest a run may last: whole seconds (259200) or HH:MM:SS (72:00:00); 0 means no limit. "
+    "Default: the OS default.",
+)
+@option(
+    "--multiple-instances",
+    type=click.Choice([e.value for e in TaskMultipleInstances], case_sensitive=False),
+    default=None,
+    help="What a start does while a run is active; Linux supports only IgnoreNew. Default: the OS default.",
+)
+@option(
+    "--allow-hard-terminate/--disallow-hard-terminate",
+    default=None,
+    help="Whether a run that ignores a stop request may be killed. Default: the OS default.",
+)
 @click.pass_context
 def cli_register_scheduled_task(
     ctx: click.Context,
@@ -474,12 +589,18 @@ def cli_register_scheduled_task(
     boot_delay: int,
     at_logon: bool,
     logon_user: str | None,
+    allow_start_if_on_batteries: bool | None,
+    stop_if_going_on_batteries: bool | None,
+    execution_time_limit: str | None,
+    multiple_instances: str | None,
+    allow_hard_terminate: bool | None,
 ) -> None:
-    """Register a task with an optional principal and triggers; none means run on demand (mutating).
+    """Register a task with an optional principal, triggers and settings; no trigger means run on demand (mutating).
 
     Times are ISO 8601 with a UTC offset (2026-10-21T03:00:00+02:00, or Z for UTC); a time
     without one is refused. On Linux a task becomes a systemd .service plus, with triggers,
-    a .timer; logon triggers and --every-days above 1 are Windows-only.
+    a .timer; logon triggers and --every-days above 1 are Windows-only. A settings flag left
+    out keeps the OS default; Linux refuses a setting systemd has no analog for.
 
     \f
     Example:
@@ -508,6 +629,13 @@ def cli_register_scheduled_task(
             at_logon=at_logon,
             logon_user=logon_user,
         )
+        settings = _settings(
+            allow_start_if_on_batteries=allow_start_if_on_batteries,
+            stop_if_going_on_batteries=stop_if_going_on_batteries,
+            execution_time_limit=execution_time_limit,
+            multiple_instances=multiple_instances,
+            allow_hard_terminate=allow_hard_terminate,
+        )
     except ValueError as exc:  # ValidationError is a ValueError; fromisoformat raises a plain one
         raise click.BadParameter(_render(exc)) from exc
     info = _ps(ctx).register_scheduled_task(
@@ -517,6 +645,7 @@ def cli_register_scheduled_task(
         description=description,
         principal=principal,
         triggers=triggers,
+        settings=settings,
     )
     click.echo(f"registered {task_path} as {_principal_label(info.user_id)}")
 

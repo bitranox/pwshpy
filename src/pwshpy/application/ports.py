@@ -60,7 +60,7 @@ from ..domain.records import (
     WindowsImage,
     WindowsUpdate,
 )
-from ..domain.scheduling import TaskPrincipal, TaskTrigger
+from ..domain.scheduling import TaskPrincipal, TaskSettings, TaskTrigger
 from ..domain.shortcuts import ShortcutSpec
 
 if TYPE_CHECKING:
@@ -377,8 +377,9 @@ class ScheduledTaskSource(Protocol):
 class ScheduledTaskController(Protocol):
     """Register/unregister, enable/disable and run/stop scheduled tasks (native, **mutating**).
 
-    ``register`` takes an optional principal (None: the interactive caller) and triggers
-    (empty: run on demand only); an adapter refuses a shape its OS cannot honour.
+    ``register`` takes an optional principal (None: the interactive caller), triggers
+    (empty: run on demand only) and settings (None: every OS default); an adapter refuses a
+    shape its OS cannot honour.
     """
 
     def enable(self, task_path: str) -> ScheduledTaskInfo: ...
@@ -395,6 +396,7 @@ class ScheduledTaskController(Protocol):
         description: str = ...,
         principal: TaskPrincipal | None = ...,
         triggers: Sequence[TaskTrigger] = ...,
+        settings: TaskSettings | None = ...,
     ) -> ScheduledTaskInfo: ...
 
 

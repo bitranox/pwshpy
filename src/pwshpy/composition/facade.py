@@ -172,7 +172,7 @@ from ..domain.records import (
     WindowsImage,
     WindowsUpdate,
 )
-from ..domain.scheduling import TaskPrincipal, TaskTrigger
+from ..domain.scheduling import TaskPrincipal, TaskSettings, TaskTrigger
 from ..domain.shortcuts import ShortcutSpec
 
 #: Platform switch for the local-accounts backend. Stored as an opaque bool so the type
@@ -204,6 +204,33 @@ def _check_wait_limit(timeout: float) -> None:
     """
     if not 0 < timeout <= _MAX_WAIT_SECONDS:
         raise ValueError(f"timeout must be in (0, {_MAX_WAIT_SECONDS}] seconds, got {timeout!r}")
+
+
+def _validated_settings(settings: TaskSettings | None) -> TaskSettings | None:
+    """Re-run :class:`TaskSettings` validation on a caller's settings before anything is written.
+
+    A record's read-back ``settings`` is built with ``model_construct`` (validation skipped), so a
+    copy-a-task flow could hand ``register`` a value no ``TaskSettings(...)`` call would accept: a
+    fractional or above-cap limit from a hand-written unit or task XML. Validating a dump of it
+    raises the same ``ValidationError`` the constructor would.
+
+    Raises:
+        pydantic.ValidationError: A field breaks a :class:`TaskSettings` rule.
+
+    Example:
+        >>> from datetime import timedelta
+        >>> _validated_settings(None) is None
+        True
+        >>> from pydantic import ValidationError
+        >>> try:
+        ...     _validated_settings(TaskSettings.model_construct(execution_time_limit=timedelta(seconds=0.5)))
+        ... except ValidationError as exc:
+        ...     print(exc.errors()[0]["msg"])
+        Value error, execution_time_limit must be whole seconds
+    """
+    if settings is None:
+        return None
+    return TaskSettings.model_validate(settings.model_dump())
 
 
 def _only_image(images: Iterable[WindowsImage], index: int, path: Path) -> Iterator[WindowsImage]:
@@ -761,8 +788,9 @@ class Ps:
         description: str = "",
         principal: TaskPrincipal | None = None,
         triggers: Sequence[TaskTrigger] = (),
+        settings: TaskSettings | None = None,
     ) -> ScheduledTaskInfo:
-        """Register a task (program + args) with an optional principal and triggers; return it (native, **mutating**).
+        """Register a task with an optional principal, triggers and settings; return it (native, **mutating**).
 
         Task Scheduler on Windows, a systemd ``.service`` (plus a ``.timer`` when triggered) on
         Linux. Registering over an existing task replaces it.
@@ -776,16 +804,25 @@ class Ps:
                 None runs it as the interactive caller on Windows and as root on Linux.
             triggers: When it runs (:class:`OnceTrigger`, :class:`DailyTrigger`,
                 :class:`BootTrigger`, :class:`LogonTrigger`); empty means on demand only.
+            settings: Battery, time-limit, multiple-instances and hard-terminate switches
+                (:class:`TaskSettings`). None, like ``TaskSettings()`` or any field left None,
+                writes nothing, so the OS default applies. It is validated again here, so a
+                record's read-back ``settings`` can be passed on. Linux refuses a value systemd
+                has no analog for (stopping a run on battery, any multiple-instances policy but
+                IgnoreNew, IgnoreNew with a daily trigger).
 
         Returns:
             The task as the scheduler reads it back (:class:`ScheduledTaskInfo`): its
-            ``user_id``, ``run_level``, state and run times.
+            ``user_id``, ``run_level``, state, run times and effective ``settings``.
 
         Raises:
-            PlatformUnsupportedError: The OS cannot honour the principal or a trigger (a uid on
-                Windows, a SID or a logon trigger on Linux).
+            PlatformUnsupportedError: The OS cannot honour the principal, a trigger or a setting
+                (a uid on Windows, a SID or a logon trigger on Linux, a setting with no systemd
+                analog).
             ConfigurationError: The principal or the task text is inconsistent (a logon type
                 that does not fit the principal, a group SID, a newline in ``program``).
+            pydantic.ValidationError: ``settings`` breaks a :class:`TaskSettings` rule (a
+                negative, fractional or above-cap ``execution_time_limit``).
             NativeCallError: The scheduler refused the registration.
 
         Example:
@@ -799,6 +836,7 @@ class Ps:
             description=description,
             principal=principal,
             triggers=triggers,
+            settings=_validated_settings(settings),
         )
 
     def unregister_scheduled_task(self, task_path: str) -> None:

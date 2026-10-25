@@ -18,6 +18,7 @@ import json
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -622,7 +623,7 @@ _PVE_WINREPAIR = TaskSettings(
 
 @pytest.mark.os_agnostic
 def test_register_writes_pve_winrepairs_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every field set reaches ITaskSettings; the limit as PT{n}S, which Windows stores as PT72H."""
+    """Every field set reaches ITaskSettings; the limit as PT{n}S, which Windows stores as PT72H, not P3D (measured)."""
     svc = _FakeService()
     _use(monkeypatch, svc)
     NativeScheduledTaskController().register("\\T", program="cmd.exe", settings=_PVE_WINREPAIR)
@@ -890,3 +891,192 @@ def test_run_info_for_a_just_run_and_a_never_run_task() -> None:
         for name in (_RAN, _NEVER):
             with contextlib.suppress(PwshPyError):
                 ps.unregister_scheduled_task("\\" + name)
+
+
+# --- [45] TaskSettings on a real Task Scheduler: throwaway VM only ------------
+
+# Each written TaskSettings, with what Task Scheduler then holds (``stored``, all measured on VM
+# 24000): the ExecutionTimeLimit text it reports, the task XML's ExecutionTimeLimit element, the
+# MultipleInstances COM integer and the XML's MultipleInstancesPolicy element. "" is an absent
+# element: a written PT259200S is stored as PT72H, the default, and the XML then holds no limit,
+# whereas a written IgnoreNew (the default policy too) keeps its element. The CIM enum behind
+# Get-ScheduledTask's MultipleInstances lacks StopExisting (it reads $null there), so the policy is
+# compared through COM and the XML instead.
+_SETTINGS_CASES = [
+    pytest.param(_PVE_WINREPAIR, ("PT72H", "", 2, "IgnoreNew"), id="pve-winrepair"),
+    pytest.param(
+        TaskSettings(
+            allow_start_if_on_batteries=False,
+            stop_if_going_on_batteries=True,
+            execution_time_limit=timedelta(0),
+            multiple_instances=TaskMultipleInstances.STOP_EXISTING,
+            allow_hard_terminate=False,
+            allow_demand_start=False,
+        ),
+        ("PT0S", "PT0S", 3, "StopExisting"),
+        id="opposite",
+    ),
+    pytest.param(
+        TaskSettings(
+            allow_start_if_on_batteries=True,
+            stop_if_going_on_batteries=True,
+            execution_time_limit=timedelta(seconds=90),
+            multiple_instances=TaskMultipleInstances.PARALLEL,
+            allow_hard_terminate=False,
+            allow_demand_start=True,
+        ),
+        ("PT1M30S", "PT1M30S", 0, "Parallel"),
+        id="parallel",
+    ),
+    pytest.param(
+        TaskSettings(
+            allow_start_if_on_batteries=False,
+            stop_if_going_on_batteries=False,
+            execution_time_limit=timedelta(days=3, seconds=1),
+            multiple_instances=TaskMultipleInstances.QUEUE,
+            allow_hard_terminate=True,
+            allow_demand_start=False,
+        ),
+        ("P3DT1S", "P3DT1S", 1, "Queue"),
+        id="queue",
+    ),
+]
+
+# Get-ScheduledTask's Settings plus the task's own COM definition and XML, all locale-independent:
+# booleans, integers, the ISO 8601 limit text and .NET's own parse of it (XmlConvert), and the XML
+# element names and values, which the task schema fixes in English.
+_SETTINGS_ORACLE = (
+    "$s = (Get-ScheduledTask -TaskName {name}).Settings;"
+    " $svc = New-Object -ComObject Schedule.Service; $svc.Connect();"
+    " $com = $svc.GetFolder('\\').GetTask('{name}').Definition.Settings;"
+    " $xml = ([xml](Export-ScheduledTask -TaskName {name})).Task.Settings;"
+    " [pscustomobject]@{{ Disallow = [bool]$s.DisallowStartIfOnBatteries; Stop = [bool]$s.StopIfGoingOnBatteries;"
+    " Kill = [bool]$s.AllowHardTerminate; Demand = [bool]$s.AllowDemandStart;"
+    " LimitText = [string]$s.ExecutionTimeLimit;"
+    " LimitSeconds = [System.Xml.XmlConvert]::ToTimeSpan($s.ExecutionTimeLimit).TotalSeconds;"
+    " Policy = [int]$com.MultipleInstances; XmlLimit = [string]$xml.ExecutionTimeLimit;"
+    " XmlPolicy = [string]$xml.MultipleInstancesPolicy }} | ConvertTo-Json -Compress"
+)
+
+
+@pytest.fixture
+def scratch_task() -> Iterator[str]:
+    """Yield the scratch task path, removed before and after the test (throwaway VM only)."""
+    from pwshpy.composition import build_ps
+
+    ps = build_ps()
+    with contextlib.suppress(PwshPyError):
+        ps.unregister_scheduled_task(_TASK)
+    try:
+        yield _TASK
+    finally:
+        with contextlib.suppress(PwshPyError):
+            ps.unregister_scheduled_task(_TASK)
+
+
+@pytest.mark.local_only
+@pytest.mark.mutating
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only scheduled-task mutation; skip off Windows")
+@pytest.mark.parametrize(("settings", "stored"), _SETTINGS_CASES)
+def test_register_settings_read_back_like_get_scheduledtask(
+    scratch_task: str, settings: TaskSettings, stored: tuple[str, str, int, str]
+) -> None:
+    """[45] Every field written reads back unchanged, through pwshpy and through pwsh's own view of the task.
+
+    The pve-winrepair row (SYSTEM, no trigger) is the registration that caller makes today; its
+    PT259200S is stored as PT72H - Task Scheduler's default, so the task XML then carries no
+    ExecutionTimeLimit element at all.
+    """
+    from pwshpy.composition import build_ps
+
+    ps = build_ps()
+    info = ps.register_scheduled_task(
+        scratch_task, program="cmd.exe", arguments="/c exit", principal=TaskPrincipal.system(), settings=settings
+    )
+    assert info.settings == settings
+    looked_up = ps.get_scheduled_task("\\", task_name="pwshpy_test_task", strict=True).first()
+    assert looked_up is not None
+    assert looked_up.settings == settings
+    oracle = _pwsh_json(_SETTINGS_ORACLE.format(name="pwshpy_test_task"))
+    assert (not oracle["Disallow"], oracle["Stop"], oracle["Kill"], oracle["Demand"]) == (
+        settings.allow_start_if_on_batteries,
+        settings.stop_if_going_on_batteries,
+        settings.allow_hard_terminate,
+        settings.allow_demand_start,
+    )
+    assert timedelta(seconds=float(oracle["LimitSeconds"])) == settings.execution_time_limit
+    assert (oracle["LimitText"], oracle["XmlLimit"], oracle["Policy"], oracle["XmlPolicy"]) == stored
+
+
+# SCHED_E_START_ON_DEMAND ("the task's settings do not allow the task to start on demand"; the
+# name as certutil -error prints it), the scode IRegisteredTask.Run reports inside DISP_E_EXCEPTION.
+_SCHED_E_START_ON_DEMAND = 0x80041328
+
+
+@pytest.mark.local_only
+@pytest.mark.mutating
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only scheduled-task mutation; skip off Windows")
+def test_start_is_refused_when_demand_start_is_disallowed(scratch_task: str) -> None:
+    """[45] allow_demand_start=False: start_scheduled_task raises NativeCallError and the task never runs."""
+    from pwshpy.composition import build_ps
+
+    ps = build_ps()
+    ps.register_scheduled_task(
+        scratch_task,
+        program="cmd.exe",
+        arguments="/c exit",
+        principal=TaskPrincipal.system(),
+        settings=TaskSettings(allow_demand_start=False),
+    )
+    with pytest.raises(NativeCallError) as refused:
+        ps.start_scheduled_task(scratch_task)
+    excepinfo = cast("tuple[object, ...]", getattr(refused.value.__cause__, "excepinfo", ()))
+    assert len(excepinfo) == 6
+    assert cast("int", excepinfo[5]) & 0xFFFFFFFF == _SCHED_E_START_ON_DEMAND
+    time.sleep(2)  # a run that slipped through would have a last-run time by now
+    task = ps.get_scheduled_task("\\", task_name="pwshpy_test_task", strict=True).first()
+    assert task is not None
+    assert (task.last_run_time, task.last_task_result) == (None, None)
+    assert task.settings is not None
+    assert task.settings.allow_demand_start is False
+
+
+# SCHED_S_TASK_TERMINATED: the LastTaskResult of a run the scheduler ended (here at its time limit).
+_SCHED_S_TASK_TERMINATED = 0x00041306
+
+
+@pytest.mark.local_only
+@pytest.mark.mutating
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only scheduled-task mutation; skip off Windows")
+def test_execution_time_limit_ends_an_on_demand_run(scratch_task: str) -> None:
+    """[45] A 10 s limit ends a ~29 s on-demand run after about 10 s, with LastTaskResult 0x41306."""
+    from pwshpy.composition import build_ps
+
+    ps = build_ps()
+    ps.register_scheduled_task(
+        scratch_task,
+        program="cmd.exe",
+        arguments="/c ping -n 30 127.0.0.1",
+        principal=TaskPrincipal.system(),
+        settings=TaskSettings(execution_time_limit=timedelta(seconds=10)),
+    )
+    started = time.monotonic()
+    ps.start_scheduled_task(scratch_task)
+    task = ps.get_scheduled_task("\\", task_name="pwshpy_test_task", strict=True).first()
+    # Wait for the result too: the state can flip to Ready before LastTaskResult is written.
+    while (
+        task is not None
+        and (task.state is TaskState.RUNNING or task.last_task_result is None)
+        and time.monotonic() - started < 60
+    ):
+        time.sleep(0.5)
+        task = ps.get_scheduled_task("\\", task_name="pwshpy_test_task", strict=True).first()
+    elapsed = time.monotonic() - started
+    assert task is not None
+    assert task.state is not TaskState.RUNNING
+    assert task.last_task_result == _SCHED_S_TASK_TERMINATED
+    assert 9 <= elapsed < 20, elapsed  # the ping alone runs ~29 s
+    assert _pwsh_task_info("pwshpy_test_task")["LastTaskResult"] == _SCHED_S_TASK_TERMINATED

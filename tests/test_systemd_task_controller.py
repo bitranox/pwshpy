@@ -12,7 +12,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -20,9 +21,9 @@ import pytest
 
 from pwshpy.adapters.native.systemd_timers import SystemdScheduledTaskController, iter_timers
 from pwshpy.composition import build_ps
-from pwshpy.domain.enums import TaskState
-from pwshpy.domain.errors import NativeCallError
-from pwshpy.domain.scheduling import BootTrigger, DailyTrigger
+from pwshpy.domain.enums import TaskMultipleInstances, TaskState
+from pwshpy.domain.errors import NativeCallError, PlatformUnsupportedError
+from pwshpy.domain.scheduling import BootTrigger, DailyTrigger, OnceTrigger, TaskSettings, TaskTrigger
 
 _UNIT_DIR = Path("/etc/systemd/system")
 _ONDEMAND = "pwshpy-pytest-task"
@@ -224,3 +225,197 @@ def test_lookup_by_name_skips_a_system_service_but_finds_a_pwshpy_on_demand_task
 def test_lookup_by_name_of_no_task_is_empty() -> None:
     """[50] On real systemd, a name with no unit file is an empty answer (LoadUnit's not-found), strict too."""
     assert list(iter_timers(task_name="pwshpy-pytest-no-such-task", strict=True)) == []
+
+
+# --- [45] TaskSettings on real systemd -----------------------------------------
+
+#: The unit keys a TaskSettings can add; any other line of the unit is pwshpy's usual text.
+_SETTINGS_KEYS = ("ConditionACPower=", "RefuseManualStart=", "TimeoutStartSec=", "SendSIGKILL=")
+#: What an on-demand task reads back with no key written: systemd's own behaviour. An unset
+#: oneshot's TimeoutStartUSec is infinity (no limit); systemd never stops a run on battery and
+#: has no multiple-instances policy to report.
+_SYSTEMD_DEFAULTS = TaskSettings.model_construct(
+    allow_start_if_on_batteries=True,
+    stop_if_going_on_batteries=False,
+    execution_time_limit=timedelta(0),
+    multiple_instances=None,
+    allow_hard_terminate=True,
+    allow_demand_start=True,
+)
+#: A marker file the task's program creates, to see from outside that a run happened.
+_MARKER = Path("/run/pwshpy-pytest-marker")
+
+
+def _systemctl(*args: str) -> str:
+    """Run ``systemctl`` with fixed arguments; return its stdout."""
+    done = subprocess.run(  # noqa: S603 - fixed argv plus scratch unit names
+        ["systemctl", *args],  # noqa: S607
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    return done.stdout
+
+
+def _settings_lines(unit: str) -> list[str]:
+    """The TaskSettings keys of ``unit`` as systemd itself shows the loaded file (``systemctl cat``)."""
+    return [line for line in _systemctl("cat", unit).splitlines() if line.startswith(_SETTINGS_KEYS)]
+
+
+def _show(unit: str, prop: str) -> str:
+    return _systemctl("show", "-p", prop, "--value", unit).strip()
+
+
+@pytest.fixture
+def marker() -> Iterator[Path]:
+    """Yield the marker path, absent before and after the test."""
+    _MARKER.unlink(missing_ok=True)
+    try:
+        yield _MARKER
+    finally:
+        _MARKER.unlink(missing_ok=True)
+
+
+def _wait_for(predicate: Callable[[], bool], timeout: float) -> float:
+    """Poll ``predicate`` until it is true or ``timeout`` seconds pass; return the elapsed time."""
+    started = time.monotonic()
+    while not predicate() and time.monotonic() - started < timeout:
+        time.sleep(0.2)
+    return time.monotonic() - started
+
+
+@pytest.mark.parametrize(
+    ("settings", "keys", "effective"),
+    [
+        pytest.param(None, [], _SYSTEMD_DEFAULTS, id="none"),
+        pytest.param(TaskSettings(), [], _SYSTEMD_DEFAULTS, id="all-unset"),
+        pytest.param(
+            TaskSettings(
+                allow_start_if_on_batteries=True,
+                stop_if_going_on_batteries=False,
+                multiple_instances=TaskMultipleInstances.IGNORE_NEW,
+                allow_hard_terminate=True,
+                allow_demand_start=True,
+            ),
+            [],
+            _SYSTEMD_DEFAULTS,
+            id="systemd-already-behaves-so",
+        ),
+        pytest.param(
+            TaskSettings(
+                allow_start_if_on_batteries=False,
+                stop_if_going_on_batteries=False,
+                execution_time_limit=timedelta(seconds=90),
+                multiple_instances=TaskMultipleInstances.IGNORE_NEW,
+                allow_hard_terminate=False,
+                allow_demand_start=False,
+            ),
+            ["ConditionACPower=true", "RefuseManualStart=yes", "TimeoutStartSec=90", "SendSIGKILL=no"],
+            _SYSTEMD_DEFAULTS.model_copy(
+                update={
+                    "allow_start_if_on_batteries": False,
+                    "execution_time_limit": timedelta(seconds=90),
+                    "allow_hard_terminate": False,
+                    "allow_demand_start": False,
+                }
+            ),
+            id="every-key",
+        ),
+        pytest.param(
+            TaskSettings(execution_time_limit=timedelta(0)),
+            ["TimeoutStartSec=infinity"],
+            _SYSTEMD_DEFAULTS,
+            id="no-limit",
+        ),
+    ],
+)
+def test_register_settings_writes_exactly_their_keys_and_reads_them_back(
+    ondemand_task: str, settings: TaskSettings | None, keys: list[str], effective: TaskSettings
+) -> None:
+    """[45] systemd loads exactly the keys a setting needs (none when unset), and the task reads them back."""
+    info = build_ps().register_scheduled_task(ondemand_task, program="/bin/true", settings=settings)
+    assert _settings_lines(f"{ondemand_task}.service") == keys
+    assert info.settings == effective
+    looked_up = build_ps().get_scheduled_task(task_name=ondemand_task, strict=True).first()
+    assert looked_up is not None
+    assert looked_up.settings == effective
+
+
+def test_a_start_timeout_ends_a_longer_run(ondemand_task: str) -> None:
+    """[45] execution_time_limit=2 s ends a 30 s run after about 2 s, with Result=timeout."""
+    controller = SystemdScheduledTaskController()
+    controller.register(
+        ondemand_task,
+        program="/bin/sleep",
+        arguments="30",
+        settings=TaskSettings(execution_time_limit=timedelta(seconds=2)),
+    )
+    unit = f"{ondemand_task}.service"
+    controller.run(ondemand_task)
+    elapsed = _wait_for(lambda: _show(unit, "ActiveState") in {"failed", "inactive"}, 20)
+    assert (_show(unit, "ActiveState"), _show(unit, "Result")) == ("failed", "timeout")
+    assert elapsed < 10, elapsed  # the sleep alone runs 30 s
+
+
+def test_a_refused_manual_start_raises_while_the_timer_still_runs_the_task(ondemand_task: str, marker: Path) -> None:
+    """[45] allow_demand_start=False: start_scheduled_task raises NativeCallError; the trigger still fires."""
+    facade = build_ps()
+    at = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=8)
+    facade.register_scheduled_task(
+        ondemand_task,
+        program="/usr/bin/touch",
+        arguments=str(marker),
+        triggers=[OnceTrigger(at=at)],
+        settings=TaskSettings(allow_demand_start=False),
+    )
+    with pytest.raises(NativeCallError, match="refused"):
+        facade.start_scheduled_task(ondemand_task)
+    assert not marker.exists()  # the refused start ran nothing (the trigger is seconds away)
+    _wait_for(marker.exists, 30)
+    assert marker.exists(), "the once trigger did not run the task"
+
+
+def test_a_start_on_ac_power_runs_in_a_host_without_a_battery(ondemand_task: str, marker: Path) -> None:
+    """[45] allow_start_if_on_batteries=False (ConditionACPower=true) still runs where no battery is present."""
+    controller = SystemdScheduledTaskController()
+    controller.register(
+        ondemand_task,
+        program="/usr/bin/touch",
+        arguments=str(marker),
+        settings=TaskSettings(allow_start_if_on_batteries=False),
+    )
+    assert _settings_lines(f"{ondemand_task}.service") == ["ConditionACPower=true"]  # the condition is in force
+    controller.run(ondemand_task)
+    _wait_for(marker.exists, 15)
+    # The marker is the evidence the condition passed: ConditionResult is no witness, as a finished
+    # oneshot is unloaded and a fresh load reads it "no" (measured on CT 24001).
+    assert marker.exists()
+
+
+_IN_AN_HOUR = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)
+
+
+@pytest.mark.parametrize(
+    ("settings", "triggers"),
+    [
+        pytest.param(TaskSettings(stop_if_going_on_batteries=True), [], id="stop-on-battery"),
+        pytest.param(TaskSettings(multiple_instances=TaskMultipleInstances.QUEUE), [], id="queue"),
+        pytest.param(TaskSettings(multiple_instances=TaskMultipleInstances.PARALLEL), [], id="parallel"),
+        pytest.param(TaskSettings(multiple_instances=TaskMultipleInstances.STOP_EXISTING), [], id="stop-existing"),
+        pytest.param(
+            TaskSettings(multiple_instances=TaskMultipleInstances.IGNORE_NEW),
+            [DailyTrigger(at=_IN_AN_HOUR)],
+            id="ignore-new-daily",
+        ),
+    ],
+)
+def test_a_setting_without_a_systemd_analog_is_refused_and_writes_nothing(
+    ondemand_task: str, settings: TaskSettings, triggers: list[TaskTrigger]
+) -> None:
+    """[45] A value systemd has no key for raises PlatformUnsupportedError and leaves no unit behind."""
+    with pytest.raises(PlatformUnsupportedError):
+        build_ps().register_scheduled_task(ondemand_task, program="/bin/true", triggers=triggers, settings=settings)
+    for suffix in ("service", "timer"):
+        assert not (_UNIT_DIR / f"{ondemand_task}.{suffix}").exists()
+        assert _show(f"{ondemand_task}.{suffix}", "LoadState") == "not-found"

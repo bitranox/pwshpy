@@ -807,9 +807,10 @@ class Ps:
             settings: Battery, time-limit, multiple-instances, hard-terminate and demand-start
                 switches (:class:`TaskSettings`). None, like ``TaskSettings()`` or any field left
                 None, writes nothing, so the OS default applies (a start on demand stays allowed).
-                With ``allow_demand_start=False`` only the triggers start the task: on Linux
-                :meth:`start_scheduled_task` then raises :class:`NativeCallError` with systemd's
-                refusal. It is validated again here, so a record's read-back ``settings`` can be
+                With ``allow_demand_start=False`` only the triggers start the task, and
+                :meth:`start_scheduled_task` raises :class:`NativeCallError` and runs nothing: on
+                Windows it wraps Task Scheduler's SCHED_E_START_ON_DEMAND (0x80041328), on Linux
+                systemd's refusal. It is validated again here, so a record's read-back ``settings`` can be
                 passed on. Linux refuses a value systemd has no analog for (stopping a run on
                 battery, any multiple-instances policy but IgnoreNew, IgnoreNew with a daily
                 trigger).

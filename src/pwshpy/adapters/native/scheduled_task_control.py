@@ -259,7 +259,8 @@ def _apply_settings(definition: Any, settings: TaskSettings) -> None:
     if settings.stop_if_going_on_batteries is not None:
         com.StopIfGoingOnBatteries = settings.stop_if_going_on_batteries
     if settings.execution_time_limit is not None:
-        # PT{n}S; Windows stores it normalised (PT259200S reads back PT72H), PT0S = no limit.
+        # PT{n}S; Windows stores it normalised (measured): PT259200S reads back PT72H, never P3D,
+        # and as that is the default the task XML holds no ExecutionTimeLimit; PT0S = no limit.
         com.ExecutionTimeLimit = _iso_duration(settings.execution_time_limit)
     if settings.multiple_instances is not None:
         com.MultipleInstances = from_task_multiple_instances(settings.multiple_instances)

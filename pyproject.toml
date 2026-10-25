@@ -108,7 +108,7 @@ dev = [
   "textual>=8.2.8",
   "import-linter>=2.15",
   "rtoml>=0.14.0",
-  "httpx2>=2.13.1",
+  "httpx2>=2.14.0",
   # Registry subsystem: lib_registry (+ its fake_winreg backend) on every dev OS
   # so the hermetic registry tests run in CI on Linux/macOS/Windows alike.
   "lib_registry>=3.1.7",
@@ -359,4 +359,4 @@ ignores = ["E003"]
 
 [tool.uv]
 exclude-newer = "7 days"
-exclude-newer-package = {certifi = "2026-10-20T02:24:17Z", fake-winreg = false, lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, lib-registry = false, virtualenv = "2026-10-18T07:06:35Z"}
+exclude-newer-package = {certifi = "2026-10-20T02:24:17Z", fake-winreg = false, lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, lib-registry = false}

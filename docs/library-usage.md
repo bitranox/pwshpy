@@ -97,7 +97,7 @@ and `ps.download_file(url, dest)` (copies to disk in chunks, never buffering the
 ## Scheduled tasks: principal, run level and triggers
 
 `ps.register_scheduled_task(task_path, *, program, arguments="", description="", principal=None,
-triggers=())` creates (or replaces) a task that runs `program` with `arguments`. It is Task
+triggers=(), settings=None)` creates (or replaces) a task that runs `program` with `arguments`. It is Task
 Scheduler on Windows and a systemd `.service` plus, when there are triggers, a `.timer` on Linux.
 Registering needs admin on Windows and root on Linux. The inputs are frozen Pydantic models,
 exported from `pwshpy`, that refuse unknown keys:
@@ -114,6 +114,8 @@ exported from `pwshpy`, that refuse unknown keys:
   (1 to 365), `BootTrigger(delay=timedelta(0))` and `LogonTrigger(user_id=None)`; a task fires on
   any of them. Every `at` must be timezone-aware; a naive datetime is refused. `delay` counts whole
   seconds. An empty sequence means the task runs only on demand (`ps.start_scheduled_task`).
+- `settings` - a `TaskSettings` for batteries, the time limit, overlapping runs, hard terminate and
+  starts on demand; None (the default) keeps every OS default. See [Task settings](#task-settings).
 
 A daily trigger is written with a fixed UTC offset on both OSes: Linux converts `at` to UTC, and
 Windows stores it in the trigger's `StartBoundary` with the offset the `datetime` carries. On Linux
@@ -234,7 +236,8 @@ such a task over, remove its `.service` / `.timer` files under `/etc/systemd/sys
 timer at once when its offset has already passed.
 
 `register_scheduled_task` returns the task read back as a `ScheduledTaskInfo`, the same record
-`ps.get_scheduled_task()` yields. Its principal and run-information fields:
+`ps.get_scheduled_task()` yields. Its principal and run-information fields (its `settings` are
+described under [Task settings](#task-settings)):
 
 | Field              | Windows                                                                               | Linux                                                                                                |
 |--------------------|---------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
@@ -246,6 +249,121 @@ timer at once when its offset has already passed.
 
 `last_task_result` 0 means the last run succeeded. On Linux a registered calendar or boot task
 reads `Ready`, a disabled one `Disabled`, and an on-demand task `Ready` (`Running` while it runs).
+
+### Task settings
+
+`settings=TaskSettings(...)` decides how a task behaves around batteries, a run that takes too long,
+a start while a run is still active, and starts on demand. The field names follow PowerShell's
+`New-ScheduledTaskSettingsSet`. `TaskSettings` is a frozen Pydantic model exported from `pwshpy`
+that refuses unknown keys, and every field defaults to None. A None field writes nothing on either
+OS, so the OS default applies: `settings=None`, `TaskSettings()` and any field you leave out change
+nothing about the task pwshpy registered before this parameter existed.
+
+| Field                         | What it decides                                                                                                       |
+|-------------------------------|-----------------------------------------------------------------------------------------------------------------------|
+| `allow_start_if_on_batteries` | whether a run may start while the machine is on battery                                                               |
+| `stop_if_going_on_batteries`  | whether a running task is stopped when the machine switches to battery                                                |
+| `execution_time_limit`        | how long a run may last before it is stopped (a `timedelta` of whole seconds; `timedelta(0)` means no limit)          |
+| `multiple_instances`          | what a start does while a run is active (`TaskMultipleInstances`: `PARALLEL`, `QUEUE`, `IGNORE_NEW`, `STOP_EXISTING`) |
+| `allow_hard_terminate`        | whether a run that ignores a stop request may be killed                                                               |
+| `allow_demand_start`          | whether `ps.start_scheduled_task` may start the task besides its triggers (False is `-DisallowDemandStart`)           |
+
+A long unattended job that runs as SYSTEM, has no trigger and is started on demand:
+
+```python
+from datetime import timedelta
+
+from pwshpy import TaskMultipleInstances, TaskPrincipal, TaskSettings, ps
+
+task = ps.register_scheduled_task(
+    "\\Maintenance\\Repair",
+    program="C:\\Tools\\repair.exe",
+    principal=TaskPrincipal.system(),  # SYSTEM, elevated
+    settings=TaskSettings(
+        allow_start_if_on_batteries=True,  # a laptop on battery still starts it
+        stop_if_going_on_batteries=False,  # pulling the charger does not stop it
+        execution_time_limit=timedelta(hours=72),  # stopped after 72 hours; timedelta(0) = no limit
+        multiple_instances=TaskMultipleInstances.IGNORE_NEW,  # a start while it runs does nothing
+        allow_hard_terminate=True,  # a run that ignores the stop request is killed
+        allow_demand_start=True,  # ps.start_scheduled_task may start it
+    ),
+)
+ps.start_scheduled_task("\\Maintenance\\Repair")
+print(task.settings)  # the settings as the scheduler reads them back
+```
+
+Linux accepts the same `TaskSettings` for a task without a daily trigger. It writes only
+`TimeoutStartSec=259200` into the `.service`, because systemd already behaves the way the other
+five fields ask.
+
+How each field is written, and the Windows default it replaces (read from a fresh task, measured;
+`register_scheduled_task` writes `AllowDemandStart` in any case, see below):
+
+| Field                         | Windows (Task Scheduler)                                               | Windows default | Linux (systemd `.service`)                                                                                                   |
+|-------------------------------|------------------------------------------------------------------------|-----------------|------------------------------------------------------------------------------------------------------------------------------|
+| `allow_start_if_on_batteries` | `DisallowStartIfOnBatteries` = not the value                           | False           | False: `ConditionACPower=true` in `[Unit]`; True: nothing                                                                    |
+| `stop_if_going_on_batteries`  | `StopIfGoingOnBatteries`                                               | True            | False: nothing; True: `PlatformUnsupportedError`                                                                             |
+| `execution_time_limit`        | `ExecutionTimeLimit` as `PT<n>S` (0: `PT0S`, no limit)                 | 72 hours        | `TimeoutStartSec=<n>` in `[Service]` (0: `infinity`)                                                                         |
+| `multiple_instances`          | `MultipleInstances` (Parallel 0, Queue 1, IgnoreNew 2, StopExisting 3) | IgnoreNew       | IgnoreNew without a `DailyTrigger`: nothing; IgnoreNew with a `DailyTrigger`, or any other value: `PlatformUnsupportedError` |
+| `allow_hard_terminate`        | `AllowHardTerminate`                                                   | True            | False: `SendSIGKILL=no` in `[Service]`; True: nothing                                                                        |
+| `allow_demand_start`          | `AllowDemandStart`                                                     | True            | False: `RefuseManualStart=yes` in `[Unit]`; True: nothing                                                                    |
+
+On Windows `register_scheduled_task` always writes `Enabled=True` and `AllowDemandStart=True`, with
+or without `settings` (`AllowDemandStart` is False only when `allow_demand_start=False`); both are
+also Task Scheduler's defaults. `Enabled` is no `TaskSettings` field: it reads back as the record's
+`enabled`.
+
+`execution_time_limit` counts whole seconds. A negative value, a fraction of a second or more than
+2147483647 seconds (about 68 years) raises `pydantic.ValidationError` before anything is written.
+The cap comes from Task Scheduler, which refuses 2^31 to 2^32-1 seconds (0x80041318) and wraps a
+larger value modulo 2^32 (`PT4294967296S` is stored as `PT0S`, no limit), so a bigger value would
+silently mean something else; the same cap holds on Linux to keep one rule. Windows normalises what
+it stores: `PT259200S` reads back as `PT72H` and 90 seconds as `PT1M30S`. pwshpy hands back a
+`timedelta` either way, and the JSON and JSONL output (`--json`, `--jsonl`, `model_dump_json()`)
+spells it in ISO 8601 form: 72 hours is `P3D` and no limit `PT0S`. Task Scheduler's own tools show
+`PT72H` for the same value.
+
+On Linux:
+
+- `allow_start_if_on_batteries=False` writes `ConditionACPower=true`. systemd checks it when a run
+  starts and skips the run while the machine is on battery (from the systemd.unit(5)
+  documentation, not measured here). A machine that reports no power supply at all counts as on
+  AC power, so the run starts there (measured in a container).
+- `stop_if_going_on_batteries=True` is refused: systemd checks `ConditionACPower=` only at the start
+  and never stops a running unit when the power source changes.
+- `multiple_instances`: a start requested while the oneshot service runs joins the running start
+  job, so one run happens, which is IgnoreNew. systemd cannot run instances in parallel, queue them
+  or stop the running one, so `PARALLEL`, `QUEUE` and `STOP_EXISTING` are refused. IgnoreNew with a
+  `DailyTrigger` is refused too: when a run outlasts its day, the timer fires one catch-up run as
+  soon as it ends instead of skipping the missed day. Leave `multiple_instances` unset for a daily
+  task on Linux.
+- `execution_time_limit` becomes `TimeoutStartSec=`, because a oneshot service's start job lasts
+  the whole run: a run over the limit is ended with SIGTERM and `Result=timeout` (measured).
+- `allow_hard_terminate=False` writes `SendSIGKILL=no`. A process that ignores SIGTERM then survives
+  the stop, and while it lives every new start of the unit is refused with
+  `Result=resources` until it exits (measured). Use it only for a program that honours SIGTERM.
+
+Every refusal is a `PlatformUnsupportedError` raised before any unit is written.
+
+`allow_demand_start=False` leaves only the triggers to start the task. `ps.start_scheduled_task`
+then raises `NativeCallError` and runs nothing, on both OSes: on Windows it wraps Task Scheduler's
+`SCHED_E_START_ON_DEMAND` (0x80041328), on Linux systemd's refusal ("Operation refused, unit ...
+may be requested by dependency only"); on Linux the timer still starts the task, and
+`ps.stop_scheduled_task` still works. pwshpy does not refuse `allow_demand_start=False` without a
+trigger, but such a task can never run.
+
+The record's `settings` holds the effective values, OS defaults included; a field that cannot be
+read is None. The two OSes read back differently:
+
+| Field                        | Windows           | Linux                                                                                       |
+|------------------------------|-------------------|---------------------------------------------------------------------------------------------|
+| `multiple_instances`         | the stored policy | always None: a repeating timer's catch-up run after an overrun is none of the four policies |
+| `stop_if_going_on_batteries` | the stored value  | always False (systemd never stops a run on battery), also when the service cannot be loaded |
+| `execution_time_limit`       | the stored value  | read only for a `Type=oneshot` service (what pwshpy writes); None for any other type        |
+| a task that cannot be read   | every field None  | `stop_if_going_on_batteries` False and every other field None                               |
+
+Passing a record's read-back `settings` to another `register_scheduled_task` call works: they are
+validated again there.
 
 ### Listing tasks: skipped versus strict
 

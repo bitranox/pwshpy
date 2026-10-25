@@ -255,6 +255,11 @@ pwshpy get_windows_update --timeout 600 --jsonl
 pwshpy register_scheduled_task '\Maintenance\NightlyBackup' --program 'C:\Tools\backup.exe' \
     --run-as local_system --run-level highest --daily 2026-11-01T03:00:00+01:00 --at-boot
 
+# New-ScheduledTaskSettingsSet: start on battery, stop after 72 hours, ignore a start while it runs
+pwshpy register_scheduled_task '\Maintenance\Repair' --program 'C:\Tools\repair.exe' \
+    --run-as local_system --run-level highest --allow-start-if-on-batteries \
+    --execution-time-limit 72:00:00 --multiple-instances ignorenew
+
 # Stop-Service -NoWait: issue the stop and return at once (typically StopPending)
 pwshpy stop_service --no-wait wuauserv
 
@@ -280,7 +285,7 @@ The same in Python:
 ```python
 from datetime import datetime, timedelta, timezone
 
-from pwshpy import BootTrigger, DailyTrigger, KnownFolder, OperationTimeoutError, TaskPrincipal, ps
+from pwshpy import BootTrigger, DailyTrigger, KnownFolder, OperationTimeoutError, TaskPrincipal, TaskSettings, ps
 
 images = ps.get_windows_image("install.wim").to_list()  # typed WindowsImage records
 ps.stop_service("wuauserv", wait=False)  # returns the state right after the stop
@@ -293,6 +298,7 @@ ps.register_scheduled_task(
     program="C:\\Tools\\backup.exe",
     principal=TaskPrincipal.system(),  # SYSTEM, elevated
     triggers=[DailyTrigger(at=datetime(2026, 11, 1, 3, tzinfo=timezone(timedelta(hours=1)))), BootTrigger()],
+    settings=TaskSettings(allow_start_if_on_batteries=True, execution_time_limit=timedelta(hours=4)),
 )
 desktop = ps.get_known_folder(KnownFolder.DESKTOP)  # a Path, or None when there is no such folder
 if desktop is not None:  # Windows: the arguments are an argv list, stored with their quoting intact

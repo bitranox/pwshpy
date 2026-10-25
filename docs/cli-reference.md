@@ -225,29 +225,48 @@ success it prints `created shortcut PATH -> TARGET` (the target as Windows store
 with `--json` / `--jsonl` the stored record, the same one `get_shortcut` shows. Off Windows it exits
 1 with `PlatformUnsupportedError`.
 
-### `register_scheduled_task`: principal, run level and triggers
+### `register_scheduled_task`: principal, run level, triggers and settings
 
 `pwshpy register_scheduled_task TASK_PATH --program P [--arguments A] [--description D]` plus the
 options below. With no trigger option the task runs only on demand (`start_scheduled_task`); with
 several, it fires on any of them.
 
-| Option              | Meaning                                                                                                        |
-|---------------------|----------------------------------------------------------------------------------------------------------------|
-| `--run-as ID`       | a SID, a decimal uid (Linux), or a `WellKnownSid` name in any case (`local_system`); account names are refused |
-| `--run-level LEVEL` | `limited` (default) or `highest` (the elevated token; on Linux root only)                                      |
-| `--logon-type TYPE` | `interactivetoken`, `serviceaccount` or `s4u` (Windows only); by default it follows `--run-as`                 |
-| `--at TIME`         | run once at `TIME` (repeatable)                                                                                |
-| `--daily TIME`      | run daily at the time of day of `TIME` (repeatable); Windows starts on that date, Linux runs from today        |
-| `--every-days N`    | day interval for every `--daily` trigger (default 1; above 1 is Windows only)                                  |
-| `--at-boot`         | run at boot                                                                                                    |
-| `--boot-delay S`    | seconds after boot (with `--at-boot`)                                                                          |
-| `--at-logon`        | run at logon (Windows only)                                                                                    |
-| `--logon-user SID`  | whose logon triggers the task (with `--at-logon`; default any user)                                            |
+| Option                                                               | Meaning                                                                                                                                                      |
+|----------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--run-as ID`                                                        | a SID, a decimal uid (Linux), or a `WellKnownSid` name in any case (`local_system`); account names are refused                                               |
+| `--run-level LEVEL`                                                  | `limited` (default) or `highest` (the elevated token; on Linux root only)                                                                                    |
+| `--logon-type TYPE`                                                  | `interactivetoken`, `serviceaccount` or `s4u` (Windows only); by default it follows `--run-as`                                                               |
+| `--at TIME`                                                          | run once at `TIME` (repeatable)                                                                                                                              |
+| `--daily TIME`                                                       | run daily at the time of day of `TIME` (repeatable); Windows starts on that date, Linux runs from today                                                      |
+| `--every-days N`                                                     | day interval for every `--daily` trigger (default 1; above 1 is Windows only)                                                                                |
+| `--at-boot`                                                          | run at boot                                                                                                                                                  |
+| `--boot-delay S`                                                     | seconds after boot (with `--at-boot`)                                                                                                                        |
+| `--at-logon`                                                         | run at logon (Windows only)                                                                                                                                  |
+| `--logon-user SID`                                                   | whose logon triggers the task (with `--at-logon`; default any user)                                                                                          |
+| `--allow-start-if-on-batteries` / `--disallow-start-if-on-batteries` | whether a run may start on battery power                                                                                                                     |
+| `--stop-if-going-on-batteries` / `--dont-stop-if-going-on-batteries` | whether a running task is stopped when the machine switches to battery; Linux refuses the first form                                                         |
+| `--execution-time-limit LIMIT`                                       | the longest a run may last: whole seconds (`259200`) or `HH:MM:SS` (`72:00:00`, hours may pass 23); `0` means no limit                                       |
+| `--multiple-instances POLICY`                                        | what a start does while a run is active: `parallel`, `queue`, `ignorenew` or `stopexisting` (any case); Linux takes only `ignorenew`, and not with `--daily` |
+| `--allow-hard-terminate` / `--disallow-hard-terminate`               | whether a run that ignores a stop request may be killed                                                                                                      |
+| `--allow-demand-start` / `--disallow-demand-start`                   | whether `start_scheduled_task` may start the task besides its triggers                                                                                       |
 
 `TIME` is ISO 8601 with a UTC offset: `2026-11-01T03:00:00+01:00`, or a trailing `Z` for UTC. A
 time without an offset is refused, because the same text would fire at a different instant on a
 machine in another zone. Without `--run-as` the task runs as the interactive caller on Windows and
 as root on Linux.
+
+The six settings flags are the CLI form of `TaskSettings` (the names follow PowerShell's
+`New-ScheduledTaskSettingsSet`). A flag you leave out writes nothing, so the OS default applies;
+with none of them the task is registered exactly as without settings. `--execution-time-limit`
+takes at most 2147483647 seconds (`596523:14:07`): Task Scheduler wraps a longer limit modulo
+2^32 seconds, so it would silently mean something else. Windows stores the limit in its own form
+(`72:00:00` is `PT72H`), and `get_scheduled_task --json` / `--jsonl` print it in ISO 8601 form
+(`P3D`; `PT0S` for no limit). With `--disallow-demand-start` only the triggers start the task:
+`start_scheduled_task` exits 1 with a `NativeCallError` line on both OSes (Task Scheduler's
+0x80041328 SCHED_E_START_ON_DEMAND on Windows, systemd's "Operation refused" on Linux), and a task
+with no trigger can then never run. On Linux `--disallow-hard-terminate` writes `SendSIGKILL=no`: a
+program that ignores SIGTERM survives `stop_scheduled_task` and blocks every new start until it
+exits.
 
 ```bash
 # Windows: SYSTEM, elevated, nightly at 03:00 +01:00 and five minutes after each boot
@@ -258,17 +277,29 @@ pwshpy register_scheduled_task '\Maintenance\NightlyBackup' --program 'C:\Tools\
 # Linux: uid 1000, nightly at 02:00 UTC (a systemd .service plus an enabled, started .timer)
 pwshpy register_scheduled_task nightly-backup --program /usr/local/bin/backup \
     --arguments=--full --run-as 1000 --daily 2026-11-01T02:00:00Z
+
+# Windows: a SYSTEM job started on demand that may run on battery for up to 72 hours,
+# ignores a second start while it runs, and may be killed if it ignores a stop
+pwshpy register_scheduled_task '\Maintenance\Repair' --program 'C:\Tools\repair.exe' \
+    --run-as local_system --run-level highest \
+    --allow-start-if-on-batteries --dont-stop-if-going-on-batteries \
+    --execution-time-limit 72:00:00 --multiple-instances ignorenew \
+    --allow-hard-terminate --allow-demand-start
 ```
 
 Exit codes: a malformed option exits 2 with a usage error before anything is registered - an
-account name for `--run-as`, an unparseable or offset-less time, a negative `--boot-delay`, or a
+account name for `--run-as`, an unparseable or offset-less time, a negative `--boot-delay`, a
 modifier without its trigger (`--every-days` without `--daily`, `--boot-delay` without `--at-boot`,
-`--logon-user` without `--at-logon`). A refusal from the OS backend exits 1 with one
+`--logon-user` without `--at-logon`), or an `--execution-time-limit` that is neither form or exceeds
+2147483647 seconds. A refusal from the OS backend exits 1 with one
 `ErrorName: message` line on stderr and no traceback. For example, on Linux a SID for `--run-as`,
 any `--logon-type`, `--run-level highest` with a non-root uid, a logon trigger, `--every-days` above
-1, or boot and calendar triggers in one task; on Windows a uid, a group SID such as
+1, boot and calendar triggers in one task, `--stop-if-going-on-batteries`, a `--multiple-instances`
+other than `ignorenew`, or `ignorenew` together with `--daily` (each a `PlatformUnsupportedError`,
+raised before any unit is written); on Windows a uid, a group SID such as
 `--run-as administrators`, or a logon type that does not fit `--run-as`. The full per-OS mapping and the fields the task reads back are in
-[Library & Pipeline](library-usage.md#scheduled-tasks-principal-run-level-and-triggers).
+[Library & Pipeline](library-usage.md#scheduled-tasks-principal-run-level-and-triggers), and the
+settings in [Task settings](library-usage.md#task-settings).
 
 ## Power-tool commands
 

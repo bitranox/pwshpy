@@ -569,7 +569,8 @@ def _settings(
     "--multiple-instances",
     type=click.Choice([e.value for e in TaskMultipleInstances], case_sensitive=False),
     default=None,
-    help="What a start does while a run is active; Linux supports only IgnoreNew. Default: the OS default.",
+    help="What a start does while a run is active; Linux supports only IgnoreNew, and refuses it together "
+    "with --daily. Default: the OS default.",
 )
 @option(
     "--allow-hard-terminate/--disallow-hard-terminate",

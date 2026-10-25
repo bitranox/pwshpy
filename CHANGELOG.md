@@ -6,6 +6,28 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `register_scheduled_task(..., settings=TaskSettings(...))` / CLI settings flags (Windows and
+  Linux): set how a task behaves around batteries, a run that takes too long, a start while a run
+  is active, and starts on demand. `TaskSettings` has six fields named after
+  `New-ScheduledTaskSettingsSet`: `allow_start_if_on_batteries`, `stop_if_going_on_batteries`,
+  `execution_time_limit` (a `timedelta` of whole seconds, `timedelta(0)` = no limit, at most
+  2147483647 seconds), `multiple_instances` (`TaskMultipleInstances`: `PARALLEL`, `QUEUE`,
+  `IGNORE_NEW`, `STOP_EXISTING`), `allow_hard_terminate` and `allow_demand_start`. Every field
+  defaults to None, which writes nothing and keeps the OS default, so existing calls register the
+  same task as before. CLI: `--allow-start-if-on-batteries` / `--disallow-start-if-on-batteries`,
+  `--stop-if-going-on-batteries` / `--dont-stop-if-going-on-batteries`,
+  `--execution-time-limit` (seconds or `HH:MM:SS`), `--multiple-instances`,
+  `--allow-hard-terminate` / `--disallow-hard-terminate`, `--allow-demand-start` /
+  `--disallow-demand-start`. On Windows they become the task's Task Scheduler settings; on Linux
+  `ConditionACPower=true`, `TimeoutStartSec=`, `SendSIGKILL=no` and `RefuseManualStart=yes` in the
+  `.service`. Linux raises `PlatformUnsupportedError`, before writing anything, for what systemd
+  cannot do: stopping a run when the machine goes on battery, any `multiple_instances` but
+  `IGNORE_NEW`, and `IGNORE_NEW` together with a daily trigger. `ScheduledTaskInfo.settings` reads
+  the effective values back on both systems. With `allow_demand_start=False`,
+  `start_scheduled_task` raises `NativeCallError` and only the triggers start the task.
+
 ## [1.7.0] 2026-10-24 23:57:13
 
 ### Added

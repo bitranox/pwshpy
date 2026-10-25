@@ -23,6 +23,12 @@ The portable counterpart to the Task Scheduler adapter. On systemd a scheduled t
 * **principals** are a decimal uid (``User=``) or SYSTEM / none (root: a system unit's
   default); a Windows SID, a logon type or HIGHEST for a non-root uid has no Linux meaning and
   is refused. Read back, ``user_id`` is the triggered service's ``User=`` as a decimal uid.
+* **settings** (:class:`TaskSettings`) become keys of the ``.service``: ``ConditionACPower=true``
+  (no start on battery), ``TimeoutStartSec=`` (the time limit; a oneshot's start job lasts the
+  whole run) and ``SendSIGKILL=no`` (no hard terminate). A value systemd has no key for is refused
+  (:func:`check_settings`); a None field writes nothing. Read back, each record carries the
+  effective values from the triggered service, each field unknown (None) on its own when its
+  property cannot be read.
 
 Shared D-Bus plumbing lives in :mod:`.systemd_dbus`. Mutation writes unit files under
 ``/etc/systemd/system`` (needs root, like the Windows verbs need admin) and never touches a
@@ -35,6 +41,8 @@ Contents:
     * :func:`usec_to_datetime` / :func:`service_last_result` / :func:`latest_usec` - pure run-info
       mappers.
     * :func:`service_user_id` - a service's ``User=`` as a decimal uid.
+    * :func:`battery_start_allowed` / :func:`start_time_limit` - pure settings read-back mappers.
+    * :func:`check_settings` - refuse the :class:`TaskSettings` values systemd has no key for.
     * :func:`service_unit` / :func:`timer_unit` / :func:`linux_user` / :func:`arms_on_register` -
       pure unit-file rendering and register policy.
     * :func:`iter_timers` - stream the ``.timer`` units as records.
@@ -56,10 +64,10 @@ from typing import Any, NamedTuple, cast
 from pydantic import ValidationError
 
 from ... import __init__conf__
-from ...domain.enums import TaskRunLevel, TaskState, WellKnownSid
+from ...domain.enums import TaskMultipleInstances, TaskRunLevel, TaskState, WellKnownSid
 from ...domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
-from ...domain.scheduling import BootTrigger, DailyTrigger, OnceTrigger, TaskPrincipal, TaskTrigger
+from ...domain.scheduling import BootTrigger, DailyTrigger, OnceTrigger, TaskPrincipal, TaskSettings, TaskTrigger
 from . import systemd_dbus as _dbus
 from .marshal import skip_or_raise
 from .systemd_dbus import ActiveState, LoadState, UnitFileState
@@ -313,6 +321,114 @@ def _service_user(bus: _dbus.Bus, service_path: str | None) -> str:
     return service_user_id(None if configured is None else str(configured))
 
 
+#: The spellings systemd's parse_boolean reads as true, case-insensitively (src/basic/parse-util.c), so
+#: a hand-written ``ConditionACPower=yes`` reads like the ``true`` pwshpy writes.
+_SYSTEMD_TRUE = frozenset({"1", "yes", "y", "true", "t", "on"})
+
+
+def _is_struct(entry: object, kinds: tuple[type, ...]) -> bool:
+    """Whether ``entry`` is a D-Bus struct (a tuple) whose fields have exactly the types ``kinds``."""
+    if not isinstance(entry, tuple):
+        return False
+    fields = cast("tuple[object, ...]", entry)
+    return len(fields) == len(kinds) and all(type(f) is k for f, k in zip(fields, kinds, strict=True))
+
+
+def battery_start_allowed(conditions: object) -> bool | None:
+    """``allow_start_if_on_batteries`` from a unit's ``Conditions`` property (D-Bus ``a(sbbsi)``).
+
+    False when an entry is ``ConditionACPower=true`` as written - not a triggering (``|``) and not
+    a negated (``!``) condition - because then a run starts only on AC power; True otherwise. Each
+    entry is (type, trigger, negate, parameter, state); the state and the unit's
+    ``ConditionResult`` are never read: both read "no" after a oneshot finishes whether it ran or
+    was skipped (measured on systemd 259).
+
+    Args:
+        conditions: The property value, or None when it could not be read.
+
+    Returns:
+        The effective value, or None when ``conditions`` is unreadable or not an ``a(sbbsi)``.
+
+    Example:
+        >>> battery_start_allowed([("ConditionACPower", False, False, "true", 0)]), battery_start_allowed([])
+        (False, True)
+        >>> battery_start_allowed(None) is None
+        True
+    """
+    if not isinstance(conditions, list):
+        return None
+    entries = cast("list[object]", conditions)
+    if not all(_is_struct(entry, (str, bool, bool, str, int)) for entry in entries):
+        return None
+    for entry in cast("list[tuple[str, bool, bool, str, int]]", entries):
+        kind, trigger, negate, parameter, _state = entry
+        if kind == "ConditionACPower" and not trigger and not negate and _is_systemd_true(parameter):
+            return False
+    return True
+
+
+def _is_systemd_true(text: str) -> bool:
+    return text.lower() in _SYSTEMD_TRUE
+
+
+def start_time_limit(service_type: object, timeout_start_usec: object) -> timedelta | None:
+    """``execution_time_limit`` from a service's ``Type`` and ``TimeoutStartUSec`` (D-Bus ``s``, ``t``).
+
+    Only a ``Type=oneshot`` service's start job lasts the whole run, so only there does the start
+    timeout bound the run (measured on 259: ``TimeoutStartSec=2`` ends a 30 s oneshot with
+    Result=timeout); for any other type it bounds only the start, and the run limit is unknown.
+    ``UINT64_MAX`` - what ``infinity``, ``0`` and an unset oneshot all read - is ``timedelta(0)``,
+    no limit. The microseconds are kept as systemd holds them, a fraction included.
+
+    Args:
+        service_type: The ``Type`` property, or None when it could not be read.
+        timeout_start_usec: The ``TimeoutStartUSec`` property, or None when it could not be read.
+
+    Returns:
+        The limit, or None when either value is unreadable, has the wrong type, or the service is
+        no oneshot.
+
+    Example:
+        >>> start_time_limit("oneshot", 2**64 - 1), start_time_limit("oneshot", 2_000_000)
+        (datetime.timedelta(0), datetime.timedelta(seconds=2))
+        >>> start_time_limit("simple", 90_000_000) is None
+        True
+    """
+    if service_type != "oneshot" or type(timeout_start_usec) is not int:
+        return None
+    if timeout_start_usec == _USEC_INFINITY:
+        return timedelta(0)
+    return timedelta(microseconds=timeout_start_usec)
+
+
+def _service_settings(bus: _dbus.Bus, service_path: str | None) -> TaskSettings:
+    """The effective :class:`TaskSettings` of the service at ``service_path`` (None: nothing readable).
+
+    Each field degrades to None on its own when its property cannot be read; the task is kept.
+    ``stop_if_going_on_batteries`` is always False: systemd never stops a running unit when the
+    power source changes. ``multiple_instances`` is None: a repeating timer's catch-up run after an
+    overrun (measured on 259) is none of the four policies. ``TimeoutStartUSec`` is read only for a
+    oneshot (:func:`start_time_limit`), saving the read where it would mean nothing.
+    """
+
+    def read(prop: str, interface: str = _dbus.SERVICE_IFACE) -> object:
+        return cast("object", _dbus.path_property(bus, service_path, prop, None, interface=interface))
+
+    service_type = read("Type")
+    send_sigkill = read("SendSIGKILL")
+    # model_construct: these are systemd's values, not a caller's; the input bounds describe what
+    # register writes, not every value a hand-written unit can hold.
+    return TaskSettings.model_construct(
+        allow_start_if_on_batteries=battery_start_allowed(read("Conditions", _dbus.UNIT_IFACE)),
+        stop_if_going_on_batteries=False,
+        execution_time_limit=start_time_limit(
+            service_type, read("TimeoutStartUSec") if service_type == "oneshot" else None
+        ),
+        multiple_instances=None,
+        allow_hard_terminate=send_sigkill if isinstance(send_sigkill, bool) else None,
+    )
+
+
 def _timer_property(bus: _dbus.Bus, timer_path: str | None, prop: str) -> int:
     """One ``Timer`` USec property as an int (0 - "none" - when the timer is not loaded)."""
     return int(_dbus.path_property(bus, timer_path, prop, 0, interface=_dbus.TIMER_IFACE))
@@ -348,6 +464,7 @@ class _RunInfo(NamedTuple):
     last_task_result: int | None
     next_run_time: datetime | None
     user_id: str
+    settings: TaskSettings
 
 
 def _timer_run_info(bus: _dbus.Bus, timer_path: str | None, base: str) -> _RunInfo:
@@ -363,6 +480,7 @@ def _timer_run_info(bus: _dbus.Bus, timer_path: str | None, base: str) -> _RunIn
     ``ExecMainStartTimestamp``: an on-demand start (``run``) never moves the trigger time but is
     a run, as Windows' LastRunTime counts Start-ScheduledTask; the trigger stays in the max so a
     ``Persistent=`` trigger that survived a reboot (which clears the service's start) still shows.
+    The settings are the service's too: the timer only decides when it starts.
     """
     service = str(_dbus.path_property(bus, timer_path, "Unit", f"{base}.service", interface=_dbus.TIMER_IFACE))
     service_path = _dbus.load_unit_path(bus, service)
@@ -372,6 +490,7 @@ def _timer_run_info(bus: _dbus.Bus, timer_path: str | None, base: str) -> _RunIn
         last_task_result=result,
         next_run_time=usec_to_datetime(_timer_property(bus, timer_path, "NextElapseUSecRealtime")),
         user_id=_service_user(bus, service_path),
+        settings=_service_settings(bus, service_path),
     )
 
 
@@ -408,6 +527,7 @@ def _timer_task(
         last_run_time=run.last_run_time,
         last_task_result=run.last_task_result,
         next_run_time=run.next_run_time,
+        settings=run.settings,
     )
 
 
@@ -430,6 +550,7 @@ def _service_task(bus: _dbus.Bus, base: str, path: str | None) -> ScheduledTaskI
         last_run_time=usec_to_datetime(started),  # no timer: the last run is the service's own last start
         last_task_result=result,
         next_run_time=None,  # on demand: nothing is scheduled
+        settings=_service_settings(bus, path),
     )
 
 
@@ -862,15 +983,87 @@ def _exec_program(program: str) -> str:
     return '"' + program.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def service_unit(program: str, arguments: str, description: str, *, user: str | None = None) -> str:
+def check_settings(settings: TaskSettings | None, triggers: Sequence[TaskTrigger]) -> None:
+    """Refuse a :class:`TaskSettings` value systemd has no key for, given the task's ``triggers``.
+
+    Accepted, and written as nothing because systemd already behaves so: a start allowed on
+    battery, no stop when going on battery, hard terminate allowed, and IgnoreNew for a task
+    without a daily trigger - a start requested while the oneshot runs joins the running start
+    job, so one run happens (measured on 259 for StartUnit); a once or boot timer does not repeat,
+    so no catch-up run can follow an overrun.
+
+    Raises:
+        PlatformUnsupportedError: ``stop_if_going_on_batteries`` is True, ``multiple_instances``
+            is anything but IgnoreNew, or it is IgnoreNew and ``triggers`` hold a daily trigger.
+
+    Example:
+        >>> check_settings(TaskSettings(stop_if_going_on_batteries=True), ())
+        Traceback (most recent call last):
+        ...
+        pwshpy.domain.errors.PlatformUnsupportedError: stop_if_going_on_batteries=True has no systemd analog ...
+    """
+    if settings is None:
+        return
+    if settings.stop_if_going_on_batteries:
+        raise PlatformUnsupportedError(
+            "stop_if_going_on_batteries=True has no systemd analog on Linux: ConditionACPower= is "
+            "checked only when a run starts, and systemd never stops a running unit when the power "
+            "source changes."
+        )
+    policy = settings.multiple_instances
+    if policy is None:
+        return
+    if policy is not TaskMultipleInstances.IGNORE_NEW:
+        raise PlatformUnsupportedError(
+            f"multiple_instances={policy.value} has no systemd analog on Linux: a start requested "
+            "while the task runs joins the running start job (one run, as IgnoreNew); systemd "
+            "cannot run instances in parallel, queue them or stop the running one for a new start."
+        )
+    if any(isinstance(trigger, DailyTrigger) for trigger in triggers):
+        raise PlatformUnsupportedError(
+            "multiple_instances=IgnoreNew has no systemd analog for a daily trigger on Linux: when a "
+            "run outlasts its day, the timer fires one catch-up run as soon as it ends instead of "
+            "skipping the missed day. Leave multiple_instances unset for a daily task."
+        )
+
+
+def _settings_keys(settings: TaskSettings | None) -> tuple[str, str]:
+    """The [Unit] and the [Service] lines ``settings`` add; empty for each field systemd already matches."""
+    if settings is None:
+        return "", ""
+    unit = "ConditionACPower=true\n" if settings.allow_start_if_on_batteries is False else ""
+    service = ""
+    limit = settings.execution_time_limit
+    if limit is not None:
+        # Whole seconds (TaskSettings refuses a fraction); a oneshot's start job lasts the whole run,
+        # so TimeoutStartSec bounds it. Never RuntimeMaxSec: no effect on a oneshot (measured, 259).
+        seconds = int(limit.total_seconds())
+        service += f"TimeoutStartSec={seconds if seconds else 'infinity'}\n"
+    if settings.allow_hard_terminate is False:
+        service += "SendSIGKILL=no\n"
+    return unit, service
+
+
+def service_unit(
+    program: str,
+    arguments: str,
+    description: str,
+    *,
+    user: str | None = None,
+    settings: TaskSettings | None = None,
+) -> str:
     """The unit-file text for a oneshot ``.service`` (the exec action), run as ``user`` if given.
 
     ``program`` is one quoted word (:func:`_exec_program`); ``arguments`` follow it as written, so
     systemd splits and unquotes them with its own rules and expands ``$VAR``, as documented.
+    ``settings`` add their keys after the existing lines of their section (:func:`check_settings`
+    with no triggers refuses what has no key, so no value is dropped silently); a None field, or
+    None for all, adds nothing.
 
     Raises:
         ConfigurationError: ``program``, ``arguments`` or ``description`` holds a line break or
             another control character, or ``program`` is empty or starts with an ExecStart= prefix.
+        PlatformUnsupportedError: a setting has no systemd key (:func:`check_settings`).
 
     Example:
         >>> "User=1000" in service_unit("/bin/true", "", "d", user="1000")
@@ -878,17 +1071,21 @@ def service_unit(program: str, arguments: str, description: str, *, user: str | 
         >>> 'ExecStart="/usr/bin/date" +%%Y' in service_unit("/usr/bin/date", "+%Y", "")
         True
     """
+    check_settings(settings, ())
     program = _exec_program(program)
     arguments = _unit_value(arguments, "arguments")
     exec_line = program if not arguments else f"{program} {arguments}"
     user_line = f"User={user}\n" if user is not None else ""
-    return f"{_unit_head(description)}[Service]\nType=oneshot\n{user_line}ExecStart={exec_line}\n"
+    unit_keys, service_keys = _settings_keys(settings)
+    return (
+        f"{_unit_head(description, unit_keys)}[Service]\nType=oneshot\n{user_line}ExecStart={exec_line}\n{service_keys}"
+    )
 
 
-def _unit_head(description: str) -> str:
-    """The [Unit] section every unit pwshpy writes: its description and the ownership key."""
+def _unit_head(description: str, extra: str = "") -> str:
+    """The [Unit] section every unit pwshpy writes: its description, the ownership key, then ``extra`` lines."""
     described = _unit_value(description, "description") or "pwshpy task"
-    return f"[Unit]\nDescription={described}\n{OWNERSHIP_KEY}={__init__conf__.version}\n\n"
+    return f"[Unit]\nDescription={described}\n{OWNERSHIP_KEY}={__init__conf__.version}\n{extra}\n"
 
 
 def is_pwshpy_unit(text: str) -> bool:
@@ -1084,6 +1281,7 @@ class SystemdScheduledTaskController:
         description: str = "",
         principal: TaskPrincipal | None = None,
         triggers: Sequence[TaskTrigger] = (),
+        settings: TaskSettings | None = None,
     ) -> ScheduledTaskInfo:
         """Create a oneshot ``.service`` and, with triggers, an enabled ``.timer``; return the task.
 
@@ -1100,13 +1298,17 @@ class SystemdScheduledTaskController:
             description: The units' ``Description=``.
             principal: Who the task runs as; None or SYSTEM is root, a decimal uid is ``User=``.
             triggers: When the task fires; empty means on demand only.
+            settings: Battery, time-limit, multiple-instances and hard-terminate switches, written
+                as keys of the ``.service``; only a set field that differs from systemd's own
+                behaviour adds a key, so None (or ``TaskSettings()``) writes the unit as before.
 
         Returns:
-            The registered task, read back.
+            The registered task, read back, its effective settings included.
 
         Raises:
-            PlatformUnsupportedError: the principal or a trigger has no systemd analog
-                (:func:`linux_user`, :func:`timer_unit`, :func:`arms_on_register`).
+            PlatformUnsupportedError: the principal, a trigger or a setting has no systemd analog
+                (:func:`linux_user`, :func:`timer_unit`, :func:`arms_on_register`,
+                :func:`check_settings`).
             ConfigurationError: ``task_path`` is no valid systemd unit name (:func:`unit_base`), or
                 ``program``, ``arguments`` or ``description`` holds a line break.
             NativeCallError: a unit of the same name exists that pwshpy did not write, a unit file
@@ -1122,7 +1324,10 @@ class SystemdScheduledTaskController:
         """
         base = unit_base(task_path)
         # Validate and render everything first: a refusal must not leave a half-written task or cost a bus.
-        service_text = service_unit(program, arguments, description, user=linux_user(principal or TaskPrincipal()))
+        check_settings(settings, triggers)  # the daily-trigger rule needs the triggers service_unit lacks
+        service_text = service_unit(
+            program, arguments, description, user=linux_user(principal or TaskPrincipal()), settings=settings
+        )
         timer_text = timer_unit(base, description, triggers) if triggers else None
         arm_now = arms_on_register(triggers)
         timer = f"{base}.timer"
@@ -1321,6 +1526,8 @@ __all__ = [
     "arms_on_register",
     "OWNERSHIP_KEY",
     "base_name",
+    "battery_start_allowed",
+    "check_settings",
     "existing_unit_base",
     "is_pwshpy_unit",
     "iter_timers",
@@ -1330,6 +1537,7 @@ __all__ = [
     "service_task_state",
     "service_unit",
     "service_user_id",
+    "start_time_limit",
     "starts_when_armed",
     "TimerBase",
     "timer_enabled",

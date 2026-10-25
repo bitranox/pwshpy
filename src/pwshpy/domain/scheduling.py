@@ -39,7 +39,10 @@ _SERVICE_SIDS = frozenset(
 # extra="forbid": these are user-supplied inputs, and a silently dropped misspelt key widens
 # the task (LogonTrigger "user" instead of "user_id" would mean "any user logs on").
 _INPUT_CONFIG = ConfigDict(frozen=True, extra="forbid")
-# The largest execution time limit both backends store faithfully (signed 32-bit seconds).
+# The largest execution time limit Task Scheduler stores faithfully: it refuses 2**31..2**32-1 s
+# (0x80041318) and wraps 2**32 s to PT0S (measured, Windows 11). The cap is Windows-driven: systemd
+# holds TimeoutStartUSec as a uint64 of microseconds (D-Bus type "t"; read back with busctl on 259),
+# far beyond it. One cap on both OSes keeps one validation rule.
 _MAX_EXECUTION_TIME_LIMIT = timedelta(seconds=2147483647)
 
 

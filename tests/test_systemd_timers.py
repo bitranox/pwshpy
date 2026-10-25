@@ -17,6 +17,7 @@ import pytest
 from elevation_doubles import RUNNING_AS_ROOT
 from systemd_fake_bus import Address, FakeConn, FakeCore, use_bus
 
+from pwshpy import __init__conf__
 from pwshpy.adapters.native import systemd_dbus, systemd_timers
 from pwshpy.adapters.native.systemd_dbus import ActiveState, UnitFileState
 from pwshpy.adapters.native.systemd_timers import (
@@ -24,12 +25,15 @@ from pwshpy.adapters.native.systemd_timers import (
     TimerBase,
     arms_on_register,
     base_name,
+    battery_start_allowed,
+    check_settings,
     iter_timers,
     linux_user,
     service_last_result,
     service_task_state,
     service_unit,
     service_user_id,
+    start_time_limit,
     starts_when_armed,
     timer_enabled,
     timer_task_state,
@@ -38,7 +42,7 @@ from pwshpy.adapters.native.systemd_timers import (
     unit_base,
     usec_to_datetime,
 )
-from pwshpy.domain.enums import TaskLogonType, TaskRunLevel, TaskState
+from pwshpy.domain.enums import TaskLogonType, TaskMultipleInstances, TaskRunLevel, TaskState
 from pwshpy.domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError
 from pwshpy.domain.records import ScheduledTaskInfo
 from pwshpy.domain.scheduling import (
@@ -47,6 +51,7 @@ from pwshpy.domain.scheduling import (
     LogonTrigger,
     OnceTrigger,
     TaskPrincipal,
+    TaskSettings,
     TaskTrigger,
 )
 
@@ -1934,3 +1939,406 @@ def test_lookup_by_name_refuses_what_names_no_single_task_before_the_bus(
     with pytest.raises(ConfigurationError, match=match):
         list(iter_timers(task_name=task_name))
     assert conn.methods == []
+
+
+# --- [45] TaskSettings: unit keys written on register, refusals, effective values read back
+
+_UINT64_MAX = 2**64 - 1
+_UNIT = systemd_dbus.UNIT_IFACE
+
+#: service_unit's output before [45] for these arguments; settings=None / TaskSettings() must keep it.
+_PLAIN_SERVICE = (
+    f"[Unit]\nDescription=nightly\n{systemd_timers.OWNERSHIP_KEY}={__init__conf__.version}\n\n"
+    '[Service]\nType=oneshot\nUser=1000\nExecStart="/usr/bin/backup" --all\n'
+)
+
+
+def _rendered(settings: TaskSettings | None) -> str:
+    return service_unit("/usr/bin/backup", "--all", "nightly", user="1000", settings=settings)
+
+
+def _sections(text: str) -> dict[str, list[str]]:
+    """Each [Section] of a unit file with its lines."""
+    found: dict[str, list[str]] = {}
+    current = ""
+    for line in text.splitlines():
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1]
+            found[current] = []
+        elif line:
+            found[current].append(line)
+    return found
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "settings",
+    [
+        None,
+        TaskSettings(),
+        TaskSettings(allow_start_if_on_batteries=True),
+        TaskSettings(stop_if_going_on_batteries=False),
+        TaskSettings(multiple_instances=TaskMultipleInstances.IGNORE_NEW),
+        TaskSettings(allow_hard_terminate=True),
+    ],
+    ids=["none", "empty", "allow-battery-start", "no-stop-on-battery", "ignore-new", "hard-terminate"],
+)
+def test_service_unit_writes_nothing_for_unset_or_default_settings(settings: TaskSettings | None) -> None:
+    """A None field, and a value systemd already has, add no key: the text is byte-identical to before."""
+    assert _rendered(settings) == _PLAIN_SERVICE
+
+
+@pytest.mark.os_agnostic
+def test_service_unit_renders_each_setting_in_its_section() -> None:
+    settings = TaskSettings(
+        allow_start_if_on_batteries=False,
+        stop_if_going_on_batteries=False,
+        execution_time_limit=timedelta(minutes=90),
+        multiple_instances=TaskMultipleInstances.IGNORE_NEW,
+        allow_hard_terminate=False,
+    )
+    sections = _sections(_rendered(settings))
+    assert "ConditionACPower=true" in sections["Unit"]
+    assert "TimeoutStartSec=5400" in sections["Service"]
+    assert "SendSIGKILL=no" in sections["Service"]
+    # Never RuntimeMaxSec: it has no effect on Type=oneshot (systemd-analyze verify, 259).
+    assert not any(line.startswith("RuntimeMaxSec") for lines in sections.values() for line in lines)
+    added = {"ConditionACPower=true", "TimeoutStartSec=5400", "SendSIGKILL=no"}
+    kept = [line for line in _rendered(settings).split("\n") if line not in added]
+    assert "\n".join(kept) == _PLAIN_SERVICE  # each key appends to its section; the rest is unchanged
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("limit", "line"),
+    [
+        (timedelta(0), "TimeoutStartSec=infinity"),
+        (timedelta(seconds=2), "TimeoutStartSec=2"),
+        (timedelta(days=3), "TimeoutStartSec=259200"),
+        (timedelta(seconds=2147483647), "TimeoutStartSec=2147483647"),
+    ],
+)
+def test_service_unit_renders_the_time_limit_in_seconds(limit: timedelta, line: str) -> None:
+    """Zero means no limit; systemd reads TimeoutStartSec=0 as infinity too, the word says it."""
+    assert _sections(_rendered(TaskSettings(execution_time_limit=limit)))["Service"][-1] == line
+
+
+_REFUSED_SETTINGS = [
+    (TaskSettings(stop_if_going_on_batteries=True), "stop_if_going_on_batteries=True"),
+    (TaskSettings(multiple_instances=TaskMultipleInstances.PARALLEL), "multiple_instances=Parallel"),
+    (TaskSettings(multiple_instances=TaskMultipleInstances.QUEUE), "multiple_instances=Queue"),
+    (TaskSettings(multiple_instances=TaskMultipleInstances.STOP_EXISTING), "multiple_instances=StopExisting"),
+]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("settings", "named"), _REFUSED_SETTINGS)
+def test_settings_without_a_systemd_analog_are_refused_naming_the_field(settings: TaskSettings, named: str) -> None:
+    with pytest.raises(PlatformUnsupportedError, match=named) as raised:
+        check_settings(settings, ())
+    assert "systemd" in str(raised.value)
+    with pytest.raises(PlatformUnsupportedError, match=named):  # service_unit never drops one silently
+        _rendered(settings)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("triggers", "refused"),
+    [
+        ([], False),
+        ([OnceTrigger(at=_AT)], False),
+        ([BootTrigger()], False),
+        ([DailyTrigger(at=_AT)], True),
+        ([OnceTrigger(at=_AT), DailyTrigger(at=_AT)], True),
+    ],
+    ids=["on-demand", "once", "boot", "daily", "once-and-daily"],
+)
+def test_ignore_new_is_refused_only_with_a_daily_trigger(triggers: list[TaskTrigger], refused: bool) -> None:
+    """A daily timer whose run overruns fires one catch-up run (measured): that is not IgnoreNew."""
+    settings = TaskSettings(multiple_instances=TaskMultipleInstances.IGNORE_NEW)
+    if refused:
+        with pytest.raises(PlatformUnsupportedError, match="multiple_instances=IgnoreNew"):
+            check_settings(settings, triggers)
+    else:
+        check_settings(settings, triggers)  # accepted, and nothing is written for it
+        assert _rendered(settings) == _PLAIN_SERVICE
+
+
+@pytest.mark.os_agnostic
+def test_check_settings_accepts_none_and_every_supported_value() -> None:
+    check_settings(None, [DailyTrigger(at=_AT)])
+    check_settings(TaskSettings(), [DailyTrigger(at=_AT)])
+    check_settings(
+        TaskSettings(
+            allow_start_if_on_batteries=False,
+            stop_if_going_on_batteries=False,
+            execution_time_limit=timedelta(0),
+            allow_hard_terminate=False,
+        ),
+        [DailyTrigger(at=_AT)],
+    )
+
+
+_NO_TRIGGERS: list[TaskTrigger] = []
+_REFUSED_ON_REGISTER: list[tuple[TaskSettings, list[TaskTrigger]]] = [
+    *[(settings, _NO_TRIGGERS) for settings, _named in _REFUSED_SETTINGS],
+    (TaskSettings(multiple_instances=TaskMultipleInstances.IGNORE_NEW), [DailyTrigger(at=_AT)]),
+]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("settings", "triggers"), _REFUSED_ON_REGISTER)
+def test_register_refuses_a_setting_before_writing_or_connecting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, settings: TaskSettings, triggers: list[TaskTrigger]
+) -> None:
+    conn = FakeConn([], {})
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(PlatformUnsupportedError):
+        SystemdScheduledTaskController().register("job", program="/bin/true", triggers=triggers, settings=settings)
+    assert list(tmp_path.iterdir()) == []
+    assert conn.methods == []
+
+
+def _settings_props(
+    unit: str,
+    *,
+    conditions: list[tuple[str, bool, bool, str, int]] | None = None,
+    timeout_usec: int = _UINT64_MAX,
+    send_sigkill: bool = True,
+    service_type: str = "oneshot",
+) -> dict[tuple[str, str, str], Any]:
+    """The properties a service's settings are read from, as systemd 259 reports them (busctl)."""
+    return {
+        (unit, _UNIT, "Conditions"): conditions or [],
+        (unit, _SERVICE, "Type"): service_type,
+        (unit, _SERVICE, "TimeoutStartUSec"): timeout_usec,
+        (unit, _SERVICE, "SendSIGKILL"): send_sigkill,
+    }
+
+
+_AC_ONLY = ("ConditionACPower", False, False, "true", 0)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("triggers", [[], [OnceTrigger(at=_AT)]], ids=["on-demand", "once"])
+@pytest.mark.parametrize("settings", [None, TaskSettings()], ids=["none", "empty"])
+def test_register_with_unset_settings_writes_the_same_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, triggers: list[TaskTrigger], settings: TaskSettings | None
+) -> None:
+    written: list[str] = []
+    for arm in ("baseline", "settings"):
+        arm_dir = tmp_path / arm
+        arm_dir.mkdir()
+        conn = FakeConn([], _job_props("job", user=""), frozenset({"job.timer"}), pending=_NEW_JOB)
+        use_bus(monkeypatch, conn)
+        monkeypatch.setattr(systemd_timers, "_UNIT_DIR", arm_dir)
+        controller = SystemdScheduledTaskController()
+        if arm == "baseline":
+            controller.register("job", program="/bin/true", triggers=triggers)
+        else:
+            controller.register("job", program="/bin/true", triggers=triggers, settings=settings)
+        written.append("".join(p.read_text(encoding="utf-8") for p in sorted(arm_dir.iterdir())))
+    assert written[0] == written[1]
+
+
+@pytest.mark.os_agnostic
+def test_register_writes_the_settings_and_reads_back_the_effective_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    props = {
+        **_job_props("job", user=""),
+        **_settings_props("job.service", conditions=[_AC_ONLY], timeout_usec=7_200_000_000, send_sigkill=False),
+    }
+    conn = FakeConn([], props, frozenset({"job.timer"}), pending=_NEW_JOB)
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    settings = TaskSettings(
+        allow_start_if_on_batteries=False,
+        stop_if_going_on_batteries=False,
+        execution_time_limit=timedelta(hours=2),
+        multiple_instances=TaskMultipleInstances.IGNORE_NEW,
+        allow_hard_terminate=False,
+    )
+    info = SystemdScheduledTaskController().register(
+        "job", program="/bin/true", triggers=[OnceTrigger(at=_AT)], settings=settings
+    )
+    service = _sections((tmp_path / "job.service").read_text(encoding="utf-8"))
+    assert "ConditionACPower=true" in service["Unit"]
+    assert {"TimeoutStartSec=7200", "SendSIGKILL=no"} <= set(service["Service"])
+    timer = (tmp_path / "job.timer").read_text(encoding="utf-8")
+    assert "ConditionACPower" not in timer  # a timer condition gates arming, not each run
+    assert info.settings == TaskSettings(
+        allow_start_if_on_batteries=False,
+        stop_if_going_on_batteries=False,
+        execution_time_limit=timedelta(hours=2),
+        multiple_instances=None,  # a repeating timer's catch-up run is none of the four policies
+        allow_hard_terminate=False,
+    )
+
+
+@pytest.mark.os_agnostic
+def test_listing_reads_the_effective_settings_of_each_timer_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    props: dict[tuple[str, str, str], Any] = {
+        ("limited.timer", _TIMER, "Unit"): "limited.service",
+        **_settings_props("limited.service", conditions=[_AC_ONLY], timeout_usec=30_000_000, send_sigkill=False),
+        ("plain.timer", _TIMER, "Unit"): "plain.service",
+        **_settings_props("plain.service"),  # unset: TimeoutStartUSec reads UINT64_MAX on a oneshot
+    }
+    units = [("limited.timer", "", "active"), ("plain.timer", "", "active")]
+    conn = FakeConn(units, props, frozenset({"limited.timer", "plain.timer"}))
+    use_bus(monkeypatch, conn)
+    limited, plain = list(iter_timers())
+    assert limited.settings == TaskSettings(
+        allow_start_if_on_batteries=False,
+        stop_if_going_on_batteries=False,
+        execution_time_limit=timedelta(seconds=30),
+        allow_hard_terminate=False,
+    )
+    assert plain.settings == TaskSettings(
+        allow_start_if_on_batteries=True,
+        stop_if_going_on_batteries=False,
+        execution_time_limit=timedelta(0),  # UINT64_MAX: no limit
+        allow_hard_terminate=True,
+    )
+
+
+@pytest.mark.os_agnostic
+def test_listing_cost_of_the_settings_is_four_property_reads_per_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[45] Risks: the settings add Conditions, Type, TimeoutStartUSec and SendSIGKILL - one Get each.
+
+    A timer task cost 10 calls before (GetUnitFileState, the service's LoadUnit and 8 Gets); now 14.
+    """
+    props = {("job.timer", _TIMER, "Unit"): "job.service", **_settings_props("job.service")}
+    conn = FakeConn([("job.timer", "", "active")], props, frozenset({"job.timer"}))
+    use_bus(monkeypatch, conn)
+    list(iter_timers())
+    service_reads = sorted(prop for unit, prop in conn.reads if unit == "job.service")
+    assert {"Conditions", "Type", "TimeoutStartUSec", "SendSIGKILL"} <= set(service_reads)
+    per_task = [m for m in conn.methods if m not in _LISTING_CALLS]
+    assert len(per_task) == 14
+    assert per_task.count("Get") == 12
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("refused", ["Conditions", "Type", "TimeoutStartUSec", "SendSIGKILL"])
+def test_an_unreadable_settings_property_unknowns_only_its_field(monkeypatch: pytest.MonkeyPatch, refused: str) -> None:
+    props = {
+        ("job.timer", _TIMER, "Unit"): "job.service",
+        **_settings_props("job.service", conditions=[_AC_ONLY], timeout_usec=5_000_000, send_sigkill=False),
+    }
+    conn = FakeConn(
+        [("job.timer", "", "active")],
+        props,
+        frozenset({"job.timer"}),
+        refused_reads=frozenset({("job.service", refused)}),
+    )
+    use_bus(monkeypatch, conn)
+    (task,) = iter_timers(strict=True)  # strict too: a property read stays soft, the task is kept
+    expected = TaskSettings(
+        allow_start_if_on_batteries=False,
+        stop_if_going_on_batteries=False,
+        execution_time_limit=timedelta(seconds=5),
+        allow_hard_terminate=False,
+    )
+    unknown = {
+        "Conditions": "allow_start_if_on_batteries",
+        "Type": "execution_time_limit",
+        "TimeoutStartUSec": "execution_time_limit",
+        "SendSIGKILL": "allow_hard_terminate",
+    }[refused]
+    assert task.settings == expected.model_copy(update={unknown: None})
+
+
+@pytest.mark.os_agnostic
+def test_a_service_that_cannot_be_read_reports_every_read_setting_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timer whose service has no unit file: nothing is read, only systemd's battery fact stands."""
+    conn = FakeConn(
+        [("orphan.timer", "", "active")],
+        {("orphan.timer", _TIMER, "Unit"): "gone.service"},
+        frozenset({"orphan.timer"}),
+    )
+    use_bus(monkeypatch, conn)
+    (task,) = iter_timers()
+    assert task.settings == TaskSettings.model_construct(
+        allow_start_if_on_batteries=None,
+        stop_if_going_on_batteries=False,
+        execution_time_limit=None,
+        multiple_instances=None,
+        allow_hard_terminate=None,
+    )
+
+
+@pytest.mark.os_agnostic
+def test_lookup_of_an_on_demand_task_reads_its_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _write_owned(tmp_path, "adhoc.service")
+    extra = _settings_props("adhoc.service", timeout_usec=_UINT64_MAX, send_sigkill=False)
+    use_bus(monkeypatch, _lookup_conn(fragments=tmp_path, extra_props=extra))
+    (task,) = iter_timers(task_name="adhoc")
+    assert task.settings == TaskSettings(
+        allow_start_if_on_batteries=True,
+        stop_if_going_on_batteries=False,
+        execution_time_limit=timedelta(0),
+        allow_hard_terminate=False,
+    )
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("conditions", "allowed"),
+    [
+        ([], True),
+        ([_AC_ONLY], False),
+        ([("ConditionPathExists", False, False, "/x", 0), _AC_ONLY], False),
+        ([("ConditionPathExists", False, False, "/x", 0)], True),
+        ([("ConditionACPower", False, True, "true", 0)], True),  # ConditionACPower=!true: battery only
+        ([("ConditionACPower", True, False, "true", 0)], True),  # |ConditionACPower=true: one of several
+        ([("ConditionACPower", False, False, "false", 0)], True),  # battery only
+        ([("ConditionACPower", False, False, "true", 1)], False),  # the state field is not read
+        ([("ConditionACPower", False, False, "yes", 0)], False),  # systemd's own boolean spellings
+        ([("ConditionACPower", False, False, "ON", 0)], False),
+        ([("ConditionACPower", False, False, "1", 0)], False),
+        ([("ConditionACPower", False, False, "bogus", 0)], True),
+        (None, None),  # unreadable
+        ("true", None),  # not an a(sbbsi)
+        ([("ConditionACPower", False, False)], None),
+        ([("ConditionACPower", 0, 0, "true", 0)], None),  # not booleans
+    ],
+)
+def test_battery_start_allowed_reads_only_the_configured_ac_power_condition(
+    conditions: Any, allowed: bool | None
+) -> None:
+    assert battery_start_allowed(conditions) is allowed
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("service_type", "usec", "limit"),
+    [
+        ("oneshot", _UINT64_MAX, timedelta(0)),
+        ("oneshot", 2_000_000, timedelta(seconds=2)),
+        ("oneshot", 2147483647 * 1_000_000, timedelta(seconds=2147483647)),
+        ("oneshot", 1_500_000, timedelta(seconds=1, microseconds=500_000)),  # what systemd holds, unrounded
+        ("oneshot", None, None),
+        ("oneshot", True, None),
+        ("oneshot", "2s", None),
+        ("simple", 90_000_000, None),  # TimeoutStartSec bounds only the start of a non-oneshot
+        ("exec", _UINT64_MAX, None),
+        (None, 2_000_000, None),
+    ],
+)
+def test_start_time_limit_is_the_oneshot_start_timeout(service_type: Any, usec: Any, limit: timedelta | None) -> None:
+    assert start_time_limit(service_type, usec) == limit
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("send_sigkill", ["no", 0, 1], ids=["string", "int-zero", "int-one"])
+def test_a_send_sigkill_that_is_no_boolean_reads_unknown(monkeypatch: pytest.MonkeyPatch, send_sigkill: Any) -> None:
+    """Only a D-Bus ``b`` has a reading; anything else is unknown, never coerced to True or False."""
+    props = {("job.timer", _TIMER, "Unit"): "job.service", **_settings_props("job.service")}
+    props["job.service", _SERVICE, "SendSIGKILL"] = send_sigkill
+    use_bus(monkeypatch, FakeConn([("job.timer", "", "active")], props, frozenset({"job.timer"})))
+    (task,) = iter_timers()
+    assert task.settings is not None
+    assert task.settings.allow_hard_terminate is None
+    assert task.settings.execution_time_limit == timedelta(0)  # the other fields still read

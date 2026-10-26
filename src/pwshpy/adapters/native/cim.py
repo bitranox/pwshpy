@@ -28,7 +28,7 @@ from typing import Any, cast
 
 from ...domain.errors import NativeCallError, PlatformUnsupportedError
 from ...domain.records import CimInstance
-from .marshal import com_hresult, is_com_error
+from .marshal import com_hresult, com_outer_hresult, is_com_error
 
 _CLASS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DEFAULT_NAMESPACE = "root/cimv2"
@@ -95,10 +95,18 @@ def iter_cim(
 
 
 def _query_failure(exc: BaseException, wql: str) -> str:
-    """The error's own text, plus its HRESULT when one is readable (the text may bury it)."""
+    """The error's own text, plus its HRESULT when one is readable (the text may bury it).
+
+    ``str(exc)`` leads with the error's outer code, so a code unwrapped from a
+    DISP_E_EXCEPTION is labelled as the callee's: two unlabelled codes would read as a
+    contradiction.
+    """
     message = str(exc) or f"WMI query failed: {wql!r}"
     code = com_hresult(exc)
-    return message if code is None else f"{message} (HRESULT 0x{code:08X})"
+    if code is None:
+        return message
+    label = "HRESULT" if code == com_outer_hresult(exc) else "callee HRESULT"
+    return f"{message} ({label} 0x{code:08X})"
 
 
 __all__ = ["iter_cim"]

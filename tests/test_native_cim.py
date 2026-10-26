@@ -128,18 +128,31 @@ def test_iter_cim_wraps_query_errors(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(
-    ("failure", "code"),
+    ("failure", "suffix"),
     [
-        (com_error_for(_WBEM_E_INVALID_CLASS), "0x80041010"),
-        (dispatch_error(signed(_WBEM_E_INVALID_CLASS), "Invalid class "), "0x80041010"),
-        (error(5, "ExecQuery", "Access is denied."), "0x80070005"),
+        (com_error_for(_WBEM_E_INVALID_CLASS), " (HRESULT 0x80041010)"),
+        (error(5, "ExecQuery", "Access is denied."), " (HRESULT 0x80070005)"),
+        (dispatch_error(0, "Invalid class "), " (HRESULT 0x80020009)"),  # no callee code: the outer one stands
     ],
-    ids=["direct", "dispatch", "win32"],
+    ids=["direct", "win32", "dispatch-without-scode"],
 )
-def test_iter_cim_names_the_hresult(monkeypatch: pytest.MonkeyPatch, failure: BaseException, code: str) -> None:
+def test_iter_cim_names_the_hresult_the_error_carries(
+    monkeypatch: pytest.MonkeyPatch, failure: BaseException, suffix: str
+) -> None:
     monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(_Boom(failure)))
-    with pytest.raises(NativeCallError, match=f"HRESULT {code}"):
+    with pytest.raises(NativeCallError) as info:
         list(iter_cim("Win32_Thing"))
+    assert str(info.value) == f"{failure}{suffix}"
+
+
+@pytest.mark.os_agnostic
+def test_iter_cim_names_an_unwrapped_code_as_the_callees(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A DISP_E_EXCEPTION's scode is the provider's own code, not the one str(exc) leads with."""
+    failure = dispatch_error(signed(_WBEM_E_INVALID_CLASS), "Invalid class ")
+    monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(_Boom(failure)))
+    with pytest.raises(NativeCallError) as info:
+        list(iter_cim("Win32_Thing"))
+    assert str(info.value) == f"{failure} (callee HRESULT 0x80041010)"
 
 
 @pytest.mark.os_agnostic

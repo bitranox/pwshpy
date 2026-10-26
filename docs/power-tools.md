@@ -566,7 +566,23 @@ Details worth knowing:
   elevated account's own `.gitconfig` (an elevated 1.5.x run read them). A script that needs them
   passes them itself (`git -c user.name=... -c user.email=...`) or points `GIT_CONFIG_GLOBAL` at a
   file it trusts before it runs git. git honours `GIT_CONFIG_GLOBAL` from 2.32 on; an older git
-  ignores it and still reads those files. The system file (`/etc/gitconfig`, or the one below Git
+  ignores it and still reads those files. So a root `.sh` run of a script with a git source asks the
+  git uv will run (the first on uv's filtered `PATH`) for its version before uv runs, and stops with
+  `pwshpy pack: refusing git <version> at <path>: it ignores GIT_CONFIG_GLOBAL, ...` and exit code
+  127 when it is older than 2.32, or with `pwshpy pack: refusing git at <path>: git --version names
+  no version this runner can read, ...` when `git --version` fails or prints no `git version
+  <major>.<minor>` it can read; the remedy it names is to upgrade git or to run the script without
+  root. With no git on uv's `PATH` nothing is asked (uv then fails on its own); for a script without
+  a git source the runner never runs git, and a run that is not root checks nothing. Whether the script has
+  a git source is decided at pack time, and `--pwshpy-info` shows it (`git source : yes` or `no`):
+  a `git+` (in any case) in a `--with` value, or, outside a TOML comment in the PEP 723 block,
+  `git+` anywhere, a key named `git` anywhere (a `[tool.uv.sources]` entry such as
+  `pkg = { git = "..." }` or a `[tool.uv.sources.pkg]` table), or a `\u`, `\U` or `\x` escape (which
+  could spell either). The rule over-detects on purpose, since a false positive only refuses a root
+  run on a git older than 2.32: a `git+` in any other string and a `git` key in another tool's
+  table count too. It reads only the script's own declarations, so a git requirement inside a local
+  wheel or path dependency is not seen. An elevated `.ps1` run does not check the git version. The
+  system file (`/etc/gitconfig`, or the one below Git
   for Windows' install directory) is the administrators' and still applies. The runner cannot tell
   who set a variable, so an elevated run in a network that reaches the internet only through a proxy
   downloads nothing: the proxy can be named neither in the environment (root's own included) nor in

@@ -259,10 +259,10 @@ token.
 
 ## Files & output  *(portable)*
 
-| PowerShell                                        | pwshpy - Python (API)                                                     | pwshpy - CLI                           |
-|---------------------------------------------------|---------------------------------------------------------------------------|----------------------------------------|
-| `Out-File -Encoding utf8` / `Set-Content`         | `ps.write_text(path, text, encoding="utf-8", newline="\n", bom=False)`    | `pwshpy write_text PATH` (reads stdin) |
-| `.. \| ConvertTo-Json \| Out-File` / `Export-Csv` | `ps.write_records(path, records, jsonl=True)`  (streams record-by-record) | *library only*                         |
+| PowerShell                                        | pwshpy - Python (API)                                                     | pwshpy - CLI                                                                             |
+|---------------------------------------------------|---------------------------------------------------------------------------|------------------------------------------------------------------------------------------|
+| `Out-File -Encoding utf8` / `Set-Content`         | `ps.write_text(path, text, encoding="utf-8", newline="\n", bom=False)`    | `pwshpy write_text PATH` (reads stdin, UTF-8 when piped; `--input-encoding` for another) |
+| `.. \| ConvertTo-Json \| Out-File` / `Export-Csv` | `ps.write_records(path, records, jsonl=True)`  (streams record-by-record) | *library only*                                                                           |
 
 Always UTF-8, no BOM, LF by default - the same bytes on every OS (no `Out-File` UTF-16/BOM surprise).
 

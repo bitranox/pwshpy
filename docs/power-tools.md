@@ -224,7 +224,12 @@ ps.download_file("https://host/big.iso", "big.iso")  # copies to disk in chunks;
 
 CLI: `pwshpy write_text PATH` (reads stdin), `pwshpy get_content PATH` (streams; UTF-8 bytes when
 piped, see [CLI Reference](cli-reference.md#portable-record-commands)), `pwshpy download_file URL
-DEST`.
+DEST`. `write_text` reads a piped stdin as UTF-8 on every OS, whatever the console code page, which
+is what pwsh 7 and pwshpy itself send into a pipe; pass `--input-encoding cp1252` (or any codec
+name) for a source that writes another encoding. Bytes that are not valid in that encoding stop the
+command with an error naming `--input-encoding`, and PATH then holds only the text read before
+them. A terminal stdin keeps its own encoding unless `--input-encoding` is given. `--encoding`
+names the encoding of the file written.
 
 ## Credential vault - typed, secret-safe, unattended-friendly
 

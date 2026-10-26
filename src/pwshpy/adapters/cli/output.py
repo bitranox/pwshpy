@@ -255,7 +255,7 @@ def _table_row(record: PSRecord) -> dict[str, Any]:
     return row
 
 
-def _is_terminal(stream: TextIO | None) -> bool:
+def is_terminal(stream: TextIO | None) -> bool:
     """Whether ``stream`` is a real terminal (a closed, missing or odd stream counts as not one).
 
     Asks the stream itself rather than ``Console.is_terminal``: rich reports a terminal whenever
@@ -268,7 +268,7 @@ def _is_terminal(stream: TextIO | None) -> bool:
         True only when the stream answers ``isatty()`` with a true value.
 
     Example:
-        >>> _is_terminal(sys.stdout)  # doctest captures stdout, so it is no terminal here
+        >>> is_terminal(sys.stdout)  # doctest captures stdout, so it is no terminal here
         False
     """
     if stream is None:
@@ -312,7 +312,7 @@ def _table_console(table: Table) -> Console:
         True
     """
     console = Console()
-    if _is_terminal(sys.stdout) or _columns_is_explicit():
+    if is_terminal(sys.stdout) or _columns_is_explicit():
         return console
     # Measure without a ceiling: rich clamps a measurement to the width it is offered, and the
     # point is to learn the width the content needs rather than the one rich guessed.
@@ -336,7 +336,7 @@ def _render_table(records: Iterable[PSRecord]) -> None:
     # Piped, the frame is ASCII on every OS: rich's own boxes are outside every legacy code page and
     # differ by OS (heavy on Linux, square for a legacy Windows console), so a reader decoding the
     # pipe as cp850/cp1252 saw a garbled frame (user decision 2026-10-26). A terminal keeps its box.
-    frame = box.HEAVY_HEAD if _is_terminal(sys.stdout) else box.ASCII
+    frame = box.HEAVY_HEAD if is_terminal(sys.stdout) else box.ASCII
     table = Table(show_header=True, header_style="bold", box=frame)
     for column in materialized[0]:
         table.add_column(column)
@@ -386,7 +386,7 @@ def emit_lines(lines: Iterable[str]) -> None:
     """
     with _clean_broken_pipe():
         stream = sys.stdout
-        if _is_terminal(stream):
+        if is_terminal(stream):
             _write_lines_as_text(lines, stream)
         else:
             _write_lines_as_utf8(lines, _Utf8Writer(stream))
@@ -438,7 +438,7 @@ def _write_text_body(text: str, stream: TextIO | None, *, err: bool) -> None:
     """Write ``text`` to ``stream``: via ``click.echo`` at a terminal, as UTF-8 bytes otherwise."""
     # click.echo is kept at a terminal so a person sees exactly what they saw before (on Windows
     # click routes console output through its own wrapper); only the piped path changes.
-    if _is_terminal(stream):
+    if is_terminal(stream):
         click.echo(text, nl=False, err=err)
         return
     out = _Utf8Writer(stream)
@@ -471,7 +471,7 @@ def use_utf8_when_piped() -> None:
         'utf-8'
     """
     for stream in (sys.stdout, sys.stderr):
-        if _is_terminal(stream) or not isinstance(stream, io.TextIOWrapper):
+        if is_terminal(stream) or not isinstance(stream, io.TextIOWrapper):
             continue
         stream.reconfigure(encoding="utf-8", errors=stream.errors, newline="\n")
 
@@ -493,4 +493,13 @@ def emit(records: Iterable[PSRecord], fmt: RecordFormat) -> None:
             _render_table(records)
 
 
-__all__ = ["RecordFormat", "emit", "emit_json", "emit_lines", "emit_text", "is_pipe_closed", "use_utf8_when_piped"]
+__all__ = [
+    "RecordFormat",
+    "emit",
+    "emit_json",
+    "emit_lines",
+    "emit_text",
+    "is_pipe_closed",
+    "is_terminal",
+    "use_utf8_when_piped",
+]

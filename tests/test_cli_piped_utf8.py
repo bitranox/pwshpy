@@ -85,6 +85,58 @@ def test_piped_write_text_status_line_names_a_path_beyond_cp1252(tmp_path: Path)
     assert dest.read_bytes() == b"body\n"
 
 
+#: UTF-8 'I-acute' is C3 8D, and 0x8D has no cp1252 mapping: a cp1252 stdin refused it (exit 22).
+_ICELAND = chr(0xCD) + "sland"
+
+
+@pytest.mark.os_agnostic
+def test_write_text_reads_a_piped_stdin_as_utf8_whatever_the_code_page(tmp_path: Path) -> None:
+    """UTF-8 piped into write_text (from pwsh 7, or from pwshpy itself) is written unchanged."""
+    dest = tmp_path / "out.txt"
+    text = _ICELAND + " " + _BEYOND_CP1252 + "\n"
+    _ok(_run_pwshpy("write_text", str(dest), stdin=text.encode("utf-8")))
+    assert dest.read_bytes() == text.encode("utf-8")
+
+
+@pytest.mark.os_agnostic
+def test_pwshpy_piped_into_write_text_round_trips(tmp_path: Path) -> None:
+    """pwshpy's own piped table, fed to write_text, lands in the file byte for byte."""
+    produced = _ok(_run_pwshpy("env", extra_env={"PWSHPY_PROBE_124": _ICELAND + " " + _BEYOND_CP1252}))
+    dest = tmp_path / "env.txt"
+    _ok(_run_pwshpy("write_text", str(dest), stdin=produced))
+    assert dest.read_bytes() == produced
+
+
+@pytest.mark.os_agnostic
+def test_write_text_input_encoding_decodes_a_legacy_source(tmp_path: Path) -> None:
+    """--input-encoding cp1252 reads a legacy program's bytes; the file is still UTF-8."""
+    dest = tmp_path / "out.txt"
+    text = "Gr" + chr(0xFC) + chr(0xDF) + "e\n"
+    _ok(_run_pwshpy("write_text", str(dest), "--input-encoding", "cp1252", stdin=text.encode("cp1252")))
+    assert dest.read_bytes() == text.encode("utf-8")
+
+
+@pytest.mark.os_agnostic
+def test_write_text_refuses_invalid_utf8_and_names_the_option(tmp_path: Path) -> None:
+    """Bytes that are not UTF-8 refuse with an error naming --input-encoding, not a raw traceback line."""
+    completed = _run_pwshpy("write_text", str(tmp_path / "out.txt"), stdin=b"ok\n\xff\xfe\n")
+    assert completed.returncode != 0
+    stderr = completed.stderr.decode("utf-8", errors="replace")
+    assert "--input-encoding" in stderr
+    assert "UnicodeDecodeError" not in stderr
+
+
+@pytest.mark.os_agnostic
+def test_write_text_refuses_an_unknown_input_encoding(tmp_path: Path) -> None:
+    """An --input-encoding Python has no codec for is a usage error (exit 2) naming the option."""
+    dest = tmp_path / "out.txt"
+    completed = _run_pwshpy("write_text", str(dest), "--input-encoding", "no-such-codec", stdin=b"x\n")
+    assert completed.returncode == 2
+    # The value, not only the option: click's own "No such option" refusal names the option too.
+    assert b"no-such-codec" in completed.stderr
+    assert not dest.exists()
+
+
 @pytest.mark.os_agnostic
 def test_piped_config_display_holds_a_value_beyond_cp1252() -> None:
     """``pwshpy config`` piped prints an env-layer value beyond cp1252 instead of exiting 22."""

@@ -16,6 +16,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   stderr to UTF-8 with LF line ends when it starts, so every piped line has the same bytes on every
   OS, as the JSON output already had. A terminal keeps its own encoding, and library use of `ps`
   leaves the host program's streams alone.
+- `write_text` reads a piped stdin as UTF-8 on every OS instead of the locale code page. On German
+  Windows it decoded as cp1252, so UTF-8 from pwsh 7 (whose `$OutputEncoding` is utf-8) or from
+  pwshpy itself landed as mojibake, and some values failed the command outright (exit 22 with a
+  `UnicodeDecodeError` for the UTF-8 of an I-acute). The new `--input-encoding NAME` option reads a
+  source in another encoding; bytes that are not valid in it stop the command with an error naming
+  that option. A terminal stdin keeps its own encoding unless the option is given.
 - A piped or redirected human table is drawn with an ASCII frame (`+`, `-`, `|`) on every OS. rich's
   box-drawing frames differ by OS (heavy on Linux, square on Windows) and turn into mojibake for a
   reader that decodes the pipe in a legacy code page. A terminal keeps its box-drawing frame. Linux

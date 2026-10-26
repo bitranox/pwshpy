@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import codecs
 import io
+import logging
 from collections.abc import Iterable
 from pathlib import Path
 
-import orjson
-
 from ...domain.records import PSRecord
+from .record_json import describe_replacements, record_json_bytes
+
+log = logging.getLogger(__name__)
 
 #: Map an encoding to its BOM-less codec, so a BOM is added ONLY when asked (Python's
 #: bare ``utf-16``/``utf-32`` codecs would otherwise inject one unbidden).
@@ -178,6 +180,12 @@ def write_records(path: str | Path, records: Iterable[PSRecord], *, jsonl: bool 
     object per line (append-friendly, cheap through ``| head``); ``jsonl=False`` writes
     a single JSON array. The bytes are UTF-8 with no BOM - the same invariant on every OS.
 
+    A field holding a byte that is not valid UTF-8 (a POSIX name or environment value Python
+    decoded to a lone surrogate) is written with U+FFFD for each such byte, so the file stays
+    valid UTF-8 JSON, and one WARNING per record is logged on this module's logger naming the
+    record type, its 1-based position and the field paths (never the value). Every record is
+    written; the original bytes cannot be recovered from the file.
+
     Args:
         path: Destination file path.
         records: The records to serialize (any iterable of :class:`PSRecord`, incl. a
@@ -187,6 +195,10 @@ def write_records(path: str | Path, records: Iterable[PSRecord], *, jsonl: bool 
     Returns:
         The :class:`~pathlib.Path` written.
 
+    Raises:
+        orjson.JSONEncodeError: A record holds a value orjson cannot write other than a lone
+            surrogate (an integer outside the 64-bit range); the records before it are written.
+
     Example:
         >>> import tempfile, os
         >>> from pwshpy.domain.records import EnvVar
@@ -195,23 +207,31 @@ def write_records(path: str | Path, records: Iterable[PSRecord], *, jsonl: bool 
         >>> Path(p).read_bytes()
         b'{"name":"A","value":"1"}\\n'
     """
-    # orjson.dumps(to_dict()) rather than model_dump_json(): the same bytes for every ordinary
-    # record, but the two disagree on integers beyond 64 bits, lone surrogates and non-UTF-8
-    # bytes (tests/test_record_json_bytes.py), and the CLI's --json/--jsonl use this chain too.
+    # record_json_bytes rather than model_dump_json(): the same bytes for every ordinary record,
+    # but the two disagree on integers beyond 64 bits, lone surrogates and non-UTF-8 bytes
+    # (tests/test_record_json_bytes.py), and the CLI's --json/--jsonl use this serialiser too.
     destination = Path(path)
     with destination.open("wb") as handle:
         if jsonl:
-            for record in records:
-                handle.write(orjson.dumps(record.to_dict()))
+            for position, record in enumerate(records, start=1):
+                handle.write(_record_bytes(record, position))
                 handle.write(b"\n")
         else:
             handle.write(b"[")
-            for index, record in enumerate(records):
-                if index:
+            for position, record in enumerate(records, start=1):
+                if position > 1:
                     handle.write(b",")
-                handle.write(orjson.dumps(record.to_dict()))
+                handle.write(_record_bytes(record, position))
             handle.write(b"]")
     return destination
+
+
+def _record_bytes(record: PSRecord, position: int) -> bytes:
+    """``record`` as JSON bytes; a field that was not valid UTF-8 is logged as a WARNING."""
+    result = record_json_bytes(record)
+    if result.replaced:
+        log.warning("%s", describe_replacements(record, position, result.replaced))
+    return result.data
 
 
 __all__ = ["write_records", "write_text", "write_text_stream"]

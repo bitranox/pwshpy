@@ -1,9 +1,10 @@
 """Record JSON bytes: ``model_dump_json()`` against the ``orjson.dumps(to_dict())`` chain.
 
 ``write_records`` and the CLI's ``--json`` / ``--jsonl`` serialise a record through
-``orjson.dumps(record.to_dict())``. Those bytes are a public contract (JSONL files, piped CLI
-output), so replacing the chain with Pydantic's own ``model_dump_json()`` is only safe if the
-two agree for every record and every value a record can carry.
+``record_json_bytes``, whose fast path is ``orjson.dumps(record.to_dict())`` (the chain). Those
+bytes are a public contract (JSONL files, piped CLI output), so replacing the chain with Pydantic's
+own ``model_dump_json()`` is only safe if the two agree for every record and every value a record
+can carry.
 
 They agree on the bytes of every ordinary record: one representative instance per concrete
 :class:`PSRecord` subclass below, with aware and naive datetimes, non-ASCII, emoji and control
@@ -14,10 +15,10 @@ the ``test_differs_*`` tests, which is why both call sites keep the chain:
 * an integer outside orjson's range (below -2**63 or above 2**64-1), in an ``int`` field or in
   an open ``properties`` / ``output`` bag: the chain raises ``orjson.JSONEncodeError`` (a
   ``TypeError``), ``model_dump_json()`` writes the number;
-* a lone surrogate in a string (a non-UTF-8 environment variable on POSIX decodes to one):
-  both raise, but the chain raises ``orjson.JSONEncodeError`` (a ``TypeError``) and
-  ``model_dump_json()`` raises ``PydanticSerializationError`` (a ``ValueError``), with a
-  different message;
+* a lone surrogate in a string (a non-UTF-8 environment variable on POSIX decodes to one): the
+  raw chain raises ``orjson.JSONEncodeError`` (a ``TypeError``), which ``record_json_bytes``
+  catches to write each surrogate as U+FFFD and report the field, while ``model_dump_json()``
+  raises ``PydanticSerializationError`` (a ``ValueError``) and gives no such hook;
 * non-UTF-8 ``bytes`` in an open bag: the chain raises ``UnicodeDecodeError`` from ``to_dict``,
   ``model_dump_json()`` raises ``PydanticSerializationError``.
 
@@ -41,6 +42,7 @@ from pydantic_core import PydanticSerializationError
 
 from pwshpy.adapters.cli.output import RecordFormat, emit
 from pwshpy.adapters.native.fileio import write_records
+from pwshpy.adapters.native.record_json import record_json_bytes
 from pwshpy.domain import records as records_module
 from pwshpy.domain.enums import (
     AceType,
@@ -332,7 +334,7 @@ _RECORDS: list[PSRecord] = [
 
 
 def _chain(record: PSRecord) -> bytes:
-    """The bytes the call sites write today."""
+    """The raw chain: what the call sites write for every record without a lone surrogate."""
     return orjson.dumps(record.to_dict())
 
 
@@ -382,7 +384,12 @@ def test_differs_on_an_integer_outside_orjson_range(value: int) -> None:
 
 @pytest.mark.os_agnostic
 def test_differs_on_a_lone_surrogate_in_a_string() -> None:
-    """Both refuse a lone surrogate, but with a different exception type and message."""
+    """The raw chain and model_dump_json both refuse a lone surrogate, with a different exception.
+
+    The call sites do not raise: record_json_bytes catches the chain's ``JSONEncodeError`` and
+    writes U+FFFD (pinned below and in tests/test_record_json.py). ``model_dump_json`` raises a
+    ``ValueError`` instead, so switching to it would need that fallback rebuilt on another error.
+    """
     record = EnvVar(name="X", value="a" + chr(0xDCFF))
     with pytest.raises(orjson.JSONEncodeError, match="surrogates not allowed"):
         _chain(record)
@@ -429,3 +436,28 @@ def test_cli_emit_still_uses_the_chain(fmt: RecordFormat) -> None:
     record = CimInstance(class_name="c", properties={"v": 2**64})
     with pytest.raises(orjson.JSONEncodeError, match="Integer exceeds 64-bit range"):
         emit([record], fmt)
+
+
+@pytest.mark.os_agnostic
+def test_record_json_bytes_is_the_chain_for_an_ordinary_record() -> None:
+    """The shared serialiser's fast path writes exactly the chain's bytes."""
+    record = EnvVar(name="X", value="caf" + chr(0xE9))
+    assert record_json_bytes(record).data == _chain(record)
+
+
+@pytest.mark.os_agnostic
+def test_write_records_writes_fffd_for_a_lone_surrogate(tmp_path: Path) -> None:
+    """Where the raw chain raises, write_records writes the surrogate as U+FFFD."""
+    target = tmp_path / "out.jsonl"
+    write_records(target, [EnvVar(name="X", value="a" + chr(0xDCFF) + "b")])
+    assert target.read_bytes() == b'{"name":"X","value":"a' + chr(0xFFFD).encode() + b'b"}\n'
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("fmt", [RecordFormat.JSONL, RecordFormat.JSON])
+def test_cli_emit_writes_fffd_for_a_lone_surrogate(
+    fmt: RecordFormat, capsysbinary: pytest.CaptureFixture[bytes]
+) -> None:
+    """Where the raw chain raises, --json / --jsonl write the surrogate as U+FFFD."""
+    emit([EnvVar(name="X", value="a" + chr(0xDCFF) + "b")], fmt)
+    assert b'"value":"a' + chr(0xFFFD).encode() + b'b"' in capsysbinary.readouterr().out

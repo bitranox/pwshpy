@@ -1305,7 +1305,9 @@ class Ps:
     def write_records(self, path: str | Path, records: Iterable[PSRecord], *, jsonl: bool = True) -> Path:
         """Write typed records to a file as UTF-8 JSON/JSONL, never a BOM (native, portable).
 
-        Pairs with any pipeline: ``ps.write_records("procs.jsonl", ps.get_process())``.
+        Pairs with any pipeline: ``ps.write_records("procs.jsonl", ps.get_process())``. A field
+        holding a byte that is not valid UTF-8 is written with U+FFFD for that byte and logged as
+        one WARNING per record (``pwshpy.adapters.native.fileio``); every record is written.
 
         Example:
             >>> callable(build_ps().write_records)

@@ -94,6 +94,10 @@ whole-file `ps.get_content`), `ps.write_text_stream` / `ps.write_records` (write
 and `ps.download_file(url, dest)` (copies to disk in chunks, never buffering the body). See
 [Power Tools](power-tools.md) for those.
 
+`ps.write_records` writes a field holding a byte that is not valid UTF-8 with U+FFFD for each such
+byte, so the file stays valid UTF-8 JSON, and logs one WARNING per affected record (logger
+`pwshpy.adapters.native.fileio`) naming the record type, its 1-based position and the field paths.
+
 ## Scheduled tasks: principal, run level and triggers
 
 `ps.register_scheduled_task(task_path, *, program, arguments="", description="", principal=None,

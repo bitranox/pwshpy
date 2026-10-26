@@ -29,6 +29,13 @@ Those bytes are the text's own: `exec` output and `get_content` lines have LF li
 read with universal newlines), a web body keeps its line ends, and ANSI sequences are not stripped.
 At a terminal they print as before.
 
+A record field holding a byte that is not valid UTF-8 (a POSIX environment variable, file, process
+or account name) is written with U+FFFD for each such byte, so `--json` / `--jsonl` stay valid UTF-8
+JSON and the stream goes on, exit 0; one line per affected record on stderr names the record type,
+its position and the field, never the value (`warning: EnvVar record 7, field value: not valid
+UTF-8; each undecodable byte written as U+FFFD`). The original bytes cannot be recovered from the
+JSON, which matches what pwsh 7 shows for the same value.
+
 Every other line the CLI writes to a piped or redirected stdout or stderr is UTF-8 with LF line ends
 too, on every OS: the human table, the status lines (`wrote`, `created`, `copied`, `moved`,
 `removed`, `registered`, ...), `config` and `config --format json`, and error messages. A value the

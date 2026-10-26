@@ -14,7 +14,9 @@ stream.  The exit code is non-zero either way.
 JSON output (``--json``, ``--jsonl``, :func:`emit_json`) is written as UTF-8 bytes below
 the text layer, whatever the console code page, ``PYTHONIOENCODING`` or ``PYTHONUTF8``
 say: JSON is UTF-8 by spec, and a cp1252 stdout (German Windows) turned every non-ASCII
-field into mojibake for a consumer reading the pipe.  Lines end in LF on every OS.  Text
+field into mojibake for a consumer reading the pipe.  Lines end in LF on every OS.  A record
+field holding a byte that is not valid UTF-8 is written with U+FFFD for that byte, and one
+``warning:`` line on stderr names the record and field; the stream goes on.  Text
 passed through from elsewhere (:func:`emit_text`: a child's output, a web response, a status
 line naming a path; :func:`emit_lines`: a file's lines) is written the same way when its stream
 is not a terminal, because a character outside cp1252 raised ``UnicodeEncodeError`` there after
@@ -60,6 +62,7 @@ from rich.table import Table
 from rich.text import Text
 
 from ...domain.records import PSRecord
+from ..native.record_json import describe_replacements, record_json_bytes
 
 #: Windows error codes for a downstream reader closing the pipe: ERROR_BROKEN_PIPE (109)
 #: and ERROR_NO_DATA (232, "the pipe is being closed"). On Windows these surface as a
@@ -175,17 +178,21 @@ class _Utf8Writer:
             self._text.flush()
 
 
-def _dumps(record: PSRecord) -> bytes:
-    # Not record.model_dump_json(): its bytes match for every ordinary record, but it writes an
-    # integer outside orjson's 64-bit range where this raises, and refuses a lone surrogate or
-    # non-UTF-8 bytes with a different exception. tests/test_record_json_bytes.py pins each case.
-    return orjson.dumps(record.to_dict())
+def _dumps(record: PSRecord, position: int) -> bytes:
+    # record_json_bytes, not record.model_dump_json(): its bytes match for every ordinary record,
+    # but it writes an integer outside orjson's 64-bit range where this raises, and refuses a lone
+    # surrogate where this writes U+FFFD. tests/test_record_json_bytes.py pins each case. The
+    # warning goes to stderr so the JSON on stdout stays parseable and the stream goes on.
+    result = record_json_bytes(record)
+    if result.replaced:
+        emit_text(f"warning: {describe_replacements(record, position, result.replaced)}\n", err=True)
+    return result.data
 
 
 def _write_jsonl(records: Iterable[PSRecord]) -> None:
     out = _Utf8Writer(sys.stdout)
-    for record in records:
-        out.write(_dumps(record) + b"\n")
+    for position, record in enumerate(records, start=1):
+        out.write(_dumps(record, position) + b"\n")
         out.flush()
 
 
@@ -202,9 +209,9 @@ def _write_json_array(records: Iterable[PSRecord]) -> None:
         out.write(b"[]\n")
         out.flush()
         return
-    out.write(b"[" + _dumps(first))
-    for record in iterator:
-        out.write(b"," + _dumps(record))
+    out.write(b"[" + _dumps(first, 1))
+    for position, record in enumerate(iterator, start=2):
+        out.write(b"," + _dumps(record, position))
     out.write(b"]\n")
     out.flush()
 

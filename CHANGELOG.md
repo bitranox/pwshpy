@@ -6,6 +6,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.9.0] 2026-10-26 22:23:51
+
 ### Added
 
 - `new_shortcut(..., run_as_administrator=True)` / CLI `--run-as-administrator` (Windows): the
@@ -68,6 +70,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 
 ## [1.8.1] 2026-10-26 13:51:55
+
+Never tagged or published to PyPI; these changes first ship in 1.9.0.
 
 ### Fixed
 

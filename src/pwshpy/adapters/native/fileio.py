@@ -25,7 +25,7 @@ from pathlib import Path
 from ...domain.records import PSRecord
 from .record_json import describe_replacements, record_json_bytes
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 #: Map an encoding to its BOM-less codec, so a BOM is added ONLY when asked (Python's
 #: bare ``utf-16``/``utf-32`` codecs would otherwise inject one unbidden).
@@ -230,7 +230,7 @@ def _record_bytes(record: PSRecord, position: int) -> bytes:
     """``record`` as JSON bytes; a field that was not valid UTF-8 is logged as a WARNING."""
     result = record_json_bytes(record)
     if result.replaced:
-        log.warning("%s", describe_replacements(record, position, result.replaced))
+        logger.warning("%s", describe_replacements(record, position, result.replaced))
     return result.data
 
 

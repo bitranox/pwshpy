@@ -152,7 +152,8 @@ SHIM_CWD_EXIT = 70
 _POWERSHELL_QUOTES = frozenset(chr(code) for code in (0x27, 0x2018, 0x2019, 0x201A, 0x201B))
 
 #: Placeholders the runner template exposes for substitution.  Distinctive enough that
-#: they cannot occur in hand-written PowerShell by accident.
+#: they cannot occur in hand-written PowerShell by accident. The two PATH variables are the ones an
+#: elevated run hands the shim the caller's PATH and uv's in ([107]).
 _PLACEHOLDERS = (
     "@@PWSHPY_PAYLOAD_B64@@",
     "@@PWSHPY_PAYLOAD_SHA256@@",
@@ -164,6 +165,8 @@ _PLACEHOLDERS = (
     "@@PWSHPY_CWD_ENV@@",
     "@@PWSHPY_UV_ARGS_RELATIVE@@",
     "@@PWSHPY_PYTHON_REQUEST@@",
+    "@@PWSHPY_PATH_ENV@@",
+    "@@PWSHPY_UV_PATH_ENV@@",
 )
 
 #: The entry name as plain text, for the runners' help comments. Optional (a template may or may not
@@ -647,7 +650,7 @@ def render_runner(template: str, content: RunnerContent) -> str:
         ...                         uv_args=["--with", "rich"], file_hashes=[FileDigest("ff", "t.py")])
         >>> render_runner("|".join(_PLACEHOLDERS), content).split("|")  # doctest: +NORMALIZE_WHITESPACE
         ['Ym9keQ==', 'ab12', "'t.py'", "'--with','rich'", 'ff *t.py', '__pwshpy_pack_main__.py',
-         'PWSHPY_PACK_ARGV', 'PWSHPY_PACK_CWD', "'',''", "''"]
+         'PWSHPY_PACK_ARGV', 'PWSHPY_PACK_CWD', "'',''", "''", 'PWSHPY_PACK_PATH', 'PWSHPY_PACK_UV_PATH']
     """
     missing = [token for token in _PLACEHOLDERS if token not in template]
     if missing:
@@ -671,6 +674,7 @@ def render_runner(template: str, content: RunnerContent) -> str:
             "@@PWSHPY_ARGV_ENV@@": ARGV_ENV_VAR,
             "@@PWSHPY_CWD_ENV@@": CWD_ENV_VAR,
             "@@PWSHPY_PATH_ENV@@": PATH_ENV_VAR,
+            "@@PWSHPY_UV_PATH_ENV@@": UV_PATH_ENV_VAR,
             "@@PWSHPY_UV_ARGS_RELATIVE@@": _powershell_relative_suffixes(content.uv_args),
             "@@PWSHPY_PYTHON_REQUEST@@": _powershell_literal(content.python_request),
         },

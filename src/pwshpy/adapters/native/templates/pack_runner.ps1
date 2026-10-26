@@ -86,6 +86,10 @@ $PwshPySha = '@@PWSHPY_PAYLOAD_SHA256@@'
 $PwshPyArgvEnv = '@@PWSHPY_ARGV_ENV@@'
 $PwshPyUvArgs = @(@@PWSHPY_UV_ARGS@@)
 $PwshPyCwdEnv = '@@PWSHPY_CWD_ENV@@'
+# An elevated run hands the shim the caller's whole PATH and the PATH uv was started on, so the script
+# gets the first back behind the entries uv put in front of the second ([107]).
+$PwshPyPathEnv = '@@PWSHPY_PATH_ENV@@'
+$PwshPyUvPathEnv = '@@PWSHPY_UV_PATH_ENV@@'
 # Per uv arg, the relative path an elevated run (which starts uv in another directory) puts the
 # caller's directory in front of: '' for a value left as it is. Parallel to $PwshPyUvArgs.
 $PwshPyUvArgsRelative = @(@@PWSHPY_UV_ARGS_RELATIVE@@)
@@ -523,6 +527,54 @@ function Test-PwshPyUvAcceptable {
     if (-not $why) { return $true }
     Write-PwshPyNotice "pwshpy: skipping uv at ${Candidate}: $why (an elevated run only runs a uv no other account can modify)"
     return $false
+}
+
+function Get-PwshPyTrustedPath {
+    param([string] $Path)
+
+    # The directories of the PATH $Path an elevated run lets uv see, in order, each one left out named
+    # on stderr. uv runs git for a git dependency (and a build backend may too) by searching PATH, so a
+    # directory another account can write would decide what runs elevated ([107]); each is judged by the
+    # same walk as a uv, with '.' appended so the walk judges the directory itself as the leaf. An
+    # empty entry is dropped silently (a trailing separator is common on Windows); a relative one names
+    # the working directory and is left out like any untrusted one.
+    $kept = New-Object System.Collections.Generic.List[string]
+    foreach ($directory in ($Path -split [IO.Path]::PathSeparator)) {
+        if (-not $directory) { continue }
+        try {
+            $why = Get-PwshPyUvDistrust -Path ($directory + [IO.Path]::DirectorySeparatorChar + '.') -Directory $true
+        } catch {
+            # Windows PowerShell 5.1 refuses a path holding a character such as '"' outright.
+            $why = "$directory cannot be judged ($($_.Exception.Message))"
+        }
+        if ($why) {
+            Write-PwshPyNotice "pwshpy: leaving $directory off uv's PATH: $why (an elevated run lets uv run git and other tools only from directories no other account can modify)"
+            continue
+        }
+        $kept.Add($directory)
+    }
+    return ($kept -join [IO.Path]::PathSeparator)
+}
+
+function Get-PwshPyGitOn {
+    param([string] $Path)
+
+    # The git the PATH $Path finds, or ''. Looked up by name in each directory and never run;
+    # Get-Command would also answer with an alias or function of this session, and read '[', '*' and
+    # '?' in an entry as wildcards. POSIX: an executable 'git', its mode read with the fixed-PATH ls.
+    $name = if ($PwshPyOnWindows) { 'git.exe' } else { 'git' }
+    foreach ($directory in ($Path -split [IO.Path]::PathSeparator)) {
+        if (-not $directory) { continue }
+        $candidate = $directory + [IO.Path]::DirectorySeparatorChar + $name
+        try {
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        } catch {
+            continue
+        }
+        if (-not $PwshPyOnWindows -and -not (Test-PwshPyExecutable -Path $candidate)) { continue }
+        return $candidate
+    }
+    return ''
 }
 
 function Get-PwshPyUvLocation {
@@ -1379,7 +1431,8 @@ $PwshPyPrepare = {
     # installer's curl and sh) runs with full rights, so from here on they come from fixed system
     # directories, not from the PATH the caller handed over; that PATH is kept for the uv search
     # and handed back to the packed script. Windows needs no such reset: the runner calls no
-    # external program there except uv and its own PowerShell, both by full path.
+    # external program there except uv and its own PowerShell, both by full path. On both, uv itself
+    # sees only the caller's PATH directories no other account can modify (see the run below).
     $PwshPyElevatedRun = Test-PwshPyElevated
     # Script scope by name: Get-PwshPyUvPath, Install-PwshPyUv and the run below read it.
     $script:PwshPyCallerPath = $env:PATH
@@ -1517,9 +1570,23 @@ $PwshPyPrepareRun = {
     Set-Item -Path ('Env:' + $PwshPyArgvEnv) -Value ($PwshPyEncoded -join '|')
 
     $PwshPyTarget = Join-Path $PwshPyCacheDir $PwshPyShim
-    # The packed script runs with the PATH its caller gave; the fixed one was only for the runner's own
-    # helpers.
-    if ($PwshPyRootPath) { $env:PATH = $PwshPyCallerPath }
+    # Elevated (Windows or POSIX root), uv sees only the caller's PATH directories no other account can
+    # modify, judged while a POSIX root run's helpers still come from the fixed PATH; the packed script
+    # gets the caller's whole PATH back from the shim, behind the entries uv puts in front of the PATH
+    # it was given, which the shim is handed too ([107]).
+    if ($PwshPyElevatedRun) {
+        $PwshPyTrustedUvPath = Get-PwshPyTrustedPath -Path $PwshPyCallerPath
+        Set-Item -LiteralPath ('Env:' + $PwshPyPathEnv) -Value $PwshPyCallerPath
+        Set-Item -LiteralPath ('Env:' + $PwshPyUvPathEnv) -Value $PwshPyTrustedUvPath
+        # A git dependency would fail with uv's bare "git not found" when the only gits are in
+        # directories left off; name the cause.
+        $PwshPyCallerGit = Get-PwshPyGitOn -Path $PwshPyCallerPath
+        if ($PwshPyCallerGit -and -not (Get-PwshPyGitOn -Path $PwshPyTrustedUvPath)) {
+            $PwshPyGitWhere = if ($PwshPyOnWindows) { 'fails elevated until git is installed in a directory only Administrators' } else { 'fails as root until git is installed in a directory only root' }
+            Write-PwshPyNotice "pwshpy: no git on uv's PATH: $PwshPyCallerGit and any other git on the caller's PATH are in directories another account can modify; a git dependency $PwshPyGitWhere can modify"
+        }
+        $env:PATH = $PwshPyTrustedUvPath
+    }
 
     # uv picks the interpreter, and runs every one it considers to ask its version, so a python planted
     # in a PATH directory another account can write would run elevated. Elevated, uv runs the Python
@@ -1536,9 +1603,11 @@ $PwshPyPrepareRun = {
         Set-Item -LiteralPath ('Env:' + $PwshPyCwdEnv) -Value $PwshPyCallerCwd
     } else {
         $PwshPyRunArgs += $PwshPyUvArgs
-        # Only an elevated run changes directory; one inherited from the caller's environment must not
-        # move an unelevated script.
-        if (Test-Path -LiteralPath ('Env:' + $PwshPyCwdEnv)) { Remove-Item -LiteralPath ('Env:' + $PwshPyCwdEnv) }
+        # Only an elevated run changes directory or hands over a PATH; one inherited from the caller's
+        # environment must not move an unelevated script or replace its PATH.
+        foreach ($PwshPyHandOver in @($PwshPyCwdEnv, $PwshPyPathEnv, $PwshPyUvPathEnv)) {
+            if (Test-Path -LiteralPath ('Env:' + $PwshPyHandOver)) { Remove-Item -LiteralPath ('Env:' + $PwshPyHandOver) }
+        }
     }
     $PwshPyRunArgs += $PwshPyTarget
 }

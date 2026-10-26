@@ -32,7 +32,8 @@ from pwshpy.domain.packing import (
 _FULL_TEMPLATE = (
     "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|"
     "@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@|@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@|"
-    "@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_RELATIVE@@|@@PWSHPY_PYTHON_REQUEST@@"
+    "@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_RELATIVE@@|@@PWSHPY_PYTHON_REQUEST@@|"
+    "@@PWSHPY_PATH_ENV@@|@@PWSHPY_UV_PATH_ENV@@"
 )
 
 _SH_TEMPLATE = (
@@ -186,15 +187,19 @@ def test_render_runner_substitutes_every_placeholder() -> None:
         "PWSHPY_PACK_CWD",
         "'',''",
         "'>=3.11'",
+        "PWSHPY_PACK_PATH",
+        "PWSHPY_PACK_UV_PATH",
     ]
 
 
 @pytest.mark.os_agnostic
-def test_render_runner_rejects_a_template_missing_a_placeholder() -> None:
-    """Shipping a runner with a literal placeholder would fail cryptically on the target host."""
-    with pytest.raises(PackError, match="@@PWSHPY_ENTRY@@"):
+@pytest.mark.parametrize("placeholder", ["@@PWSHPY_ENTRY@@", "@@PWSHPY_PATH_ENV@@", "@@PWSHPY_UV_PATH_ENV@@"])
+def test_render_runner_rejects_a_template_missing_a_placeholder(placeholder: str) -> None:
+    """Shipping a runner with a literal placeholder would fail cryptically on the target host; the
+    variables an elevated run hands the caller's PATH and uv's over in ([107]) are required too."""
+    with pytest.raises(PackError, match=placeholder):
         render_runner(
-            _FULL_TEMPLATE.replace("@@PWSHPY_ENTRY@@", ""),
+            _FULL_TEMPLATE.replace(placeholder, ""),
             RunnerContent(payload_b64="x", payload_sha256="y", entry="e"),
         )
 

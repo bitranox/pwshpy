@@ -1188,8 +1188,12 @@ def _run_with_path(
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
     real_probe: bool = False,
+    inherit_path: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a runner with exactly ``path_first`` ahead of the inherited PATH (no real uv added).
+
+    ``inherit_path=False`` makes ``path_first`` the whole PATH, for a test that must control every
+    directory on it (the interpreter is started by its full path either way).
 
     The interpreter and library variables a suite run may carry (bmk's VIRTUAL_ENV among them) are
     dropped unless ``env`` sets them, so uv's interpreter choice is the one the test arranged, and an
@@ -1219,7 +1223,8 @@ def _run_with_path(
     # Never the real user's uv cache ([93]), unless the test names its own.
     child_env.setdefault("UV_CACHE_DIR", str(session_uv_cache()))
     child_env.pop("PWSHPY_TEST_UV", None)
-    child_env["PATH"] = os.pathsep.join([*map(str, path_first), os.environ.get("PATH", "")])
+    inherited = [os.environ.get("PATH", "")] if inherit_path else []
+    child_env["PATH"] = os.pathsep.join([*map(str, path_first), *inherited])
     return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
         [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), _NEVER_INSTALL_UV, *arguments],
         capture_output=True,
@@ -1603,6 +1608,168 @@ def test_an_elevated_posix_run_never_runs_a_planted_ls(tmp_path: Path) -> None:
     assert "is writable by every account" in _skip_line(result, planted), result.stderr
 
 
+# --- [107] elevated runs: uv sees only trusted PATH directories, the script all of them -----------
+
+_ENTRY_REPORTING_PATH = """import os
+print("path:" + os.environ.get("PATH", ""))
+"""
+
+_NO_GIT_HINT = "pwshpy: no git on uv's PATH: "
+
+
+def _path_runner(tmp_path: Path, *, elevated: str) -> tuple[Path, list[Path]]:
+    """A runner whose script reports its PATH, plus the PATH head holding a uv it trusts (see
+    :func:`_python_runner`: on POSIX this test's own uid counts as root's)."""
+    return _python_runner(tmp_path, elevated=elevated, source=_ENTRY_REPORTING_PATH)
+
+
+def _reported_path(result: subprocess.CompletedProcess[str]) -> str:
+    lines = [line[5:] for line in result.stdout.splitlines() if line.startswith("path:")]
+    assert len(lines) == 1, result.stdout + result.stderr
+    return lines[0]
+
+
+def _path_powershell_sees(path: str) -> str:
+    """The PATH a runner started with ``path`` reads as its caller's: pwsh puts its own directory in
+    front at startup, which would otherwise pass for an entry uv put there."""
+    assert _PWSH is not None
+    result = subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.Write($env:PATH)"],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=True,
+        env={**os.environ, "PATH": path},
+    )
+    return result.stdout
+
+
+def _git_requirement(tmp_path: Path) -> str:
+    """A git+file requirement, so uv runs git to fetch it (the same source as the .sh e2e tests)."""
+    return f"pwshpy-git-probe @ git+{write_git_source(tmp_path).as_uri()}"
+
+
+def _writable_by_others(directory: Path) -> str:
+    """Why the runner's walk refuses ``directory`` made by :func:`_user_writable_dir` (default sid)."""
+    if sys.platform == "win32":
+        return f"its directory {directory} lets {_SID_USERS[1:]} change it"
+    return f"its directory {directory} is writable by every account"
+
+
+@pytest.mark.local_only
+def test_an_elevated_run_leaves_an_untrusted_directory_off_uvs_path(tmp_path: Path) -> None:
+    """[107]: a PATH directory other accounts can modify is named and left off uv's PATH; the script
+    still gets the caller's whole PATH, behind the entries uv puts in front (user decision: "Keep uv's
+    entry first")."""
+    planted = _user_writable_dir(tmp_path / "planted-bin")
+    runner, uv_dirs = _path_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[planted, *uv_dirs])
+    assert result.returncode == 0, result.stdout + result.stderr
+    leaving = f"pwshpy: leaving {planted} off uv's PATH: {_writable_by_others(planted)}"
+    assert leaving in result.stderr, result.stderr
+    caller = _path_powershell_sees(os.pathsep.join([str(planted), *map(str, uv_dirs), os.environ.get("PATH", "")]))
+    seen = _reported_path(result)
+    assert seen.endswith(os.pathsep + caller), seen
+    assert seen[: -len(caller)].strip(os.pathsep), f"uv put nothing in front of the caller's PATH: {seen}"
+
+
+@pytest.mark.local_only
+def test_a_run_that_is_not_elevated_leaves_uvs_path_alone(tmp_path: Path) -> None:
+    """Control: not elevated, nothing is filtered or named."""
+    planted = _user_writable_dir(tmp_path / "planted-bin")
+    runner, uv_dirs = _path_runner(tmp_path, elevated="$false")
+    result = _run_with_path(tmp_path, runner, path_first=[planted, *uv_dirs])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "off uv's PATH" not in result.stderr, result.stderr
+    assert str(planted) in _reported_path(result).split(os.pathsep), result.stdout
+
+
+@pytest.mark.local_only
+def test_a_run_that_is_not_elevated_ignores_an_inherited_path_hand_over(tmp_path: Path) -> None:
+    """[107]: the variables an elevated run hands the shim, inherited by an unelevated run, must not
+    replace the PATH its script gets (the .ps1 always starts the shim, unlike the .sh)."""
+    planted = _user_writable_dir(tmp_path / "planted-bin")
+    runner, uv_dirs = _path_runner(tmp_path, elevated="$false")
+    bogus = str(tmp_path / "not-the-callers-path")
+    hand_over = {"PWSHPY_PACK_PATH": bogus, "PWSHPY_PACK_UV_PATH": bogus}
+    result = _run_with_path(tmp_path, runner, path_first=[planted, *uv_dirs], env=hand_over)
+    assert result.returncode == 0, result.stdout + result.stderr
+    seen = _reported_path(result).split(os.pathsep)
+    assert bogus not in seen, seen
+    assert str(planted) in seen, seen
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs and a real git.exe")
+def test_an_elevated_windows_run_never_runs_a_planted_git(tmp_path: Path) -> None:
+    """[107] as measured: a git.exe planted in a directory Authenticated Users can modify is not the git uv runs.
+
+    The stand-in is a copy of whoami.exe: run as git, it fails uv's first git call naming its own path.
+    """
+    planted = _user_writable_dir(tmp_path / "planted-git", sid=_BROAD_GROUP_SIDS[1])
+    shutil.copy(Path(os.environ["SYSTEMROOT"]) / "System32" / "whoami.exe", planted / "git.exe")
+    trusted = _trusted_uv(tmp_path)
+    if trusted is None or shutil.which("git") is None:
+        pytest.skip("needs a trusted uv and a real git on this host")
+    entry = tmp_path / "needs_git.py"
+    entry.write_text(f'# /// script\n# dependencies = ["{_git_requirement(tmp_path)}"]\n# ///\nprint("ran")\n')
+    runner = _elevation_stand_in(Path(pack_script(entry).output_path), tmp_path / "git_stand_in.ps1", elevated="$true")
+    result = _run_with_path(
+        tmp_path, runner, path_first=[planted, trusted.parent], env={"UV_PYTHON_DOWNLOADS": "never"}
+    )
+    assert str(planted / "git.exe") not in result.stderr, result.stderr
+    assert f"pwshpy: leaving {planted} off uv's PATH: " in result.stderr, result.stderr
+
+
+def _planted_git_dir(tmp_path: Path, marker: Path) -> tuple[Path, Path]:
+    """A directory other accounts can modify holding a git, and that git; it never runs a real one.
+
+    POSIX: a script recording that it ran. Windows: a copy of whoami.exe (no test can write an .exe).
+    """
+    planted = _user_writable_dir(tmp_path / "planted-git-bin")
+    if sys.platform == "win32":
+        git = planted / "git.exe"
+        shutil.copy(Path(os.environ["SYSTEMROOT"]) / "System32" / "whoami.exe", git)
+        return planted, git
+    _marker_double(planted, "git", marker, "exit 1")
+    return planted, planted / "git"
+
+
+@pytest.mark.local_only
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs a real git")
+@pytest.mark.parametrize(
+    ("gits", "hinted"),
+    [("planted-only", True), ("planted-and-trusted", False), ("none", False)],
+    ids=["planted-only", "planted-and-trusted", "none"],
+)
+def test_an_elevated_run_names_why_uv_has_no_git(tmp_path: Path, gits: str, hinted: bool) -> None:
+    """[107]: when every git on the caller's PATH sits in a directory left off uv's PATH, one stderr line
+    says a git dependency will fail and why; none when a trusted git is left, or when there is no git.
+
+    The PATH is exactly the one listed, so no git elsewhere on this host's PATH decides the case.
+    """
+    real_git = Path(str(shutil.which("git"))).parent
+    if sys.platform != "win32" and not _root_only_writable(real_git / "git"):
+        pytest.skip(f"the real git in {real_git} is not one a root run trusts")
+    marker = tmp_path / "git-ran.txt"
+    planted, planted_git = _planted_git_dir(tmp_path, marker)
+    first: list[Path] = {"planted-only": [planted], "planted-and-trusted": [planted, real_git], "none": []}[gits]
+    # Windows keeps its system directories, which hold no git; the runner itself needs no PATH.
+    system: list[Path] = [Path(os.environ["SYSTEMROOT"]) / "System32"] if sys.platform == "win32" else []
+    runner, uv_dirs = _path_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[*first, *uv_dirs, *system], inherit_path=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    hints = [line for line in result.stderr.splitlines() if line.startswith(_NO_GIT_HINT)]
+    assert len(hints) == (1 if hinted else 0), result.stderr
+    if hinted:
+        assert str(planted_git) in hints[0], hints[0]
+        only = "only Administrators can modify" if sys.platform == "win32" else "only root can modify"
+        assert only in hints[0], hints[0]
+    assert not marker.exists(), "the hint ran git"
+
+
 @pytest.mark.local_only
 @pytest.mark.os_posix
 @_POSIX_ONLY
@@ -1739,8 +1906,10 @@ def test_an_elevated_posix_run_takes_path_entries_literally(tmp_path: Path) -> N
     result = _run_with_path(tmp_path, runner, path_first=[pattern, uv.parent])
     assert result.returncode == 0, result.stdout + result.stderr
     assert _same(_reported_uv(result), uv), result.stdout + result.stderr
-    # decoy? does not exist, so it is no candidate at all - not one read as matching decoyX.
-    assert str(pattern) not in result.stderr, result.stderr
+    # decoy? does not exist, so it is no uv candidate at all - not one read as matching decoyX. uv's
+    # PATH filter ([107]) may name it, as the literal directory it cannot inspect, never decoyX.
+    assert str(pattern / "uv") not in result.stderr, result.stderr
+    assert str(decoy) not in result.stderr, result.stderr
 
 
 @pytest.mark.local_only

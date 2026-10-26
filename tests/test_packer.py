@@ -573,6 +573,27 @@ def test_the_shim_keeps_uvs_entry_when_uv_was_given_an_empty_path(tmp_path: Path
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(
+    "uv_entries",
+    [
+        # uv 0.13.0 on Linux hands a script run on an empty PATH "<interpreter bin>:" (measured).
+        pytest.param(("python-bin",), id="one-entry"),
+        # uv 0.13.5 on Windows hands it "<py>\Scripts;<py>;" (measured).
+        pytest.param(("python-Scripts", "python"), id="two-entries"),
+    ],
+)
+def test_the_shim_keeps_uvs_entries_when_the_callers_path_was_empty(
+    tmp_path: Path, uv_entries: tuple[str, ...]
+) -> None:
+    """[107]: a caller with an empty PATH (the .sh hands it over as PWSHPY_PACK_PATH='') gives uv an
+    empty one too; the script gets what uv put in front, its trailing separator included, exactly as an
+    unelevated run on an empty PATH sees it."""
+    uv_added = os.pathsep.join(str(tmp_path / entry) for entry in uv_entries) + os.pathsep
+    result = _run_shim(tmp_path, env={PATH_ENV_VAR: "", UV_PATH_ENV_VAR: "", "PATH": uv_added})
+    assert _shim_path(result) == uv_added
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
     ("given", "current"),
     [
         # As long as "given-dir", so the part in front would be "uv-bin" plus a separator if taken.

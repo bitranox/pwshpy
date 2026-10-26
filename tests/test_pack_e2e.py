@@ -8,7 +8,9 @@ typed, and the script's own exit code comes back through PowerShell.
 These run in CI on purpose: GitHub's ubuntu, windows and macos runners all ship PowerShell and
 the workflow installs ``uv``. The host is ``pwsh`` where it is on PATH, else ``powershell``; the
 ``PWSHPY_TEST_POWERSHELL`` environment variable names another one, which is how a Windows host
-that has pwsh 7 runs the module under Windows PowerShell 5.1 (``PWSHPY_TEST_POWERSHELL=powershell``).
+that has pwsh 7 runs the module under Windows PowerShell 5.1 (``PWSHPY_TEST_POWERSHELL=powershell``);
+a host it names that cannot be found fails the collection, never skips the module, so a misspelled
+selection cannot pass for a green run.
 On Windows every runner starts under a process-scoped Bypass execution policy (see
 ``_process_scoped_execution_policy``). They skip cleanly when no PowerShell or ``uv`` is found, and
 the dependency cases reach PyPI. Two tests stay ``local_only`` and never touch a runner: the ``mutating`` elevate test
@@ -75,12 +77,23 @@ if sys.platform != "win32":
 
 pytestmark = [pytest.mark.os_agnostic]
 
-#: The PowerShell every runner here starts under (see the module docstring for the override).
-_PWSH = (
-    shutil.which(os.environ["PWSHPY_TEST_POWERSHELL"])
-    if os.environ.get("PWSHPY_TEST_POWERSHELL")
-    else shutil.which("pwsh") or shutil.which("powershell")
-)
+
+def _selected_powershell() -> str | None:
+    """The PowerShell every runner here starts under (see the module docstring for the override).
+
+    None only when nothing was selected and neither default is installed: the module then skips. An
+    explicit selection that is not found fails instead, since a skip would hide the typo.
+    """
+    selected = os.environ.get("PWSHPY_TEST_POWERSHELL")
+    if not selected:
+        return shutil.which("pwsh") or shutil.which("powershell")
+    found = shutil.which(selected)
+    if found is None:
+        pytest.fail(f"PWSHPY_TEST_POWERSHELL={selected!r} names no PowerShell on PATH", pytrace=False)
+    return found
+
+
+_PWSH = _selected_powershell()
 _UV = shutil.which("uv")
 #: Passed on every run: a run that finds no uv it may use must fail with 127, never fetch the network
 #: installer, which would install uv into the real profile of whoever runs the suite (it did once,
@@ -1807,10 +1820,54 @@ def test_an_elevated_run_names_why_uv_has_no_git(tmp_path: Path, gits: str, hint
     assert not marker.exists(), "the hint ran git"
 
 
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs a real git")
+@pytest.mark.parametrize(
+    ("elevated", "planted_runs"),
+    [pytest.param("$true", False, id="root"), pytest.param("$false", True, id="not-root-control")],
+)
+def test_a_posix_root_run_never_runs_a_git_planted_on_path(tmp_path: Path, elevated: str, planted_runs: bool) -> None:
+    """[107] on the .ps1 under POSIX pwsh: a git planted first on PATH in a world-writable directory is not
+    the git uv runs as root for a git+file dependency; the control, not root, runs it.
+
+    The planted git records that it ran, then hands over to the real one, so both arms reach the fetch:
+    uv's fetch appears in the cache, so a missing marker is not a run that never reached git. Offline,
+    so both arms then fail to build the source."""
+    managed = _needs_managed_python()
+    real_git = Path(str(shutil.which("git")))
+    if not _root_only_writable(real_git):
+        pytest.skip(f"the real git {real_git} is not one a root run trusts")
+    marker = tmp_path / "git-ran.txt"
+    planted = _user_writable_dir(tmp_path / "planted-git-bin")
+    _marker_double(planted, "git", marker, f'exec "{real_git}" "$@"')
+    source = f'# /// script\n# dependencies = ["{_git_requirement(tmp_path)}"]\n# ///\nprint("ran")\n'
+    runner, head = _python_runner(tmp_path, elevated=elevated, source=source)
+    environment = {**interpreter_probe_env(tmp_path, managed=managed), "UV_OFFLINE": "1"}
+    result = _run_with_path(tmp_path, runner, path_first=[planted, *head], env=environment, cwd=_clean_cwd(tmp_path))
+    caches = (default_uv_cache_dir(tmp_path), tmp_path / "uv-cache")
+    assert any(fetched_git_source(cache) for cache in caches), "uv fetched no git source: " + result.stderr
+    assert marker.exists() is planted_runs, result.stdout + result.stderr
+    leaving = f"pwshpy: leaving {planted} off uv's PATH: {_writable_by_others(planted)}"
+    assert (leaving in result.stderr) is not planted_runs, result.stderr
+
+
 #: The runner's download of uv's installer, the one line a test of the installation replaces.
 _UV_INSTALLER_DOWNLOAD = (
     "Invoke-RestMethod -Uri 'https://astral.sh/uv/install.ps1' -UseBasicParsing -OutFile $installer"
 )
+
+
+def _ps_literal(value: object) -> str:
+    """``value`` as a single-quoted PowerShell literal: a ``'`` inside is doubled, the one escape such a
+    literal has (a profile or temp path may hold one, as in O'Brien).
+
+    Example:
+        >>> _ps_literal("C:/temp/it's")
+        "'C:/temp/it''s'"
+    """
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def _with_local_uv_installer(runner: Path, installer: Path) -> None:
@@ -1818,9 +1875,10 @@ def _with_local_uv_installer(runner: Path, installer: Path) -> None:
     substitution, so the installer step that runs it and the PATH handling after it are the shipped code."""
     text = runner.read_text(encoding="utf-8")
     assert text.count(_UV_INSTALLER_DOWNLOAD) == 1
-    literal = "'" + str(installer).replace("'", "''") + "'"
     runner.write_text(
-        text.replace(_UV_INSTALLER_DOWNLOAD, f"Copy-Item -LiteralPath {literal} -Destination $installer"),
+        text.replace(
+            _UV_INSTALLER_DOWNLOAD, f"Copy-Item -LiteralPath {_ps_literal(installer)} -Destination $installer"
+        ),
         encoding="utf-8",
     )
 
@@ -1830,18 +1888,31 @@ def _with_local_uv_installer(runner: Path, installer: Path) -> None:
 @pytest.mark.skipif(sys.platform != "win32", reason="the Windows branch of the uv installation")
 def test_an_elevated_windows_run_keeps_the_installed_uvs_directory_on_path(tmp_path: Path) -> None:
     """[107]: after the runner installs uv, an elevated Windows run keeps ``.local\\bin`` on the PATH
-    it rebuilds for uv and hands the script.
+    it rebuilds for uv and hands the script, and never names it as left off uv's PATH.
 
     Both are built from the caller's PATH, so a directory joined only to the runner's own PATH is lost
     to them. A local installer stands in for astral.sh's: it copies this host's uv into the
     ``.local\\bin`` of a profile only this account, SYSTEM and Administrators can change, so the
     installed uv passes the elevated trust rule; nothing finds a uv before it runs.
+
+    The installer also records its host's own argv: the runner must start it with
+    ``-ExecutionPolicy Bypass`` ahead of ``-File``. This module's process-scoped Bypass
+    (``_process_scoped_execution_policy``) reaches the installer's host too, so the installer would
+    run without the flag here, but not on a host whose policy refuses a downloaded script.
     """
     profile = _private_dir(tmp_path / "profile")
     installed = profile / ".local" / "bin"
     installer = tmp_path / "local-uv-install.ps1"
-    copy_uv = f"Copy-Item -LiteralPath '{_UvLocation.directory / 'uv.exe'}' -Destination '{installed / 'uv.exe'}'"
-    installer.write_text(f"New-Item -ItemType Directory -Force -Path '{installed}' | Out-Null\n{copy_uv}\n")
+    host_argv = tmp_path / "installer-host-argv.json"
+    record = (
+        f"[IO.File]::WriteAllText({_ps_literal(host_argv)},"
+        " (ConvertTo-Json -Compress -InputObject @([Environment]::GetCommandLineArgs())))"
+    )
+    make_dir = f"New-Item -ItemType Directory -Force -Path {_ps_literal(installed)} | Out-Null"
+    source, target = _ps_literal(_UvLocation.directory / "uv.exe"), _ps_literal(installed / "uv.exe")
+    copy_uv = f"Copy-Item -LiteralPath {source} -Destination {target}"
+    # With a BOM, so Windows PowerShell 5.1 and pwsh 7 both read a non-ASCII path in it as UTF-8.
+    installer.write_text(f"{record}\n{make_dir}\n{copy_uv}\n", encoding="utf-8-sig")
     runner, _ = _path_runner(tmp_path, elevated="$true")
     _with_local_uv_installer(runner, installer)
     nowhere = tmp_path / "no-uv-here"
@@ -1859,6 +1930,13 @@ def test_an_elevated_windows_run_keeps_the_installed_uvs_directory_on_path(tmp_p
     assert "uv was not found; installing it" in result.stdout, result.stdout + result.stderr
     assert (installed / "uv.exe").is_file(), result.stdout + result.stderr
     assert str(installed) in _reported_path(result).split(os.pathsep), result.stdout
+    assert f"pwshpy: leaving {installed} off uv's PATH" not in result.stderr, result.stderr
+    argv = [str(item) for item in cast("list[object]", json.loads(host_argv.read_text(encoding="utf-8-sig")))]
+    assert "-File" in argv, argv
+    policy_at = [index for index, item in enumerate(argv) if item == "-ExecutionPolicy"]
+    assert policy_at, argv
+    assert policy_at[0] < argv.index("-File"), argv
+    assert argv[policy_at[0] + 1] == "Bypass", argv
 
 
 @pytest.mark.local_only
@@ -1971,7 +2049,7 @@ def test_an_unanswered_posix_euid_probe_applies_the_root_rule(tmp_path: Path, pr
     runner = Path(pack_script(entry).output_path)
     text = runner.read_text(encoding="utf-8")
     assert text.count(_FIXED_IDS) == 1
-    replacement = "@(" + ", ".join(f"'{fixed / f'id{n}'}'" for n in range(6)) + ")"
+    replacement = "@(" + ", ".join(_ps_literal(fixed / f"id{n}") for n in range(6)) + ")"
     runner.write_text(text.replace(_FIXED_IDS, replacement), encoding="utf-8")
     result = _run_with_path(tmp_path, runner, path_first=[planted.parent], real_probe=True)
     assert not marker.exists(), "the runner asked an id on PATH"

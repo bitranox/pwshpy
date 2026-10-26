@@ -2127,22 +2127,42 @@ def test_as_root_the_script_still_gets_the_callers_whole_path(tmp_path: Path, sh
     assert seen == seen_unprivileged, (seen, seen_unprivileged)
 
 
-@pytest.mark.skipif(not Path("/usr/bin/git").is_file(), reason="needs a git in /usr/bin, a directory root owns")
+#: The trusted git the planted-and-trusted case leaves on uv's PATH; only that case needs it.
+_TRUSTED_GIT_DIR = Path("/usr/bin")
+
+
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
 @pytest.mark.parametrize(
     ("gits", "hinted"),
-    [("planted-only", True), ("planted-and-trusted", False), ("none", False)],
-    ids=["planted-only", "planted-and-trusted", "none"],
+    [
+        pytest.param("planted-only", True, id="planted-only"),
+        pytest.param(
+            "planted-and-trusted",
+            False,
+            id="planted-and-trusted",
+            marks=pytest.mark.skipif(
+                not (_TRUSTED_GIT_DIR / "git").is_file(),
+                reason=f"needs a git in {_TRUSTED_GIT_DIR}, a directory root owns",
+            ),
+        ),
+        pytest.param("none", False, id="none"),
+    ],
 )
 def test_as_root_a_hint_names_why_uv_has_no_git(
     tmp_path: Path, shell_id: str, shell: list[str], gits: str, hinted: bool
 ) -> None:
     """[107]: when every git on the caller's PATH sits in a directory left off uv's PATH, one stderr line
-    says a git dependency will fail and why; none when a trusted git is left, or when there is no git."""
+    says a git dependency will fail and why; none when a trusted git is left, or when there is no git.
+
+    The planted git only records that it ran and never needs a real one (the hint never runs git), so
+    only the planted-and-trusted case depends on this host's git."""
     _needs_managed_python()
     runner, uv = _python_runner(tmp_path, as_root=True, source=_ENTRY_REPORTING_PATH, entry_name="report_path.py")
-    planted = _planted_git(tmp_path, tmp_path / "git-ran.txt")
-    first = {"planted-only": [planted], "planted-and-trusted": [planted, Path("/usr/bin")], "none": []}[gits]
+    planted = tmp_path / "planted-git-bin"
+    planted.mkdir()
+    planted.chmod(0o777)
+    _marker_tool(planted, "git", tmp_path / "git-ran.txt", body="exit 1")
+    first = {"planted-only": [planted], "planted-and-trusted": [planted, _TRUSTED_GIT_DIR], "none": []}[gits]
     environment = _trust_env(tmp_path, uv.parent)
     environment["PATH"] = os.pathsep.join(map(str, [*first, uv.parent]))
     # The shell is looked up on the child's PATH, which no longer holds the system directories.
@@ -2155,3 +2175,145 @@ def test_as_root_a_hint_names_why_uv_has_no_git(
         assert f"{planted}/git" in hints[0], hints[0]
         assert "only root can modify" in hints[0], hints[0]
     assert not (tmp_path / "git-ran.txt").exists(), "the hint ran git"
+
+
+#: How each m6 row names a directory it builds: (kind, name below tmp_path). A "trusted" one is this
+#: test's own 0755 directory (its uid counts as root's, see :func:`_python_runner`), an "open" one is
+#: world-writable, a "link" one is a symlink to the target named after the colon, and a "missing" one
+#: is never created.
+_PATH_ROW_DIRS = {
+    "trusted space": ("trusted", "with space"),
+    "missing space": ("missing", "no such dir"),
+    "trusted newline": ("trusted", "new\nline"),
+    "open newline": ("open", "open\nline"),
+    "open": ("open", "open-bin"),
+    "link to open": ("link:open", "link-to-open"),
+    "link to usr-bin": ("link:/usr/bin", "link-to-usr-bin"),
+}
+
+#: The m6 table: (id, the caller's PATH entries, the entries uv's PATH must hold in order, and for each
+#: entry left off, (name, why) as the runner's stderr line names it). "{uv}" is the trusted uv's
+#: directory, which every row needs on PATH so the run finds a uv; "<...>" names a _PATH_ROW_DIRS entry.
+_UV_PATH_ROWS: list[tuple[str, list[str], list[str], list[tuple[str, str]]]] = [
+    ("leading-empty", ["", "/usr/bin", "{uv}"], ["/usr/bin", "{uv}"], [(".", "./. is not an absolute path")]),
+    ("inner-empty", ["/usr/bin", "", "{uv}"], ["/usr/bin", "{uv}"], [(".", "./. is not an absolute path")]),
+    ("trailing-empty", ["/usr/bin", "{uv}", ""], ["/usr/bin", "{uv}"], []),
+    (
+        "relative",
+        ["/usr/bin", "rel/bin", "{uv}"],
+        ["/usr/bin", "{uv}"],
+        [("rel/bin", "rel/bin/. is not an absolute path")],
+    ),
+    ("space-trusted", ["<trusted space>", "{uv}"], ["<trusted space>", "{uv}"], []),
+    (
+        "space-missing",
+        ["<missing space>", "{uv}"],
+        ["{uv}"],
+        [("<missing space>", "its directory <missing space> cannot be inspected")],
+    ),
+    # Never expanded: "/usr/bi*" names no directory, though /usr/bin matches it as a pattern.
+    ("glob", ["/usr/bi*", "{uv}"], ["{uv}"], [("/usr/bi*", "its directory /usr/bi* cannot be inspected")]),
+    ("newline-trusted", ["<trusted newline>", "{uv}"], ["<trusted newline>", "{uv}"], []),
+    (
+        "newline-open",
+        ["<open newline>", "{uv}"],
+        ["{uv}"],
+        [("<open newline>", "its directory <open newline> is writable by every account")],
+    ),
+    (
+        "open",
+        ["<open>", "/usr/bin", "{uv}"],
+        ["/usr/bin", "{uv}"],
+        [("<open>", "its directory <open> is writable by every account")],
+    ),
+    # A symlink is judged at its target, and kept as the caller spelled it.
+    (
+        "symlink-to-open",
+        ["<link to open>", "{uv}"],
+        ["{uv}"],
+        [("<link to open>", "its directory <open> is writable by every account")],
+    ),
+    ("symlink-to-trusted", ["<link to usr-bin>", "{uv}"], ["<link to usr-bin>", "{uv}"], []),
+    ("trusted-kept-in-order", ["/usr/bin", "/bin", "{uv}"], ["/usr/bin", "/bin", "{uv}"], []),
+]
+
+
+def _path_row_dirs(tmp_path: Path) -> dict[str, str]:
+    """Build every _PATH_ROW_DIRS directory below ``tmp_path``; returns "<key>" -> its path.
+
+    The working directory (:func:`_work_dir`) and its rel/bin are trusted directories too, so an empty
+    or relative entry is left off for naming the working directory, never for what it holds: a runner
+    that resolved either against the working directory would keep it.
+    """
+    relative = _work_dir(tmp_path) / "rel" / "bin"
+    relative.mkdir(parents=True)
+    for directory in (relative, relative.parent, relative.parent.parent):
+        directory.chmod(0o755)
+    built: dict[str, str] = {}
+    for key, (kind, name) in _PATH_ROW_DIRS.items():
+        path = tmp_path / name
+        if kind == "trusted":
+            path.mkdir()
+            path.chmod(0o755)
+        elif kind == "open":
+            path.mkdir()
+            path.chmod(0o777)
+        elif kind.startswith("link:"):
+            target = kind[len("link:") :]
+            path.symlink_to(tmp_path / _PATH_ROW_DIRS[target][1] if target in _PATH_ROW_DIRS else Path(target))
+        built[f"<{key}>"] = str(path)
+    return built
+
+
+def _fill(text: str, names: dict[str, str]) -> str:
+    for placeholder, value in names.items():
+        text = text.replace(placeholder, value)
+    return text
+
+
+def _recording_uv_at(uv: Path, record: Path) -> None:
+    """Make the trusted stand-in ``uv`` also write the PATH it was started on for ``uv run``, byte for
+    byte, before it hands over to the real uv: what uv sees is what decides which git it runs."""
+    uv.write_text(
+        f'#!/bin/sh\nif [ "$1" = run ]; then printf %s "$PATH" > "{record}"; fi\n'
+        f'PWSHPY_TEST_UV="$0"\nexport PWSHPY_TEST_UV\nexec "{_UV}" "$@"\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize(
+    ("caller", "kept", "left_off"),
+    [pytest.param(caller, kept, left_off, id=row_id) for row_id, caller, kept, left_off in _UV_PATH_ROWS],
+)
+def test_as_root_uv_runs_on_exactly_the_trusted_path_entries(
+    tmp_path: Path,
+    shell_id: str,
+    shell: list[str],
+    *,
+    caller: list[str],
+    kept: list[str],
+    left_off: list[tuple[str, str]],
+) -> None:
+    """[107]: a root run hands uv exactly the caller's PATH entries no other account can modify, in the
+    caller's order and spelling. A leading or inner empty entry (the working directory) is named as "."
+    and left off; a trailing one is dropped without a line (sh field splitting ends there); a relative,
+    missing, untrusted or glob-like entry is named and left off, the glob never expanded; a symlink is
+    judged at its target; a space or a newline in a trusted directory's name keeps it."""
+    _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=True, source=_ENTRY_REPORTING_PATH, entry_name="report_path.py")
+    record = tmp_path / "uv-run-path.txt"
+    _recording_uv_at(uv, record)
+    names = {**_path_row_dirs(tmp_path), "{uv}": str(uv.parent)}
+    environment = _trust_env(tmp_path, uv.parent)
+    environment["PATH"] = os.pathsep.join(_fill(entry, names) for entry in caller)
+    # The shell is looked up on the child's PATH, which may not hold the system directories.
+    shell = [shutil.which(shell[0]) or shell[0], *shell[1:]]
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert record.read_text(encoding="utf-8") == os.pathsep.join(_fill(entry, names) for entry in kept), result.stderr
+    assert result.stderr.count("pwshpy: leaving ") == len(left_off), result.stderr
+    for name, why in left_off:
+        line = f"pwshpy: leaving {_fill(name, names)} off uv's PATH: {_fill(why, names)} (as root uv runs git"
+        assert line in result.stderr, result.stderr

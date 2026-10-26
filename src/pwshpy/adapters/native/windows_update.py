@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import importlib
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, NamedTuple
 
 from ...domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
@@ -94,12 +94,18 @@ def _com_failure_message(exc: BaseException) -> str:
     return f"Windows Update search failed: HRESULT 0x{code:08X}{suffix}"
 
 
-def _windows_update_search(criteria: str) -> _Outcome:
-    """Child-side: run the COM search; return its outcome, never raise a COM error."""
-    pythoncom: Any = importlib.import_module("pythoncom")
+def _windows_update_search(criteria: str, load: Callable[[str], object] | None = None) -> _Outcome:
+    """Child-side: run the COM search; return its outcome, never raise a COM error.
+
+    ``load`` imports the pywin32 modules (``None``: :func:`importlib.import_module`). It is the
+    seam for the external edge, and it crosses the spawn pipe as a pickled argument, so a
+    replacement must be a module-level function.
+    """
+    loader = load if load is not None else importlib.import_module
+    pythoncom: Any = loader("pythoncom")
     pythoncom.CoInitialize()
     try:
-        return _search_updates(criteria)
+        return _search_updates(criteria, loader)
     except Exception as exc:
         if not is_com_error(exc):
             raise
@@ -108,14 +114,14 @@ def _windows_update_search(criteria: str) -> _Outcome:
         pythoncom.CoUninitialize()
 
 
-def _search_updates(criteria: str) -> _Outcome:
+def _search_updates(criteria: str, load: Callable[[str], object]) -> _Outcome:
     """Search and read each update into a record; every COM object is local to this frame.
 
     So all of them are released when it returns, BEFORE the caller's ``CoUninitialize``: a COM
     reference still alive at that point is released into a torn-down apartment, and pywin32
     prints "Win32 exception occurred releasing IUnknown" to stderr for each one.
     """
-    client: Any = importlib.import_module("win32com.client")
+    client: Any = load("win32com.client")
     updates = client.Dispatch("Microsoft.Update.Session").CreateUpdateSearcher().Search(criteria).Updates
     return _Outcome(error="", updates=tuple(_to_update(updates.Item(i)) for i in range(int(updates.Count))))
 

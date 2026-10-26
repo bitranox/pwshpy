@@ -6,6 +6,8 @@ import os
 import time
 from typing import Protocol
 
+import com_fakes
+
 from pwshpy.adapters.native.bounded import run_bounded
 
 
@@ -44,3 +46,26 @@ def run_bounded_and_report(conn: _Sender) -> None:
         conn.send(exc)
     finally:
         conn.close()
+
+
+class _NoApartment:
+    """``pythoncom`` for a spawn child: the apartment calls succeed and do nothing."""
+
+    def CoInitialize(self) -> None:  # noqa: N802 - pythoncom API name
+        return None
+
+    def CoUninitialize(self) -> None:  # noqa: N802 - pythoncom API name
+        return None
+
+
+class _AccessDeniedClient:
+    """``win32com.client`` whose Dispatch fails as pywin32 does for ERROR_ACCESS_DENIED."""
+
+    def Dispatch(self, name: str) -> object:  # noqa: N802 - win32com API name
+        raise com_fakes.error(5, "Dispatch", "Access is denied.")
+
+
+def load_access_denied_wu(name: str) -> object:
+    """A picklable ``load=`` for the Windows Update child: pywin32 doubles, Dispatch denied."""
+    modules: dict[str, object] = {"pythoncom": _NoApartment(), "win32com.client": _AccessDeniedClient()}
+    return modules[name]

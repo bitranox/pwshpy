@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import struct
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from bounded_targets import echo
+from bounded_targets import echo, load_access_denied_wu
 from com_fakes import codeless_com_error, com_error, error
 
 from pwshpy.adapters.native import windows_update
@@ -248,12 +248,11 @@ class _FailingClient:
         raise self._failure
 
 
-def _child_with(monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> _FakePythoncom:
-    """Point the child's lazy pywin32 imports (the external edge) at doubles raising ``failure``."""
+def _child_with(failure: BaseException) -> tuple[Callable[[str], object], _FakePythoncom]:
+    """A ``load=`` for the child's lazy pywin32 imports (the external edge), raising ``failure``."""
     pythoncom = _FakePythoncom()
-    modules: dict[str, Any] = {"pythoncom": pythoncom, "win32com.client": _FailingClient(failure)}
-    monkeypatch.setattr(windows_update, "importlib", SimpleNamespace(import_module=modules.__getitem__))
-    return pythoncom
+    modules: dict[str, object] = {"pythoncom": pythoncom, "win32com.client": _FailingClient(failure)}
+    return modules.__getitem__, pythoncom
 
 
 @pytest.mark.os_agnostic
@@ -262,21 +261,28 @@ def _child_with(monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> _Fak
     [com_error(-2147024894, "The system cannot find the file specified.", None, None), error(5, "f", "denied")],
     ids=["com_error", "error"],
 )
-def test_child_returns_a_pywin32_failure_as_data(monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> None:
-    pythoncom = _child_with(monkeypatch, failure)
-    outcome = _windows_update_search("IsInstalled=0")
+def test_child_returns_a_pywin32_failure_as_data(failure: BaseException) -> None:
+    load, pythoncom = _child_with(failure)
+    outcome = _windows_update_search("IsInstalled=0", load)
     assert outcome == _Outcome(error=_com_failure_message(failure), updates=())
     assert pythoncom.calls == ["init", "uninit"]
 
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("failure", [RuntimeError("a bug"), struct.error("not pywin32's")], ids=["bug", "struct"])
-def test_child_lets_a_non_pywin32_failure_propagate(monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> None:
-    pythoncom = _child_with(monkeypatch, failure)
+def test_child_lets_a_non_pywin32_failure_propagate(failure: BaseException) -> None:
+    load, pythoncom = _child_with(failure)
     with pytest.raises(type(failure)) as info:
-        _windows_update_search("IsInstalled=0")
+        _windows_update_search("IsInstalled=0", load)
     assert info.value is failure
     assert pythoncom.calls == ["init", "uninit"]
+
+
+@pytest.mark.os_agnostic
+def test_child_takes_its_loader_through_a_real_spawn_pipe() -> None:
+    """The ``load`` seam pickles by name into a spawn child, as run_bounded hands it over."""
+    outcome = run_bounded(_windows_update_search, ("IsInstalled=0", load_access_denied_wu), timeout=30)
+    assert outcome == _Outcome(error="Windows Update search failed: HRESULT 0x80070005 (Access is denied.)", updates=())
 
 
 @pytest.mark.os_agnostic

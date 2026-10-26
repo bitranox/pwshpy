@@ -6,6 +6,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.8.0] 2026-10-26 09:42:09
+
 ### Added
 
 - `register_scheduled_task(..., settings=TaskSettings(...))` / CLI settings flags (Windows and

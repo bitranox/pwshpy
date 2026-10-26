@@ -1,6 +1,6 @@
 [project]
 name = "pwshpy"
-version = "1.7.0"
+version = "1.8.0"
 description = "A genuinely Pythonic PowerShell: typed records and a fluent pipeline over native Windows bindings, with an in-process PowerShell 7 SDK fallback — never a pwsh.exe subprocess."
 readme = "README.md"
 requires-python = ">=3.10"

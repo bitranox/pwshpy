@@ -27,7 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -1223,7 +1223,7 @@ def _run_with_path(
     tmp_path: Path,
     runner: Path,
     *arguments: str,
-    path_first: Sequence[Path],
+    path_first: Sequence[Path | str],
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
     real_probe: bool = False,
@@ -1231,6 +1231,8 @@ def _run_with_path(
     install_uv: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a runner with exactly ``path_first`` ahead of the inherited PATH (no real uv added).
+
+    A ``str`` entry reaches PATH exactly as spelled; a ``Path`` would normalise its separators.
 
     ``inherit_path=False`` makes ``path_first`` the whole PATH, for a test that must control every
     directory on it (the interpreter is started by its full path either way). ``install_uv`` drops
@@ -1852,6 +1854,196 @@ def test_a_posix_root_run_never_runs_a_git_planted_on_path(tmp_path: Path, eleva
     assert marker.exists() is planted_runs, result.stdout + result.stderr
     leaving = f"pwshpy: leaving {planted} off uv's PATH: {_writable_by_others(planted)}"
     assert (leaving in result.stderr) is not planted_runs, result.stderr
+
+
+# --- [146] elevated runs trust no network (UNC) path ---------------------------------------------
+
+#: Why the runner's walk refuses a path on a network share, whatever ACL its server reports.
+_NETWORK_PATH = "it is a network path, and an elevated run trusts only local paths"
+#: Why it refuses a device-namespace path other than the extended-length drive form.
+_DEVICE_PATH = "it is a device path, and an elevated run trusts only local drive paths"
+
+#: Each way the runner can meet a UNC path, built from the plain ``\\server\share\...`` spelling.
+_NETWORK_SPELLINGS: dict[str, Callable[[str], str]] = {
+    "unc": lambda share: share,
+    "forward-slashes": lambda share: share.replace("\\", "/"),
+    "mixed-separators": lambda share: "\\/" + share[2:],
+    "extended-length": lambda share: "\\\\?\\UNC\\" + share[2:],
+}
+
+
+def _admin_share(path: Path) -> str:
+    """``path`` reached through this host's own administrative share (``\\\\localhost\\c$\\...``), or a skip.
+
+    The server is this host, so it reports exactly the ACL the local walk reads: a test that sees the
+    share refused sees the network rule at work, not a different ACL.
+    """
+    drive, rest = os.path.splitdrive(str(path))
+    share = f"\\\\localhost\\{drive[:1].lower()}$" + rest
+    if not Path(share).is_dir():
+        pytest.skip(f"this host's administrative share {share} is not reachable")
+    return share
+
+
+_NETWORK_RULE_PROBE = r"""
+param([string] $Artefact, [Parameter(ValueFromRemainingArguments = $true)] [string[]] $Paths)
+$ErrorActionPreference = 'Stop'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Artefact, [ref]$null, [ref]$null)
+$language = 'System.Management.Automation.Language'
+$functions = $ast.FindAll({ param($n) $n -is ("$language.FunctionDefinitionAst" -as [type]) }, $false)
+foreach ($definition in $functions) { . ([ScriptBlock]::Create($definition.Extent.Text)) }
+$PwshPyOnWindows = $true
+foreach ($path in $Paths) {
+    # The walk only for a refused spelling: it returns before touching the filesystem there, while a
+    # local one would read ACLs this host may not have.
+    $rule = Get-PwshPyNetworkDistrust -Path $path
+    $walk = if ($rule) { Get-PwshPyUvDistrust -Path $path } else { '' }
+    Write-Output ($path + "`t" + $rule + "`t" + $walk)
+}
+"""
+
+#: Spellings the rule refuses as network paths, with either separator and the device prefixes.
+_NETWORK_RULE_NETWORK = (
+    r"\\server\share\bin\uv.exe",
+    "//server/share/bin/uv.exe",
+    r"\/server\share/bin\uv.exe",
+    r"\\?\UNC\server\share\bin\uv.exe",
+    r"\\?\unc\server\share\bin\uv.exe",
+    "//?/UNC/server/share/bin/uv.exe",
+    r"\\.\UNC\server\share\bin\uv.exe",
+    r"\\server",
+)
+#: Device-namespace spellings the rule refuses: none of them is a plain drive path.
+_NETWORK_RULE_DEVICE = (
+    r"\\.\C:\bin\uv.exe",
+    r"\\?\GLOBALROOT\Device\Mup\server\share\uv.exe",
+    r"\\?\Volume{00000000-0000-0000-0000-000000000000}\bin\uv.exe",
+    r"\\.\pipe\uv",
+)
+#: Local spellings the rule leaves to the ACL walk.
+_NETWORK_RULE_LOCAL = (r"C:\bin\uv.exe", "c:/bin/uv.exe", r"\\?\C:\bin\uv.exe", "//?/C:/bin/uv.exe")
+
+
+def test_the_network_rule_judges_every_unc_spelling(tmp_path: Path) -> None:
+    """[146]: every UNC spelling is refused as a network path, by the rule and by the walk that calls it;
+    other device-namespace paths are refused as device paths; drive paths, the extended-length one
+    included, are left to the ACL walk. Pure string work, so it runs on any host with a PowerShell."""
+    assert _PWSH is not None
+    probe = tmp_path / "network_rule.ps1"
+    probe.write_text(_NETWORK_RULE_PROBE, encoding="utf-8")
+    artefact = pack_script(_project(tmp_path)).output_path
+    spellings = (*_NETWORK_RULE_NETWORK, *_NETWORK_RULE_DEVICE, *_NETWORK_RULE_LOCAL)
+    result = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(probe), str(artefact), *spellings],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    verdicts = {path: (rule, walk) for path, rule, walk in (line.split("\t") for line in result.stdout.splitlines())}
+    assert len(verdicts) == len(spellings), result.stdout
+    for path in _NETWORK_RULE_NETWORK:
+        assert verdicts[path] == (_NETWORK_PATH, _NETWORK_PATH), (path, verdicts[path])
+    for path in _NETWORK_RULE_DEVICE:
+        assert verdicts[path] == (_DEVICE_PATH, _DEVICE_PATH), (path, verdicts[path])
+    for path in _NETWORK_RULE_LOCAL:
+        assert verdicts[path] == ("", ""), (path, verdicts[path])
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.parametrize("spelling", sorted(_NETWORK_SPELLINGS))
+def test_an_elevated_run_leaves_a_network_path_off_uvs_path(tmp_path: Path, spelling: str) -> None:
+    """[146]: a PATH directory on a network share is named and left off uv's PATH, whatever ACL its server
+    reports. The directory is private, so the same directory spelled locally passes the walk (the
+    control) and the share, this host's own, reports that same ACL: only the network rule refuses it."""
+    shared = _private_dir(tmp_path / "shared-bin")
+    entry = _NETWORK_SPELLINGS[spelling](_admin_share(shared))
+    runner, uv_dirs = _path_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[entry, shared, *uv_dirs])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"pwshpy: leaving {entry} off uv's PATH: {_NETWORK_PATH} (" in result.stderr, result.stderr
+    assert f"pwshpy: leaving {shared} off" not in result.stderr, result.stderr
+
+
+def _network_link(tmp_path: Path, target: str) -> Path:
+    """A directory symlink in a private directory, pointing at the network path ``target``."""
+    link = _private_dir(tmp_path / "links") / "net"
+    link.symlink_to(target, target_is_directory=True)
+    return link
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+def test_an_elevated_run_leaves_a_link_to_a_network_path_off_uvs_path(tmp_path: Path) -> None:
+    """[146]: a local PATH directory that is a link to a share is refused for its resolved target. The
+    link and the directory holding it are private, so nothing else about it fails the walk."""
+    share = _admin_share(_private_dir(tmp_path / "shared-bin"))
+    link = _network_link(tmp_path, share)
+    runner, uv_dirs = _path_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[link, *uv_dirs])
+    assert result.returncode == 0, result.stdout + result.stderr
+    refused = f"pwshpy: leaving {link} off uv's PATH: the link {link} points to {share}: {_NETWORK_PATH} ("
+    assert refused in result.stderr, result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+def test_an_elevated_run_keeps_an_extended_length_local_path_on_uvs_path(tmp_path: Path) -> None:
+    """[146] control: ``\\\\?\\C:\\...`` is the long spelling of a local path, so the network rule leaves
+    it to the ACL walk, which keeps a private directory under pwsh 7. Windows PowerShell 5.1 cannot
+    walk that spelling at all (its Join-Path finds no drive in it) and leaves it off for that reason,
+    which fails safe; there the test pins only that the network rule is not what refused it."""
+    entry = "\\\\?\\" + str(_private_dir(tmp_path / "long-bin"))
+    runner, uv_dirs = _path_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[entry, *uv_dirs])
+    assert result.returncode == 0, result.stdout + result.stderr
+    leaving = f"pwshpy: leaving {entry} off uv's PATH: "
+    if Path(str(_PWSH)).stem.lower() == "powershell":
+        refusal = next(line for line in result.stderr.splitlines() if line.startswith(leaving))
+        assert "cannot be judged" in refusal and _NETWORK_PATH not in refusal and _DEVICE_PATH not in refusal, refusal
+        return
+    assert leaving not in result.stderr, result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.parametrize("reached", ["unc", "link"])
+def test_an_elevated_run_skips_a_uv_on_a_network_path(tmp_path: Path, reached: str) -> None:
+    """[146]: a uv found on a share, directly or through a local link, is skipped with the network reason,
+    and the trusted local uv later on PATH runs. Its directory is private, so spelled locally it would
+    pass (see test_an_elevated_run_accepts_a_uv_only_the_running_account_can_modify)."""
+    shared_uv = _copy_uv(_private_dir(tmp_path / "shared-bin"))
+    share = _admin_share(shared_uv.parent)
+    trusted = _trusted_uv(tmp_path)
+    assert trusted is not None
+    entry = share if reached == "unc" else str(_network_link(tmp_path, share))
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[entry, trusted.parent])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _same(_reported_uv(result), trusted), result.stdout + result.stderr
+    reason = _NETWORK_PATH if reached == "unc" else f"the link {entry} points to {share}: {_NETWORK_PATH}"
+    assert reason in _skip_line(result, Path(entry) / shared_uv.name), result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+def test_an_elevated_run_refuses_a_pinned_uv_on_a_network_path(tmp_path: Path) -> None:
+    """[146]: a -PwshPyUv pin on a share is refused like any untrusted pin (exit 127), naming the reason."""
+    shared_uv = _copy_uv(_private_dir(tmp_path / "shared-bin"))
+    pinned = _admin_share(shared_uv.parent) + "\\" + shared_uv.name
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, "-PwshPyUv", pinned, path_first=[])
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert f"{_PIN_REFUSED} -PwshPyUv: {pinned}: {_NETWORK_PATH}." in result.stderr, result.stderr
+    assert _reported_uv(result) is None, result.stdout
 
 
 #: The runner's download of uv's installer, the one line a test of the installation replaces.

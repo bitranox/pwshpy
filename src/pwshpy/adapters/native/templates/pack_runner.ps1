@@ -310,6 +310,26 @@ function Test-PwshPyAbsolutePath {
     return $Path.StartsWith('/')
 }
 
+function Get-PwshPyNetworkDistrust {
+    param([string] $Path)
+
+    # Windows: why an elevated run must not trust $Path for where it lies, or ''. A UNC path
+    # (\\server\share, \\?\UNC\ or \\.\UNC\, either separator) is judged by the ACL its server reports,
+    # and whoever runs that server decides the content whatever the ACL claims ([146]). Of the device
+    # namespace (\\?\, \\.\) only \\?\C:\..., the long spelling of a drive path, is left to the ACL
+    # walk: any other name there (\\?\GLOBALROOT\Device\Mup\..., a volume GUID, a pipe) is resolved by
+    # the object manager, can reach a network redirector, and is never where uv or a PATH directory
+    # lives. A drive letter mapped to a share passes here ([147]).
+    if (-not $PwshPyOnWindows) { return '' }
+    $spelled = $Path.Replace('/', '\')
+    if (-not $spelled.StartsWith('\\')) { return '' }
+    if ($spelled -match '^\\\\\?\\[A-Za-z]:\\') { return '' }
+    if ($spelled -match '^\\\\[?.]\\' -and $spelled -notmatch '^\\\\[?.]\\UNC(\\|$)') {
+        return 'it is a device path, and an elevated run trusts only local drive paths'
+    }
+    return 'it is a network path, and an elevated run trusts only local paths'
+}
+
 function Get-PwshPyAclDistrust {
     param([string] $Path, [int] $Rights, [object] $Security = $null, [string[]] $Trusted = $null)
 
@@ -456,6 +476,10 @@ function Get-PwshPyUvDistrust {
     # resolved like any other. -Directory judges the last component as a directory (on Windows the
     # rights that add or remove an entry count too), for a path that names one.
     if (-not (Test-PwshPyAbsolutePath -Path $Path)) { return "$Path is not an absolute path" }
+    # Before any ACL is read: a share's ACL is whatever its server says. Every later root comes from
+    # a link target, judged below.
+    $network = Get-PwshPyNetworkDistrust -Path $Path
+    if ($network) { return $network }
     if ($PwshPyOnWindows) { $Path = $Path.Replace('/', '\') }
     $current = [IO.Path]::GetPathRoot($Path)
     $rest = New-Object System.Collections.Generic.List[string]
@@ -481,10 +505,16 @@ function Get-PwshPyUvDistrust {
             $why = Get-PwshPyLinkDistrust -Path $next
             if ($why) { return $why }
             # Target is a string on PowerShell 7 and a one-element array on 5.1; a junction's may
-            # carry the NT prefix.
+            # carry the NT prefix. A symlink to a share reads \\server\share on 7 but
+            # UNC\server\share on 5.1 (measured), which would pass for a relative target there, so
+            # 5.1 takes a target spelled UNC\... as the share it names; a relative link into a
+            # directory named UNC is refused with it, which fails safe.
             $target = ([string](@($item.Target)[0])) -replace '^\\\?\?\\', ''
+            if ($PSVersionTable.PSEdition -ne 'Core') { $target = $target -replace '^UNC\\', '\\' }
             if (-not $target) { return "the symlink $next cannot be read" }
             if (Test-PwshPyAbsolutePath -Path $target) {
+                $network = Get-PwshPyNetworkDistrust -Path $target
+                if ($network) { return "the link $next points to ${target}: $network" }
                 if ($PwshPyOnWindows) { $target = $target.Replace('/', '\') }
                 $root = [IO.Path]::GetPathRoot($target)
                 if ($root -ne [IO.Path]::GetPathRoot($current) -and -not $ancestor) { $ancestor = Get-PwshPyAncestorDistrust -Path $root }
@@ -989,7 +1019,9 @@ function Get-PwshPyPythonDirDistrust {
         $directory = $parent
     }
     if ($directory -eq [IO.Path]::GetPathRoot($directory)) {
-        $why = Get-PwshPyLeafDistrust -Path $directory -Directory $true
+        # A root is judged here without the walk, so the walk's network rule is asked for too.
+        $why = Get-PwshPyNetworkDistrust -Path $directory
+        if (-not $why) { $why = Get-PwshPyLeafDistrust -Path $directory -Directory $true }
     } else {
         $why = Get-PwshPyUvDistrust -Path $directory -Directory $true
     }

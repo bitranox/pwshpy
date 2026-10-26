@@ -378,7 +378,11 @@ Details worth knowing:
   is asked; busybox shows neither, but on Linux an ACL that grants write shows as group write
   through its mask). Every symlink on the way (the `uv` itself, a `PATH` entry, `/bin -> usr/bin` on
   a merged-`/usr` system) is resolved where it is met, its owner judged and the directories it leads
-  through judged like the rest. As root on POSIX the runner also runs its own helpers (`ls`, `id`,
+  through judged like the rest. On Windows an elevated run never trusts a network (UNC) path, for a
+  `uv` or for a `PATH` directory: `\\server\share\...` in any separator, its `\\?\UNC\` long form
+  and a link whose target is one are refused with `it is a network path`, whatever ACL the server
+  reports, because whoever runs the server decides what the share holds (a drive letter mapped to a
+  share is not detected). As root on POSIX the runner also runs its own helpers (`ls`, `id`,
   `tar`, `base64`, `sha256sum`, the installer's `curl` and `sh`, ...) only from the system
   directories
   `/usr/bin:/bin:/usr/sbin:/sbin:/run/current-system/sw/bin:/run/current-system/profile/bin` (not

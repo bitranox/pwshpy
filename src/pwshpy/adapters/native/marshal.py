@@ -16,8 +16,9 @@ Contents:
       ``MultipleInstances``.
     * :func:`to_integrity_level` - mandatory-label RID -> :class:`IntegrityLevel`.
     * :func:`skip_or_raise` - the lenient/strict contract for an item a listing cannot read.
-    * :func:`is_com_error` / :func:`com_hresult` / :func:`com_error_text` - recognise a pywin32
-      COM/Win32 error and read its unsigned HRESULT and its text.
+    * :func:`is_com_error` / :func:`com_hresult` / :func:`com_outer_hresult` /
+      :func:`com_error_text` - recognise a pywin32 COM/Win32 error and read its unsigned
+      HRESULT (unwrapped or as carried) and its text.
 """
 
 from __future__ import annotations
@@ -665,13 +666,21 @@ def _arg(exc: BaseException, index: int) -> object:
 def _own_hresult(exc: BaseException) -> int | None:
     """The HRESULT the error itself carries, unsigned and not unwrapped; ``None`` for none.
 
-    ``.hresult`` first; ``args[0]`` only when there is no ``.winerror`` either, because a
-    ``pywintypes.error`` keeps its Win32 code (not an HRESULT) there.
+    ``.hresult`` first; ``args[0]`` only for a ``com_error``, whose first argument is an
+    HRESULT (a ``pywintypes.error`` keeps a Win32 code there, see :func:`_win32_code`).
     """
     code = _as_int(getattr(exc, "hresult", None))
-    if code is None and _as_int(getattr(exc, "winerror", None)) is None:
+    if code is None and type(exc).__name__ == "com_error":
         code = _as_int(_arg(exc, 0))
     return None if code is None else code & _HRESULT_MASK
+
+
+def _win32_code(exc: BaseException) -> int | None:
+    """The Win32 code an error carries: ``.winerror``, else a ``pywintypes.error``'s ``args[0]``."""
+    code = _as_int(getattr(exc, "winerror", None))
+    if code is None and type(exc).__name__ == "error":
+        code = _as_int(_arg(exc, 0))
+    return code
 
 
 def _callee_excepinfo(exc: BaseException, own: int | None) -> tuple[object, ...] | None:
@@ -702,16 +711,49 @@ def _win32_to_hresult(code: int) -> int:
     return code & _HRESULT_MASK
 
 
+def com_outer_hresult(exc: BaseException) -> int | None:
+    """Return the HRESULT a pywin32 error itself carries, unsigned, WITHOUT unwrapping.
+
+    For a DISP_E_EXCEPTION this is ``0x80020009`` itself, where :func:`com_hresult` gives the
+    callee's status; a caller compares the two to tell a message which code it shows. A Win32
+    code is mapped as HRESULT_FROM_WIN32, as in :func:`com_hresult`.
+
+    Args:
+        exc: Any exception a pywin32 call raised.
+
+    Returns:
+        The unsigned HRESULT, or ``None`` when ``exc`` is not a pywin32 error or carries no
+        int code.
+
+    Example:
+        >>> class com_error(Exception):
+        ...     hresult = -2147352567
+        ...     excepinfo = (0, "source", "No network", None, 0, -2145107924)
+        >>> com_error.__module__ = "pywintypes"
+        >>> f"0x{com_outer_hresult(com_error()):08X}"
+        '0x80020009'
+        >>> com_outer_hresult(ValueError()) is None
+        True
+    """
+    if not is_com_error(exc):
+        return None
+    own = _own_hresult(exc)
+    if own is not None:
+        return own
+    win32 = _win32_code(exc)
+    return None if win32 is None else _win32_to_hresult(win32)
+
+
 def com_hresult(exc: BaseException) -> int | None:
     """Return the HRESULT a pywin32 error carries, as an unsigned 32-bit int.
 
     pywin32 reports an HRESULT signed (``0x80070002`` arrives as ``-2147024894``), so it is
     masked to 32 bits, ready for ``0x%08X``. A DISP_E_EXCEPTION (``0x80020009``) is unwrapped
     to the callee's own status in ``excepinfo[5]`` when that is a nonzero int. A
-    ``pywintypes.error`` carries a Win32 code on ``.winerror``, which is mapped as
-    HRESULT_FROM_WIN32 (5 becomes ``0x80070005``). ``None`` means no status could be read:
-    either ``exc`` is not a pywin32 error (see :func:`is_com_error`, which a caller asks first
-    when the two cases must be told apart) or it carries no int code.
+    ``pywintypes.error`` carries a Win32 code on ``.winerror`` (or as ``args[0]``), which is
+    mapped as HRESULT_FROM_WIN32 (5 becomes ``0x80070005``). ``None`` means no status could be
+    read: either ``exc`` is not a pywin32 error (see :func:`is_com_error`, which a caller asks
+    first when the two cases must be told apart) or it carries no int code.
 
     Args:
         exc: Any exception a pywin32 call raised.
@@ -733,14 +775,11 @@ def com_hresult(exc: BaseException) -> int | None:
         >>> com_hresult(ValueError()) is None
         True
     """
-    if not is_com_error(exc):
+    outer = com_outer_hresult(exc)
+    if outer is None:
         return None
-    own = _own_hresult(exc)
-    if own is not None:
-        scode = _callee_scode(_callee_excepinfo(exc, own))
-        return own if scode is None else scode
-    winerror = _as_int(getattr(exc, "winerror", None))
-    return None if winerror is None else _win32_to_hresult(winerror)
+    scode = _callee_scode(_callee_excepinfo(exc, outer))
+    return outer if scode is None else scode
 
 
 def com_error_text(exc: BaseException) -> str:
@@ -769,7 +808,7 @@ def com_error_text(exc: BaseException) -> str:
     """
     if not is_com_error(exc):
         return ""
-    fields = _callee_excepinfo(exc, _own_hresult(exc))
+    fields = _callee_excepinfo(exc, com_outer_hresult(exc))
     description = None if fields is None else fields[_EXCEPINFO_DESCRIPTION]
     if isinstance(description, str) and description:
         return description
@@ -783,6 +822,7 @@ __all__ = [
     "com_date_to_datetime",
     "com_error_text",
     "com_hresult",
+    "com_outer_hresult",
     "epoch_to_datetime",
     "from_registry_value_type",
     "from_service_start_type",

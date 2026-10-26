@@ -1834,7 +1834,8 @@ def test_a_posix_root_run_never_runs_a_git_planted_on_path(tmp_path: Path, eleva
 
     The planted git records that it ran, then hands over to the real one, so both arms reach the fetch:
     uv's fetch appears in the cache, so a missing marker is not a run that never reached git. Offline,
-    so both arms then fail to build the source."""
+    so both arms then fail to build the source. local_only: it needs a uv-managed Python and a git only
+    root can modify, which the CI runners do not guarantee."""
     managed = _needs_managed_python()
     real_git = Path(str(shutil.which("git")))
     if not _root_only_writable(real_git):

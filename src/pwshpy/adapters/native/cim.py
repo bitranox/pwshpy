@@ -28,6 +28,7 @@ from typing import Any, cast
 
 from ...domain.errors import NativeCallError, PlatformUnsupportedError
 from ...domain.records import CimInstance
+from .marshal import com_hresult, is_com_error
 
 _CLASS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DEFAULT_NAMESPACE = "root/cimv2"
@@ -88,9 +89,16 @@ def iter_cim(
         for obj in service.ExecQuery(wql, "WQL", _LAZY_FLAGS):
             yield CimInstance.model_construct(class_name=class_name, properties=_properties(obj))
     except Exception as exc:
-        if type(exc).__name__ not in {"com_error", "error"}:
+        if not is_com_error(exc):
             raise
-        raise NativeCallError(str(exc) or f"WMI query failed: {wql!r}") from exc
+        raise NativeCallError(_query_failure(exc, wql)) from exc
+
+
+def _query_failure(exc: BaseException, wql: str) -> str:
+    """The error's own text, plus its HRESULT when one is readable (the text may bury it)."""
+    message = str(exc) or f"WMI query failed: {wql!r}"
+    code = com_hresult(exc)
+    return message if code is None else f"{message} (HRESULT 0x{code:08X})"
 
 
 __all__ = ["iter_cim"]

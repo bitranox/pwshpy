@@ -9,11 +9,13 @@ Windows.  Exact live behaviour is pinned against Get-CimInstance in
 
 from __future__ import annotations
 
+import struct
 import sys
 from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
+from com_fakes import codeless_com_error, com_error_for, dispatch_error, error, signed
 
 from pwshpy.adapters.native import cim as cim_mod
 from pwshpy.adapters.native.cim import iter_cim
@@ -100,24 +102,63 @@ def test_iter_cim_rejects_bad_class_name(monkeypatch: pytest.MonkeyPatch) -> Non
         list(iter_cim("Win32_Thing; DROP"))
 
 
-class _FakeComError(Exception):
-    """Mimics pywintypes.com_error; the adapter wraps errors whose type name is 'com_error'."""
+class _Boom:
+    """A WBEM service whose query raises ``failure``."""
+
+    def __init__(self, failure: BaseException) -> None:
+        self._failure = failure
+
+    def ExecQuery(self, *args: Any) -> Iterator[Any]:  # noqa: N802 - WBEM API name
+        raise self._failure
 
 
-_FakeComError.__name__ = "com_error"
+_WBEM_E_INVALID_CLASS = 0x80041010
 
 
 @pytest.mark.os_agnostic
 def test_iter_cim_wraps_query_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A COM/query failure surfaces as NativeCallError."""
-
-    class _Boom:
-        def ExecQuery(self, *args: Any) -> Iterator[Any]:  # noqa: N802 - WBEM API name
-            raise _FakeComError("bad query")
-
-    monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(_Boom()))
-    with pytest.raises(NativeCallError):
+    """A COM/query failure surfaces as NativeCallError, keeping the error's own text."""
+    failure = com_error_for(_WBEM_E_INVALID_CLASS, "bad query")
+    monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(_Boom(failure)))
+    with pytest.raises(NativeCallError) as info:
         list(iter_cim("Win32_Thing"))
+    assert str(failure) in str(info.value)
+    assert info.value.__cause__ is failure
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        (com_error_for(_WBEM_E_INVALID_CLASS), "0x80041010"),
+        (dispatch_error(signed(_WBEM_E_INVALID_CLASS), "Invalid class "), "0x80041010"),
+        (error(5, "ExecQuery", "Access is denied."), "0x80070005"),
+    ],
+    ids=["direct", "dispatch", "win32"],
+)
+def test_iter_cim_names_the_hresult(monkeypatch: pytest.MonkeyPatch, failure: BaseException, code: str) -> None:
+    monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(_Boom(failure)))
+    with pytest.raises(NativeCallError, match=f"HRESULT {code}"):
+        list(iter_cim("Win32_Thing"))
+
+
+@pytest.mark.os_agnostic
+def test_iter_cim_names_no_hresult_when_none_is_readable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(_Boom(codeless_com_error())))
+    with pytest.raises(NativeCallError) as info:
+        list(iter_cim("Win32_Thing"))
+    assert "HRESULT" not in str(info.value)
+    assert str(info.value) == "WMI query failed: 'SELECT * FROM Win32_Thing'"
+
+
+@pytest.mark.os_agnostic
+def test_iter_cim_lets_a_foreign_error_class_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``struct.error`` shares pywin32's class name ``error`` but is not a WMI answer."""
+    failure = struct.error("not pywin32's")
+    monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(_Boom(failure)))
+    with pytest.raises(struct.error) as info:
+        list(iter_cim("Win32_Thing"))
+    assert info.value is failure
 
 
 @pytest.mark.os_agnostic

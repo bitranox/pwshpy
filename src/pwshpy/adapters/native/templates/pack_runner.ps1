@@ -332,24 +332,28 @@ function Get-PwshPyNetworkDistrust {
 
 function Get-PwshPyNetworkReason {
     # The reason Get-PwshPyNetworkDistrust gives for a network path, kept in one place because the
-    # refusals below the account's data directory pick their remedy by it (Test-PwshPyNetworkReason).
+    # refusals below the account's data directory pick their remedy by it
+    # (Test-PwshPyBareNetworkReason).
     return 'it is a network path, and an elevated run trusts only local paths'
 }
 
-function Test-PwshPyNetworkReason {
+function Test-PwshPyBareNetworkReason {
     param([string] $Why)
 
-    # Whether the refusal $Why is the network rule's: the walk returns its reason alone, or after "the
-    # link L points to T: " for a link target. Our own fixed text, never a localised system message.
-    return ([bool]$Why -and $Why.EndsWith((Get-PwshPyNetworkReason)))
+    # Whether the refusal $Why is the network rule's own reason and nothing else, which is what the walk
+    # returns when the path itself (the redirected data directory) is on a share. A link met below a
+    # local data directory is refused as "the link L points to T: <reason>" and is not matched: the
+    # data directory is not redirected then, and removing the link (the usual remedy) works. Compared
+    # ordinally with our own fixed text, never with a localised system message.
+    return [string]::Equals($Why, (Get-PwshPyNetworkReason), [StringComparison]::Ordinal)
 }
 
 function Get-PwshPyNetworkRemedy {
     # What an elevated run says in place of a remedy when a path below the running account's data
     # directory (the RoamingAppData known folder, see Get-PwshPyAccountDataHome) failed the network
-    # rule. Folder redirection can put that folder on a share, and then neither remedy the run names
-    # otherwise (take write access off, remove the directory and run again) can work: the next run
-    # meets the same share ([146]).
+    # rule for being on a share itself, not through a link met on the way. Folder redirection can put
+    # that folder on a share, and then neither remedy the run names otherwise (take write access off,
+    # remove the directory and run again) can work: the next run meets the same share ([146]).
     return 'the running account''s AppData is on a network share; an elevated run cannot use it'
 }
 
@@ -868,7 +872,7 @@ function Get-PwshPyPythonRemedy {
     param([string] $Why)
 
     # What an elevated run that refused a managed-Python path for $Why tells the caller to do about it.
-    if (Test-PwshPyNetworkReason -Why $Why) { return (Get-PwshPyNetworkRemedy) }
+    if (Test-PwshPyBareNetworkReason -Why $Why) { return (Get-PwshPyNetworkRemedy) }
     if ($PwshPyOnWindows) {
         return 'take every other account''s write access off the path named above (only the running account, SYSTEM and Administrators may change it), or remove uv''s managed-Python directory and install the Python again elevated (uv python install)'
     }
@@ -1589,7 +1593,7 @@ $PwshPyPrepare = {
             if ($PwshPyGitGlobalWhy) {
                 $PwshPyGitGlobalRemedy = "take every other account's write access off the path named above and leave the file empty, or remove its directory and run again elevated, which creates it"
                 # A share is no less a share on the next run, which would create the file there again.
-                if (Test-PwshPyNetworkReason -Why $PwshPyGitGlobalWhy) { $PwshPyGitGlobalRemedy = Get-PwshPyNetworkRemedy }
+                if (Test-PwshPyBareNetworkReason -Why $PwshPyGitGlobalWhy) { $PwshPyGitGlobalRemedy = Get-PwshPyNetworkRemedy }
                 Write-PwshPyFailure "pwshpy: refusing the git configuration file ${PwshPyGitGlobal}: $PwshPyGitGlobalWhy (an elevated run points GIT_CONFIG_GLOBAL only at an empty file no other account can modify): $PwshPyGitGlobalRemedy"
                 exit 127
             }

@@ -14,18 +14,20 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - An elevated `.ps1` pack run no longer trusts a network (UNC) path. A share's ACL is whatever its
   server reports, so a `uv` or a `PATH` directory on `\\server\share\...` passed the trust rule
   whenever the server claimed administrator ownership, while the server's operator controlled the
-  content. Now `\\server\share\...` (either separator), `\\?\UNC\...` and `\\.\UNC\...` are
-  refused for the `uv` search, a `-PwshPyUv` pin, the `PATH` handed to uv, uv's managed-Python
-  directory and every directory above it, the Python uv finds there and the empty git configuration
-  file, and so is a link met on the way to one of those paths whose target is one of them (a link
-  below the managed-Python directory is judged as the link it is and never followed), named with
-  `it is a network path, and an elevated run trusts only local paths`. Other device-namespace paths
-  (`\\.\...`, `\\?\` other than `\\?\C:\...`) are refused as device paths. A drive letter
-  mapped to a share is not detected. Elevated `.ps1` runs are unavailable while the running
-  account's RoamingAppData is redirected to a share: the empty git configuration file and uv's
-  managed Pythons live below it, so such a run stops with exit code 127, and its refusal names no
-  remedy but says `the running account's AppData is on a network share; an elevated run cannot use
-  it`. Runs that are not elevated are unchanged.
+  content. Now `\\server\share\...` (either separator), `\\?\UNC\...` and `\\.\UNC\...` are refused
+  for the `uv` search, a `-PwshPyUv` pin, the `PATH` handed to uv, uv's managed-Python directory and
+  every directory above it, the Python uv finds there and the empty git configuration file, and so
+  is a link met on the way to one of those paths whose target is one of them (only the walk of the
+  managed-Python directory's contents judges a link it meets as the link it is and never follows
+  it), named with `it is a network path, and an elevated run trusts only local paths`. Other
+  device-namespace paths (`\\.\...`, `\\?\` other than `\\?\C:\...`) are refused as device paths. A
+  drive letter mapped to a share is not detected. Elevated `.ps1` runs are unavailable while the
+  running account's RoamingAppData is redirected to a share: the empty git configuration file and
+  uv's managed Pythons live below it, so such a run stops with exit code 127, and its refusal names
+  no remedy but says `the running account's AppData is on a network share; an elevated run cannot
+  use it`. That is said only when the data directory itself is on a share; a link to a share below a
+  local one is refused the same way, its reason naming the link and where it points, and keeps the
+  usual remedy, since removing the link works. Runs that are not elevated are unchanged.
 - The test suite no longer reads the developer's own user configuration layer. A new autouse fixture,
   `user_layer_in_tmp_path`, points the user layer (`XDG_CONFIG_HOME`, `LIB_LAYERED_CONFIG_MAC_HOME_ROOT`,
   `_APPDATA`, `_LOCALAPPDATA`) at an empty directory under `tmp_path`; `HOME` is left alone, because

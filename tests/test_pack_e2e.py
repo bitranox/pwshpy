@@ -2050,8 +2050,15 @@ def test_an_elevated_run_refuses_a_pinned_uv_on_a_network_path(tmp_path: Path) -
 
 
 #: What an elevated run says in place of a remedy when a path below its account's data directory
-#: (RoamingAppData) fails the network rule: neither the ACL change nor a fresh directory makes it local.
+#: (RoamingAppData) fails the network rule for being on a share itself (the rule's reason alone, not a
+#: link's): neither the ACL change nor a fresh directory makes it local.
 _NETWORK_REMEDY = "the running account's AppData is on a network share; an elevated run cannot use it"
+#: The usual remedy a refused managed-Python path names on Windows, for every reason but the bare network one.
+_WINDOWS_PYTHON_REMEDY = (
+    "take every other account's write access off the path named above (only the running account, SYSTEM and"
+    " Administrators may change it), or remove uv's managed-Python directory and install the Python again"
+    " elevated (uv python install)"
+)
 
 
 @pytest.mark.local_only
@@ -2087,12 +2094,16 @@ def test_an_elevated_run_names_a_network_appdata_when_it_refuses_the_git_configu
 @pytest.mark.local_only
 @pytest.mark.os_windows
 @_WINDOWS_ONLY
-def test_an_elevated_run_names_a_network_appdata_when_it_refuses_the_managed_python_directory(tmp_path: Path) -> None:
-    """[146]: uv's managed-Python directory below the account's data directory that is a link to a share
-    is refused for the link's target, and the run exits 127 saying the AppData is on a network share
-    instead of the usual remedy. A data directory on a share itself stops at the git configuration file
-    first (see test_an_elevated_run_names_a_network_appdata_when_it_refuses_the_git_configuration_file);
-    the link and the share's directory are private, so only the network rule refuses them."""
+def test_an_elevated_run_keeps_the_usual_remedy_for_a_managed_python_directory_linked_to_a_share(
+    tmp_path: Path,
+) -> None:
+    """[146]: uv's managed-Python directory below a local data directory that is a link to a share is
+    refused for the link's target, and the run exits 127 naming the usual remedy, not the network
+    AppData one: the data directory is not redirected, and removing the link works. The reason line
+    names the link and where it points. A data directory on a share itself stops at the git
+    configuration file first and gets the network remedy (see
+    test_an_elevated_run_names_a_network_appdata_when_it_refuses_the_git_configuration_file); the link
+    and the share's directory are private, so only the network rule refuses them."""
     share = _admin_share(_private_dir(tmp_path / "remote-python"))
     runner, head = _python_runner(tmp_path, elevated="$true")
     environment = interpreter_probe_env(tmp_path, managed=Path(share))
@@ -2101,15 +2112,18 @@ def test_an_elevated_run_names_a_network_appdata_when_it_refuses_the_managed_pyt
     assert result.returncode == 127, result.stdout + result.stderr
     refusal = (
         f"{_PYTHON_DIR_REFUSED} {install}: the link {install} points to {share}: {_NETWORK_PATH} (an elevated"
-        f" run lets uv search only a directory no other account can modify, nor anything below it): {_NETWORK_REMEDY}"
+        f" run lets uv search only a directory no other account can modify, nor anything below it):"
+        f" {_WINDOWS_PYTHON_REMEDY}"
     )
     assert refusal in result.stderr, result.stderr
-    assert _PYTHON_REMEDY not in result.stderr, result.stderr
+    assert _NETWORK_REMEDY not in result.stderr, result.stderr
     assert _reported_python(result) is None, result.stdout
 
 
 #: Loads the runner's functions alone and prints, for each directory, why the managed-Python check
-#: refuses it and the remedy an elevated run names for that reason; then the remedy for a device path.
+#: refuses it and the remedy an elevated run names for that reason; then the remedy for a device path
+#: and for a link to a share, in the form the walk gives it (the e2e run with a managed-Python
+#: directory linked to a share pins that form from the real walk).
 _PYTHON_DIR_PROBE = r"""
 param([string] $Artefact, [Parameter(ValueFromRemainingArguments = $true)] [string[]] $Directories)
 $ErrorActionPreference = 'Stop'
@@ -2124,6 +2138,9 @@ foreach ($directory in $Directories) {
 }
 $device = Get-PwshPyNetworkDistrust -Path '\\.\pipe\uv'
 Write-Output ("device`t" + $device + "`t" + (Get-PwshPyPythonRemedy -Why $device))
+$share = '\\server\share\python'
+$link = "the link C:\data\uv\python points to ${share}: " + (Get-PwshPyNetworkDistrust -Path $share)
+Write-Output ("link`t" + $link + "`t" + (Get-PwshPyPythonRemedy -Why $link))
 """
 
 
@@ -2138,8 +2155,9 @@ def test_a_managed_python_directory_climbing_to_a_share_root_is_refused_with_the
     run cannot reach this branch: the data directory holding the managed Pythons also holds the git
     configuration file, judged first (see
     test_an_elevated_run_names_a_network_appdata_when_it_refuses_the_git_configuration_file), so the
-    runner's own functions are asked here. The control: another refusal (a device path) keeps the usual
-    remedy. Read only: nothing below the share root exists, and nothing is created."""
+    runner's own functions are asked here. The controls keep the usual remedy: another refusal (a device
+    path), and a link to a share, whose reason names the link and where it points, and which removing
+    the link cures. Read only: nothing below the share root exists, and nothing is created."""
     assert _PWSH is not None
     probe = tmp_path / "python_dir.ps1"
     probe.write_text(_PYTHON_DIR_PROBE, encoding="utf-8")
@@ -2156,8 +2174,9 @@ def test_a_managed_python_directory_climbing_to_a_share_root_is_refused_with_the
     assert result.returncode == 0, result.stdout + result.stderr
     verdicts = {name: (why, remedy) for name, why, remedy in (line.split("\t") for line in result.stdout.splitlines())}
     assert verdicts[missing] == (_NETWORK_PATH, _NETWORK_REMEDY), verdicts
-    assert verdicts["device"][0] == _DEVICE_PATH, verdicts
-    assert verdicts["device"][1].startswith("take every other account's write access off"), verdicts
+    assert verdicts["device"] == (_DEVICE_PATH, _WINDOWS_PYTHON_REMEDY), verdicts
+    link_reason = f"the link C:\\data\\uv\\python points to \\\\server\\share\\python: {_NETWORK_PATH}"
+    assert verdicts["link"] == (link_reason, _WINDOWS_PYTHON_REMEDY), verdicts
 
 
 #: The runner's download of uv's installer, the one line a test of the installation replaces.

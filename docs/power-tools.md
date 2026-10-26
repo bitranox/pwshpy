@@ -381,9 +381,9 @@ Details worth knowing:
   through judged like the rest. On Windows an elevated run never trusts a network (UNC) path, for a
   `uv` or for a `PATH` directory: `\\server\share\...` in any separator, its `\\?\UNC\` and
   `\\.\UNC\` long forms and a link whose target is one are refused with `it is a network path, and
-  an elevated run trusts only local paths`, whatever ACL the server reports, because whoever runs the
-  server decides what the share holds (a drive letter mapped to a share is not detected). Any other
-  device-namespace path (`\\.\...`, or `\\?\...` other than the long form of a drive path,
+  an elevated run trusts only local paths`, whatever ACL the server reports, because whoever runs
+  the server decides what the share holds (a drive letter mapped to a share is not detected). Any
+  other device-namespace path (`\\.\...`, or `\\?\...` other than the long form of a drive path,
   `\\?\C:\...`) is refused with `it is a device path, and an elevated run trusts only local drive
   paths`: the object manager resolves such a name (`\\?\GLOBALROOT\Device\Mup\...` reaches the
   network redirector), and neither a `uv` nor a `PATH` directory lives there. As root on POSIX the
@@ -476,12 +476,14 @@ Details worth knowing:
   make the path named in the reason root's alone (`chown root`, then `chmod go-w`, with `-R` for a
   directory), on Windows take every other account's write access off it; or remove uv's
   managed-Python directory and install the Python again elevated (`uv python install`). On Windows a
-  refusal for the network rule (above) names no remedy but says `the running account's AppData is
-  on a network share; an elevated run cannot use it`: with RoamingAppData redirected to a share no
-  elevated `.ps1` run is available, since neither an ACL change nor a fresh install makes the share
-  local (such a data directory already stops the run at the git configuration file, see below). The
-  run is then
-  `uv run --no-config --python-preference only-managed --no-env-file --python <that path>`,
+  refusal whose reason is the network rule's alone names no remedy but says `the running account's
+  AppData is on a network share; an elevated run cannot use it`: that reason means RoamingAppData is
+  redirected to a share, and then no elevated `.ps1` run is available, since neither an ACL change
+  nor a fresh install makes the share local (such a data directory already stops the run at the git
+  configuration file, see below). A link to a share met below a local data directory is refused too,
+  its reason naming the link and where it points, but it keeps the usual remedy: the data directory
+  is not redirected then, and removing the link works. The run is
+  then `uv run --no-config --python-preference only-managed --no-env-file --python <that path>`,
   started in `/` on POSIX or `System32` on Windows (`--directory`, `--project`), so the
   `.python-version` uv would read from the script's directory upwards (the cache, which
   `PWSHPY_PACK_CACHE` can put anywhere) and every `.venv` above the caller's directory or above
@@ -553,32 +555,33 @@ Details worth knowing:
   directory. The file and every directory above it pass the same trust rule as a `uv`; when another
   account could change them, or the file is not empty, the run stops with `pwshpy: refusing the git
   configuration file <path>: <reason>` and exit code 127, naming the remedy (take the other
-  account's write access off, or remove the directory so the next elevated run creates it). When
-  the reason is the network rule, that is the RoamingAppData known folder redirected to a share, the
-  refusal says `the running account's AppData is on a network share; an elevated run cannot use it`
-  instead: elevated `.ps1` runs are unavailable while it is redirected, because the next run would
-  create the file on the same share. The packed script inherits the variable, so a git it runs
-  reads no global configuration file either:
-  no `user.name`/`user.email` and no `credential.helper` from the elevated account's own
-  `.gitconfig` (an elevated 1.5.x run read them). A script that needs them
+  account's write access off, or remove the directory so the next elevated run creates it). When the
+  reason is the network rule's alone, that is the RoamingAppData known folder redirected to a share,
+  the refusal says `the running account's AppData is on a network share; an elevated run cannot use
+  it` instead: elevated `.ps1` runs are unavailable while it is redirected, because the next run
+  would create the file on the same share. A link to a share met below a local data directory is
+  refused too, its reason naming the link and where it points, and keeps the usual remedy, since
+  removing the link works. The packed script inherits the variable, so a git it runs reads no global
+  configuration file either: no `user.name`/`user.email` and no `credential.helper` from the
+  elevated account's own `.gitconfig` (an elevated 1.5.x run read them). A script that needs them
   passes them itself (`git -c user.name=... -c user.email=...`) or points `GIT_CONFIG_GLOBAL` at a
-  file it trusts before it runs git. git honours `GIT_CONFIG_GLOBAL` from 2.32 on; an older git ignores
-  it and still reads those files. The system file (`/etc/gitconfig`, or the one below Git for Windows'
-  install directory) is the administrators' and still applies. The runner cannot tell who set
-  a variable, so an elevated run in a network that reaches the internet only through a proxy
-  downloads nothing: the proxy can be named neither in the
-  environment (root's own included) nor in a `uv.toml` (none is read), and the certificate of a
-  TLS-inspecting proxy is not trusted. What still works there: a script with no dependencies (no PEP
-  723 `dependencies`, no `--with`) on a managed Python already in the account's managed-Python
-  directory, installed beforehand as that account with the proxy set (`uv python install` with
-  `UV_PYTHON_INSTALL_DIR` naming that directory); an unelevated run, which keeps every variable;
-  and, by the same reasoning (not measured), a proxy that needs no setting on the machine, such as a
-  transparent one. The user's own site-packages is switched off (`PYTHONNOUSERSITE=1`, which the
-  packed script inherits): without `PYTHONUSERBASE` it comes from `HOME` (POSIX, which some `sudo`
-  setups keep) or `APPDATA` (Windows), so a `.pth` the caller put there would otherwise run with the
-  elevated rights. Not elevated, nothing changes: uv starts in your directory with your environment
-  and configuration, and the `.sh` runs the entry itself. The `-PwshPyUv` / `--pwshpy-uv` pin is
-  unaffected: it chooses the `uv`, not the Python.
+  file it trusts before it runs git. git honours `GIT_CONFIG_GLOBAL` from 2.32 on; an older git
+  ignores it and still reads those files. The system file (`/etc/gitconfig`, or the one below Git
+  for Windows' install directory) is the administrators' and still applies. The runner cannot tell
+  who set a variable, so an elevated run in a network that reaches the internet only through a proxy
+  downloads nothing: the proxy can be named neither in the environment (root's own included) nor in
+  a `uv.toml` (none is read), and the certificate of a TLS-inspecting proxy is not trusted. What
+  still works there: a script with no dependencies (no PEP 723 `dependencies`, no `--with`) on a
+  managed Python already in the account's managed-Python directory, installed beforehand as that
+  account with the proxy set (`uv python install` with `UV_PYTHON_INSTALL_DIR` naming that
+  directory); an unelevated run, which keeps every variable; and, by the same reasoning (not
+  measured), a proxy that needs no setting on the machine, such as a transparent one. The user's own
+  site-packages is switched off (`PYTHONNOUSERSITE=1`, which the packed script inherits): without
+  `PYTHONUSERBASE` it comes from `HOME` (POSIX, which some `sudo` setups keep) or `APPDATA`
+  (Windows), so a `.pth` the caller put there would otherwise run with the elevated rights. Not
+  elevated, nothing changes: uv starts in your directory with your environment and configuration,
+  and the `.sh` runs the entry itself. The `-PwshPyUv` / `--pwshpy-uv` pin is unaffected: it chooses
+  the `uv`, not the Python.
 - **Any file name packs.** The entry name and every packed file name land in the runner as quoted
   literals, so `it's.py`, a typographic quote, `$`, a backtick or a space in a name, or in a `--with`
   value, reaches the runner and uv as given. Refused at pack time, with the reason: a name holding a

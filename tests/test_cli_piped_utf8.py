@@ -20,7 +20,9 @@ from pathlib import Path
 
 import pytest
 
+from pwshpy.adapters.cli.main import main as cli_main
 from pwshpy.adapters.cli.output import RecordFormat, emit, use_utf8_when_piped
+from pwshpy.composition import build_production
 from pwshpy.domain.records import EnvVar
 
 #: Not representable in cp1252: the old code raised UnicodeEncodeError on stdout.
@@ -135,6 +137,48 @@ def test_write_text_refuses_an_unknown_input_encoding(tmp_path: Path) -> None:
     # The value, not only the option: click's own "No such option" refusal names the option too.
     assert b"no-such-codec" in completed.stderr
     assert not dest.exists()
+
+
+@pytest.mark.os_agnostic
+def test_write_text_drops_a_utf8_bom_from_a_piped_stdin(tmp_path: Path) -> None:
+    """A source saved with a UTF-8 BOM (Notepad, PowerShell 5.1) does not put a BOM into the file."""
+    dest = tmp_path / "out.txt"
+    _ok(_run_pwshpy("write_text", str(dest), stdin=b"\xef\xbb\xbfhi\n"))
+    assert dest.read_bytes() == b"hi\n"
+
+
+@pytest.mark.os_agnostic
+def test_write_text_refuses_a_codec_that_is_not_a_text_encoding(tmp_path: Path) -> None:
+    """--input-encoding base64 names a codec, but not a text encoding: a usage error, exit 2."""
+    completed = _run_pwshpy("write_text", str(tmp_path / "out.txt"), "--input-encoding", "base64", stdin=b"x\n")
+    assert completed.returncode == 2
+    assert b"base64" in completed.stderr
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("extra", [[], ["--input-encoding", "utf-8"]], ids=["no-option", "with-option"])
+def test_write_text_keeps_a_terminal_stdin_on_its_own_encoding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra: list[str]
+) -> None:
+    """A terminal stdin is read through its own text layer; --input-encoding applies to a pipe only."""
+    text = "Gr" + chr(0xFC) + chr(0xDF) + "e\n"
+    monkeypatch.setattr(sys, "stdin", _TerminalStream(io.BytesIO(text.encode("cp1252")), encoding="cp1252"))
+    dest = tmp_path / "out.txt"
+    assert cli_main(["write_text", str(dest), *extra], services_factory=build_production) == 0
+    assert dest.read_bytes() == text.encode("utf-8")
+
+
+@pytest.mark.os_agnostic
+def test_a_terminal_table_keeps_its_box_drawing_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a piped table switches to ASCII: at a terminal the frame stays rich's box drawing."""
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    sink = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", _TerminalStream(sink, encoding="utf-8", newline="\n"))
+    emit([EnvVar(name="A", value="b")], RecordFormat.HUMAN)
+    sys.stdout.flush()
+    assert sink.getvalue()
+    assert not sink.getvalue().startswith(b"+")
 
 
 @pytest.mark.os_agnostic

@@ -77,11 +77,8 @@ def write_text(
         >>> Path(p).read_bytes()
         b'hi'
     """
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    if newline != "\n":
-        normalized = normalized.replace("\n", newline)
     codec = _BOMLESS_CODEC.get(encoding.lower(), encoding)
-    data = normalized.encode(codec)
+    data = _normalize_newlines(text, newline).encode(codec)
     if bom:
         data = _BOM_BYTES.get(codec, b"") + data
     destination = Path(path)
@@ -126,12 +123,27 @@ def write_text_stream(
     with destination.open("wb") as handle:
         if bom:
             handle.write(_BOM_BYTES.get(codec, b""))
+        # A chunk ending in CR is held back by one character: its LF may start the next chunk, and
+        # normalizing the two halves apart wrote one line end twice (POSIX stdin does no newline
+        # translation, so write_text's fixed-size blocks split a CRLF wherever it falls).
+        pending = ""
         for chunk in chunks:
-            normalized = chunk.replace("\r\n", "\n").replace("\r", "\n")
-            if newline != "\n":
-                normalized = normalized.replace("\n", newline)
-            handle.write(normalized.encode(codec))
+            text = pending + chunk
+            pending = "\r" if text.endswith("\r") else ""
+            handle.write(_normalize_newlines(text[: len(text) - len(pending)], newline).encode(codec))
+        handle.write(_normalize_newlines(pending, newline).encode(codec))
     return destination
+
+
+def _normalize_newlines(text: str, newline: str) -> str:
+    """Turn every CRLF, CR and LF in ``text`` into ``newline``.
+
+    Example:
+        >>> _normalize_newlines("a\\r\\nb\\rc\\n", "\\r\\n")
+        'a\\r\\nb\\r\\nc\\r\\n'
+    """
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized if newline == "\n" else normalized.replace("\n", newline)
 
 
 def write_records(path: str | Path, records: Iterable[PSRecord], *, jsonl: bool = True) -> Path:

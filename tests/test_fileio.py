@@ -62,6 +62,18 @@ def test_write_text_utf16le_bom_controlled(tmp_path: Path) -> None:
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_write_text_stream_crlf_split_between_chunks_is_one_line_end(tmp_path: Path, newline: str) -> None:
+    """A CRLF whose CR ends one chunk and whose LF starts the next is one line end, not two.
+
+    POSIX stdin does no newline translation, so write_text's fixed-size blocks can split a CRLF.
+    """
+    target = tmp_path / "out.txt"
+    write_text_stream(target, ["a\r", "\nb\r", "", "\nc\r"], newline=newline)
+    assert target.read_bytes() == f"a{newline}b{newline}c{newline}".encode()
+
+
+@pytest.mark.os_agnostic
 def test_write_records_jsonl_no_bom(tmp_path: Path) -> None:
     """JSONL output is one UTF-8 object per line with no BOM."""
     target = tmp_path / "recs.jsonl"

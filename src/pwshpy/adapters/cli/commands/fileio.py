@@ -4,7 +4,7 @@
 default - the same bytes on every OS, unlike a shell ``>`` redirect or PowerShell's
 ``Out-File``. A piped stdin is read as UTF-8 on every OS, whatever the console code page:
 pwsh 7 pipes UTF-8 into a native command, and so does pwshpy itself. ``--input-encoding``
-names another source encoding; a terminal stdin keeps its own unless that option is given.
+names another source encoding for a piped stdin; a terminal stdin keeps its own.
 
 Contents:
     * :func:`cli_write_text`, exported as ``FILEIO_COMMANDS``.
@@ -12,7 +12,6 @@ Contents:
 
 from __future__ import annotations
 
-import codecs
 import io
 import sys
 
@@ -28,40 +27,50 @@ _STDIN_BLOCK = 65536
 
 
 def _stdin_encoding(input_encoding: str | None) -> str | None:
-    """The encoding to read stdin with, or ``None`` to keep the text layer it already has.
+    """The encoding to read a piped stdin with, or ``None`` to keep the text layer it already has.
 
     A piped stdin defaults to UTF-8 rather than the locale code page: on German Windows that is
     cp1252, so UTF-8 from pwsh 7 or from pwshpy itself landed as mojibake, and a byte cp1252 does
-    not map (0x8D in the UTF-8 for an I-acute) failed the command (user decision 2026-10-26). A
-    terminal keeps its own, as the output side does.
+    not map (0x8D in the UTF-8 for an I-acute) failed the command (user decision 2026-10-26). The
+    default is ``utf-8-sig``, which reads BOM-less UTF-8 the same and drops a leading BOM (Notepad,
+    PowerShell 5.1 ``Out-File``) that would otherwise land in a file promised to have none. A
+    terminal keeps its own encoding even with ``--input-encoding``: a Windows console hands its text
+    layer UTF-8 whatever the option says, so honouring it there would decode the typing wrongly.
 
     Args:
         input_encoding: The ``--input-encoding`` value, or ``None`` when it was not given.
 
     Returns:
-        The codec name to read stdin with, or ``None`` for a terminal with no option.
+        The codec name to read stdin with, or ``None`` for a terminal.
 
     Raises:
-        click.BadParameter: ``input_encoding`` names no codec Python knows.
+        click.BadParameter: ``input_encoding`` names no text encoding (unknown, or a bytes-to-bytes
+            codec such as ``base64``).
 
     Example:
-        >>> _stdin_encoding("cp1252")
-        'cp1252'
+        >>> _stdin_encoding("no-such-codec")
+        Traceback (most recent call last):
+        click.exceptions.BadParameter: unknown text encoding 'no-such-codec'
     """
     if input_encoding is not None:
-        try:
-            codecs.lookup(input_encoding)
-        except LookupError:
-            raise click.BadParameter(f"unknown encoding {input_encoding!r}", param_hint="'--input-encoding'") from None
-        return input_encoding
-    return None if is_terminal(sys.stdin) else "utf-8"
+        _require_text_encoding(input_encoding)
+    if is_terminal(sys.stdin):
+        return None
+    return input_encoding or "utf-8-sig"
+
+
+def _require_text_encoding(name: str) -> None:
+    """Refuse ``name`` unless a text stream can use it (``codecs.lookup`` also accepts ``base64``)."""
+    try:
+        io.TextIOWrapper(io.BytesIO(), encoding=name)
+    except LookupError:
+        raise click.BadParameter(f"unknown text encoding {name!r}", param_hint="'--input-encoding'") from None
 
 
 def _read_stdin_as(encoding: str | None) -> None:
     """Switch ``sys.stdin`` to ``encoding`` (strict) before its first read; ``None`` leaves it as it is.
 
-    ``reconfigure`` keeps the universal-newline decoding, so a CRLF split across two blocks is still
-    one line end. A stdin that is missing or not a ``TextIOWrapper`` has no text layer to switch.
+    A stdin that is missing or not a ``TextIOWrapper`` has no text layer to switch.
     """
     stream = sys.stdin
     if encoding is None or not isinstance(stream, io.TextIOWrapper):
@@ -75,7 +84,7 @@ def _read_stdin_as(encoding: str | None) -> None:
 @option(
     "--input-encoding",
     default=None,
-    help="Encoding of stdin (default: utf-8 when piped, e.g. cp1252 for a legacy program's output).",
+    help="Encoding of a piped stdin (default utf-8; e.g. cp1252 for a legacy program's output).",
 )
 @option("--bom", is_flag=True, default=False, help="Write a byte-order mark (default: none).")
 @option("--crlf", is_flag=True, default=False, help="Use CRLF line endings instead of LF.")
@@ -102,7 +111,7 @@ def cli_write_text(
     except UnicodeDecodeError:
         raise click.ClickException(
             f"stdin is not valid {source_encoding or sys.stdin.encoding}; name the encoding of the source "
-            f"with --input-encoding (for example --input-encoding cp1252). {path} holds only the text read before it."
+            f"with --input-encoding (for example --input-encoding cp1252). {path} holds part of the text before it."
         ) from None
     click.echo(f"wrote {written}")
 

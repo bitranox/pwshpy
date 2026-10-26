@@ -18,10 +18,16 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   leaves the host program's streams alone.
 - `write_text` reads a piped stdin as UTF-8 on every OS instead of the locale code page. On German
   Windows it decoded as cp1252, so UTF-8 from pwsh 7 (whose `$OutputEncoding` is utf-8) or from
-  pwshpy itself landed as mojibake, and some values failed the command outright (exit 22 with a
-  `UnicodeDecodeError` for the UTF-8 of an I-acute). The new `--input-encoding NAME` option reads a
-  source in another encoding; bytes that are not valid in it stop the command with an error naming
-  that option. A terminal stdin keeps its own encoding unless the option is given.
+  pwshpy itself landed as mojibake, and some values failed the command outright (a
+  `UnicodeDecodeError` for the UTF-8 of an I-acute: exit 87 on Windows, 22 on Linux under a cp1252
+  `PYTHONIOENCODING`). A leading UTF-8 BOM in the input (Notepad, PowerShell 5.1 `Out-File`) is
+  dropped, so it never lands in a file written without `--bom`. The new `--input-encoding NAME`
+  option reads a piped source in another encoding; a name that is no text encoding (unknown, or
+  `base64`) is a usage error, and bytes that are not valid in it stop the command with an error
+  naming that option. A terminal stdin keeps its own encoding.
+- `write_text_stream` (and so `write_text`) no longer writes one line end twice when a CRLF is split
+  between two chunks: POSIX stdin does no newline translation, so a CRLF falling on the 65536-character
+  block boundary became an extra blank line.
 - A piped or redirected human table is drawn with an ASCII frame (`+`, `-`, `|`) on every OS. rich's
   box-drawing frames differ by OS (heavy on Linux, square on Windows) and turn into mojibake for a
   reader that decodes the pipe in a legacy code page. A terminal keeps its box-drawing frame. Linux

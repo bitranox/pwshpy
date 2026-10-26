@@ -80,7 +80,7 @@ def test_a_uid_within_uid_t_is_accepted(uid: str) -> None:
 @pytest.mark.parametrize("uid", ["01", "007", "4294967296", "9999999999"])
 def test_a_zero_padded_or_out_of_range_uid_is_refused(uid: str) -> None:
     # uid_t is 32-bit; "01" would name the same account as "1" under a second spelling.
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="never an account name"):
         TaskPrincipal(user_id=uid)
 
 
@@ -97,13 +97,13 @@ def test_a_zero_padded_or_out_of_range_uid_is_refused(uid: str) -> None:
 def test_the_union_refuses_an_unknown_key(payload: dict[str, object]) -> None:
     # A misspelt key silently dropped would widen the task: "this user logs on" -> "any user".
     adapter: TypeAdapter[TaskTrigger] = TypeAdapter(TaskTrigger)
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         adapter.validate_python(payload)
 
 
 @pytest.mark.os_agnostic
 def test_a_principal_refuses_an_unknown_key() -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         TaskPrincipal.model_validate({"user_id": "S-1-5-18", "runlevel": "Highest"})
 
 
@@ -116,38 +116,38 @@ def test_the_interactive_caller_is_neither_sid_nor_uid() -> None:
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("bad", ["Administrator", "S-1-", "S-1-5-18\n", _ARABIC_INDIC_TEN, "-5", "", "S-1-5-x", 1000])
 def test_a_name_or_malformed_identity_is_refused(bad: object) -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="never an account name"):
         TaskPrincipal(user_id=bad)  # pyright: ignore[reportArgumentType] - wrong types ARE the input under test
 
 
 @pytest.mark.os_agnostic
 def test_a_logon_trigger_refuses_an_account_name() -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="never an account name"):
         LogonTrigger(user_id="Administrator")
 
 
 @pytest.mark.os_agnostic
 def test_a_principal_is_frozen() -> None:
     p = TaskPrincipal()
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="Instance is frozen"):
         p.run_level = TaskRunLevel.HIGHEST  # pyright: ignore[reportAttributeAccessIssue] - assignment IS the test
 
 
 @pytest.mark.os_agnostic
 def test_a_naive_trigger_time_is_refused() -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="should have timezone info"):
         OnceTrigger(at=datetime(2026, 10, 21, 23, 59))
 
 
 @pytest.mark.os_agnostic
 def test_every_days_must_be_positive() -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="greater than or equal to 1"):
         DailyTrigger(at=_AT, every_days=0)
 
 
 @pytest.mark.os_agnostic
 def test_a_negative_boot_delay_is_refused() -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="delay must not be negative"):
         BootTrigger(delay=timedelta(seconds=-1))
 
 
@@ -161,7 +161,7 @@ def test_the_union_round_trips_by_kind() -> None:
 @pytest.mark.os_agnostic
 def test_the_union_refuses_an_unknown_kind() -> None:
     adapter: TypeAdapter[TaskTrigger] = TypeAdapter(TaskTrigger)
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="does not match any of the expected tags"):
         adapter.validate_python({"kind": "weekly", "at": _AT})
 
 
@@ -188,7 +188,7 @@ def test_allow_demand_start_takes_a_bool(allowed: bool) -> None:
 @pytest.mark.os_agnostic
 def test_task_settings_refuse_an_unknown_key() -> None:
     # A misspelt key silently dropped would leave the OS default the caller meant to change.
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         TaskSettings.model_validate({"allow_hard_terminate": True, "multiple_instance": "IgnoreNew"})
 
 
@@ -205,7 +205,7 @@ def test_a_whole_second_execution_time_limit_is_accepted() -> None:
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("limit", [timedelta(seconds=-1), timedelta(microseconds=-1), timedelta(days=-3)])
 def test_a_negative_execution_time_limit_is_refused(limit: timedelta) -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="execution_time_limit must not be negative"):
         TaskSettings(execution_time_limit=limit)
 
 
@@ -213,7 +213,7 @@ def test_a_negative_execution_time_limit_is_refused(limit: timedelta) -> None:
 @pytest.mark.parametrize("limit", [timedelta(seconds=1, microseconds=1), timedelta(milliseconds=500), 1.5])
 def test_a_sub_second_execution_time_limit_is_refused(limit: object) -> None:
     # Task Scheduler and systemd are written in whole seconds; a fraction would be dropped silently.
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="execution_time_limit must be whole seconds"):
         TaskSettings(execution_time_limit=limit)  # pyright: ignore[reportArgumentType] - a float IS the input under test
 
 
@@ -227,14 +227,14 @@ def test_the_largest_execution_time_limit_is_accepted() -> None:
 @pytest.mark.parametrize("seconds", [2147483648, 4294967295, 4294967296])
 def test_an_execution_time_limit_past_int32_is_refused(seconds: int) -> None:
     # Measured on Windows: 2**31..2**32-1 is refused (0x80041318) and 2**32 wraps to PT0S = no limit.
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="execution_time_limit must not exceed 2147483647 seconds"):
         TaskSettings(execution_time_limit=timedelta(seconds=seconds))
 
 
 @pytest.mark.os_agnostic
 def test_task_settings_are_frozen() -> None:
     s = TaskSettings()
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="Instance is frozen"):
         s.allow_hard_terminate = True  # pyright: ignore[reportAttributeAccessIssue] - assignment IS the test
 
 
@@ -260,7 +260,7 @@ def test_multiple_instances_has_exactly_the_four_policies() -> None:
 
 @pytest.mark.os_agnostic
 def test_an_unknown_multiple_instances_policy_is_refused() -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="Input should be 'Parallel'"):
         TaskSettings.model_validate({"multiple_instances": "Ignore"})
 
 

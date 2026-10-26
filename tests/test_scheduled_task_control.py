@@ -745,7 +745,9 @@ def test_register_wraps_a_settings_write_failure(monkeypatch: pytest.MonkeyPatch
 
 # --- Real integration: run only on the disposable throwaway VM ---------------
 
-_TASK = "\\pwshpy_test_task"
+#: The scratch task's leaf name; _TASK is its full path in the root folder.
+_TASK_NAME = "pwshpy_test_task"
+_TASK = "\\" + _TASK_NAME
 
 
 @pytest.mark.local_only
@@ -763,8 +765,8 @@ def test_scheduled_task_lifecycle() -> None:
         created = ps.register_scheduled_task(
             _TASK, program="cmd.exe", arguments="/c exit", description="pwshpy scratch"
         )
-        assert created.task_name == "pwshpy_test_task"
-        assert ps.get_scheduled_task().where(lambda t: t.task_name == "pwshpy_test_task").first() is not None
+        assert created.task_name == _TASK_NAME
+        assert ps.get_scheduled_task().where(lambda t: t.task_name == _TASK_NAME).first() is not None
         assert ps.disable_scheduled_task(_TASK).enabled is False
         assert ps.enable_scheduled_task(_TASK).enabled is True
         ps.start_scheduled_task(_TASK)
@@ -773,7 +775,7 @@ def test_scheduled_task_lifecycle() -> None:
     finally:
         with contextlib.suppress(PwshPyError):
             ps.unregister_scheduled_task(_TASK)
-    assert ps.get_scheduled_task().where(lambda t: t.task_name == "pwshpy_test_task").first() is None
+    assert ps.get_scheduled_task().where(lambda t: t.task_name == _TASK_NAME).first() is None
 
 
 def _pwsh_json(script: str) -> Any:
@@ -816,7 +818,7 @@ def test_register_as_system_with_every_trigger_kind() -> None:
         assert info.run_level is TaskRunLevel.HIGHEST
         # The CIM class names are locale-independent, unlike any display text pwsh prints.
         kinds = _pwsh_json(
-            "ConvertTo-Json -Compress -InputObject @((Get-ScheduledTask -TaskName pwshpy_test_task).Triggers"
+            f"ConvertTo-Json -Compress -InputObject @((Get-ScheduledTask -TaskName {_TASK_NAME}).Triggers"
             " | ForEach-Object { $_.CimClass.CimClassName })"
         )
         assert sorted(kinds) == sorted(
@@ -995,10 +997,10 @@ def test_register_settings_read_back_like_get_scheduledtask(
         scratch_task, program="cmd.exe", arguments="/c exit", principal=TaskPrincipal.system(), settings=settings
     )
     assert info.settings == settings
-    looked_up = ps.get_scheduled_task("\\", task_name="pwshpy_test_task", strict=True).first()
+    looked_up = ps.get_scheduled_task("\\", task_name=_TASK_NAME, strict=True).first()
     assert looked_up is not None
     assert looked_up.settings == settings
-    oracle = _pwsh_json(_SETTINGS_ORACLE.format(name="pwshpy_test_task"))
+    oracle = _pwsh_json(_SETTINGS_ORACLE.format(name=_TASK_NAME))
     assert (not oracle["Disallow"], oracle["Stop"], oracle["Kill"], oracle["Demand"]) == (
         settings.allow_start_if_on_batteries,
         settings.stop_if_going_on_batteries,
@@ -1036,7 +1038,7 @@ def test_start_is_refused_when_demand_start_is_disallowed(scratch_task: str) -> 
     assert len(excepinfo) == 6
     assert cast("int", excepinfo[5]) & 0xFFFFFFFF == _SCHED_E_START_ON_DEMAND
     time.sleep(2)  # a run that slipped through would have a last-run time by now
-    task = ps.get_scheduled_task("\\", task_name="pwshpy_test_task", strict=True).first()
+    task = ps.get_scheduled_task("\\", task_name=_TASK_NAME, strict=True).first()
     assert task is not None
     assert (task.last_run_time, task.last_task_result) == (None, None)
     assert task.settings is not None
@@ -1065,7 +1067,7 @@ def test_execution_time_limit_ends_an_on_demand_run(scratch_task: str) -> None:
     )
     started = time.monotonic()
     ps.start_scheduled_task(scratch_task)
-    task = ps.get_scheduled_task("\\", task_name="pwshpy_test_task", strict=True).first()
+    task = ps.get_scheduled_task("\\", task_name=_TASK_NAME, strict=True).first()
     # Wait for the result too: the state can flip to Ready before LastTaskResult is written.
     while (
         task is not None
@@ -1073,10 +1075,10 @@ def test_execution_time_limit_ends_an_on_demand_run(scratch_task: str) -> None:
         and time.monotonic() - started < 60
     ):
         time.sleep(0.5)
-        task = ps.get_scheduled_task("\\", task_name="pwshpy_test_task", strict=True).first()
+        task = ps.get_scheduled_task("\\", task_name=_TASK_NAME, strict=True).first()
     elapsed = time.monotonic() - started
     assert task is not None
     assert task.state is not TaskState.RUNNING
     assert task.last_task_result == _SCHED_S_TASK_TERMINATED
     assert 9 <= elapsed < 20, elapsed  # the ping alone runs ~29 s
-    assert _pwsh_task_info("pwshpy_test_task")["LastTaskResult"] == _SCHED_S_TASK_TERMINATED
+    assert _pwsh_task_info(_TASK_NAME)["LastTaskResult"] == _SCHED_S_TASK_TERMINATED

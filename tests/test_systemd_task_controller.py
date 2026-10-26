@@ -48,6 +48,20 @@ def _reload() -> None:
     subprocess.run(["systemctl", "daemon-reload"], check=False)  # noqa: S607 - fixed argv
 
 
+def _reset_failed(name: str) -> None:
+    """Forget a failed state of the scratch units.
+
+    systemd keeps a unit that failed (a run killed by its time limit, say) listed as ``failed``
+    even after its file is gone, until ``reset-failed``; without it the next run of this module
+    starts beside a stale failed unit of the same name.
+    """
+    subprocess.run(  # noqa: S603 - fixed argv plus scratch unit names
+        ["systemctl", "reset-failed", f"{name}.service", f"{name}.timer"],  # noqa: S607
+        check=False,
+        capture_output=True,
+    )
+
+
 @pytest.fixture
 def ondemand_task() -> Iterator[str]:
     """Yield a task name; on teardown disarm and remove any .timer and the .service, then reload."""
@@ -59,6 +73,7 @@ def ondemand_task() -> Iterator[str]:
         (_UNIT_DIR / f"{_ONDEMAND}.timer").unlink(missing_ok=True)
         (_UNIT_DIR / f"{_ONDEMAND}.service").unlink(missing_ok=True)
         _reload()
+        _reset_failed(_ONDEMAND)
 
 
 @pytest.fixture
@@ -75,6 +90,7 @@ def timer_task() -> Iterator[str]:
         (_UNIT_DIR / f"{_TIMER}.timer").unlink(missing_ok=True)
         (_UNIT_DIR / f"{_TIMER}.service").unlink(missing_ok=True)
         _reload()
+        _reset_failed(_TIMER)
 
 
 def test_register_run_unregister_ondemand(ondemand_task: str) -> None:
@@ -259,8 +275,23 @@ def _systemctl(*args: str) -> str:
 
 
 def _settings_lines(unit: str) -> list[str]:
-    """The TaskSettings keys of ``unit`` as systemd itself shows the loaded file (``systemctl cat``)."""
-    return [line for line in _systemctl("cat", unit).splitlines() if line.startswith(_SETTINGS_KEYS)]
+    """The TaskSettings keys of ``unit`` as systemd itself shows the loaded file (``systemctl cat``).
+
+    A failed ``systemctl cat`` prints nothing, which would read as "no settings written" and let
+    an equality with an empty expectation pass; so the call must succeed and show the unit's
+    ``ExecStart=`` before its lines count as evidence.
+    """
+    done = subprocess.run(  # noqa: S603 - fixed argv plus scratch unit names
+        ["systemctl", "cat", unit],  # noqa: S607
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert done.returncode == 0, f"systemctl cat {unit} failed: {done.stderr.strip()}"
+    lines = done.stdout.splitlines()
+    assert any(line.startswith("ExecStart=") for line in lines), f"systemctl cat {unit} shows no ExecStart="
+    return [line for line in lines if line.startswith(_SETTINGS_KEYS)]
 
 
 def _show(unit: str, prop: str) -> str:

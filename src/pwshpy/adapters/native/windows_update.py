@@ -24,16 +24,12 @@ from __future__ import annotations
 import importlib
 import sys
 from collections.abc import Iterator
-from typing import Any, NamedTuple, cast
+from typing import Any, NamedTuple
 
 from ...domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
 from ...domain.records import UpdateCategory, WindowsUpdate
 from .bounded import run_bounded
-
-# DISP_E_EXCEPTION: IDispatch::Invoke reports that the callee raised, with the callee's own
-# HRESULT in excepinfo[5] (scode).  The WU agent fails this way, so the outer code alone would
-# read "Exception occurred" for every failure.
-_DISP_E_EXCEPTION = -2147352567
+from .marshal import com_error_text, com_hresult, is_com_error
 
 
 class _Outcome(NamedTuple):
@@ -85,31 +81,17 @@ def _to_update(update: Any) -> WindowsUpdate:
 
 
 def _com_failure_message(exc: BaseException) -> str:
-    """Describe a ``pywintypes.com_error`` by its effective HRESULT (hex) and text.
+    """Describe a pywin32 error by its effective HRESULT (hex) and text.
 
-    ``com_error.args`` is ``(hresult, strerror, excepinfo, argerror)``.
+    The WU agent fails as DISP_E_EXCEPTION with its own code and description in excepinfo, so
+    both are read through the marshaling seam, which unwraps them.
     """
-    args: tuple[object, ...] = (*exc.args, None, None, None)
-    code = args[0] if isinstance(args[0], int) else 0
-    text = str(args[1] or "")
-    if code == _DISP_E_EXCEPTION:
-        code, text = _callee_failure(args[2], code=code, text=text)
-    suffix = f" ({text.strip()})" if text.strip() else ""
-    return f"Windows Update search failed: HRESULT 0x{code & 0xFFFFFFFF:08X}{suffix}"
-
-
-def _callee_failure(excepinfo: object, *, code: int, text: str) -> tuple[int, str]:
-    """The callee's (scode, description) from ``excepinfo``, else the outer pair unchanged.
-
-    ``excepinfo`` is ``(wcode, source, description, helpfile, helpcontext, scode)``.
-    """
-    if not isinstance(excepinfo, tuple):
-        return code, text
-    fields = cast("tuple[object, ...]", excepinfo)
-    if len(fields) < 6:  # noqa: PLR2004 - excepinfo's documented arity
-        return code, text
-    scode, description = fields[5], fields[2]
-    return (scode if isinstance(scode, int) and scode else code), str(description or text)
+    code = com_hresult(exc)
+    text = com_error_text(exc).strip()
+    suffix = f" ({text})" if text else ""
+    if code is None:
+        return f"Windows Update search failed without an HRESULT{suffix}"
+    return f"Windows Update search failed: HRESULT 0x{code:08X}{suffix}"
 
 
 def _windows_update_search(criteria: str) -> _Outcome:
@@ -119,8 +101,7 @@ def _windows_update_search(criteria: str) -> _Outcome:
     try:
         return _search_updates(criteria)
     except Exception as exc:
-        # Matched by name: pywintypes is importable only on Windows, and cim.py does the same.
-        if type(exc).__name__ != "com_error":
+        if not is_com_error(exc):
             raise
         return _Outcome(error=_com_failure_message(exc), updates=())
     finally:

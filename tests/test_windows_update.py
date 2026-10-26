@@ -8,12 +8,16 @@ because pywin32 exists only on Windows.  The live search against the real Window
 
 from __future__ import annotations
 
+import struct
 import sys
 from dataclasses import dataclass, field
 from decimal import Decimal
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from bounded_targets import echo
+from com_fakes import codeless_com_error, com_error, error
 
 from pwshpy.adapters.native import windows_update
 from pwshpy.adapters.native.bounded import run_bounded
@@ -25,6 +29,7 @@ _Outcome = windows_update._Outcome  # pyright: ignore[reportPrivateUsage]
 _to_update = windows_update._to_update  # pyright: ignore[reportPrivateUsage]
 _com_failure_message = windows_update._com_failure_message  # pyright: ignore[reportPrivateUsage]
 _updates_or_raise = windows_update._updates_or_raise  # pyright: ignore[reportPrivateUsage]
+_windows_update_search = windows_update._windows_update_search  # pyright: ignore[reportPrivateUsage]
 
 # Real WUA CategoryIDs (read live from the Windows Update agent): the Security Updates
 # classification and the Windows 11 product.
@@ -169,10 +174,6 @@ def test_windows_update_record_defaults() -> None:
 # --- COM failure: the child returns the message as data, the parent raises it ------------------
 
 
-class com_error(Exception):  # noqa: N801, N818 - named like pywintypes.com_error, which the adapter matches by name
-    """Shaped like pywintypes.com_error: (hresult, strerror, excepinfo, argerror)."""
-
-
 @pytest.mark.os_agnostic
 def test_com_failure_message_prefers_the_scode_inside_a_dispatch_exception() -> None:
     """DISP_E_EXCEPTION wraps the real WU code in excepinfo; the message names that code."""
@@ -190,6 +191,92 @@ def test_com_failure_message_uses_the_hresult_when_there_is_no_excepinfo() -> No
     message = _com_failure_message(exc)
     assert "0x80070002" in message
     assert "cannot find the file" in message
+
+
+@pytest.mark.os_agnostic
+def test_com_failure_message_keeps_the_outer_code_and_the_callee_text_for_a_zero_scode() -> None:
+    """A DISP_E_EXCEPTION whose scode is 0 names no inner code: the outer one stands."""
+    exc = com_error(-2147352567, "Exception occurred.", (0, None, "No network", None, 0, 0), None)
+    assert _com_failure_message(exc) == "Windows Update search failed: HRESULT 0x80020009 (No network)"
+
+
+@pytest.mark.os_agnostic
+def test_com_failure_message_formats_code_and_text_exactly() -> None:
+    exc = com_error(-2147352567, "Exception occurred.", (0, None, " No network ", None, 0, -2145107924), None)
+    assert _com_failure_message(exc) == "Windows Update search failed: HRESULT 0x8024402C (No network)"
+
+
+@pytest.mark.os_agnostic
+def test_com_failure_message_omits_an_empty_text() -> None:
+    assert _com_failure_message(com_error(-2145124302, "", None, None)) == (
+        "Windows Update search failed: HRESULT 0x80240032"
+    )
+
+
+@pytest.mark.os_agnostic
+def test_com_failure_message_says_so_when_there_is_no_hresult() -> None:
+    message = _com_failure_message(codeless_com_error())
+    assert message == "Windows Update search failed without an HRESULT (localized text nobody may rely on)"
+
+
+@pytest.mark.os_agnostic
+def test_com_failure_message_maps_a_win32_error_to_its_hresult() -> None:
+    message = _com_failure_message(error(5, "Search", "Access is denied."))
+    assert message == "Windows Update search failed: HRESULT 0x80070005 (Access is denied.)"
+
+
+class _FakePythoncom:
+    """``pythoncom``: records the apartment calls the child makes around the search."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def CoInitialize(self) -> None:  # noqa: N802 - pythoncom API name
+        self.calls.append("init")
+
+    def CoUninitialize(self) -> None:  # noqa: N802 - pythoncom API name
+        self.calls.append("uninit")
+
+
+class _FailingClient:
+    """``win32com.client`` whose Dispatch raises ``failure``, as a broken WU agent does."""
+
+    def __init__(self, failure: BaseException) -> None:
+        self._failure = failure
+
+    def Dispatch(self, name: str) -> Any:  # noqa: N802 - win32com API name
+        raise self._failure
+
+
+def _child_with(monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> _FakePythoncom:
+    """Point the child's lazy pywin32 imports (the external edge) at doubles raising ``failure``."""
+    pythoncom = _FakePythoncom()
+    modules: dict[str, Any] = {"pythoncom": pythoncom, "win32com.client": _FailingClient(failure)}
+    monkeypatch.setattr(windows_update, "importlib", SimpleNamespace(import_module=modules.__getitem__))
+    return pythoncom
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "failure",
+    [com_error(-2147024894, "The system cannot find the file specified.", None, None), error(5, "f", "denied")],
+    ids=["com_error", "error"],
+)
+def test_child_returns_a_pywin32_failure_as_data(monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> None:
+    pythoncom = _child_with(monkeypatch, failure)
+    outcome = _windows_update_search("IsInstalled=0")
+    assert outcome == _Outcome(error=_com_failure_message(failure), updates=())
+    assert pythoncom.calls == ["init", "uninit"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("failure", [RuntimeError("a bug"), struct.error("not pywin32's")], ids=["bug", "struct"])
+def test_child_lets_a_non_pywin32_failure_propagate(monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> None:
+    pythoncom = _child_with(monkeypatch, failure)
+    with pytest.raises(type(failure)) as info:
+        _windows_update_search("IsInstalled=0")
+    assert info.value is failure
+    assert pythoncom.calls == ["init", "uninit"]
 
 
 @pytest.mark.os_agnostic

@@ -577,7 +577,8 @@ pwshpy_require_git_config_global() {
     _gc_why="as root it would read the caller's git configuration (a script with a git source needs git"
     _gc_why="$_gc_why 2.32 or later as root): upgrade git, or run the script without root"
     _gc_out=$("$1" --version </dev/null 2>/dev/null) || _gc_out=
-    # The first line only, for a git that prints more.
+    # The first line only, on purpose: a git that prints a warning line before its "git version" line
+    # names no version here and is refused, which fails closed.
     _gc_nl='
 '
     _gc_out=${_gc_out%%"$_gc_nl"*}
@@ -1130,15 +1131,12 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
         PWSHPY_PYTHON_DIR_WHY="$PWSHPY_PYTHON_DIR_WHY modify, nor anything below it): $PWSHPY_PYTHON_REMEDY"
         pwshpy_die "refusing uv's managed-Python directory $UV_PYTHON_INSTALL_DIR: $PWSHPY_PYTHON_DIR_WHY" 127
     fi
-    pwshpy_resolve_managed_python
     # uv sees only the caller's PATH directories no other account can modify (computed while the
     # helpers still come from the fixed PATH); the packed script gets the caller's whole PATH back
     # from the shim, through @@PWSHPY_PATH_ENV@@ ([107]). The shim is handed uv's PATH too
     # (@@PWSHPY_UV_PATH_ENV@@): uv puts its own bin directory in front of it, and the shim keeps
     # what precedes it in front of the caller's PATH, as an unelevated run has it.
     PWSHPY_UV_PATH=$(pwshpy_trusted_path "$PWSHPY_CALLER_PATH")
-    export "@@PWSHPY_PATH_ENV@@=$PWSHPY_CALLER_PATH"
-    export "@@PWSHPY_UV_PATH_ENV@@=$PWSHPY_UV_PATH"
     # A git dependency would fail with uv's bare "git not found" when the only gits are in directories
     # left off; name the cause.
     PWSHPY_UV_GIT=$(pwshpy_git_on "$PWSHPY_UV_PATH")
@@ -1149,9 +1147,13 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
         printf '%s\n' "pwshpy: no git on uv's PATH: $PWSHPY_GIT_WHY installed in a directory only root can modify" >&2
     fi
     # The git uv will run, asked only for a script that needs one; with none, uv fails on its own.
+    # Before uv is asked for a managed Python, which it may download: a run refused here calls no uv.
     if [ "$PWSHPY_GIT_SOURCE" = "1" ] && [ -n "$PWSHPY_UV_GIT" ]; then
         pwshpy_require_git_config_global "$PWSHPY_UV_GIT"
     fi
+    pwshpy_resolve_managed_python
+    export "@@PWSHPY_PATH_ENV@@=$PWSHPY_CALLER_PATH"
+    export "@@PWSHPY_UV_PATH_ENV@@=$PWSHPY_UV_PATH"
     PATH=$PWSHPY_UV_PATH
     export PATH
     # --no-config: a uv.toml (system-wide under XDG_CONFIG_DIRS or /etc, or the user's own) can name a

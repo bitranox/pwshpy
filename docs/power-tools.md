@@ -567,7 +567,8 @@ Details worth knowing:
   passes them itself (`git -c user.name=... -c user.email=...`) or points `GIT_CONFIG_GLOBAL` at a
   file it trusts before it runs git. git honours `GIT_CONFIG_GLOBAL` from 2.32 on; an older git
   ignores it and still reads those files. So a root `.sh` run of a script with a git source asks the
-  git uv will run (the first on uv's filtered `PATH`) for its version before uv runs, and stops with
+  git uv will run (the first on uv's filtered `PATH`) for its version before any uv call (so a
+  refused run downloads no managed Python), and stops with
   `pwshpy pack: refusing git <version> at <path>: it ignores GIT_CONFIG_GLOBAL, ...` and exit code
   127 when it is older than 2.32, or with `pwshpy pack: refusing git at <path>: git --version names
   no version this runner can read, ...` when `git --version` fails or prints no `git version

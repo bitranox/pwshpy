@@ -2373,7 +2373,8 @@ def test_as_root_a_git_source_needs_git_2_32(
     """[116]: git honours GIT_CONFIG_GLOBAL from 2.32 on, so an older one run by uv as root would read the
     caller's ~/.gitconfig. A root run of a script with a git source asks the git uv will run for its
     version and exits 127 when it is older than 2.32, unreadable, or the command fails, before uv runs
-    the script; 2.32 or later (a vendor suffix included) runs."""
+    the script, and before uv is asked for a managed Python, which it might download first; 2.32 or
+    later (a vendor suffix included) runs."""
     runner, uv, record, marker, environment = _git_version_setup(
         tmp_path, as_root=True, git_source=True, version_output=version_output, git_exit=git_exit
     )
@@ -2387,6 +2388,8 @@ def test_as_root_a_git_source_needs_git_2_32(
         return
     assert result.returncode == 127, result.stdout + result.stderr
     assert not record.exists(), "uv ran the script: " + record.read_text(encoding="utf-8")
+    python_calls = Path(f"{record}.python")
+    assert not python_calls.exists(), "uv was asked for a Python: " + python_calls.read_text(encoding="utf-8")
     assert len(refusals) == 1, result.stderr
     (refusal,) = refusals
     spelled = f"{_OLD_GIT_REFUSED}{refused_version} at " if refused_version else f"{_OLD_GIT_REFUSED}at "

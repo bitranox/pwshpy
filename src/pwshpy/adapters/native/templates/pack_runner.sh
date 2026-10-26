@@ -62,8 +62,8 @@ set -eu
 # below could say anything. They come from the system directories alone (user decision): /usr/bin,
 # /bin, /usr/sbin, /sbin and the NixOS and Guix system profiles, not /usr/local, which a local
 # install, a package manager run by hand, or a group-writable /usr/local/bin can populate. The
-# caller's PATH is kept: the uv search still walks it, judging each candidate, and the packed script
-# gets it back.
+# caller's PATH is kept: the uv search still walks it, judging each candidate; uv itself sees only
+# its directories no other account can modify, and the packed script gets all of it back.
 #
 # The euid is asked of an id in those same directories, for the same reason, and never of one on
 # PATH: a planted id answering "not root" would switch all of
@@ -525,6 +525,33 @@ pwshpy_find_uv() {
         fi
     done
     return 1
+}
+
+# Prints the directories of the PATH "$1" that a root run lets uv see, colon-joined, and names each
+# one it leaves out on stderr. uv runs git for a git dependency (and a build backend may too) by
+# searching PATH, so a directory another account can write would decide what runs as root; each is
+# judged by the same walk as a uv, with "/." so the walk judges the directory itself as the leaf.
+# An empty or relative entry names the working directory and is left out like any untrusted one.
+pwshpy_trusted_path() {
+    _tp_out=
+    _tp_oldifs=$IFS
+    IFS=:
+    set -f
+    for _tp_dir in $1; do
+        # The list is split once, up front; the body runs with the caller's IFS and globbing.
+        IFS=$_tp_oldifs
+        set +f
+        _tp_why=$(pwshpy_uv_distrust "${_tp_dir:-.}/.")
+        if [ -n "$_tp_why" ]; then
+            _tp_why="$_tp_why (as root uv runs git and other tools only from directories no other account"
+            printf '%s\n' "pwshpy: leaving ${_tp_dir:-.} off uv's PATH: $_tp_why can modify)" >&2
+            continue
+        fi
+        _tp_out=${_tp_out:+$_tp_out:}$_tp_dir
+    done
+    IFS=$_tp_oldifs
+    set +f
+    printf '%s' "$_tp_out"
 }
 
 # The variables through which a caller names the interpreter itself, past --python-preference
@@ -1043,9 +1070,12 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
         pwshpy_die "refusing uv's managed-Python directory $UV_PYTHON_INSTALL_DIR: $PWSHPY_PYTHON_DIR_WHY" 127
     fi
     pwshpy_resolve_managed_python
-    # The packed script runs with the PATH its caller gave: the fixed one was only for this runner's
-    # own helpers.
-    PATH=$PWSHPY_CALLER_PATH
+    # uv sees only the caller's PATH directories no other account can modify (computed while the
+    # helpers still come from the fixed PATH); the packed script gets the caller's whole PATH back
+    # from the shim, through @@PWSHPY_PATH_ENV@@ ([107]).
+    PWSHPY_UV_PATH=$(pwshpy_trusted_path "$PWSHPY_CALLER_PATH")
+    export "@@PWSHPY_PATH_ENV@@=$PWSHPY_CALLER_PATH"
+    PATH=$PWSHPY_UV_PATH
     export PATH
     # --no-config: a uv.toml (system-wide under XDG_CONFIG_DIRS or /etc, or the user's own) can name a
     # cache directory, a package index or a Python download mirror, each a way to choose what runs as

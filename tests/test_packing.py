@@ -37,7 +37,8 @@ _FULL_TEMPLATE = (
 
 _SH_TEMPLATE = (
     "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@|"
-    "@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@|@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_ANCHORED@@|@@PWSHPY_PYTHON_REQUEST@@"
+    "@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@|@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_ANCHORED@@|@@PWSHPY_PYTHON_REQUEST@@|"
+    "@@PWSHPY_PATH_ENV@@"
 )
 
 
@@ -223,14 +224,15 @@ def test_render_posix_runner_substitutes_its_placeholders() -> None:
         ),
     )
     assert "@@PWSHPY" not in rendered
-    payload, sha, entry, uv_args, hashes, shim, argv_env, cwd_env, anchored, request = rendered.split("|")
+    payload, sha, entry, uv_args, hashes, shim, argv_env, cwd_env, anchored, request, path_env = rendered.split("|")
     assert shlex.split(request) == [">=3.11"]
-    assert [payload, sha, shim, argv_env, cwd_env] == [
+    assert [payload, sha, shim, argv_env, cwd_env, path_env] == [
         "Ym9keQ==",
         "ab12",
         SHIM_MODULE,
         "PWSHPY_PACK_ARGV",
         "PWSHPY_PACK_CWD",
+        "PWSHPY_PACK_PATH",
     ]
     assert _sh_uv_args(anchored) == ["--with", "rich"]
     assert [*shlex.split(entry), *shlex.split(hashes)] == ["tool.py", "ff  tool.py"]
@@ -238,11 +240,13 @@ def test_render_posix_runner_substitutes_its_placeholders() -> None:
 
 
 @pytest.mark.os_agnostic
-def test_render_posix_runner_rejects_a_template_missing_a_placeholder() -> None:
-    """A literal placeholder in a shipped .sh would break on the target host."""
-    with pytest.raises(PackError, match="@@PWSHPY_ENTRY@@"):
+@pytest.mark.parametrize("placeholder", ["@@PWSHPY_ENTRY@@", "@@PWSHPY_PATH_ENV@@"])
+def test_render_posix_runner_rejects_a_template_missing_a_placeholder(placeholder: str) -> None:
+    """A literal placeholder in a shipped .sh would break on the target host; one the .sh must carry
+    (the variable a root run hands the caller's PATH over in, [107]) is required, not optional."""
+    with pytest.raises(PackError, match=placeholder):
         render_posix_runner(
-            _SH_TEMPLATE.replace("@@PWSHPY_ENTRY@@", ""),
+            _SH_TEMPLATE.replace(placeholder, ""),
             RunnerContent(payload_b64="x", payload_sha256="y", entry="e"),
         )
 

@@ -172,8 +172,8 @@ _POWERSHELL_COMMENT_END = "#>"
 
 #: Placeholders the POSIX ``.sh`` runner exposes. It needs no out-of-band argv channel (POSIX
 #: ``sh`` forwards ``"$@"`` intact), and an unelevated run executes the entry itself; only a root run
-#: goes through the shim (to change back to the caller's directory), so it names the shim, the
-#: variables the shim reads, and the uv args with relative paths re-anchored.
+#: goes through the shim (to change back to the caller's directory and give back its PATH), so it
+#: names the shim, the variables the shim reads, and the uv args with relative paths re-anchored.
 _SH_PLACEHOLDERS = (
     "@@PWSHPY_PAYLOAD_B64@@",
     "@@PWSHPY_PAYLOAD_SHA256@@",
@@ -183,6 +183,7 @@ _SH_PLACEHOLDERS = (
     "@@PWSHPY_SHIM@@",
     "@@PWSHPY_ARGV_ENV@@",
     "@@PWSHPY_CWD_ENV@@",
+    "@@PWSHPY_PATH_ENV@@",
     "@@PWSHPY_UV_ARGS_ANCHORED@@",
     "@@PWSHPY_PYTHON_REQUEST@@",
 )

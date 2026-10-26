@@ -2030,3 +2030,82 @@ def test_as_root_a_command_in_the_callers_global_git_config_never_runs(
     result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
     assert any(default_uv_cache_dir(tmp_path).glob("git-v*/db/*")), "uv fetched no git source: " + result.stderr
     assert marker.exists() is not as_root, "global git config command ran: " + str(marker.exists()) + result.stderr
+
+
+# --- [107] root runs: uv sees only trusted PATH directories, the script all of them ------------
+
+_ENTRY_REPORTING_PATH = """import os
+print("path:" + os.environ.get("PATH", ""))
+"""
+
+
+def _planted_git(tmp_path: Path, marker: Path) -> Path:
+    """A world-writable directory holding a git that records it ran, then runs the real git."""
+    real = shutil.which("git")
+    assert real is not None
+    directory = tmp_path / "planted-git-bin"
+    directory.mkdir()
+    directory.chmod(0o777)
+    git = directory / "git"
+    git.write_text(f'#!/bin/sh\necho ran >> "{marker}"\nexec "{real}" "$@"\n', encoding="utf-8", newline="\n")
+    git.chmod(0o755)
+    return directory
+
+
+def _git_dependency_runner(tmp_path: Path, *, as_root: bool) -> tuple[Path, Path]:
+    """A packed script whose PEP 723 block names a git+file source, so uv runs git to fetch it; and
+    a uv the runner trusts (see :func:`_python_runner`)."""
+    requirement = f"pwshpy-git-probe @ git+{write_git_source(tmp_path).as_uri()}"
+    source = f'# /// script\n# dependencies = ["{requirement}"]\n# ///\nprint("ran")\n'
+    return _python_runner(tmp_path, as_root=as_root, source=source, entry_name="needs_git.py")
+
+
+def _git_env(tmp_path: Path, planted: Path, uv: Path) -> dict[str, str]:
+    """``planted`` first on PATH, then the trusted uv; offline, so uv fetches the git source and then
+    fails to build it (no index), like the [X23 G1] tests."""
+    return {**_trust_env(tmp_path, planted, uv.parent), "UV_OFFLINE": "1"}
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_uv_never_runs_a_git_planted_on_path(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """[107]: a git planted first on PATH in a world-writable directory is not the git uv runs as root.
+
+    uv still fetches the source with a trusted git (its git database appears in the cache), so the
+    missing marker is not a run that never reached git.
+    """
+    _needs_managed_python()
+    marker = tmp_path / "git-ran.txt"
+    planted = _planted_git(tmp_path, marker)
+    runner, uv = _git_dependency_runner(tmp_path, as_root=True)
+    environment = _git_env(tmp_path, planted, uv)
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert any(default_uv_cache_dir(tmp_path).glob("git-v*/db/*")), "uv fetched no git source: " + result.stderr
+    assert not marker.exists(), result.stdout + result.stderr
+    leaving = f"pwshpy: leaving {planted} off uv's PATH: its directory {planted} is writable by every account"
+    assert leaving in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_not_root_uv_runs_the_git_first_on_path(tmp_path: Path) -> None:
+    """Liveness for the test above: without root the same planted git is the one uv runs."""
+    marker = tmp_path / "git-ran.txt"
+    planted = _planted_git(tmp_path, marker)
+    runner, uv = _git_dependency_runner(tmp_path, as_root=False)
+    environment = _git_env(tmp_path, planted, uv)
+    result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert marker.exists(), result.stdout + result.stderr
+    assert "off uv's PATH" not in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_the_script_still_gets_the_callers_whole_path(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """[107]: only uv's PATH is filtered; the packed script sees every directory the caller had, in order,
+    the one left off uv's PATH included."""
+    _needs_managed_python()
+    planted = _planted_uv(tmp_path).parent
+    runner, uv = _python_runner(tmp_path, as_root=True, source=_ENTRY_REPORTING_PATH, entry_name="report_path.py")
+    environment = _trust_env(tmp_path, planted, uv.parent)
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"path:{environment['PATH']}\n" in result.stdout, result.stdout + result.stderr

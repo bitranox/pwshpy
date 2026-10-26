@@ -1,27 +1,35 @@
-"""Record JSON bytes - the one serialiser behind ``--json`` / ``--jsonl`` and ``write_records``.
+"""JSON bytes for CLI and file output - the one serialiser behind every ``--json`` / ``--jsonl``.
 
-A record is dumped with ``orjson.dumps(record.to_dict())``. Text holding a byte that is not valid
+A record is dumped with ``orjson.dumps(record.to_dict())`` (``--json`` / ``--jsonl`` and
+``write_records``), a plain value with ``orjson.dumps(value, default=str)`` (``emit_json``:
+``get_known_folder --json``, ``run``, ``invoke_rest_method``). Text holding a byte that is not valid
 UTF-8 (a POSIX environment variable, file name, process or account name) reaches Python as a lone
 surrogate, because ``os`` decodes with ``surrogateescape``, and orjson refuses a lone surrogate. Only
-then is the record's mapping walked again: each code point in U+D800-U+DFFF is written as U+FFFD
-(one per undecodable byte, which is what pwsh 7 shows for the same value) and the field paths that
-held one are returned, so the caller can warn instead of aborting the stream. The output stays
-valid UTF-8 JSON; the original bytes cannot be recovered from it.
+then is the value walked again: each code point in U+D800-U+DFFF is written as U+FFFD, one per
+undecodable byte (for a single undecodable byte this is what pwsh 7 shows), and the paths that held
+one are returned, so the caller can warn instead of aborting the stream. The output stays valid
+UTF-8 JSON; the original bytes cannot be recovered from it.
 
-Lives in ``adapters`` because both callers do (``adapters.cli.output`` and
+A repaired mapping key that now equals another key keeps its entry under ``<key>~2`` (then ``~3``,
+...): a key that was valid already keeps its name, and a later repaired key takes the next free
+suffix. Reported paths are ASCII, each non-ASCII character of a key shown as ``?``, because the
+warning is printed on consoles (cp1252) that cannot hold U+FFFD.
+
+Lives in ``adapters`` because every caller does (``adapters.cli.output`` and
 ``adapters.native.fileio``) and the domain stays free of serialisation; ``native`` because the
 library-side serialiser ``fileio`` is here and the CLI already imports sibling adapters.
 
 Contents:
-    * :class:`RecordJson` - the JSON bytes plus the replaced field paths.
+    * :class:`JsonBytes` - the JSON bytes plus the replaced paths.
+    * :func:`json_bytes` - dump a plain value, repairing lone surrogates.
     * :func:`record_json_bytes` - dump one record, repairing lone surrogates.
-    * :func:`describe_replacements` - the one-line warning text both callers print.
+    * :func:`describe_replacements` / :func:`describe_output_replacements` - the warning text.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import NamedTuple, cast
 
 import orjson
@@ -34,12 +42,18 @@ _SURROGATE = re.compile("[" + chr(0xD800) + "-" + chr(0xDFFF) + "]")
 #: U+REPLACEMENT CHARACTER, written in place of each surrogate.
 _REPLACEMENT = chr(0xFFFD)
 
+#: What every warning says after naming the place.
+_WARNING_TAIL = "not valid UTF-8; each undecodable byte written as U+FFFD"
 
-class RecordJson(NamedTuple):
-    """One record's JSON bytes and the dotted paths of the fields whose text was replaced.
+#: orjson's ``default`` hook: called for a value orjson cannot write natively.
+Default = Callable[[object], object]
+
+
+class JsonBytes(NamedTuple):
+    """JSON bytes and the dotted paths of the fields whose text was replaced.
 
     Example:
-        >>> RecordJson(b"{}", ()).replaced
+        >>> JsonBytes(b"{}", ()).replaced
         ()
     """
 
@@ -47,23 +61,54 @@ class RecordJson(NamedTuple):
     replaced: tuple[str, ...]
 
 
-def record_json_bytes(record: PSRecord) -> RecordJson:
-    """Dump ``record`` as JSON bytes, writing each lone surrogate as U+FFFD.
+def json_bytes(value: object, *, default: Default | None = None) -> JsonBytes:
+    """Dump ``value`` as JSON bytes, writing each lone surrogate as U+FFFD.
 
-    The fast path is ``orjson.dumps(record.to_dict())`` unchanged. Only when orjson refuses the
-    mapping and the mapping holds a lone surrogate (in a value or a key, at any depth) is it
-    repaired and dumped again.
+    The fast path is ``orjson.dumps(value, default=default)`` unchanged. Only when orjson refuses
+    the value and it holds a lone surrogate (in a string, a mapping key, or the text ``default``
+    turns a leaf into, at any depth) is it repaired and dumped again.
+
+    Args:
+        value: The value to serialise (dicts, lists, tuples, strings, numbers, and anything
+            orjson or ``default`` can write).
+        default: orjson's ``default`` hook (``str`` for ``emit_json``).
+
+    Returns:
+        The JSON bytes and the dotted ASCII paths (``value``, ``properties.items.2``; ``""`` for a
+        bare top-level string) of everything whose text was replaced, in order; an empty tuple
+        when nothing was.
+
+    Raises:
+        orjson.JSONEncodeError: For anything but a lone surrogate (an integer outside orjson's
+            64-bit range), exactly as ``orjson.dumps`` raises it.
+
+    Example:
+        >>> result = json_bytes({"p": "a" + chr(0xDCFF)}, default=str)
+        >>> result.data == b'{"p":"a' + chr(0xFFFD).encode() + b'"}', result.replaced
+        (True, ('p',))
+    """
+    try:
+        return JsonBytes(orjson.dumps(value, default=default), ())
+    except orjson.JSONEncodeError:
+        repairer = _Repairer(default)
+        repaired = repairer.value(value, "")
+        if not repairer.paths:
+            raise
+    # dict.fromkeys: a key and its value can both be replaced and would name one path twice.
+    return JsonBytes(orjson.dumps(repaired, default=default), tuple(dict.fromkeys(repairer.paths)))
+
+
+def record_json_bytes(record: PSRecord) -> JsonBytes:
+    """Dump ``record`` as JSON bytes (``orjson.dumps(record.to_dict())``), writing each lone surrogate as U+FFFD.
 
     Args:
         record: The record to serialise.
 
     Returns:
-        The JSON bytes and the dotted paths (``value``, ``properties.items.2``) of every field
-        whose text was replaced, in field order; an empty tuple when nothing was.
+        As :func:`json_bytes`: the bytes and the replaced field paths (``value``).
 
     Raises:
-        orjson.JSONEncodeError: For anything but a lone surrogate (an integer outside orjson's
-            64-bit range), exactly as ``orjson.dumps`` raises it.
+        orjson.JSONEncodeError: For anything but a lone surrogate, as ``orjson.dumps`` raises it.
 
     Example:
         >>> from pwshpy.domain.records import EnvVar
@@ -71,16 +116,7 @@ def record_json_bytes(record: PSRecord) -> RecordJson:
         >>> result.data == b'{"name":"X","value":"a' + chr(0xFFFD).encode() + b'b"}', result.replaced
         (True, ('value',))
     """
-    mapping = record.to_dict()
-    try:
-        return RecordJson(orjson.dumps(mapping), ())
-    except orjson.JSONEncodeError:
-        replaced: list[str] = []
-        repaired = _repair(mapping, "", replaced)
-        if not replaced:
-            raise
-    # dict.fromkeys: a key and its value can both be replaced and would name one path twice.
-    return RecordJson(orjson.dumps(repaired), tuple(dict.fromkeys(replaced)))
+    return json_bytes(record.to_dict())
 
 
 def describe_replacements(record: PSRecord, position: int, fields: tuple[str, ...]) -> str:
@@ -100,45 +136,102 @@ def describe_replacements(record: PSRecord, position: int, fields: tuple[str, ..
         'EnvVar record 7, field value: not valid UTF-8; each undecodable byte written as U+FFFD'
     """
     noun = "field" if len(fields) == 1 else "fields"
-    return (
-        f"{type(record).__name__} record {position}, {noun} {', '.join(fields)}: "
-        "not valid UTF-8; each undecodable byte written as U+FFFD"
-    )
+    return f"{type(record).__name__} record {position}, {noun} {', '.join(fields)}: {_WARNING_TAIL}"
 
 
-def _repair(value: object, path: str, replaced: list[str]) -> object:
-    """``value`` with every lone surrogate written as U+FFFD; each repaired path appended to ``replaced``."""
-    if isinstance(value, str):
-        return _repair_text(value, path, replaced)
-    if isinstance(value, Mapping):
-        return _repair_mapping(cast("Mapping[object, object]", value), path, replaced)
-    if isinstance(value, (list, tuple)):
-        items = cast("list[object] | tuple[object, ...]", value)
-        return [_repair(item, _join(path, str(index)), replaced) for index, item in enumerate(items)]
-    return value
+def describe_output_replacements(fields: tuple[str, ...]) -> str:
+    """The warning text for a plain value (``emit_json``) that was repaired, never quoting it.
+
+    Args:
+        fields: The replaced paths, from :func:`json_bytes`; ``("",)`` for a bare string.
+
+    Returns:
+        One line without a trailing newline.
+
+    Example:
+        >>> describe_output_replacements(("",))
+        'output: not valid UTF-8; each undecodable byte written as U+FFFD'
+        >>> describe_output_replacements(("items.0",))
+        'output field items.0: not valid UTF-8; each undecodable byte written as U+FFFD'
+    """
+    named = [field for field in fields if field]
+    if not named:
+        return f"output: {_WARNING_TAIL}"
+    noun = "field" if len(named) == 1 else "fields"
+    return f"output {noun} {', '.join(named)}: {_WARNING_TAIL}"
 
 
-def _repair_mapping(mapping: Mapping[object, object], path: str, replaced: list[str]) -> dict[object, object]:
-    repaired: dict[object, object] = {}
-    for key, item in mapping.items():
-        new_key = key
-        if isinstance(key, str):
-            new_key = _SURROGATE.sub(_REPLACEMENT, key)
-            if new_key != key:
-                replaced.append(_join(path, new_key))
-        repaired[new_key] = _repair(item, _join(path, str(new_key)), replaced)
-    return repaired
+class _Repairer:
+    """One repair walk: the ``default`` hook it honours and the paths it replaced, in order."""
+
+    def __init__(self, default: Default | None) -> None:
+        self._default = default
+        self.paths: list[str] = []
+
+    def value(self, value: object, path: str) -> object:
+        """``value`` with every lone surrogate written as U+FFFD."""
+        if isinstance(value, str):
+            return self._text(value, path)
+        if isinstance(value, Mapping):
+            return self._mapping(cast("Mapping[object, object]", value), path)
+        if isinstance(value, (list, tuple)):
+            items = cast("list[object] | tuple[object, ...]", value)
+            return [self.value(item, _join(path, str(index))) for index, item in enumerate(items)]
+        return self._leaf(value, path)
+
+    def _mapping(self, mapping: Mapping[object, object], path: str) -> dict[object, object]:
+        # Valid keys are reserved first, so a repaired key never takes a name that was already
+        # someone's, whichever comes first; a repaired key that collides takes the next free suffix.
+        taken = {key for key in mapping if isinstance(key, str) and not _SURROGATE.search(key)}
+        repaired: dict[object, object] = {}
+        for key, item in mapping.items():
+            new_key = key
+            if isinstance(key, str) and _SURROGATE.search(key):
+                new_key = _free_name(_SURROGATE.sub(_REPLACEMENT, key), taken)
+                taken.add(new_key)
+                self.paths.append(_join(path, _ascii(new_key)))
+            repaired[new_key] = self.value(item, _join(path, _ascii(str(new_key))))
+        return repaired
+
+    def _text(self, text: str, path: str) -> str:
+        repaired = _SURROGATE.sub(_REPLACEMENT, text)
+        if repaired != text:
+            self.paths.append(path)
+        return repaired
+
+    def _leaf(self, leaf: object, path: str) -> object:
+        # A leaf orjson writes natively stays as it is. One it hands to ``default`` (a Path for
+        # emit_json) is converted here only when the converted text holds a surrogate, so an
+        # integer orjson cannot write is never turned into a string and still raises.
+        if self._default is None or leaf is None or isinstance(leaf, (bool, int, float)):
+            return leaf
+        converted = self._default(leaf)
+        if isinstance(converted, str) and _SURROGATE.search(converted):
+            return self._text(converted, path)
+        return leaf
 
 
-def _repair_text(text: str, path: str, replaced: list[str]) -> str:
-    repaired = _SURROGATE.sub(_REPLACEMENT, text)
-    if repaired != text:
-        replaced.append(path)
-    return repaired
+def _free_name(name: str, taken: set[str]) -> str:
+    """``name``, or ``name~2``, ``name~3``, ... - the first not in ``taken``."""
+    candidate, suffix = name, 2
+    while candidate in taken:
+        candidate, suffix = f"{name}~{suffix}", suffix + 1
+    return candidate
+
+
+def _ascii(segment: str) -> str:
+    """``segment`` with each non-ASCII character as ``?`` (the warning reaches cp1252 consoles)."""
+    return segment.encode("ascii", "replace").decode("ascii")
 
 
 def _join(path: str, segment: str) -> str:
     return f"{path}.{segment}" if path else segment
 
 
-__all__ = ["RecordJson", "describe_replacements", "record_json_bytes"]
+__all__ = [
+    "JsonBytes",
+    "describe_output_replacements",
+    "describe_replacements",
+    "json_bytes",
+    "record_json_bytes",
+]

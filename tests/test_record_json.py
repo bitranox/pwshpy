@@ -1,6 +1,7 @@
 """The shared record serialiser: U+FFFD for each undecodable byte, and the paths it replaced.
 
-``record_json_bytes`` is what ``--json`` / ``--jsonl`` and ``ps.write_records`` dump a record with.
+``record_json_bytes`` is what ``--json`` / ``--jsonl`` and ``ps.write_records`` dump a record with;
+``json_bytes`` is the same rule for a plain value (``emit_json``: ``get_known_folder --json``, ``run``).
 A POSIX environment variable, file name, process name or account name holding a byte that is not
 valid UTF-8 reaches Python as a lone surrogate (``os`` decodes with ``surrogateescape``), which
 ``orjson`` refuses; the helper writes each such code point as U+FFFD and names the field.
@@ -9,12 +10,19 @@ valid UTF-8 reaches Python as a lone surrogate (``os`` decodes with ``surrogatee
 from __future__ import annotations
 
 import json
+from pathlib import PurePosixPath
 from typing import Any
 
 import orjson
 import pytest
 
-from pwshpy.adapters.native.record_json import RecordJson, describe_replacements, record_json_bytes
+from pwshpy.adapters.native.record_json import (
+    JsonBytes,
+    describe_output_replacements,
+    describe_replacements,
+    json_bytes,
+    record_json_bytes,
+)
 from pwshpy.domain.records import CimInstance, EnvVar, PSRecord
 
 #: The code point os.environ / os.fsdecode hold for the undecodable byte 0xFF.
@@ -30,7 +38,7 @@ _FFFD = chr(0xFFFD)
 def test_a_clean_record_is_dumped_as_before_with_no_replaced_fields() -> None:
     """The fast path: the same bytes as orjson.dumps(to_dict()) and nothing replaced."""
     record = EnvVar(name="A", value="caf" + chr(0xE9))
-    assert record_json_bytes(record) == RecordJson(orjson.dumps(record.to_dict()), ())
+    assert record_json_bytes(record) == JsonBytes(orjson.dumps(record.to_dict()), ())
 
 
 @pytest.mark.os_agnostic
@@ -78,7 +86,32 @@ def test_a_surrogate_in_a_dict_key_is_replaced_and_named() -> None:
     """A bad byte in a mapping key is replaced too; the path names the replaced key once."""
     result = record_json_bytes(_RawBag(bag={"k" + _BAD: {"x": "v" + _BAD}}))
     assert json.loads(result.data) == {"bag": {"k" + _FFFD: {"x": "v" + _FFFD}}}
-    assert result.replaced == ("bag.k" + _FFFD, "bag.k" + _FFFD + ".x")
+    assert result.replaced == ("bag.k?", "bag.k?.x")
+
+
+@pytest.mark.os_agnostic
+def test_reported_paths_are_ascii_with_question_marks_for_non_ascii_key_characters() -> None:
+    """A path is printed on consoles that cannot hold U+FFFD (cp1252): every non-ASCII key char is '?'."""
+    result = record_json_bytes(_RawBag(bag={"caf" + chr(0xE9) + _BAD: "v", "x": chr(0x4E2D) + _BAD}))
+    assert result.replaced == ("bag.caf??", "bag.x")
+    assert all(path.isascii() for path in result.replaced)
+
+
+@pytest.mark.os_agnostic
+def test_two_keys_differing_only_in_bad_bytes_both_survive_with_a_suffix() -> None:
+    """The later colliding key gets ~2 (then ~3, ...) and is reported; no entry is lost."""
+    bag = {"a" + chr(0xDCFF): 1, "a" + chr(0xDCFE): 2, "a" + chr(0xDCFD): 3}
+    result = record_json_bytes(_RawBag(bag=bag))
+    assert json.loads(result.data)["bag"] == {"a" + _FFFD: 1, "a" + _FFFD + "~2": 2, "a" + _FFFD + "~3": 3}
+    assert result.replaced == ("bag.a?", "bag.a?~2", "bag.a?~3")
+
+
+@pytest.mark.os_agnostic
+def test_a_clean_key_keeps_its_name_and_the_repaired_key_takes_the_suffix() -> None:
+    """A key that was already valid is never renamed, even when it comes after the repaired one."""
+    result = record_json_bytes(_RawBag(bag={"a" + _BAD: 1, "a" + _FFFD: 2, "a" + _FFFD + "~2": 3}))
+    assert json.loads(result.data)["bag"] == {"a" + _FFFD + "~3": 1, "a" + _FFFD: 2, "a" + _FFFD + "~2": 3}
+    assert result.replaced == ("bag.a?~3",)
 
 
 @pytest.mark.os_agnostic
@@ -132,3 +165,45 @@ def test_describe_replacements_names_type_position_and_fields_never_the_value() 
     assert describe_replacements(record, 2, ("name", "value")) == (
         "EnvVar record 2, fields name, value: not valid UTF-8; each undecodable byte written as U+FFFD"
     )
+
+
+# --- plain values (emit_json) ---------------------------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+def test_a_clean_value_is_dumped_as_before() -> None:
+    """The fast path for a plain value is orjson.dumps(value, default=str)."""
+    value = {"p": PurePosixPath("/opt/data"), "n": 1}
+    assert json_bytes(value, default=str) == JsonBytes(orjson.dumps(value, default=str), ())
+
+
+@pytest.mark.os_agnostic
+def test_a_bare_string_is_repaired_with_an_empty_path() -> None:
+    """A top-level string has no field: its path is the empty string."""
+    result = json_bytes("/opt/a" + _BAD + "b", default=str)
+    assert json.loads(result.data) == "/opt/a" + _FFFD + "b"
+    assert result.replaced == ("",)
+
+
+@pytest.mark.os_agnostic
+def test_a_value_converted_by_default_is_repaired_at_its_path() -> None:
+    """A leaf orjson hands to ``default`` (a path) is repaired when its text holds a surrogate."""
+    result = json_bytes({"o": [{"p": PurePosixPath("/opt/x" + _BAD), "q": PurePosixPath("/opt/ok")}]}, default=str)
+    assert json.loads(result.data) == {"o": [{"p": "/opt/x" + _FFFD, "q": "/opt/ok"}]}
+    assert result.replaced == ("o.0.p",)
+
+
+@pytest.mark.os_agnostic
+def test_a_plain_value_with_an_oversized_integer_still_raises() -> None:
+    """``default=str`` does not turn an integer orjson cannot write into a string."""
+    with pytest.raises(orjson.JSONEncodeError, match="Integer exceeds 64-bit range"):
+        json_bytes({"s": _BAD, "v": 2**64}, default=str)
+
+
+@pytest.mark.os_agnostic
+def test_describe_output_replacements_wording() -> None:
+    """``output field <path>``, ``output fields a, b``, and plain ``output`` for a bare string."""
+    tail = ": not valid UTF-8; each undecodable byte written as U+FFFD"
+    assert describe_output_replacements(("a.b",)) == "output field a.b" + tail
+    assert describe_output_replacements(("a", "b")) == "output fields a, b" + tail
+    assert describe_output_replacements(("",)) == "output" + tail

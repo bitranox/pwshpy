@@ -8,6 +8,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- `logdemo` refuses a `LOG_*` variable lib_log_rich refuses (`LOG_CONSOLE_LEVEL=bogus`) with exit 78
+  and lib_log_rich's own line, as `config` does. The demo reads the variables itself, so its
+  `ValueError` reached `main()` and exited with the OS errno (22 on POSIX, 87 on Windows).
 - The test suite no longer reads the developer's own user configuration layer. A new autouse fixture,
   `user_layer_in_tmp_path`, points the user layer (`XDG_CONFIG_HOME`, `LIB_LAYERED_CONFIG_MAC_HOME_ROOT`,
   `_APPDATA`, `_LOCALAPPDATA`) at an empty directory under `tmp_path`; `HOME` is left alone, because

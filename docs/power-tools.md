@@ -404,26 +404,27 @@ Details worth knowing:
   stderr with a `pwshpy: leaving <dir> off uv's PATH: <reason> (...)` line. A relative entry names
   the working directory and is left out like any untrusted one. In a `.sh` run a leading or inner
   empty entry is named and left out the same way; a trailing one is dropped by the shell's field
-  splitting without a line, and is left off all the same. The `.ps1` drops every empty entry silently
-  (a trailing `;` is common on Windows). A root run
-  judges the `PATH` while its own helpers still come from the fixed system directories. When the
-  caller's `PATH` holds a `git` but every one is in a directory left off, one more line names the
-  cause, since uv would otherwise fail with only its bare "git not found": `pwshpy: no git on uv's
-  PATH: <git> and any other git on the caller's PATH are in directories another account can modify;
-  a git dependency fails as root until git is installed in a directory only root can modify` (on
-  Windows: `fails elevated until git is installed in a directory no other account can modify (e.g. a
-  system-wide install)`). That lookup only searches `PATH`; it never runs a `git`. A git dependency
-  in an elevated run therefore needs a `git` in a directory no other account can modify, such as a
-  system-wide install (on POSIX one only root can modify). The packed script still sees the caller's
-  whole `PATH`: the shim puts it back before the script starts, behind the entry uv put in front of
-  the `PATH` it was given (the script environment's `bin` (`Scripts` on Windows), or the
-  interpreter's directory for a script with no dependencies), so the script sees the same `PATH` as
-  an unelevated run. One exception: when no directory of the caller's `PATH` passes, an elevated
-  `.ps1` run hands the shim an empty uv `PATH`, which PowerShell drops as an unset variable, so the
-  script gets the caller's `PATH` without uv's entry in front (a `.sh` run keeps it). The two
-  variables that carry it over
-  (`PWSHPY_PACK_PATH`, `PWSHPY_PACK_UV_PATH`) are removed before the script starts. Not elevated,
-  nothing changes: uv and the script get the caller's `PATH` as it is.
+  splitting without a line, and is left off all the same. The `.ps1` drops every empty entry
+  silently (a trailing `;` is common on Windows). A root run judges the `PATH` while its own helpers
+  still come from the fixed system directories. When the caller's `PATH` holds a `git` but every one
+  is in a directory left off, one more line names the cause, since uv would otherwise fail with only
+  its bare "git not found": `pwshpy: no git on uv's PATH: <git> and any other git on the caller's
+  PATH are in directories another account can modify; a git dependency fails as root until git is
+  installed in a directory only root can modify` (on Windows: `fails elevated until git is installed
+  in a directory no other account can modify (e.g. a system-wide install)`). That lookup only
+  searches `PATH`; it never runs a `git`. A git dependency in an elevated run therefore needs a
+  `git` in a directory no other account can modify, such as a system-wide install (on POSIX one only
+  root can modify). The packed script still sees the caller's whole `PATH`: the shim puts it back
+  before the script starts, behind the entry uv put in front of the `PATH` it was given (the script
+  environment's `bin` (`Scripts` on Windows), or the interpreter's directory for a script with no
+  dependencies), so the script sees the same `PATH` as an unelevated run. One exception: when no
+  directory of the caller's `PATH` passes, uv's `PATH` is empty, and Windows PowerShell 5.1 deletes
+  an environment variable set to an empty string. Under 5.1 the shim therefore cannot tell which
+  entry uv put in front and gives the script the caller's `PATH` without uv's entry. pwsh 7 and a
+  `.sh` run keep the empty variable, so the script keeps uv's entry there too. Either way nothing is
+  added beyond the caller's own `PATH`. The two variables that carry it over (`PWSHPY_PACK_PATH`,
+  `PWSHPY_PACK_UV_PATH`) are removed before the script starts. Not elevated, nothing changes: uv and
+  the script get the caller's `PATH` as it is.
 - **An elevated run only runs a Python uv manages, named to uv outright.** uv picks the interpreter
   the script runs on, and it executes every interpreter it considers to ask its version, so a
   `python` planted in a `PATH` directory another account can write would run with the elevated

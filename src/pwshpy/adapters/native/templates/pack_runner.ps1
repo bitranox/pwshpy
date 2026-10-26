@@ -1581,11 +1581,11 @@ $PwshPyPrepareRun = {
     if ($PwshPyElevatedRun) {
         $PwshPyTrustedUvPath = Get-PwshPyTrustedPath -Path $PwshPyCallerPath
         Set-Item -LiteralPath ('Env:' + $PwshPyPathEnv) -Value $PwshPyCallerPath
-        # When no caller directory is trusted this is '', and PowerShell deletes a variable set to '':
-        # the shim then finds no uv PATH, cannot tell what uv put in front, and gives the script the
-        # caller's PATH without uv's entry. That fails safe (nothing untrusted is added), at the cost
-        # of the uv entry in this one case; the .sh keeps it, since an empty PATH stays set there
-        # (uv 0.13 hands such a script '<interpreter bin>:').
+        # When no caller directory is trusted this is ''. Windows PowerShell 5.1 deletes a variable set
+        # to '', so under 5.1 the shim finds no uv PATH, cannot tell what uv put in front, and gives
+        # the script the caller's PATH without uv's entry. pwsh 7 keeps the variable set to '', so the
+        # shim keeps uv's entry there, as the .sh does (uv 0.13 hands a script run on an empty PATH
+        # '<interpreter bin>:'). Either way it fails safe: nothing untrusted is added.
         Set-Item -LiteralPath ('Env:' + $PwshPyUvPathEnv) -Value $PwshPyTrustedUvPath
         # A git dependency would fail with uv's bare "git not found" when the only gits are in
         # directories left off; name the cause.

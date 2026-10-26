@@ -31,8 +31,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   the cause: a git dependency then needs a `git` in a directory no other account can modify, such
   as a system-wide install (on POSIX one only root can modify). The packed script still gets the
   caller's whole `PATH`, behind the entry uv puts in front, as in an unelevated run; only an elevated
-  `.ps1` run in which no `PATH` directory passes gives it the caller's `PATH` without uv's entry. An
-  unelevated run is unchanged.
+  `.ps1` run under Windows PowerShell 5.1 in which no `PATH` directory passes gives it the caller's
+  `PATH` without uv's entry, because 5.1 deletes the empty variable that hands uv's `PATH` to the
+  shim (pwsh 7 keeps it). An unelevated run is unchanged.
 
 
 ## [1.8.1] 2026-10-26 13:51:55

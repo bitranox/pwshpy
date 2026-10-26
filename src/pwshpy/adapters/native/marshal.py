@@ -16,8 +16,8 @@ Contents:
       ``MultipleInstances``.
     * :func:`to_integrity_level` - mandatory-label RID -> :class:`IntegrityLevel`.
     * :func:`skip_or_raise` - the lenient/strict contract for an item a listing cannot read.
-    * :func:`is_com_error` / :func:`com_hresult` - recognise a pywin32 COM error and read its
-      unsigned HRESULT.
+    * :func:`is_com_error` / :func:`com_hresult` / :func:`com_error_text` - recognise a pywin32
+      COM/Win32 error and read its unsigned HRESULT and its text.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import logging
 import re
 import socket
 from datetime import datetime, timedelta, timezone
+from typing import cast
 
 from ...domain.enums import (
     AceType,
@@ -600,14 +601,30 @@ def skip_or_raise(what: str, exc: Exception, *, strict: bool, log: logging.Logge
     log.warning("skipped (pass strict=True to raise instead) - %s: %s", what, exc)
 
 
-#: pywin32's ``pywintypes.com_error`` and ``pywintypes.error``. Matched by class name because
-#: pywintypes is importable only on Windows, and a portable module must not import it.
+#: pywin32's ``pywintypes.com_error`` and ``pywintypes.error``. Matched by class name AND module
+#: because pywintypes is importable only on Windows, and a portable module must not import it;
+#: the name alone would admit ``struct.error``, ``zlib.error`` and every other ``error`` class.
 _COM_ERROR_NAMES = frozenset({"com_error", "error"})
+_PYWINTYPES_MODULE = "pywintypes"
 _HRESULT_MASK = 0xFFFFFFFF
+#: DISP_E_EXCEPTION: a late-bound IDispatch call reports that the callee raised, with the
+#: callee's own status in excepinfo[5] (the scode) and its text in excepinfo[2]; the outer code
+#: alone would read "Exception occurred" for every such failure.
+_DISP_E_EXCEPTION = 0x80020009
+_EXCEPINFO_DESCRIPTION = 2
+_EXCEPINFO_SCODE = 5
+_ARG_EXCEPINFO = 2
+#: HRESULT_FROM_WIN32 (winerror.h): a Win32 code in 1..0xFFFF takes FACILITY_WIN32 and the
+#: failure bit; 0 stays success, and anything wider is already an HRESULT.
+_FACILITY_WIN32_FAILURE = 0x80070000
+_WIN32_CODE_MAX = 0xFFFF
+#: Where each class keeps its text in ``args``: com_error is (hresult, strerror, excepinfo,
+#: argerror), error is (winerror, funcname, strerror).
+_STRERROR_ARG = {"com_error": 1, "error": 2}
 
 
 def is_com_error(exc: BaseException) -> bool:
-    """Return whether ``exc`` is a pywin32 COM/Win32 error (``com_error`` or ``error``).
+    """Return whether ``exc`` is a pywin32 COM/Win32 error (``pywintypes.com_error`` or ``.error``).
 
     A caller uses it to tell a native failure, which it wraps in
     :class:`~pwshpy.domain.errors.NativeCallError`, from any other exception, which is not
@@ -617,22 +634,84 @@ def is_com_error(exc: BaseException) -> bool:
         exc: Any exception a pywin32 call raised.
 
     Returns:
-        True when the exception's class is named ``com_error`` or ``error``.
+        True when the exception's class is named ``com_error`` or ``error`` and is defined in
+        ``pywintypes``.
 
     Example:
-        >>> is_com_error(RuntimeError("x"))
+        >>> class com_error(Exception): ...
+        >>> com_error.__module__ = "pywintypes"
+        >>> is_com_error(com_error())
+        True
+        >>> import struct
+        >>> is_com_error(struct.error("a class named error, but not pywin32's"))
         False
     """
-    return type(exc).__name__ in _COM_ERROR_NAMES
+    cls = type(exc)
+    return cls.__name__ in _COM_ERROR_NAMES and cls.__module__ == _PYWINTYPES_MODULE
+
+
+def _as_int(value: object) -> int | None:
+    """``value`` when it is an int (a bool is not a status code), else ``None``."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _arg(exc: BaseException, index: int) -> object:
+    """``exc.args[index]``, or ``None`` when ``args`` is shorter."""
+    return exc.args[index] if len(exc.args) > index else None
+
+
+def _own_hresult(exc: BaseException) -> int | None:
+    """The HRESULT the error itself carries, unsigned and not unwrapped; ``None`` for none.
+
+    ``.hresult`` first; ``args[0]`` only when there is no ``.winerror`` either, because a
+    ``pywintypes.error`` keeps its Win32 code (not an HRESULT) there.
+    """
+    code = _as_int(getattr(exc, "hresult", None))
+    if code is None and _as_int(getattr(exc, "winerror", None)) is None:
+        code = _as_int(_arg(exc, 0))
+    return None if code is None else code & _HRESULT_MASK
+
+
+def _callee_excepinfo(exc: BaseException, own: int | None) -> tuple[object, ...] | None:
+    """The full excepinfo of a DISP_E_EXCEPTION (``.excepinfo``, else ``args[2]``), else ``None``."""
+    if own != _DISP_E_EXCEPTION:
+        return None
+    info: object = getattr(exc, "excepinfo", None)
+    if info is None:
+        info = _arg(exc, _ARG_EXCEPINFO)
+    if not isinstance(info, tuple):
+        return None
+    fields = cast("tuple[object, ...]", info)  # pywin32's excepinfo is an untyped 6-tuple
+    return fields if len(fields) > _EXCEPINFO_SCODE else None
+
+
+def _callee_scode(fields: tuple[object, ...] | None) -> int | None:
+    """The callee's nonzero status from an excepinfo, unsigned; ``None`` when it names none."""
+    scode = None if fields is None else _as_int(fields[_EXCEPINFO_SCODE])
+    if scode is None:
+        return None
+    return (scode & _HRESULT_MASK) or None
+
+
+def _win32_to_hresult(code: int) -> int:
+    """HRESULT_FROM_WIN32: ``0x8007xxxx`` for a Win32 code, 0 stays 0, anything else masked."""
+    if 0 < code <= _WIN32_CODE_MAX:
+        return _FACILITY_WIN32_FAILURE | code
+    return code & _HRESULT_MASK
 
 
 def com_hresult(exc: BaseException) -> int | None:
-    """Return the HRESULT a pywin32 COM error carries, as an unsigned 32-bit int.
+    """Return the HRESULT a pywin32 error carries, as an unsigned 32-bit int.
 
     pywin32 reports an HRESULT signed (``0x80070002`` arrives as ``-2147024894``), so it is
-    masked to 32 bits, ready for ``0x%08X``. ``None`` means no status could be read: either
-    ``exc`` is not a COM error (see :func:`is_com_error`, which a caller asks first when the
-    two cases must be told apart) or it carries no int ``hresult``.
+    masked to 32 bits, ready for ``0x%08X``. A DISP_E_EXCEPTION (``0x80020009``) is unwrapped
+    to the callee's own status in ``excepinfo[5]`` when that is a nonzero int. A
+    ``pywintypes.error`` carries a Win32 code on ``.winerror``, which is mapped as
+    HRESULT_FROM_WIN32 (5 becomes ``0x80070005``). ``None`` means no status could be read:
+    either ``exc`` is not a pywin32 error (see :func:`is_com_error`, which a caller asks first
+    when the two cases must be told apart) or it carries no int code.
 
     Args:
         exc: Any exception a pywin32 call raised.
@@ -643,21 +722,66 @@ def com_hresult(exc: BaseException) -> int | None:
     Example:
         >>> class com_error(Exception):
         ...     hresult = -2147024894
+        >>> com_error.__module__ = "pywintypes"
         >>> f"0x{com_hresult(com_error()):08X}"
         '0x80070002'
+        >>> class error(Exception):
+        ...     winerror = 5
+        >>> error.__module__ = "pywintypes"
+        >>> f"0x{com_hresult(error()):08X}"
+        '0x80070005'
         >>> com_hresult(ValueError()) is None
         True
     """
     if not is_com_error(exc):
         return None
-    hresult: object = getattr(exc, "hresult", None)
-    if isinstance(hresult, bool) or not isinstance(hresult, int):
-        return None
-    return hresult & _HRESULT_MASK
+    own = _own_hresult(exc)
+    if own is not None:
+        scode = _callee_scode(_callee_excepinfo(exc, own))
+        return own if scode is None else scode
+    winerror = _as_int(getattr(exc, "winerror", None))
+    return None if winerror is None else _win32_to_hresult(winerror)
+
+
+def com_error_text(exc: BaseException) -> str:
+    """Return the text a pywin32 error carries, for a message beside its HRESULT.
+
+    For a DISP_E_EXCEPTION that is the callee's own description (``excepinfo[2]``) when it is
+    a non-empty str, since the outer text only says "Exception occurred"; otherwise the
+    error's ``strerror``. The text is localized, so it is for people: never decide on it.
+
+    Args:
+        exc: Any exception a pywin32 call raised.
+
+    Returns:
+        The text, or ``""`` when ``exc`` is not a pywin32 error or carries none.
+
+    Example:
+        >>> class com_error(Exception):
+        ...     hresult = -2147352567
+        ...     strerror = "Exception occurred."
+        ...     excepinfo = (0, "source", "No network", None, 0, -2145107924)
+        >>> com_error.__module__ = "pywintypes"
+        >>> com_error_text(com_error())
+        'No network'
+        >>> com_error_text(ValueError("not pywin32's"))
+        ''
+    """
+    if not is_com_error(exc):
+        return ""
+    fields = _callee_excepinfo(exc, _own_hresult(exc))
+    description = None if fields is None else fields[_EXCEPINFO_DESCRIPTION]
+    if isinstance(description, str) and description:
+        return description
+    text: object = getattr(exc, "strerror", None)
+    if text is None:
+        text = _arg(exc, _STRERROR_ARG[type(exc).__name__])
+    return text if isinstance(text, str) else ""
 
 
 __all__ = [
     "com_date_to_datetime",
+    "com_error_text",
     "com_hresult",
     "epoch_to_datetime",
     "from_registry_value_type",

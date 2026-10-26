@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from com_fakes import codeless_com_error, com_error_for, error
 
 from pwshpy.adapters.native.known_folders import windows_known_folder
 from pwshpy.domain.enums import KnownFolder
@@ -57,15 +58,6 @@ _FALLBACK_VARS: dict[KnownFolder, str] = {
 }
 
 _NO_FALLBACK = [KnownFolder.DESKTOP, KnownFolder.DOCUMENTS, KnownFolder.PROGRAMS]
-
-
-class com_error(Exception):  # noqa: N801, N818 - pywin32's class name is what the resolver recognises
-    """A stand-in for ``pywintypes.com_error``: the HRESULT arrives signed, on ``.hresult``."""
-
-    def __init__(self, code: int) -> None:
-        signed = code - 0x1_0000_0000 if code & 0x8000_0000 else code
-        super().__init__(signed, "localized text the resolver must not rely on", None, None)
-        self.hresult = signed
 
 
 class _FakeShell:
@@ -117,7 +109,7 @@ def test_each_member_asks_for_its_folderid_with_flags_0(folder: KnownFolder) -> 
 def test_not_found_app_data_takes_its_env_var_when_that_directory_exists(
     tmp_path: Path, folder: KnownFolder, code: int
 ) -> None:
-    result = _resolve(folder, com_error(code), {_FALLBACK_VARS[folder]: str(tmp_path)})
+    result = _resolve(folder, com_error_for(code), {_FALLBACK_VARS[folder]: str(tmp_path)})
 
     assert result == tmp_path
 
@@ -128,7 +120,7 @@ def test_not_found_app_data_takes_its_env_var_when_that_directory_exists(
 def test_not_found_app_data_is_none_when_its_env_var_names_a_missing_directory(
     tmp_path: Path, folder: KnownFolder, code: int
 ) -> None:
-    result = _resolve(folder, com_error(code), {_FALLBACK_VARS[folder]: str(tmp_path / "missing")})
+    result = _resolve(folder, com_error_for(code), {_FALLBACK_VARS[folder]: str(tmp_path / "missing")})
 
     assert result is None
 
@@ -140,7 +132,7 @@ def test_not_found_app_data_is_none_when_its_env_var_is_unset(tmp_path: Path, fo
     """The other two variables point at an existing directory, so only the member's own counts."""
     others = {var: str(tmp_path) for member, var in _FALLBACK_VARS.items() if member is not folder}
 
-    result = _resolve(folder, com_error(code), others)
+    result = _resolve(folder, com_error_for(code), others)
 
     assert result is None
 
@@ -153,7 +145,7 @@ def test_not_found_desktop_documents_programs_are_none_whatever_the_environment(
 ) -> None:
     every_var = {var: str(tmp_path) for var in _FALLBACK_VARS.values()}
 
-    result = _resolve(folder, com_error(code), every_var)
+    result = _resolve(folder, com_error_for(code), every_var)
 
     assert result is None
 
@@ -161,7 +153,7 @@ def test_not_found_desktop_documents_programs_are_none_whatever_the_environment(
 @pytest.mark.os_agnostic
 def test_fallback_env_var_name_is_matched_case_insensitively(tmp_path: Path) -> None:
     """Windows environment names ignore case; a caller's dict may spell ``ProgramData`` in capitals."""
-    result = _resolve(KnownFolder.PROGRAM_DATA, com_error(_FILE_NOT_FOUND), {"PROGRAMDATA": str(tmp_path)})
+    result = _resolve(KnownFolder.PROGRAM_DATA, com_error_for(_FILE_NOT_FOUND), {"PROGRAMDATA": str(tmp_path)})
 
     assert result == tmp_path
 
@@ -173,14 +165,14 @@ def test_empty_fallback_env_var_is_unset_not_the_current_directory(
     """``Path("")`` is ``.``, an existing directory; an empty value must not turn into the cwd."""
     monkeypatch.chdir(tmp_path)
 
-    result = _resolve(KnownFolder.LOCAL_APP_DATA, com_error(_FILE_NOT_FOUND), {"LOCALAPPDATA": ""})
+    result = _resolve(KnownFolder.LOCAL_APP_DATA, com_error_for(_FILE_NOT_FOUND), {"LOCALAPPDATA": ""})
 
     assert result is None
 
 
 @pytest.mark.os_agnostic
 def test_environ_none_reads_the_process_environment_per_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    shell = _FakeShell(com_error(_FILE_NOT_FOUND))
+    shell = _FakeShell(com_error_for(_FILE_NOT_FOUND))
     monkeypatch.delenv("APPDATA", raising=False)
     assert windows_known_folder(KnownFolder.ROAMING_APP_DATA, load=_loader(shell)) is None
 
@@ -200,7 +192,7 @@ def test_fallback_directory_behind_an_unsearchable_parent_is_none(tmp_path: Path
     locked.chmod(0o000)
     try:
         result = _resolve(
-            KnownFolder.LOCAL_APP_DATA, com_error(_FILE_NOT_FOUND), {"LOCALAPPDATA": str(locked / "inner")}
+            KnownFolder.LOCAL_APP_DATA, com_error_for(_FILE_NOT_FOUND), {"LOCALAPPDATA": str(locked / "inner")}
         )
     finally:
         locked.chmod(0o700)
@@ -215,38 +207,39 @@ def test_fallback_directory_behind_an_unsearchable_parent_is_none(tmp_path: Path
 @pytest.mark.parametrize("folder", [KnownFolder.DESKTOP, KnownFolder.LOCAL_APP_DATA], ids=lambda f: f.name)
 def test_other_hresult_raises_native_call_error_naming_code_and_member(tmp_path: Path, folder: KnownFolder) -> None:
     """E_FAIL (measured for a virtual folder) is not "missing": no fallback, even with the variable set."""
-    error = com_error(_E_FAIL)
+    failure = com_error_for(_E_FAIL)
 
     with pytest.raises(NativeCallError) as info:
-        _resolve(folder, error, {var: str(tmp_path) for var in _FALLBACK_VARS.values()})
+        _resolve(folder, failure, {var: str(tmp_path) for var in _FALLBACK_VARS.values()})
 
     assert "0x80004005" in str(info.value)
     assert folder.name in str(info.value)
-    assert info.value.__cause__ is error
+    assert info.value.__cause__ is failure
 
 
 @pytest.mark.os_agnostic
 def test_com_error_without_an_hresult_raises_native_call_error(tmp_path: Path) -> None:
-    error = com_error(_FILE_NOT_FOUND)
-    del error.hresult
-
-    with pytest.raises(NativeCallError):
-        _resolve(KnownFolder.PROGRAM_DATA, error, {"ProgramData": str(tmp_path)})
-
-
-class error(Exception):  # noqa: N801, N818 - pywin32's class name is what the resolver recognises
-    """A stand-in for ``pywintypes.error``: a Win32 failure with no ``.hresult``."""
+    with pytest.raises(NativeCallError, match="without an HRESULT"):
+        _resolve(KnownFolder.PROGRAM_DATA, codeless_com_error(), {"ProgramData": str(tmp_path)})
 
 
 @pytest.mark.os_agnostic
 def test_pywintypes_error_raises_native_call_error(tmp_path: Path) -> None:
-    """A Win32 error is a native failure too: wrapped, never read as "missing"."""
+    """A Win32 error is a native failure too: wrapped, naming its code as HRESULT_FROM_WIN32."""
     failure = error(5, "SHGetKnownFolderPath", "localized text")
 
-    with pytest.raises(NativeCallError) as info:
+    with pytest.raises(NativeCallError, match="0x80070005") as info:
         _resolve(KnownFolder.PROGRAM_DATA, failure, {"ProgramData": str(tmp_path)})
 
     assert info.value.__cause__ is failure
+
+
+@pytest.mark.os_agnostic
+def test_pywintypes_error_file_not_found_takes_the_fallback(tmp_path: Path) -> None:
+    """Win32 ERROR_FILE_NOT_FOUND (2) is HRESULT 0x80070002: the same "missing" as the COM form."""
+    failure = error(2, "SHGetKnownFolderPath", "localized text")
+
+    assert _resolve(KnownFolder.PROGRAM_DATA, failure, {"ProgramData": str(tmp_path)}) == tmp_path
 
 
 @pytest.mark.os_agnostic

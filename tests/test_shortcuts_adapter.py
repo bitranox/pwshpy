@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from com_fakes import codeless_com_error, com_error_for
 
 from pwshpy.adapters.native.shortcuts import NativeShortcutController
 from pwshpy.domain.errors import NativeCallError, PlatformUnsupportedError
@@ -43,15 +44,6 @@ _COINIT_MULTITHREADED = 0
 _INSUFFICIENT_BUFFER = 0x8007007A
 _PATH_NOT_FOUND = 0x80070003
 _TARGET = "C:\\Tools\\tool.exe"
-
-
-class com_error(Exception):  # noqa: N801, N818 - pywin32's class name is what the adapter recognises
-    """A stand-in for ``pywintypes.com_error``: the HRESULT arrives signed, on ``.hresult``."""
-
-    def __init__(self, code: int) -> None:
-        signed = code - 0x1_0000_0000 if code & 0x8000_0000 else code
-        super().__init__(signed, "localized text the adapter must not rely on", None, None)
-        self.hresult = signed
 
 
 class _Com:
@@ -118,7 +110,7 @@ class _FakeLink:
         self.com.record("GetPath", flags, size)
         target = str(self.fields["target"])
         if len(target) >= size:
-            raise com_error(_INSUFFICIENT_BUFFER)
+            raise com_error_for(_INSUFFICIENT_BUFFER)
         return target, object()
 
     def GetArguments(self, size: int) -> str:  # noqa: N802 - the pywin32 name
@@ -349,7 +341,7 @@ def test_overwriting_an_elevated_shortcut_without_the_flag_clears_it(lnk: Callab
 
 @pytest.mark.os_agnostic
 def test_a_failed_set_flags_stops_before_save_and_names_the_step(lnk: Callable[[str], str]) -> None:
-    com = _Com(fail_at={"SetFlags": com_error(0x80004005)})
+    com = _Com(fail_at={"SetFlags": com_error_for(0x80004005)})
     controller, _ = _controller(com)
     path = lnk("Fail.lnk")
 
@@ -402,7 +394,7 @@ def test_create_with_force_overwrites_an_existing_file(lnk: Callable[[str], str]
 
 @pytest.mark.os_agnostic
 def test_a_failed_save_raises_native_call_error_naming_hresult_step_and_path(lnk: Callable[[str], str]) -> None:
-    failure = com_error(_PATH_NOT_FOUND)
+    failure = com_error_for(_PATH_NOT_FOUND)
     com = _Com(fail_at={"Save": failure})
     controller, _ = _controller(com)
     path = lnk("Missing.lnk")
@@ -421,7 +413,7 @@ def test_a_failed_save_raises_native_call_error_naming_hresult_step_and_path(lnk
 @pytest.mark.os_agnostic
 def test_a_failed_set_stops_before_save(lnk: Callable[[str], str]) -> None:
     """A Save after a failed SetPath writes a link with no target (measured), so it never runs."""
-    com = _Com(fail_at={"SetPath": com_error(0x80004005)})
+    com = _Com(fail_at={"SetPath": com_error_for(0x80004005)})
     controller, _ = _controller(com)
     path = lnk("NoTarget.lnk")
 
@@ -434,8 +426,7 @@ def test_a_failed_set_stops_before_save(lnk: Callable[[str], str]) -> None:
 
 @pytest.mark.os_agnostic
 def test_a_com_error_without_an_hresult_still_raises_native_call_error(lnk: Callable[[str], str]) -> None:
-    failure = com_error(_PATH_NOT_FOUND)
-    del failure.hresult
+    failure = codeless_com_error()
     controller, _ = _controller(_Com(fail_at={"SetDescription": failure}))
 
     with pytest.raises(NativeCallError, match="without an HRESULT") as info:
@@ -457,7 +448,7 @@ def test_a_non_com_exception_propagates_unchanged(lnk: Callable[[str], str]) -> 
 
 @pytest.mark.os_agnostic
 def test_a_failed_com_init_raises_native_call_error(lnk: Callable[[str], str]) -> None:
-    com = _Com(fail_at={"CoInitializeEx": com_error(0x80010106)})
+    com = _Com(fail_at={"CoInitializeEx": com_error_for(0x80010106)})
     controller, _ = _controller(com)
 
     with pytest.raises(NativeCallError, match="0x80010106"):
@@ -486,7 +477,7 @@ def test_com_work_runs_off_the_callers_thread_with_objects_released_before_unini
 
 @pytest.mark.os_agnostic
 def test_objects_are_released_before_uninit_when_a_com_call_fails(lnk: Callable[[str], str]) -> None:
-    com = _Com(fail_at={"Save": com_error(_PATH_NOT_FOUND)})
+    com = _Com(fail_at={"Save": com_error_for(_PATH_NOT_FOUND)})
     controller, _ = _controller(com)
 
     with pytest.raises(NativeCallError):
@@ -588,7 +579,7 @@ def test_read_refuses_a_directory_before_any_com_call(lnk: Callable[[str], str])
 def test_a_failed_load_raises_native_call_error_naming_the_step(lnk: Callable[[str], str]) -> None:
     path = lnk("Garbage.lnk")
     Path(path).write_bytes(b"garbage")
-    failure = com_error(0x80004005)
+    failure = com_error_for(0x80004005)
     controller, _ = _controller(_Com(fail_at={"Load": failure}))
 
     with pytest.raises(NativeCallError) as info:

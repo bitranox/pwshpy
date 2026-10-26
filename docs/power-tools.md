@@ -577,10 +577,13 @@ Details worth knowing:
   a git source is decided at pack time, and `--pwshpy-info` shows it (`git source : yes` or `no`):
   a `git+` (in any case) in a `--with` value, or, outside a TOML comment in the PEP 723 block,
   `git+` anywhere, a key named `git` anywhere (a `[tool.uv.sources]` entry such as
-  `pkg = { git = "..." }` or a `[tool.uv.sources.pkg]` table), or a `\u`, `\U` or `\x` escape (which
-  could spell either). The rule over-detects on purpose, since a false positive only refuses a root
-  run on a git older than 2.32: a `git+` in any other string and a `git` key in another tool's
-  table count too. It reads only the script's own declarations, so a git requirement inside a local
+  `pkg = { git = "..." }` or a `[tool.uv.sources.pkg]` table), a `\u`, `\U` or `\x` escape, or a
+  backslash followed only by whitespace to the end of a line (in a multi-line basic string it joins
+  the next line on, so `pkg @ gi\` at the end of one line and `t+https://...` on the next spell
+  `pkg @ git+https://...`); either of the last two could spell the first two. The rule over-detects
+  on purpose, since a false positive only refuses a root run on a git older than 2.32: a `git+` in
+  any other string, a `git` key in another tool's table and a line-ending backslash in a literal
+  (`'''`) string, which joins nothing, count too. It reads only the script's own declarations, so a git requirement inside a local
   wheel or path dependency is not seen. An elevated `.ps1` run does not check the git version. The
   system file (`/etc/gitconfig`, or the one below Git
   for Windows' install directory) is the administrators' and still applies. The runner cannot tell

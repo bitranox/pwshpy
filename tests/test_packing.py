@@ -552,6 +552,10 @@ def _block(*lines: str) -> str:
 
 _GIT_URL = "https://example.invalid/r.git"
 
+#: A git requirement split over two lines by a line-ending backslash in a multi-line basic string, which
+#: TOML joins: no line holds ``git+``.
+_LINE_JOINED_GIT_BLOCK = _block('dependencies = ["""pkg @ gi\\', 't+https://h/r"""]')
+
 #: (metadata, --with packages, whether the script has a git source). [116]: a root .sh run of a script
 #: with a git source refuses a git older than 2.32, so a real git source must never read as none; the
 #: rule may over-detect (the last rows), since that costs only a refused root run on an old git.
@@ -612,6 +616,20 @@ _GIT_SOURCE_CASES = [
     ),
     pytest.param(_block(f'description = "mirrors git+{_GIT_URL}"'), (), True, id="over-detect-git-plus-in-any-string"),
     pytest.param(_block("[tool.other]", 'git = "yes"'), (), True, id="over-detect-git-key-in-any-table"),
+    pytest.param(_LINE_JOINED_GIT_BLOCK, (), True, id="line-ending-backslash-joins-git-plus"),
+    pytest.param(
+        _block('dependencies = ["""pkg @ gi\\   ', 't+https://h/r"""]'),
+        (),
+        True,
+        id="line-ending-backslash-before-spaces",
+    ),
+    pytest.param(
+        _block("dependencies = ['''pkg @ gi\\", "t+https://h/r''']"),
+        (),
+        True,
+        id="over-detect-line-ending-backslash-in-a-literal-string",
+    ),
+    pytest.param(_block('description = """a\\tb"""'), (), False, id="other-escape-is-no-git-source"),
 ]
 
 
@@ -621,6 +639,15 @@ def test_has_git_source_detects_every_git_source(metadata: str, with_packages: l
     """[116]: a git+ requirement in the block or in --with, and a git key in [tool.uv.sources], each
     count; text in a TOML comment does not."""
     assert has_git_source(metadata, with_packages) is expected
+
+
+@pytest.mark.os_agnostic
+def test_a_line_ending_backslash_really_joins_a_git_requirement() -> None:
+    """The premise of the line-joined row: a TOML parser reads one git requirement from two lines."""
+    # tomllib is 3.11+; the scanner itself exists because the domain cannot rely on it on 3.10.
+    tomllib = pytest.importorskip("tomllib")
+    content = "\n".join(line[2:] for line in _LINE_JOINED_GIT_BLOCK.splitlines()[1:-1])
+    assert tomllib.loads(content)["dependencies"] == ["pkg @ git+https://h/r"]
 
 
 @pytest.mark.os_agnostic

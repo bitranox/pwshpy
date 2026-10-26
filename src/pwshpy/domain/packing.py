@@ -627,9 +627,12 @@ _GIT_REQUIREMENT = "git+"
 #: ``[tool.uv.sources]`` entry names a git repository with.
 _GIT_KEY = re.compile(r"""(?:^|[\s{,.])(?:git|"git"|'git')\s*=(?!=)""")
 
-#: A TOML escape that can spell any character (``\u``, ``\U``, and TOML 1.1's ``\x``): a key or a
-#: requirement could spell ``git`` or ``git+`` with one, without those letters in the text.
-_SPELLING_ESCAPE = re.compile(r"\\[uUx]")
+#: A TOML escape that can spell any character (``\u``, ``\U``, and TOML 1.1's ``\x``), or a backslash
+#: followed only by whitespace to the end of the line, which in a multi-line basic string joins the
+#: next line on: a key or a requirement could spell ``git`` or ``git+`` with one, without those letters
+#: in one line. The line-ending one counts in a literal string too, where it joins nothing: telling
+#: the two apart would rest on the scanner's string state, and a miss there would under-detect.
+_SPELLING_ESCAPE = re.compile(r"\\(?:[uUx]|\s*$)")
 
 
 def has_git_source(metadata: str, with_packages: Sequence[str]) -> bool:
@@ -645,7 +648,10 @@ def has_git_source(metadata: str, with_packages: Sequence[str]) -> bool:
       but also any other string that spells it;
     * a key named ``git`` anywhere: a ``[tool.uv.sources]`` entry (``pkg = { git = "..." }``, a
       ``[tool.uv.sources.pkg]`` table, a dotted ``sources.pkg.git``), but also one in any other table;
-    * a ``\u``, ``\U`` or ``\x`` escape anywhere, which could spell either of them.
+    * a ``\u``, ``\U`` or ``\x`` escape anywhere, or a backslash followed only by whitespace to the
+      end of a line (in a multi-line basic string it joins the next line on, so a line ending in
+      ``pkg @ gi\`` and one starting with ``t+https://...`` spell ``pkg @ git+https://...``), either
+      of which could spell the two above; the line-ending one counts in a literal string too.
 
     This rule over-detects on purpose instead of parsing TOML (the domain cannot rely on ``tomllib``
     on Python 3.10): a false positive costs only a refused root run on a git older than 2.32, while a

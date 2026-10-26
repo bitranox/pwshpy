@@ -1640,6 +1640,7 @@ class Ps:
         icon: str | None = None,
         icon_index: int = 0,
         description: str | None = None,
+        run_as_administrator: bool = False,
         force: bool = False,
     ) -> ShortcutInfo:
         r"""Write a Windows shortcut (``.lnk``) and return what Windows stored (native, Windows, **mutating**).
@@ -1658,6 +1659,9 @@ class Ps:
             icon: The file the icon is taken from.
             icon_index: Which icon in ``icon`` (negative selects a resource id).
             description: The tooltip Explorer shows.
+            run_as_administrator: Start ``target`` elevated when the shortcut is opened (one
+                UAC prompt; Explorer's "Run as administrator" box, the link flag
+                ``SLDF_RUNAS_USER``); a bool only.
             force: Overwrite an existing file at ``path``.
 
         Returns:
@@ -1666,7 +1670,8 @@ class Ps:
         Raises:
             PlatformUnsupportedError: Not Windows (raised before anything is checked or touched).
             ConfigurationError: A value breaks the shortcut rules (a relative target, a field too
-                long, NUL/CR/LF in a field, a path not ending in ``.lnk``); nothing is written.
+                long, NUL/CR/LF in a field, a path not ending in ``.lnk``, a non-bool
+                ``run_as_administrator``); nothing is written.
             NativeCallError: ``path`` exists and ``force`` is False, or the shell failed (e.g. a
                 missing directory); the message names the HRESULT.  This includes a ``target``
                 whose environment reference expands past 259 characters: its raw text passes
@@ -1696,6 +1701,7 @@ class Ps:
             icon=icon,
             icon_index=icon_index,
             description=description,
+            run_as_administrator=run_as_administrator,
         )
         return controller.create(spec, force=force)
 

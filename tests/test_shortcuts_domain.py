@@ -39,6 +39,7 @@ def test_shortcut_info_serializes_every_field() -> None:
         icon="C:\\Tools\\tool.ico",
         icon_index=-3,
         description="Run the tool",
+        run_as_administrator=True,
     )
     assert info.to_dict() == {
         "path": _LNK,
@@ -48,6 +49,7 @@ def test_shortcut_info_serializes_every_field() -> None:
         "icon": "C:\\Tools\\tool.ico",
         "icon_index": -3,
         "description": "Run the tool",
+        "run_as_administrator": True,
     }
 
 
@@ -55,13 +57,14 @@ def test_shortcut_info_serializes_every_field() -> None:
 def test_shortcut_info_unset_fields_default_to_what_com_reads_back() -> None:
     """COM reads an unset field back as "" and an unset icon index as 0."""
     info = ShortcutInfo(path=_LNK, target=_TARGET)
-    assert (info.arguments, info.working_directory, info.icon, info.icon_index, info.description) == (
-        "",
-        "",
-        "",
-        0,
-        "",
-    )
+    assert (
+        info.arguments,
+        info.working_directory,
+        info.icon,
+        info.icon_index,
+        info.description,
+        info.run_as_administrator,
+    ) == ("", "", "", 0, "", False)
 
 
 @pytest.mark.os_agnostic
@@ -82,6 +85,7 @@ def test_minimal_spec_defaults() -> None:
     assert spec.icon is None
     assert spec.icon_index == 0
     assert spec.description is None
+    assert spec.run_as_administrator is False
     assert spec.joined_arguments == ""
 
 
@@ -252,6 +256,20 @@ def test_icon_index_outside_int32_is_refused(index: int) -> None:
 def test_icon_index_that_is_not_a_plain_int_is_refused(index: object) -> None:
     with pytest.raises(ConfigurationError, match="icon_index"):
         _spec(icon_index=index)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("value", [True, False])
+def test_run_as_administrator_accepts_a_bool(value: bool) -> None:
+    assert _spec(run_as_administrator=value).run_as_administrator is value
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("value", [1, 0, "yes", "no", "", None])
+def test_run_as_administrator_that_is_not_a_bool_is_refused(value: object) -> None:
+    """A truthy str such as "no" must never turn on elevation."""
+    with pytest.raises(ConfigurationError, match="run_as_administrator must be a bool"):
+        _spec(run_as_administrator=value)
 
 
 @pytest.mark.os_agnostic

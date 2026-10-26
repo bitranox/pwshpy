@@ -214,7 +214,7 @@ account API), and a POSIX group has no description so `new_local_group`'s is ign
 `new_shortcut`. See [COMMANDS.md](../COMMANDS.md) for the full cmdlet-by-cmdlet table.
 
 `pwshpy new_shortcut PATH --target TARGET [--working-directory D] [--icon I] [--icon-index N]
-[--description T] [-f] [-- ARGS...]` writes a shortcut (`.lnk`). The target's arguments go after
+[--description T] [--run-as-administrator] [-f] [-- ARGS...]` writes a shortcut (`.lnk`). The target's arguments go after
 `--`, one word per argument, as with `exec`; the shortcut stores them as one command line quoted
 the way `subprocess.list2cmdline` quotes it:
 
@@ -233,7 +233,9 @@ Windows (exit 1, `NativeCallError`, HRESULT 0x80004005), and no file is written.
 `NativeCallError` unless `--force` / `-f` is given, and a missing directory is not created. On
 success it prints `created shortcut PATH -> TARGET` (the target as Windows stored it, expanded), or
 with `--json` / `--jsonl` the stored record, the same one `get_shortcut` shows. Off Windows it exits
-1 with `PlatformUnsupportedError`.
+1 with `PlatformUnsupportedError`. `--run-as-administrator` ticks the shortcut's "Run as
+administrator" box: opening it starts the target elevated after one UAC prompt, and `get_shortcut`
+shows the record's `run_as_administrator` as `True` (`true` with `--json` / `--jsonl`).
 
 ### `register_scheduled_task`: principal, run level, triggers and settings
 

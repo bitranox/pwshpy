@@ -6,6 +6,17 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `new_shortcut(..., run_as_administrator=True)` / CLI `--run-as-administrator` (Windows): the
+  shortcut starts its target elevated, with one UAC prompt and one window, like ticking "Run as
+  administrator" in the shortcut's Advanced properties. pwshpy sets the link flag
+  `SLDF_RUNAS_USER` (0x2000) through `IShellLinkDataList` before the file is saved.
+  `ShortcutInfo.run_as_administrator` reports the flag for every shortcut `get_shortcut` reads,
+  including one a pwsh script marked by patching byte 0x15 of the file. Only a bool is accepted;
+  anything else raises `ConfigurationError` before anything is written. It defaults to False, so
+  existing calls write the same shortcut as before.
+
 ### Fixed
 
 - `logdemo` refuses a `LOG_*` variable lib_log_rich refuses (`LOG_CONSOLE_LEVEL=bogus`) with exit 78

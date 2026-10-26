@@ -900,12 +900,14 @@ class ShortcutInfo(PSRecord):
         icon: The file the icon is taken from.
         icon_index: Which icon in ``icon``; negative values select a resource id.
         description: The comment Explorer shows as the tooltip.
+        run_as_administrator: Whether the shortcut starts ``target`` elevated (the link flag
+            ``SLDF_RUNAS_USER``, Explorer's "Run as administrator" box).
 
     Example:
         >>> info = ShortcutInfo(path="C:\\\\Users\\\\me\\\\Desktop\\\\Tool.lnk", target="C:\\\\Tools\\\\tool.exe",
         ...                     arguments='--mode "a b"')
-        >>> info.arguments, info.working_directory, info.icon_index
-        ('--mode "a b"', '', 0)
+        >>> info.arguments, info.working_directory, info.icon_index, info.run_as_administrator
+        ('--mode "a b"', '', 0, False)
     """
 
     path: str
@@ -915,6 +917,7 @@ class ShortcutInfo(PSRecord):
     icon: str = ""
     icon_index: int = 0
     description: str = ""
+    run_as_administrator: bool = False
 
 
 __all__ = [

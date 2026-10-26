@@ -302,6 +302,13 @@ directory or icon over 260, or NUL/CR/LF in any field. A target whose environmen
 `get_shortcut` reads it; the CLI prints one `created shortcut PATH -> TARGET` line, or the record
 with `--json` / `--jsonl`. Off Windows both shortcut verbs raise `PlatformUnsupportedError`.
 
+`run_as_administrator=True` (CLI `--run-as-administrator`) ticks the shortcut's "Run as
+administrator" box, so opening it starts the target elevated after one UAC prompt. WScript has no
+property for it, so pwsh scripts patch byte `0x15` of the saved file with `0x20`; pwshpy sets the
+same link flag (`SLDF_RUNAS_USER`, `0x2000`) through `IShellLinkDataList` before the file is saved,
+and `get_shortcut` reads it back as `ShortcutInfo.run_as_administrator`, whichever tool set it. It
+takes a bool only: `"no"` or `1` is refused with `ConfigurationError`.
+
 ## Running an external program  *(portable)*
 
 | PowerShell                                       | pwshpy - Python (API)                                              | pwshpy - CLI                           |

@@ -94,6 +94,12 @@ def cli_get_shortcut(ctx: click.Context, path: str, as_json: bool, as_jsonl: boo
 @option("--icon", default=None, help="The file the icon is taken from.")
 @option("--icon-index", type=int, default=0, show_default=True, help="Which icon in --icon (negative: a resource id).")
 @option("--description", default=None, help="The tooltip Explorer shows.")
+@option(
+    "--run-as-administrator",
+    is_flag=True,
+    default=False,
+    help="Start the target elevated when the shortcut is opened (one UAC prompt).",
+)
 @option("--force", "-f", is_flag=True, default=False, help="Overwrite an existing file at PATH.")
 @option("--json", "as_json", is_flag=True, default=False, help="Emit the stored record as a JSON array.")
 @option("--jsonl", "as_jsonl", is_flag=True, default=False, help="Emit the stored record as one JSON line.")
@@ -108,6 +114,7 @@ def cli_new_shortcut(
     icon: str | None,
     icon_index: int,
     description: str | None,
+    run_as_administrator: bool,
     force: bool,
     as_json: bool,
     as_jsonl: bool,
@@ -132,6 +139,7 @@ def cli_new_shortcut(
         icon=icon,
         icon_index=icon_index,
         description=description,
+        run_as_administrator=run_as_administrator,
         force=force,
     )
     if fmt is RecordFormat.HUMAN:

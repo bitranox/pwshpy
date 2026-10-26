@@ -64,6 +64,7 @@ class _FakePs:
         icon: str | None = None,
         icon_index: int = 0,
         description: str | None = None,
+        run_as_administrator: bool = False,
         force: bool = False,
     ) -> ShortcutInfo:
         self.calls.append(
@@ -77,13 +78,20 @@ class _FakePs:
                     "icon": icon,
                     "icon_index": icon_index,
                     "description": description,
+                    "run_as_administrator": run_as_administrator,
                     "force": force,
                 },
             )
         )
         if self._error is not None:
             raise self._error
-        return ShortcutInfo(path=path, target=target, arguments=" ".join(arguments), description=description or "")
+        return ShortcutInfo(
+            path=path,
+            target=target,
+            arguments=" ".join(arguments),
+            description=description or "",
+            run_as_administrator=run_as_administrator,
+        )
 
 
 def _invoke(fake: _FakePs, args: list[str]) -> Any:
@@ -253,6 +261,7 @@ def test_new_shortcut_passes_every_option() -> None:
         "-3",
         "--description",
         "tip",
+        "--run-as-administrator",
         "--force",
     ]
     result = _invoke(fake, args)
@@ -268,6 +277,7 @@ def test_new_shortcut_passes_every_option() -> None:
                 "icon": "C:\\i.ico",
                 "icon_index": -3,
                 "description": "tip",
+                "run_as_administrator": True,
                 "force": True,
             },
         )
@@ -286,6 +296,7 @@ def test_new_shortcut_defaults_pass_no_optional_field_and_no_force() -> None:
         "icon": None,
         "icon_index": 0,
         "description": None,
+        "run_as_administrator": False,
         "force": False,
     }
 

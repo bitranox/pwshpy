@@ -16,6 +16,10 @@ returns what Windows then reads back; ``read`` returns a shortcut's fields as a
   a missing, empty or non-regular file before any COM call.
 - pywin32's default read buffers cut values silently (``GetArguments`` at 1023 characters,
   ``GetIconLocation`` at 259 of 260), so every getter is given an explicit buffer.
+- "Run as administrator" is the link flag ``SLDF_RUNAS_USER`` (0x2000), set through
+  ``IShellLinkDataList.SetFlags`` before ``Save`` and stored in the header's LinkFlags. It is
+  OR-ed into what ``GetFlags`` returns, so any flag the link object already holds survives (a
+  fresh one reads 0; ``Save`` adds the rest).
 - ``target`` is read with ``GetPath`` flags 0: environment references come back expanded, the
   value WScript's ``TargetPath`` reports. Arguments, working directory and icon come back raw.
 
@@ -51,6 +55,8 @@ _SAVE_REMEMBER = 0
 _STGM_READ = 0
 #: ``GetPath`` flags 0: the expanded path, as WScript's ``TargetPath`` reports it.
 _GET_PATH_FLAGS = 0
+#: ``SLDF_RUNAS_USER`` (shlobj_core.h): start the target elevated, Explorer's "Run as administrator".
+_SLDF_RUNAS_USER = 0x2000
 #: The longest argument string a link stores is 32767 characters, plus the terminating NUL.
 _ARGUMENTS_BUFFER = 32768
 #: Path, working directory, description and icon hold at most 260 characters plus the NUL; the
@@ -175,6 +181,12 @@ def _persist(pythoncom: Any, link: Any, progress: _Progress) -> Any:
     return link.QueryInterface(pythoncom.IID_IPersistFile)
 
 
+def _data_list(shell: Any, link: Any, progress: _Progress) -> Any:
+    """Return the link's ``IShellLinkDataList`` (it holds the link flags)."""
+    progress.step = "IShellLink.QueryInterface(IShellLinkDataList)"
+    return link.QueryInterface(shell.IID_IShellLinkDataList)
+
+
 def _save(pythoncom: Any, shell: Any, spec: ShortcutSpec, progress: _Progress) -> None:
     """Worker side: set every field ``spec`` holds and save; COM objects stay local here."""
     link = _new_link(pythoncom, shell, progress)
@@ -193,6 +205,12 @@ def _save(pythoncom: Any, shell: Any, spec: ShortcutSpec, progress: _Progress) -
     if spec.description is not None:
         progress.step = "IShellLink.SetDescription"
         link.SetDescription(spec.description)
+    if spec.run_as_administrator:
+        data = _data_list(shell, link, progress)
+        progress.step = "IShellLinkDataList.GetFlags"
+        flags = int(data.GetFlags())
+        progress.step = "IShellLinkDataList.SetFlags"
+        data.SetFlags(flags | _SLDF_RUNAS_USER)
     persist = _persist(pythoncom, link, progress)
     progress.step = "IPersistFile.Save"
     persist.Save(spec.path, _SAVE_REMEMBER)
@@ -214,6 +232,9 @@ def _read(pythoncom: Any, shell: Any, path: str, progress: _Progress) -> Shortcu
     icon, icon_index = link.GetIconLocation(_FIELD_BUFFER)
     progress.step = "IShellLink.GetDescription"
     description = link.GetDescription(_FIELD_BUFFER)
+    data = _data_list(shell, link, progress)
+    progress.step = "IShellLinkDataList.GetFlags"
+    flags = int(data.GetFlags())
     # Trusted native values (str and int from pywin32): built without validation, like every
     # native record on the hot path.
     return ShortcutInfo.model_construct(
@@ -224,6 +245,7 @@ def _read(pythoncom: Any, shell: Any, path: str, progress: _Progress) -> Shortcu
         icon=str(icon),
         icon_index=int(icon_index),
         description=str(description),
+        run_as_administrator=bool(flags & _SLDF_RUNAS_USER),
     )
 
 

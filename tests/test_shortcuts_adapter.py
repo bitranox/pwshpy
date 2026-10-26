@@ -1,4 +1,4 @@
-"""Windows shortcut adapter: IShellLinkW + IPersistFile through the ``load=`` seam.
+"""Windows shortcut adapter: IShellLinkW + IPersistFile + IShellLinkDataList through the ``load=`` seam.
 
 ``pythoncom`` and ``win32com.shell.shell`` are doubles: a fake shell link that records every
 call (with the thread it ran on) and a fake ``IPersistFile`` whose ``Save`` really writes the
@@ -33,6 +33,11 @@ from pwshpy.domain.shortcuts import ShortcutSpec
 _CLSID_SHELL_LINK = "{00021401-0000-0000-C000-000000000046}"
 _IID_SHELL_LINK = "{000214F9-0000-0000-C000-000000000046}"
 _IID_PERSIST_FILE = "{0000010B-0000-0000-C000-000000000046}"
+_IID_DATA_LIST = "{45E2B4AE-B1C3-11D0-B92F-00A0C90312E1}"
+_SLDF_RUNAS_USER = 0x2000
+# Bits real Windows adds on Save (HasLinkTargetIDList, HasName, ...; 0x8b measured on pywin32 312),
+# so a test can see the run-as bit is OR-ed in and read back by mask, never compared whole.
+_SAVED_FLAGS = 0x8B
 _CLSCTX_INPROC_SERVER = 1
 _COINIT_MULTITHREADED = 0
 _INSUFFICIENT_BUFFER = 0x8007007A
@@ -52,9 +57,11 @@ class com_error(Exception):  # noqa: N801, N818 - pywin32's class name is what t
 class _Com:
     """Shared state of one test's doubles: the call log and the failures to inject."""
 
-    def __init__(self, fail_at: dict[str, BaseException] | None = None) -> None:
+    def __init__(self, fail_at: dict[str, BaseException] | None = None, *, link_flags: int = 0) -> None:
         self.calls: list[tuple[str, tuple[object, ...], int]] = []
         self.fail_at = fail_at or {}
+        # The flags a new link object reports before anything sets them.
+        self.link_flags = link_flags
 
     def record(self, name: str, *args: object) -> None:
         self.calls.append((name, args, threading.get_ident()))
@@ -81,6 +88,7 @@ class _FakeLink:
             "icon": "",
             "icon_index": 0,
             "description": "",
+            "flags": com.link_flags,
         }
 
     def __del__(self) -> None:
@@ -129,9 +137,27 @@ class _FakeLink:
         self.com.record("GetIconLocation", size)
         return str(self.fields["icon"])[: size - 1], int(self.fields["icon_index"])
 
-    def QueryInterface(self, iid: str) -> _FakePersist:  # noqa: N802 - the pywin32 name
+    def QueryInterface(self, iid: str) -> _FakePersist | _FakeDataList:  # noqa: N802 - the pywin32 name
         self.com.record("QueryInterface", iid)
-        return _FakePersist(self)
+        return _FakeDataList(self) if iid == _IID_DATA_LIST else _FakePersist(self)
+
+
+class _FakeDataList:
+    """An ``IShellLinkDataList`` double reading and writing the link's flags."""
+
+    def __init__(self, link: _FakeLink) -> None:
+        self.link = link
+
+    def __del__(self) -> None:
+        self.link.com.calls.append(("released data list", (), threading.get_ident()))
+
+    def GetFlags(self) -> int:  # noqa: N802 - the pywin32 name
+        self.link.com.record("GetFlags")
+        return int(self.link.fields["flags"])
+
+    def SetFlags(self, flags: int) -> None:  # noqa: N802 - the pywin32 name
+        self.link.com.record("SetFlags", flags)
+        self.link.fields["flags"] = flags
 
 
 class _FakePersist:
@@ -145,7 +171,8 @@ class _FakePersist:
 
     def Save(self, path: str, remember: int) -> None:  # noqa: N802 - the pywin32 name
         self.link.com.record("Save", path, remember)
-        Path(path).write_text(json.dumps(self.link.fields), encoding="utf-8")
+        saved = dict(self.link.fields, flags=int(self.link.fields["flags"]) | _SAVED_FLAGS)
+        Path(path).write_text(json.dumps(saved), encoding="utf-8")
 
     def Load(self, path: str, mode: int) -> None:  # noqa: N802 - the pywin32 name
         self.link.com.record("Load", path, mode)
@@ -181,7 +208,9 @@ class _Doubles:
                 CoCreateInstance=self.CoCreateInstance,
             )
         if module == "win32com.shell.shell":
-            return SimpleNamespace(CLSID_ShellLink=_CLSID_SHELL_LINK, IID_IShellLink=_IID_SHELL_LINK)
+            return SimpleNamespace(
+                CLSID_ShellLink=_CLSID_SHELL_LINK, IID_IShellLink=_IID_SHELL_LINK, IID_IShellLinkDataList=_IID_DATA_LIST
+            )
         raise AssertionError(f"unexpected module {module}")
 
 
@@ -256,6 +285,79 @@ def test_create_sets_nothing_for_unset_optional_fields(lnk: Callable[[str], str]
     setters = [name for name in com.names() if name.startswith("Set")]
     assert setters == ["SetPath"]
     assert info == ShortcutInfo(path=path, target=_TARGET)
+
+
+@pytest.mark.os_agnostic
+def test_run_as_administrator_ors_the_runas_bit_into_the_flags_before_save(lnk: Callable[[str], str]) -> None:
+    com = _Com()
+    controller, _ = _controller(com)
+    path = lnk("Admin.lnk")
+
+    info = controller.create(ShortcutSpec(path=path, target=_TARGET, run_as_administrator=True), force=False)
+
+    names = com.names()
+    assert com.args_of("SetFlags") == [(_SLDF_RUNAS_USER,)]
+    assert names.index("SetFlags") < names.index("Save"), "a flag set after Save is never stored"
+    assert (_IID_DATA_LIST,) in com.args_of("QueryInterface")
+    assert info.run_as_administrator is True
+
+
+@pytest.mark.os_agnostic
+def test_run_as_administrator_keeps_the_flags_already_on_the_link(lnk: Callable[[str], str]) -> None:
+    com = _Com(link_flags=0x4)
+    controller, _ = _controller(com)
+
+    controller.create(ShortcutSpec(path=lnk("Keep.lnk"), target=_TARGET, run_as_administrator=True), force=False)
+
+    assert com.args_of("SetFlags") == [(0x4 | _SLDF_RUNAS_USER,)]
+
+
+@pytest.mark.os_agnostic
+def test_without_run_as_administrator_the_flags_are_not_touched(lnk: Callable[[str], str]) -> None:
+    com = _Com()
+    controller, _ = _controller(com)
+
+    info = controller.create(ShortcutSpec(path=lnk("Plain.lnk"), target=_TARGET), force=False)
+
+    assert "SetFlags" not in com.names()
+    assert info.run_as_administrator is False
+
+
+@pytest.mark.os_agnostic
+def test_read_reports_run_as_administrator_by_the_runas_bit_alone(lnk: Callable[[str], str]) -> None:
+    """Every other bit set reads False; the run-as bit alone reads True."""
+    path = lnk("Bits.lnk")
+    _controller(_Com(link_flags=0xFFFF & ~_SLDF_RUNAS_USER))[0].create(
+        ShortcutSpec(path=path, target=_TARGET), force=False
+    )
+    assert _controller(_Com())[0].read(path).run_as_administrator is False
+
+    _controller(_Com())[0].create(ShortcutSpec(path=path, target=_TARGET, run_as_administrator=True), force=True)
+    assert _controller(_Com())[0].read(path).run_as_administrator is True
+
+
+@pytest.mark.os_agnostic
+def test_overwriting_an_elevated_shortcut_without_the_flag_clears_it(lnk: Callable[[str], str]) -> None:
+    """force writes a new link object, so the old file's run-as bit must not carry over."""
+    path = lnk("Demote.lnk")
+    _controller(_Com())[0].create(ShortcutSpec(path=path, target=_TARGET, run_as_administrator=True), force=False)
+
+    info = _controller(_Com())[0].create(ShortcutSpec(path=path, target=_TARGET), force=True)
+
+    assert info.run_as_administrator is False
+
+
+@pytest.mark.os_agnostic
+def test_a_failed_set_flags_stops_before_save_and_names_the_step(lnk: Callable[[str], str]) -> None:
+    com = _Com(fail_at={"SetFlags": com_error(0x80004005)})
+    controller, _ = _controller(com)
+    path = lnk("Fail.lnk")
+
+    with pytest.raises(NativeCallError, match=r"IShellLinkDataList\.SetFlags with HRESULT 0x80004005"):
+        controller.create(ShortcutSpec(path=path, target=_TARGET, run_as_administrator=True), force=False)
+
+    assert "Save" not in com.names()
+    assert not Path(path).exists()
 
 
 @pytest.mark.os_agnostic
@@ -377,7 +479,8 @@ def test_com_work_runs_off_the_callers_thread_with_objects_released_before_unini
     for uninit in (i for i, name in enumerate(names) if name == "CoUninitialize"):
         before = names[:uninit]
         assert before.count("released link") == before.count("CoCreateInstance")
-        assert before.count("released persist") == before.count("QueryInterface")
+        released = before.count("released persist") + before.count("released data list")
+        assert released == before.count("QueryInterface")
     assert com.args_of("CoInitializeEx") == [(_COINIT_MULTITHREADED,), (_COINIT_MULTITHREADED,)]
 
 
@@ -580,6 +683,22 @@ def test_real_round_trip_of_non_ascii_in_every_field_and_the_file_name(tmp_path:
     assert info.target == spec.target
     assert info.arguments == spec.joined_arguments
     assert (info.working_directory, info.icon, info.description) == (str(folder), spec.icon, text)
+
+
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.parametrize("run_as_administrator", [True, False])
+def test_real_run_as_administrator_round_trips_as_the_header_bit(tmp_path: Path, run_as_administrator: bool) -> None:
+    """MS-SHLLINK 2.1: LinkFlags is the little-endian uint32 at offset 0x14; RunAsUser is 0x2000."""
+    path = tmp_path / "Admin.lnk"
+    spec = ShortcutSpec(path=str(path), target=_TARGET, run_as_administrator=run_as_administrator)
+
+    info = NativeShortcutController().create(spec, force=False)
+
+    link_flags = int.from_bytes(path.read_bytes()[0x14:0x18], "little")
+    assert bool(link_flags & _SLDF_RUNAS_USER) is run_as_administrator
+    assert info.run_as_administrator is run_as_administrator
+    assert info.target == _TARGET
 
 
 @pytest.mark.os_windows

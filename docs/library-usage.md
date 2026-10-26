@@ -485,12 +485,17 @@ print(info.arguments)  # tool run --exclude-newer "7 days" mytool
 ```
 
 The returned `ShortcutInfo` carries `path`, `target`, `arguments`, `working_directory`, `icon`,
-`icon_index` and `description`. `arguments` is the one command-line string Windows stores, joined
+`icon_index`, `description` and `run_as_administrator`. `arguments` is the one command-line string Windows stores, joined
 with `subprocess.list2cmdline`, so the target's C runtime splits it back into the same argv; `target`
 reads back with environment references expanded (`%SystemRoot%\notepad.exe` as
 `C:\Windows\notepad.exe`), and an unset field is `""`. The write goes through `IShellLinkW`, so
 non-ASCII text survives in every field and in the file name. A relative `path` resolves against the
 working directory; no directory is created.
+
+`run_as_administrator=True` makes the shortcut start its target elevated, with one UAC prompt and
+one window (the "Run as administrator" box in the shortcut's Advanced properties). It is a bool
+only; `get_shortcut` reports it for any shortcut, including one a pwsh script marked by patching
+the file.
 
 What each refusal raises, all before anything is written unless noted:
 
@@ -499,7 +504,7 @@ What each refusal raises, all before anything is written unless noted:
   environment reference (`%SystemRoot%\notepad.exe`); `arguments` is a bare `str`; a value Windows
   would silently cut, wrap or rename (`target` or the absolute `path` over 259 characters, the joined
   arguments over 32767, `description`, `working_directory` or `icon` over 260); NUL, CR or LF in any
-  value; or a `path` not ending in `.lnk`.
+  value; a `path` not ending in `.lnk`; or a `run_as_administrator` that is not a bool.
 - `NativeCallError`: `path` exists and `force` is False, or the shell failed (a missing directory, a
   target whose environment reference expands past 259 characters, which Windows refuses with E_FAIL
   0x80004005 while writing nothing; the expansion depends on the host, so pwshpy cannot check it

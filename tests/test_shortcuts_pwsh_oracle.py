@@ -325,3 +325,40 @@ def test_values_at_their_length_limits_round_trip_whole_through_pwshpy(tmp_path:
     )
     assert written == expected
     assert ps.get_shortcut(path) == expected
+
+
+# --- run as administrator ---------------------------------------------------------------------------
+
+#: Prints the header's LinkFlags (MS-SHLLINK 2.1: a little-endian uint32 at offset 0x14).
+_LINK_FLAGS_SCRIPT = "[BitConverter]::ToUInt32([IO.File]::ReadAllBytes($env:PWSHPY_LNK), 0x14)"
+#: The pwsh idiom for "Run as administrator": WScript cannot set it, so scripts patch byte 0x15
+#: (the second LinkFlags byte) with 0x20, which is RunAsUser (0x2000).
+_PATCH_RUNAS_SCRIPT = (
+    "$b = [IO.File]::ReadAllBytes($env:PWSHPY_LNK); $b[0x15] = $b[0x15] -bor 0x20; "
+    "[IO.File]::WriteAllBytes($env:PWSHPY_LNK, $b)"
+)
+_RUNAS_USER = 0x2000
+
+
+@pytest.mark.parametrize("run_as_administrator", [True, False])
+def test_run_as_administrator_written_by_pwshpy_is_the_header_bit_pwsh_reads(
+    tmp_path: Path, run_as_administrator: bool
+) -> None:
+    path = tmp_path / "Admin.lnk"
+
+    written = ps.new_shortcut(path, target=_NOTEPAD, run_as_administrator=run_as_administrator)
+
+    link_flags = int(_pwsh(_LINK_FLAGS_SCRIPT, {"PWSHPY_LNK": str(path)}))
+    assert bool(link_flags & _RUNAS_USER) is run_as_administrator
+    assert written.run_as_administrator is run_as_administrator
+    assert _wscript_read(path)["TargetPath"] == _on_disk(_NOTEPAD), "the flag leaves the other fields intact"
+
+
+@pytest.mark.parametrize("patched", [True, False])
+def test_run_as_administrator_set_the_pwsh_way_is_read_by_pwshpy(tmp_path: Path, patched: bool) -> None:
+    path = tmp_path / "Patched.lnk"
+    _wscript_write(path, target=_NOTEPAD, arguments="", working_directory="", icon_location="", description="")
+    if patched:
+        _pwsh(_PATCH_RUNAS_SCRIPT, {"PWSHPY_LNK": str(path)})
+
+    assert ps.get_shortcut(path).run_as_administrator is patched

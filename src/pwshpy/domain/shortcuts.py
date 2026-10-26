@@ -1,7 +1,7 @@
 """What ``new_shortcut`` writes, validated once before any COM call (pure domain).
 
 :class:`ShortcutSpec` bundles the inputs of a Windows shortcut (``.lnk``) so the adapter takes
-one value object instead of seven parameters.  It is a frozen dataclass rather than a Pydantic
+one value object instead of eight parameters.  It is a frozen dataclass rather than a Pydantic
 model so that every refusal surfaces as :class:`~pwshpy.domain.errors.ConfigurationError`, never
 wrapped in a Pydantic ``ValidationError`` that the facade and CLI would not map.
 
@@ -165,6 +165,24 @@ def _optional(name: str, value: object) -> str | None:
     return _bounded(name, _text(name, value), _MAX_FIELD)
 
 
+def _flag(name: str, value: object) -> bool:
+    """Return ``value`` when it is a bool.
+
+    An int or a str is refused rather than read for truth: ``"no"`` is truthy, and a shortcut
+    that starts its target elevated is not one to build from a guess.
+
+    Raises:
+        ConfigurationError: ``value`` is not a bool.
+
+    Example:
+        >>> _flag("run_as_administrator", True)
+        True
+    """
+    if not isinstance(value, bool):
+        raise ConfigurationError(f"{name} must be a bool, not {type(value).__name__}")
+    return value
+
+
 def _icon_index(value: object) -> int:
     """Return ``value`` when it is an int (not a bool) in the signed 32-bit range.
 
@@ -217,6 +235,8 @@ class ShortcutSpec:
         icon_index: Which icon in ``icon``: any signed 32-bit int (negative selects a resource
             id); a bool is refused.
         description: The comment Explorer shows as the tooltip, or None; at most 260 characters.
+        run_as_administrator: Start ``target`` elevated (the "Run as administrator" box in the
+            shortcut's Advanced properties, the link flag ``SLDF_RUNAS_USER``); a bool only.
 
     No text field and no argument may contain NUL, CR or LF.
 
@@ -237,6 +257,7 @@ class ShortcutSpec:
     icon: str | None = None
     icon_index: int = 0
     description: str | None = None
+    run_as_administrator: bool = False
 
     def __post_init__(self) -> None:
         """Validate and normalise every field (frozen, hence ``object.__setattr__``)."""
@@ -248,6 +269,7 @@ class ShortcutSpec:
             "icon": _optional("icon", self.icon),
             "icon_index": _icon_index(self.icon_index),
             "description": _optional("description", self.description),
+            "run_as_administrator": _flag("run_as_administrator", self.run_as_administrator),
         }
         for name, value in checked.items():
             object.__setattr__(self, name, value)

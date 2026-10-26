@@ -6,8 +6,14 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.8.1] 2026-10-26 13:51:55
+
 ### Fixed
 
+- `pwshpy logdemo` works with lib_log_rich 7, whose `logdemo()` takes a `ConsoleTheme`: the
+  command passed the theme as a string and failed with `'str' object has no attribute 'value'`.
+  `--theme` now offers the theme values (`classic`, `dark`, `neon`, `pastel`) and refuses any other
+  with a usage error.
 - A piped or redirected human table no longer fails on a value the console code page cannot hold:
   `pwshpy env | more` with a CJK value exited 22 on Linux under `PYTHONIOENCODING=cp1252` and 87 on
   German Windows after the work was done. The same crash hit the status lines naming a path
@@ -47,6 +53,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   (for example a `/etc/xdg/<slug>/config.d/99-*.toml`) can no longer fail tests locally while CI stays
   green. The subprocess tests in `test_logging_dotenv_isolation.py` dropped every
   `LIB_LAYERED_CONFIG*` variable and so read the real system layers; they now keep the redirect.
+
+### Changed
+
+- The `using-pwsh` skill says how to run a one-shot job as a SYSTEM scheduled task: unregister it
+  once it has started, stop and unregister it on a failure or Ctrl-C (never in `finally`), and that
+  `Stop` ends the whole process tree. It adds a parse check to run before shipping a `.ps1` and the
+  `"$t: done"` parse trap.
 
 ## [1.8.0] 2026-10-26 09:42:09
 

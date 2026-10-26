@@ -208,3 +208,26 @@ def test_when_logdemo_is_invoked_it_completes_successfully(
 
     assert result.exit_code == 0
     assert "Log demo completed" in result.output
+
+
+@pytest.mark.os_agnostic
+def test_when_logdemo_is_given_a_theme_value_it_previews_that_theme(
+    cli_runner: CliRunner,
+    production_factory: Callable[[], Any],
+) -> None:
+    """A lowercase theme value reaches lib_log_rich as its ConsoleTheme member."""
+    result: Result = cli_runner.invoke(cli_mod.cli, ["logdemo", "--theme", "neon"], obj=production_factory)
+
+    assert result.exit_code == 0
+    assert "(theme: neon)" in result.output
+
+
+@pytest.mark.os_agnostic
+def test_when_logdemo_is_given_an_unknown_theme_it_refuses_with_a_usage_error(
+    cli_runner: CliRunner,
+    production_factory: Callable[[], Any],
+) -> None:
+    """An unknown theme is refused by click before lib_log_rich runs."""
+    result: Result = cli_runner.invoke(cli_mod.cli, ["logdemo", "--theme", "sepia"], obj=production_factory)
+
+    assert result.exit_code == 2

@@ -362,8 +362,15 @@ read is None. The two OSes read back differently:
 | `execution_time_limit`       | the stored value  | read only for a `Type=oneshot` service (what pwshpy writes); None for any other type        |
 | a task that cannot be read   | every field None  | `stop_if_going_on_batteries` False and every other field None                               |
 
-Passing a record's read-back `settings` to another `register_scheduled_task` call works: they are
-validated again there.
+A record's read-back `settings` can be passed to another `register_scheduled_task` call, and they
+are validated again there: a value outside the `TaskSettings` rules (a fractional or over-cap
+limit read from a hand-written unit or task) raises `ValidationError`, and Windows defaults passed
+to a Linux register (`stop_if_going_on_batteries=True`, `multiple_instances=IgnoreNew` with a
+daily trigger) raise `PlatformUnsupportedError`.
+
+With `allow_start_if_on_batteries=False`, a start while the host runs on battery succeeds and runs
+nothing: Windows does not start the run, and on Linux systemd skips the unit on its
+`ConditionACPower` (cited from systemd.unit(5)).
 
 ### Listing tasks: skipped versus strict
 

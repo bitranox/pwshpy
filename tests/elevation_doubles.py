@@ -632,6 +632,28 @@ def default_uv_cache_dir(scratch: Path) -> Path:
     return root / "cache" if sys.platform == "win32" else root
 
 
+def fetched_git_source(cache: Path) -> bool:
+    """Whether uv fetched a git source into the uv cache ``cache``: the liveness check of a git test.
+
+    Keyed on the fetch's own ``FETCH_HEAD`` in uv's git database, never on the database directory: uv
+    creates ``git-v1/db/<hash>`` before it looks for git and leaves it empty when it finds none
+    (measured with uv 0.13.0 on Linux and Windows), so a run that never reached git would pass a
+    directory check.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as scratch:
+        ...     db = Path(scratch) / "git-v1" / "db" / "0123"
+        ...     db.mkdir(parents=True)
+        ...     empty = fetched_git_source(Path(scratch))
+        ...     (db / ".git").mkdir()
+        ...     _ = (db / ".git" / "FETCH_HEAD").write_text("")
+        ...     (empty, fetched_git_source(Path(scratch)))
+        (False, True)
+    """
+    return any(cache.glob("git-v*/db/*/.git/FETCH_HEAD"))
+
+
 def _install_holding(executable: Path) -> Path | None:
     """The install directory (a child of the host's managed-Python directory) holding ``executable``."""
     root = managed_python_dir()
@@ -878,6 +900,7 @@ __all__ = [
     "data_home",
     "default_uv_cache_dir",
     "default_uv_cache_env",
+    "fetched_git_source",
     "trusted_managed_python",
     "interpreter_probe_env",
     "link_tools",

@@ -39,6 +39,7 @@ from elevation_doubles import (
     UV_SOURCE_VARIABLES,
     default_uv_cache_dir,
     default_uv_cache_env,
+    fetched_git_source,
     link_tools,
     managed_python_env,
     owned_by_another_account,
@@ -1949,7 +1950,7 @@ def test_as_root_no_git_variable_reaches_uv(tmp_path: Path, as_root: bool) -> No
 def test_as_root_a_git_config_command_from_the_environment_never_runs(tmp_path: Path, as_root: bool) -> None:
     """[X23 G1], end to end with the real uv and git: a GIT_CONFIG_COUNT/KEY/VALUE triple naming a
     core.fsmonitor command runs that command from uv's git fetch of a --with git source (the control,
-    not root, runs it). As root the triple is dropped: uv still fetches the source (its git database
+    not root, runs it). As root the triple is dropped: uv still fetches the source (its fetch
     appears in the cache), and the command never runs. Offline, so both arms then fail to build it."""
     _needs_managed_python()
     marker = tmp_path / "git-hook-ran.txt"
@@ -1966,7 +1967,7 @@ def test_as_root_a_git_config_command_from_the_environment_never_runs(tmp_path: 
         "GIT_CONFIG_VALUE_0": str(hook),
     }
     result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
-    assert any(default_uv_cache_dir(tmp_path).glob("git-v*/db/*")), "uv fetched no git source: " + result.stderr
+    assert fetched_git_source(default_uv_cache_dir(tmp_path)), "uv fetched no git source: " + result.stderr
     assert marker.exists() is not as_root, "git config command ran: " + str(marker.exists()) + result.stderr
 
 
@@ -2010,7 +2011,7 @@ def test_as_root_a_command_in_the_callers_global_git_config_never_runs(
     """[X24 G2], end to end with the real uv and git: a core.fsmonitor command in the global git config
     below the HOME or XDG_CONFIG_HOME the run was given runs from uv's git fetch of a --with git source
     (the control, not root, runs it: the plant fires). As root git reads GIT_CONFIG_GLOBAL=/dev/null
-    instead: uv still fetches the source (its git database appears in the cache), and the command never
+    instead: uv still fetches the source (its fetch appears in the cache), and the command never
     runs. Offline, so both arms then fail to build it."""
     _needs_managed_python()
     marker = tmp_path / "git-hook-ran.txt"
@@ -2028,7 +2029,7 @@ def test_as_root_a_command_in_the_callers_global_git_config_never_runs(
         config.parent.mkdir(parents=True)
     config.write_text(f"[core]\n\tfsmonitor = {hook}\n", encoding="utf-8", newline="\n")
     result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
-    assert any(default_uv_cache_dir(tmp_path).glob("git-v*/db/*")), "uv fetched no git source: " + result.stderr
+    assert fetched_git_source(default_uv_cache_dir(tmp_path)), "uv fetched no git source: " + result.stderr
     assert marker.exists() is not as_root, "global git config command ran: " + str(marker.exists()) + result.stderr
 
 
@@ -2071,7 +2072,7 @@ def _git_env(tmp_path: Path, planted: Path, uv: Path) -> dict[str, str]:
 def test_as_root_uv_never_runs_a_git_planted_on_path(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
     """[107]: a git planted first on PATH in a world-writable directory is not the git uv runs as root.
 
-    uv still fetches the source with a trusted git (its git database appears in the cache), so the
+    uv still fetches the source with a trusted git (its fetch appears in the cache), so the
     missing marker is not a run that never reached git.
     """
     _needs_managed_python()
@@ -2080,7 +2081,7 @@ def test_as_root_uv_never_runs_a_git_planted_on_path(tmp_path: Path, shell_id: s
     runner, uv = _git_dependency_runner(tmp_path, as_root=True)
     environment = _git_env(tmp_path, planted, uv)
     result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
-    assert any(default_uv_cache_dir(tmp_path).glob("git-v*/db/*")), "uv fetched no git source: " + result.stderr
+    assert fetched_git_source(default_uv_cache_dir(tmp_path)), "uv fetched no git source: " + result.stderr
     assert not marker.exists(), result.stdout + result.stderr
     leaving = f"pwshpy: leaving {planted} off uv's PATH: its directory {planted} is writable by every account"
     assert leaving in result.stderr, result.stderr

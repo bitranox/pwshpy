@@ -6,10 +6,12 @@ resolves the PEP 723 dependencies, local submodules import, the arguments arrive
 typed, and the script's own exit code comes back through PowerShell.
 
 These run in CI on purpose: GitHub's ubuntu, windows and macos runners all ship PowerShell and
-the workflow installs ``uv``, so the windows-latest leg exercises the real Windows PowerShell
-5.1 path (``_powershell()`` picks up ``powershell.exe`` there) - the one branch this dev box
-cannot reach. They skip cleanly when ``pwsh``/``uv`` are absent, and the dependency cases reach
-PyPI. Two tests stay ``local_only`` and never touch a runner: the ``mutating`` elevate test
+the workflow installs ``uv``. The host is ``pwsh`` where it is on PATH, else ``powershell``; the
+``PWSHPY_TEST_POWERSHELL`` environment variable names another one, which is how a Windows host
+that has pwsh 7 runs the module under Windows PowerShell 5.1 (``PWSHPY_TEST_POWERSHELL=powershell``).
+On Windows every runner starts under a process-scoped Bypass execution policy (see
+``_process_scoped_execution_policy``). They skip cleanly when no PowerShell or ``uv`` is found, and
+the dependency cases reach PyPI. Two tests stay ``local_only`` and never touch a runner: the ``mutating`` elevate test
 (GitHub runners have passwordless sudo, so ``-m "not local_only"`` would really run it as root)
 and the uv-absent test (it blanks ``PATH``/``HOME``, which can break process creation on Windows).
 """
@@ -44,6 +46,7 @@ from elevation_doubles import (
     data_home,
     default_uv_cache_dir,
     default_uv_cache_env,
+    fetched_git_source,
     interpreter_probe_env,
     link_tools,
     managed_python_env,
@@ -72,7 +75,12 @@ if sys.platform != "win32":
 
 pytestmark = [pytest.mark.os_agnostic]
 
-_PWSH = shutil.which("pwsh") or shutil.which("powershell")
+#: The PowerShell every runner here starts under (see the module docstring for the override).
+_PWSH = (
+    shutil.which(os.environ["PWSHPY_TEST_POWERSHELL"])
+    if os.environ.get("PWSHPY_TEST_POWERSHELL")
+    else shutil.which("pwsh") or shutil.which("powershell")
+)
 _UV = shutil.which("uv")
 #: Passed on every run: a run that finds no uv it may use must fail with 127, never fetch the network
 #: installer, which would install uv into the real profile of whoever runs the suite (it did once,
@@ -99,6 +107,24 @@ class _UvLocation:
     """
 
     directory: Path = Path(_UV or "uv").parent
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _process_scoped_execution_policy() -> Iterator[None]:
+    """On Windows, start every runner of this module under a process-scoped Bypass execution policy.
+
+    Windows PowerShell 5.1 on a client without a configured policy is Restricted and refuses to run
+    any script file, so its arm would test nothing; pwsh 7 (RemoteSigned) runs them either way. The
+    variable is what ``-ExecutionPolicy Bypass`` sets for its own process, inherited only by the
+    processes this module starts, so both hosts are launched alike and the machine's policy is never
+    changed. Elsewhere PowerShell has no execution policy to set.
+    """
+    if sys.platform != "win32":
+        yield
+        return
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("PSExecutionPolicyPreference", "Bypass")
+        yield
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -1189,11 +1215,13 @@ def _run_with_path(
     cwd: Path | None = None,
     real_probe: bool = False,
     inherit_path: bool = True,
+    install_uv: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a runner with exactly ``path_first`` ahead of the inherited PATH (no real uv added).
 
     ``inherit_path=False`` makes ``path_first`` the whole PATH, for a test that must control every
-    directory on it (the interpreter is started by its full path either way).
+    directory on it (the interpreter is started by its full path either way). ``install_uv`` drops
+    ``-PwshPyNoInstallUv``, only for a runner whose installer download a test has replaced.
 
     The interpreter and library variables a suite run may carry (bmk's VIRTUAL_ENV among them) are
     dropped unless ``env`` sets them, so uv's interpreter choice is the one the test arranged, and an
@@ -1225,8 +1253,9 @@ def _run_with_path(
     child_env.pop("PWSHPY_TEST_UV", None)
     inherited = [os.environ.get("PATH", "")] if inherit_path else []
     child_env["PATH"] = os.pathsep.join([*map(str, path_first), *inherited])
+    never_install = [] if install_uv else [_NEVER_INSTALL_UV]
     return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
-        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), _NEVER_INSTALL_UV, *arguments],
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), *never_install, *arguments],
         capture_output=True,
         encoding="utf-8",
         errors="replace",
@@ -1707,6 +1736,9 @@ def test_an_elevated_windows_run_never_runs_a_planted_git(tmp_path: Path) -> Non
     """[107] as measured: a git.exe planted in a directory Authenticated Users can modify is not the git uv runs.
 
     The stand-in is a copy of whoami.exe: run as git, it fails uv's first git call naming its own path.
+    uv still fetches the source with a trusted git (the fetch leaves its FETCH_HEAD in the run's uv
+    cache, the one :func:`_elevation_stand_in` names inside ``tmp_path``; see
+    :func:`fetched_git_source`), so a missing path is not a run that never reached git.
     """
     planted = _user_writable_dir(tmp_path / "planted-git", sid=_BROAD_GROUP_SIDS[1])
     shutil.copy(Path(os.environ["SYSTEMROOT"]) / "System32" / "whoami.exe", planted / "git.exe")
@@ -1719,6 +1751,7 @@ def test_an_elevated_windows_run_never_runs_a_planted_git(tmp_path: Path) -> Non
     result = _run_with_path(
         tmp_path, runner, path_first=[planted, trusted.parent], env={"UV_PYTHON_DOWNLOADS": "never"}
     )
+    assert fetched_git_source(default_uv_cache_dir(tmp_path)), "uv fetched no git source: " + result.stderr
     assert str(planted / "git.exe") not in result.stderr, result.stderr
     assert f"pwshpy: leaving {planted} off uv's PATH: " in result.stderr, result.stderr
 
@@ -1765,9 +1798,67 @@ def test_an_elevated_run_names_why_uv_has_no_git(tmp_path: Path, gits: str, hint
     assert len(hints) == (1 if hinted else 0), result.stderr
     if hinted:
         assert str(planted_git) in hints[0], hints[0]
-        only = "only Administrators can modify" if sys.platform == "win32" else "only root can modify"
+        only = (
+            "in a directory no other account can modify (e.g. a system-wide install)"
+            if sys.platform == "win32"
+            else "in a directory only root can modify"
+        )
         assert only in hints[0], hints[0]
     assert not marker.exists(), "the hint ran git"
+
+
+#: The runner's download of uv's installer, the one line a test of the installation replaces.
+_UV_INSTALLER_DOWNLOAD = (
+    "Invoke-RestMethod -Uri 'https://astral.sh/uv/install.ps1' -UseBasicParsing -OutFile $installer"
+)
+
+
+def _with_local_uv_installer(runner: Path, installer: Path) -> None:
+    """``runner`` with the installer download replaced by a copy of ``installer``; one counted
+    substitution, so the installer step that runs it and the PATH handling after it are the shipped code."""
+    text = runner.read_text(encoding="utf-8")
+    assert text.count(_UV_INSTALLER_DOWNLOAD) == 1
+    literal = "'" + str(installer).replace("'", "''") + "'"
+    runner.write_text(
+        text.replace(_UV_INSTALLER_DOWNLOAD, f"Copy-Item -LiteralPath {literal} -Destination $installer"),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows branch of the uv installation")
+def test_an_elevated_windows_run_keeps_the_installed_uvs_directory_on_path(tmp_path: Path) -> None:
+    """[107]: after the runner installs uv, an elevated Windows run keeps ``.local\\bin`` on the PATH
+    it rebuilds for uv and hands the script.
+
+    Both are built from the caller's PATH, so a directory joined only to the runner's own PATH is lost
+    to them. A local installer stands in for astral.sh's: it copies this host's uv into the
+    ``.local\\bin`` of a profile only this account, SYSTEM and Administrators can change, so the
+    installed uv passes the elevated trust rule; nothing finds a uv before it runs.
+    """
+    profile = _private_dir(tmp_path / "profile")
+    installed = profile / ".local" / "bin"
+    installer = tmp_path / "local-uv-install.ps1"
+    copy_uv = f"Copy-Item -LiteralPath '{_UvLocation.directory / 'uv.exe'}' -Destination '{installed / 'uv.exe'}'"
+    installer.write_text(f"New-Item -ItemType Directory -Force -Path '{installed}' | Out-Null\n{copy_uv}\n")
+    runner, _ = _path_runner(tmp_path, elevated="$true")
+    _with_local_uv_installer(runner, installer)
+    nowhere = tmp_path / "no-uv-here"
+    nowhere.mkdir()
+    system = Path(os.environ["SYSTEMROOT"]) / "System32"
+    result = _run_with_path(
+        tmp_path,
+        runner,
+        path_first=[system],
+        inherit_path=False,
+        install_uv=True,
+        env={"USERPROFILE": str(profile), "XDG_BIN_HOME": str(nowhere)},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "uv was not found; installing it" in result.stdout, result.stdout + result.stderr
+    assert (installed / "uv.exe").is_file(), result.stdout + result.stderr
+    assert str(installed) in _reported_path(result).split(os.pathsep), result.stdout
 
 
 @pytest.mark.local_only
@@ -3128,7 +3219,7 @@ def test_an_elevated_run_never_runs_a_command_from_the_callers_global_git_config
     global git config below the profile the run was given (HOME, and USERPROFILE on Windows) or below
     its XDG_CONFIG_HOME runs from uv's git fetch of a --with git source (the control runs it: the plant
     fires). Elevated, git reads GIT_CONFIG_GLOBAL (an empty file of the runner's on Windows, [117];
-    /dev/null on POSIX) instead: uv still fetches the source (its git database appears in the cache),
+    /dev/null on POSIX) instead: uv still fetches the source (its fetch appears in the cache),
     and the command never runs. The profile is a scratch directory, never the real one. Offline, so
     both arms then fail to build it."""
     managed = _needs_managed_python()
@@ -3153,7 +3244,7 @@ def test_an_elevated_run_never_runs_a_command_from_the_callers_global_git_config
     config.write_text(f"[core]\n\tfsmonitor = {hook.as_posix()}\n", encoding="utf-8", newline="\n")
     result = _run_with_path(tmp_path, runner, path_first=head, env=environment, cwd=_clean_cwd(tmp_path))
     caches = (default_uv_cache_dir(tmp_path), tmp_path / "uv-cache")
-    assert any(any(cache.glob("git-v*/db/*")) for cache in caches), "uv fetched no git source: " + result.stderr
+    assert any(fetched_git_source(cache) for cache in caches), "uv fetched no git source: " + result.stderr
     ran = marker.exists()
     assert ran is (elevated == "$false"), "global git config command ran: " + str(ran) + result.stderr
 

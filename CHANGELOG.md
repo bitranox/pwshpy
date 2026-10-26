@@ -28,9 +28,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   the running account, SYSTEM, Administrators, LOCAL SERVICE, NETWORK SERVICE and TrustedInstaller)
   and name each one left out on stderr (`pwshpy: leaving <dir> off uv's PATH: ...`). When the
   caller's `PATH` has a `git` but none is left, one line (`pwshpy: no git on uv's PATH: ...`) names
-  the cause: a git dependency then needs a `git` in a directory only root or the Administrators can
-  modify, such as a system-wide install. The packed script still gets the caller's whole `PATH`,
-  behind the entry uv puts in front, as in an unelevated run. An unelevated run is unchanged.
+  the cause: a git dependency then needs a `git` in a directory no other account can modify, such
+  as a system-wide install (on POSIX one only root can modify). The packed script still gets the
+  caller's whole `PATH`, behind the entry uv puts in front, as in an unelevated run; only an elevated
+  `.ps1` run in which no `PATH` directory passes gives it the caller's `PATH` without uv's entry. An
+  unelevated run is unchanged.
 
 
 ## [1.8.1] 2026-10-26 13:51:55

@@ -648,7 +648,11 @@ function Install-PwshPyUv {
         } finally {
             Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
         }
-        $env:PATH = (Join-Path $env:USERPROFILE '.local\bin') + [IO.Path]::PathSeparator + $env:PATH
+        # The caller's PATH too, not only this process's: an elevated run rebuilds uv's PATH from it
+        # and hands it to the shim for the script, so a directory joined to $env:PATH alone would be
+        # lost to both ([107]).
+        $script:PwshPyCallerPath = (Join-Path $env:USERPROFILE '.local\bin') + [IO.Path]::PathSeparator + $script:PwshPyCallerPath
+        $env:PATH = $script:PwshPyCallerPath
     } else {
         & /bin/sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh || wget -qO- https://astral.sh/uv/install.sh | sh'
         if ($LASTEXITCODE -ne 0) { throw "the uv installer failed with exit code $LASTEXITCODE" }
@@ -1577,13 +1581,18 @@ $PwshPyPrepareRun = {
     if ($PwshPyElevatedRun) {
         $PwshPyTrustedUvPath = Get-PwshPyTrustedPath -Path $PwshPyCallerPath
         Set-Item -LiteralPath ('Env:' + $PwshPyPathEnv) -Value $PwshPyCallerPath
+        # When no caller directory is trusted this is '', and PowerShell deletes a variable set to '':
+        # the shim then finds no uv PATH, cannot tell what uv put in front, and gives the script the
+        # caller's PATH without uv's entry. That fails safe (nothing untrusted is added), at the cost
+        # of the uv entry in this one case; the .sh keeps it, since an empty PATH stays set there
+        # (uv 0.13 hands such a script '<interpreter bin>:').
         Set-Item -LiteralPath ('Env:' + $PwshPyUvPathEnv) -Value $PwshPyTrustedUvPath
         # A git dependency would fail with uv's bare "git not found" when the only gits are in
         # directories left off; name the cause.
         $PwshPyCallerGit = Get-PwshPyGitOn -Path $PwshPyCallerPath
         if ($PwshPyCallerGit -and -not (Get-PwshPyGitOn -Path $PwshPyTrustedUvPath)) {
-            $PwshPyGitWhere = if ($PwshPyOnWindows) { 'fails elevated until git is installed in a directory only Administrators' } else { 'fails as root until git is installed in a directory only root' }
-            Write-PwshPyNotice "pwshpy: no git on uv's PATH: $PwshPyCallerGit and any other git on the caller's PATH are in directories another account can modify; a git dependency $PwshPyGitWhere can modify"
+            $PwshPyGitWhere = if ($PwshPyOnWindows) { 'fails elevated until git is installed in a directory no other account can modify (e.g. a system-wide install)' } else { 'fails as root until git is installed in a directory only root can modify' }
+            Write-PwshPyNotice "pwshpy: no git on uv's PATH: $PwshPyCallerGit and any other git on the caller's PATH are in directories another account can modify; a git dependency $PwshPyGitWhere"
         }
         $env:PATH = $PwshPyTrustedUvPath
     }

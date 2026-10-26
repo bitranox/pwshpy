@@ -224,12 +224,14 @@ convention = "google"
 typeCheckingMode = "strict"
 extraPaths = [
   "src",
+  "tests",
 ]
+executionEnvironments = [{root = "tests"}]
 
 [tool.pytest.ini_options]
 addopts = ["--doctest-modules"]
 doctest_optionflags = ["ELLIPSIS", "NORMALIZE_WHITESPACE"]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 markers = [
   "os_agnostic: test runs on every supported operating system",
   "os_windows: test exercises Windows-only behavior",
@@ -240,6 +242,7 @@ markers = [
   "integration: tests requiring external resources (SMTP, databases, APIs); run via 'bmk ti' or 'mktesti.sh'",
   "mutating: tests that CHANGE host state (mutating native verbs); run only on the disposable throwaway VM, never CI",
 ]
+testpaths = ["src", "tests"]
 
 [tool.coverage.run]
 branch = true

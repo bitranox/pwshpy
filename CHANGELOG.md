@@ -16,6 +16,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   stderr to UTF-8 with LF line ends when it starts, so every piped line has the same bytes on every
   OS, as the JSON output already had. A terminal keeps its own encoding, and library use of `ps`
   leaves the host program's streams alone.
+- A piped or redirected human table is drawn with an ASCII frame (`+`, `-`, `|`) on every OS. rich's
+  box-drawing frames differ by OS (heavy on Linux, square on Windows) and turn into mojibake for a
+  reader that decodes the pipe in a legacy code page. A terminal keeps its box-drawing frame. Linux
+  pipes, which had the heavy box, now get the ASCII frame too.
 
 - The test suite no longer reads the app and host configuration layers of the machine it runs on.
   An autouse fixture points lib_layered_config's three app-root variables (`LIB_LAYERED_CONFIG_ETC`,

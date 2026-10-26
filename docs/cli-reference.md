@@ -43,7 +43,9 @@ redirected (`pwshpy env | grep PATH`, `> out.txt`), it is as wide as its content
 line. A table wider than 8192 columns folds its long values onto further lines rather than dropping
 characters, breaking a value that holds spaces at a space. The table is for reading: use `--jsonl`
 when a script needs a value's exact bytes. An explicit `COLUMNS` in
-the environment still sets the width in both cases.
+the environment still sets the width in both cases. Piped or redirected, the table's frame is ASCII
+(`+`, `-`, `|`) on every OS, so a reader that decodes the pipe in a legacy code page never garbles
+it; at a terminal the table keeps its box-drawing frame.
 
 **Everywhere** - one binding on Windows, macOS and Linux:
 

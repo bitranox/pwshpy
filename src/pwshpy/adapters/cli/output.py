@@ -53,6 +53,7 @@ from typing import Any, BinaryIO, TextIO
 import orjson
 import rich_click as click
 from pydantic import BaseModel
+from rich import box
 from rich.console import Console
 from rich.measure import Measurement
 from rich.table import Table
@@ -332,7 +333,11 @@ def _render_table(records: Iterable[PSRecord]) -> None:
     if not materialized:
         Console().print("[dim]No records.[/dim]")
         return
-    table = Table(show_header=True, header_style="bold")
+    # Piped, the frame is ASCII on every OS: rich's own boxes are outside every legacy code page and
+    # differ by OS (heavy on Linux, square for a legacy Windows console), so a reader decoding the
+    # pipe as cp850/cp1252 saw a garbled frame (user decision 2026-10-26). A terminal keeps its box.
+    frame = box.HEAVY_HEAD if _is_terminal(sys.stdout) else box.ASCII
+    table = Table(show_header=True, header_style="bold", box=frame)
     for column in materialized[0]:
         table.add_column(column)
     for row in materialized:

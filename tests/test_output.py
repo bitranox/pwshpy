@@ -233,7 +233,7 @@ def test_piped_table_folds_a_value_beyond_the_ceiling_without_losing_a_character
     """Beyond the ceiling the value folds over several lines but keeps every character, never an ellipsis."""
     monkeypatch.delenv("COLUMNS", raising=False)
     lines = _emit_piped_table(capsys, [EnvVar(name="BIG", value=_BEYOND_CEILING_VALUE)])
-    joined = "".join("".join(line.split()).replace("\u2502", "") for line in lines)
+    joined = "".join("".join(line.split()).replace("|", "") for line in lines)
     assert _BEYOND_CEILING_VALUE in joined
     assert "\u2026" not in joined
 
@@ -263,7 +263,7 @@ def test_piped_table_never_cuts_a_neighbour_of_a_folded_value(
     lines = _emit_piped_table(
         capsys, [EnvVar(name="BIG", value=_BEYOND_CEILING_VALUE), EnvVar(name="NEAR", value=neighbour)]
     )
-    joined = "".join("".join(line.split()).replace("\u2502", "") for line in lines)
+    joined = "".join("".join(line.split()).replace("|", "") for line in lines)
     assert neighbour in joined
     assert "\u2026" not in joined
 

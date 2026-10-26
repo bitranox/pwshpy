@@ -20,7 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from pwshpy.adapters.cli.output import use_utf8_when_piped
+from pwshpy.adapters.cli.output import RecordFormat, emit, use_utf8_when_piped
+from pwshpy.domain.records import EnvVar
 
 #: Not representable in cp1252: the old code raised UnicodeEncodeError on stdout.
 _BEYOND_CP1252 = chr(0x4E2D) + chr(0x6587) + " " + chr(0x2603)
@@ -97,6 +98,27 @@ def test_piped_stderr_error_names_a_value_beyond_cp1252_as_utf8() -> None:
     completed = _run_pwshpy("config", "--section", _BEYOND_CP1252)
     assert completed.returncode != 0
     assert _BEYOND_CP1252.encode("utf-8") in completed.stderr
+
+
+@pytest.mark.os_agnostic
+def test_piped_human_table_frame_is_ascii_on_every_os(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A piped table is drawn with an ASCII frame, byte for byte the same on every OS.
+
+    rich draws a heavy box on Linux and swaps in a square one for a legacy Windows console, both
+    outside every legacy code page, so a reader decoding the pipe as cp850/cp1252 saw a garbled
+    frame and the bytes differed by OS (user decision 2026-10-26: ASCII when piped).
+    """
+    # The Claude Code harness exports FORCE_COLOR; colour codes would hide the frame comparison.
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("COLUMNS", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    sink = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(sink, encoding="utf-8", newline="\n"))
+    emit([EnvVar(name="A", value="b")], RecordFormat.HUMAN)
+    sys.stdout.flush()
+    assert sink.getvalue() == (
+        b"+--------------+\n| name | value |\n|------+-------|\n| A    | b     |\n+--------------+\n"
+    )
 
 
 class _TerminalStream(io.TextIOWrapper):

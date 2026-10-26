@@ -148,6 +148,25 @@ def test_write_text_drops_a_utf8_bom_from_a_piped_stdin(tmp_path: Path) -> None:
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("name", ["utf-8", "UTF8"])
+def test_write_text_drops_a_bom_when_utf8_is_named_explicitly(tmp_path: Path, name: str) -> None:
+    """Naming UTF-8 with --input-encoding drops a leading BOM exactly like the default does."""
+    dest = tmp_path / "out.txt"
+    _ok(_run_pwshpy("write_text", str(dest), "--input-encoding", name, stdin=b"\xef\xbb\xbfhi\n"))
+    assert dest.read_bytes() == b"hi\n"
+
+
+@pytest.mark.os_agnostic
+def test_write_text_decode_error_names_utf8_not_an_internal_codec(tmp_path: Path) -> None:
+    """The refusal names the encoding as the user knows it (UTF-8), not the internal utf-8-sig."""
+    completed = _run_pwshpy("write_text", str(tmp_path / "out.txt"), stdin=b"a\xffb\n")
+    stderr = completed.stderr.decode("utf-8", errors="replace")
+    assert completed.returncode != 0
+    assert "not valid utf-8;" in stderr
+    assert "utf-8-sig" not in stderr
+
+
+@pytest.mark.os_agnostic
 def test_write_text_refuses_a_codec_that_is_not_a_text_encoding(tmp_path: Path) -> None:
     """--input-encoding base64 names a codec, but not a text encoding: a usage error, exit 2."""
     completed = _run_pwshpy("write_text", str(tmp_path / "out.txt"), "--input-encoding", "base64", stdin=b"x\n")

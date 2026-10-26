@@ -16,6 +16,7 @@ Contents:
 
 from __future__ import annotations
 
+import codecs
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -77,7 +78,7 @@ def write_text(
         >>> Path(p).read_bytes()
         b'hi'
     """
-    codec = _BOMLESS_CODEC.get(encoding.lower(), encoding)
+    codec = _bomless_codec(encoding)
     data = _normalize_newlines(text, newline).encode(codec)
     if bom:
         data = _BOM_BYTES.get(codec, b"") + data
@@ -118,7 +119,7 @@ def write_text_stream(
         >>> Path(p).read_bytes()
         b'line1\\nline2\\n'
     """
-    codec = _BOMLESS_CODEC.get(encoding.lower(), encoding)
+    codec = _bomless_codec(encoding)
     destination = Path(path)
     with destination.open("wb") as handle:
         if bom:
@@ -131,8 +132,27 @@ def write_text_stream(
             text = pending + chunk
             pending = "\r" if text.endswith("\r") else ""
             handle.write(_normalize_newlines(text[: len(text) - len(pending)], newline).encode(codec))
-        handle.write(_normalize_newlines(pending, newline).encode(codec))
+        if pending:
+            handle.write(_normalize_newlines(pending, newline).encode(codec))
     return destination
+
+
+def _bomless_codec(encoding: str) -> str:
+    """The codec that writes ``encoding`` with no BOM, whatever spelling names it.
+
+    The map is keyed on Python's canonical names, so ``utf_16``, ``utf16`` and ``UTF-16`` all reach
+    ``utf-16-le``; looking up only the lower-cased spelling let an alias through to a codec that
+    writes a BOM on every ``encode`` call - one per chunk, and one for an empty string.
+
+    Raises:
+        LookupError: ``encoding`` names no codec.
+
+    Example:
+        >>> _bomless_codec("utf_16"), _bomless_codec("UTF8"), _bomless_codec("cp1252")
+        ('utf-16-le', 'utf-8', 'cp1252')
+    """
+    name = codecs.lookup(encoding).name
+    return _BOMLESS_CODEC.get(name, name)
 
 
 def _normalize_newlines(text: str, newline: str) -> str:

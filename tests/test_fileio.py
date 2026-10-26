@@ -73,6 +73,37 @@ def test_write_text_stream_crlf_split_between_chunks_is_one_line_end(tmp_path: P
     assert target.read_bytes() == f"a{newline}b{newline}c{newline}".encode()
 
 
+#: Spellings of BOM-writing codecs that Python accepts but the hyphenated BOM-less map did not
+#: name, each with the BOM-less bytes "hi\n" must become.
+_ALIASES = [("utf_16", "utf-16-le"), ("utf16", "utf-16-le"), ("UTF-32", "utf-32-le"), ("utf_8_sig", "utf-8")]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("alias", "bomless"), _ALIASES)
+def test_write_text_stream_writes_no_bom_for_a_codec_alias(tmp_path: Path, alias: str, bomless: str) -> None:
+    """Any spelling of a BOM-writing codec writes no BOM without bom=True: not per chunk, not at the end."""
+    target = tmp_path / "out.txt"
+    write_text_stream(target, ["hi\n", "", "hi\n"], encoding=alias)
+    assert target.read_bytes() == "hi\nhi\n".encode(bomless)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("alias", "bomless"), _ALIASES)
+def test_write_text_writes_no_bom_for_a_codec_alias(tmp_path: Path, alias: str, bomless: str) -> None:
+    """write_text maps every spelling of a BOM-writing codec to its BOM-less form too."""
+    target = tmp_path / "out.txt"
+    write_text(target, "hi\n", encoding=alias)
+    assert target.read_bytes() == "hi\n".encode(bomless)
+
+
+@pytest.mark.os_agnostic
+def test_write_text_stream_of_nothing_is_an_empty_file(tmp_path: Path) -> None:
+    """No chunks write zero bytes, whatever the codec (a BOM-writing one encodes "" as a BOM)."""
+    target = tmp_path / "out.txt"
+    write_text_stream(target, [], encoding="utf_16")
+    assert target.read_bytes() == b""
+
+
 @pytest.mark.os_agnostic
 def test_write_records_jsonl_no_bom(tmp_path: Path) -> None:
     """JSONL output is one UTF-8 object per line with no BOM."""

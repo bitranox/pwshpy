@@ -25,6 +25,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   option reads a piped source in another encoding; a name that is no text encoding (unknown, or
   `base64`) is a usage error, and bytes that are not valid in it stop the command with an error
   naming that option. A terminal stdin keeps its own encoding.
+- `write_text` and `write_text_stream` (and the `write_text` command's `--encoding`) no longer write
+  a BOM unasked for a codec spelled other than its canonical hyphenated name: `utf_16`, `utf16` or
+  `utf_8_sig` wrote one BOM per streamed chunk without `bom=True`. Every spelling now maps to the
+  BOM-less codec. Naming UTF-8 with `--input-encoding` drops a leading input BOM like the default.
 - `write_text_stream` (and so `write_text`) no longer writes one line end twice when a CRLF is split
   between two chunks: POSIX stdin does no newline translation, so a CRLF falling on the 65536-character
   block boundary became an extra blank line.

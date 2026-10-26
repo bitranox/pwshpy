@@ -12,6 +12,7 @@ Contents:
 
 from __future__ import annotations
 
+import codecs
 import io
 import sys
 
@@ -56,7 +57,21 @@ def _stdin_encoding(input_encoding: str | None) -> str | None:
         _require_text_encoding(input_encoding)
     if is_terminal(sys.stdin):
         return None
-    return input_encoding or "utf-8-sig"
+    chosen = input_encoding or "utf-8"
+    # Every spelling of UTF-8 (utf8, UTF_8) reads as utf-8-sig, so naming it drops a BOM like the default.
+    return "utf-8-sig" if codecs.lookup(chosen).name == "utf-8" else chosen
+
+
+def _shown_encoding(source_encoding: str | None, input_encoding: str | None) -> str:
+    """The stdin encoding as the user knows it: their own spelling, or UTF-8, never utf-8-sig.
+
+    Example:
+        >>> _shown_encoding("utf-8-sig", None), _shown_encoding("cp1252", "CP1252")
+        ('utf-8', 'CP1252')
+    """
+    if source_encoding is None:
+        return str(sys.stdin.encoding)
+    return input_encoding or "utf-8"
 
 
 def _require_text_encoding(name: str) -> None:
@@ -110,7 +125,7 @@ def cli_write_text(
         )
     except UnicodeDecodeError:
         raise click.ClickException(
-            f"stdin is not valid {source_encoding or sys.stdin.encoding}; name the encoding of the source "
+            f"stdin is not valid {_shown_encoding(source_encoding, input_encoding)}; name the encoding of the source "
             f"with --input-encoding (for example --input-encoding cp1252). {path} holds part of the text before it."
         ) from None
     click.echo(f"wrote {written}")

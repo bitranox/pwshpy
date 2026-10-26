@@ -220,8 +220,12 @@ def _free_name(name: str, taken: set[str]) -> str:
 
 
 def _ascii(segment: str) -> str:
-    """``segment`` with each non-ASCII character as ``?`` (the warning reaches cp1252 consoles)."""
-    return segment.encode("ascii", "replace").decode("ascii")
+    """``segment`` with each non-ASCII or non-printable character as ``?``.
+
+    The warning reaches cp1252 consoles, and a key from an outside source (a REST body, a CIM
+    property) can hold a newline or an ESC sequence that would split or style the one-line warning.
+    """
+    return "".join(char if char.isascii() and char.isprintable() else "?" for char in segment)
 
 
 def _join(path: str, segment: str) -> str:

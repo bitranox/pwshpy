@@ -98,6 +98,14 @@ def test_reported_paths_are_ascii_with_question_marks_for_non_ascii_key_characte
 
 
 @pytest.mark.os_agnostic
+def test_reported_paths_hold_no_control_characters() -> None:
+    """A key with a newline or an ESC sequence must not split or style the one-line warning."""
+    result = record_json_bytes(_RawBag(bag={"a\nb" + _BAD: "v", "c\x1b[31m": "v" + _BAD, "d\x7f": _BAD}))
+    assert result.replaced == ("bag.a?b?", "bag.c?[31m", "bag.d?")
+    assert all(path.isprintable() for path in result.replaced)
+
+
+@pytest.mark.os_agnostic
 def test_two_keys_differing_only_in_bad_bytes_both_survive_with_a_suffix() -> None:
     """The later colliding key gets ~2 (then ~3, ...) and is reported; no entry is lost."""
     bag = {"a" + chr(0xDCFF): 1, "a" + chr(0xDCFE): 2, "a" + chr(0xDCFD): 3}

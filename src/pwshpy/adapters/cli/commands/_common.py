@@ -159,6 +159,8 @@ class CaseInsensitiveChoice(click.Choice[str]):
 
     def shell_complete(self, ctx: click.Context, param: click.Parameter, incomplete: str) -> list[CompletionItem]:
         """Complete the choices starting with ``incomplete`` in any case, in the original spelling."""
+        # Folding here instead of through normalize_choice skips ctx.token_normalize_func; pwshpy
+        # sets none, and going through normalize_choice would hand back the folded spelling.
         folded = incomplete.casefold()
         return [CompletionItem(choice) for choice in self._shown() if choice.casefold().startswith(folded)]
 

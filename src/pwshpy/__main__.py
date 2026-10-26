@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from .adapters.cli.main import main
-from .composition import build_production
+from .entry import main
 
 if __name__ == "__main__":
-    raise SystemExit(main(services_factory=build_production))
+    raise SystemExit(main())

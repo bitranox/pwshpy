@@ -8,6 +8,15 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- A piped or redirected human table no longer fails on a value the console code page cannot hold:
+  `pwshpy env | more` with a CJK value exited 22 on Linux under `PYTHONIOENCODING=cp1252` and 87 on
+  German Windows after the work was done. The same crash hit the status lines naming a path
+  (`wrote`, `created`, `copied`, `moved`, `removed`, ...), `config` and `config --format json`, and
+  error lines turned such a value into backslash escapes. The CLI now switches a piped stdout and
+  stderr to UTF-8 with LF line ends when it starts, so every piped line has the same bytes on every
+  OS, as the JSON output already had. A terminal keeps its own encoding, and library use of `ps`
+  leaves the host program's streams alone.
+
 - The test suite no longer reads the app and host configuration layers of the machine it runs on.
   An autouse fixture points lib_layered_config's three app-root variables (`LIB_LAYERED_CONFIG_ETC`,
   `_MAC_APP_ROOT`, `_PROGRAMDATA`) at an empty directory under `tmp_path`, so a system-wide deploy

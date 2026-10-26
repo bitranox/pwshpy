@@ -27,7 +27,15 @@ file's lines) and `download_file` (its `downloaded URL -> DEST` line) write when
 a character the console code page cannot hold no longer fails the command after the work was done.
 Those bytes are the text's own: `exec` output and `get_content` lines have LF line ends (both are
 read with universal newlines), a web body keeps its line ends, and ANSI sequences are not stripped.
-At a terminal they print as before. The human table stays on the console's own encoding.
+At a terminal they print as before.
+
+Every other line the CLI writes to a piped or redirected stdout or stderr is UTF-8 with LF line ends
+too, on every OS: the human table, the status lines (`wrote`, `created`, `copied`, `moved`,
+`removed`, `registered`, ...), `config` and `config --format json`, and error messages. A value the
+console code page cannot hold (`pwshpy env | more` with a CJK value on German Windows) used to fail
+the command with exit 22 (87 on Windows) after the work was done. A reader that decodes the pipe in
+a legacy code page sees non-ASCII characters as mojibake rather than as an error. At a terminal
+nothing changes: the console's own encoding is used.
 
 At a terminal the human table fits the terminal's width and may shorten long cells. Piped or
 redirected (`pwshpy env | grep PATH`, `> out.txt`), it is as wide as its content instead, up to

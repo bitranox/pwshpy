@@ -20,7 +20,9 @@ line naming a path; :func:`emit_lines`: a file's lines) is written the same way 
 is not a terminal, because a character outside cp1252 raised ``UnicodeEncodeError`` there after
 the work was done; at a terminal it goes through the text layer as before.  A missing stream
 (``None``, as under pythonw or a detached service) drops the output, as ``click.echo`` does.
-The human table stays on the console's own encoding: it is text for a person.
+Everything else (the human table, status and error lines, ``config``) goes through the text
+layer, which :func:`use_utf8_when_piped` switches to UTF-8 with LF line ends for a piped stream
+when the process starts.
 
 The human table fits a terminal's width. Piped or redirected it is sized to its content up to
 ``_MAX_PIPED_WIDTH`` columns, so no cell is cut: every value is whole, a value without line
@@ -33,6 +35,7 @@ Contents:
     * :func:`emit` - render an iterable of records in the chosen format.
     * :func:`emit_text` - pass a text body through, UTF-8 when piped.
     * :func:`emit_lines` - stream text lines, UTF-8 when piped.
+    * :func:`use_utf8_when_piped` - switch a piped stdout/stderr to UTF-8 with LF, at process start.
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ from __future__ import annotations
 import contextlib
 import enum
 import errno
+import io
 import itertools
 import os
 import sys
@@ -437,6 +441,36 @@ def _write_text_body(text: str, stream: TextIO | None, *, err: bool) -> None:
     out.flush()
 
 
+def use_utf8_when_piped() -> None:
+    """Switch a piped or redirected stdout and stderr to UTF-8 with LF line ends, for the whole run.
+
+    Called once by the process entry, before any output. A cp1252 text stdout (German Windows)
+    raised ``UnicodeEncodeError`` on a character it cannot hold, so ``pwshpy env | more``, every
+    status line naming such a path, an error line and ``pwshpy config`` (rendered by
+    lib_layered_config's own console) failed after the work was done. Switching the stream itself
+    reaches every writer at once - click, rich and that library - where wrapping each call site
+    leaves the next one to be forgotten. LF makes the piped bytes the same on every OS, as the JSON
+    output already is. A terminal keeps its encoding: a Windows console renders Unicode already. Each
+    stream keeps its error handler (``reconfigure`` would reset it to strict), so this changes the
+    encoding and nothing else. A stream that is missing or not a ``TextIOWrapper`` (pythonw, a test
+    harness' stand-in) is left alone. Library use (``from pwshpy import ps``) never calls this, so a
+    host program's streams are never touched.
+
+    Example:
+        >>> saved = sys.stdout, sys.stderr
+        >>> sys.stdout, sys.stderr = io.TextIOWrapper(io.BytesIO(), encoding="cp1252"), None
+        >>> use_utf8_when_piped()
+        >>> piped = sys.stdout
+        >>> sys.stdout, sys.stderr = saved
+        >>> piped.encoding
+        'utf-8'
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if _is_terminal(stream) or not isinstance(stream, io.TextIOWrapper):
+            continue
+        stream.reconfigure(encoding="utf-8", errors=stream.errors, newline="\n")
+
+
 def emit(records: Iterable[PSRecord], fmt: RecordFormat) -> None:
     """Render ``records`` to stdout in the chosen format, safe against broken pipes.
 
@@ -454,4 +488,4 @@ def emit(records: Iterable[PSRecord], fmt: RecordFormat) -> None:
             _render_table(records)
 
 
-__all__ = ["RecordFormat", "emit", "emit_json", "emit_lines", "emit_text", "is_pipe_closed"]
+__all__ = ["RecordFormat", "emit", "emit_json", "emit_lines", "emit_text", "is_pipe_closed", "use_utf8_when_piped"]

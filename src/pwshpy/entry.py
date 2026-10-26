@@ -11,15 +11,21 @@ System Role:
 from __future__ import annotations
 
 from .adapters.cli.main import main as cli_main
+from .adapters.cli.output import use_utf8_when_piped
 from .composition import build_production
 
 
 def main() -> int:
-    """Console script entry point with production services wired.
+    """Console script and ``python -m pwshpy`` entry point with production services wired.
+
+    A piped stdout and stderr are switched to UTF-8 here, at the start of the process, rather than
+    in :func:`pwshpy.adapters.cli.main.main`: that one is also called in-process, where the streams
+    belong to the caller.
 
     Returns:
         Exit code from CLI execution.
     """
+    use_utf8_when_piped()
     return cli_main(services_factory=build_production)
 
 

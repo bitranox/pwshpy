@@ -26,6 +26,7 @@ from pwshpy.domain.packing import (
     PATH_ENV_VAR,
     SHIM_CWD_EXIT,
     SHIM_MODULE,
+    UV_PATH_ENV_VAR,
     PackOptions,
     render_shim,
 )
@@ -476,10 +477,12 @@ def _run_shim(tmp_path: Path, *arguments: str, env: dict[str, str]) -> subproces
     (tmp_path / "entry.py").write_text(
         "import os, sys\nprint('cwd:' + os.getcwd())\nprint('argv:' + repr(sys.argv[1:]))\n"
         f"print('path:' + os.environ.get('PATH', ''))\nprint('leak:' + repr({PATH_ENV_VAR!r} in os.environ))\n"
+        f"print('uv-leak:' + repr({UV_PATH_ENV_VAR!r} in os.environ))\n"
     )
     shim = tmp_path / SHIM_MODULE
     shim.write_text(render_shim(entry="entry.py", metadata=""), encoding="utf-8")
-    child = {k: v for k, v in os.environ.items() if k not in (CWD_ENV_VAR, ARGV_ENV_VAR, PATH_ENV_VAR)}
+    handed_over = (CWD_ENV_VAR, ARGV_ENV_VAR, PATH_ENV_VAR, UV_PATH_ENV_VAR)
+    child = {k: v for k, v in os.environ.items() if k not in handed_over}
     return subprocess.run(  # noqa: S603 - the running interpreter and a file this test wrote
         [sys.executable, str(shim), *arguments],
         capture_output=True,
@@ -538,6 +541,56 @@ def test_the_shim_gives_the_entry_the_path_an_elevated_run_hands_over(tmp_path: 
     assert result.returncode == 0, result.stderr
     assert f"path:{caller}" in result.stdout, result.stdout
     assert "leak:False" in result.stdout, result.stdout
+
+
+def _shim_path(result: subprocess.CompletedProcess[str]) -> str:
+    assert result.returncode == 0, result.stderr
+    assert "leak:False" in result.stdout and "uv-leak:False" in result.stdout, result.stdout
+    (path,) = [line[5:] for line in result.stdout.splitlines() if line.startswith("path:")]
+    return path
+
+
+@pytest.mark.os_agnostic
+def test_the_shim_keeps_the_entries_uv_put_in_front_of_the_path_it_was_given(tmp_path: Path) -> None:
+    """[107]: uv puts its own bin directories in front of the PATH it runs on; they stay in front of the
+    caller's PATH, as in an unelevated run (user decision: "Keep uv's entry first")."""
+    caller = os.pathsep.join([str(tmp_path / "caller-one"), str(tmp_path / "untrusted"), str(tmp_path / "caller-two")])
+    given = os.pathsep.join([str(tmp_path / "caller-one"), str(tmp_path / "caller-two")])
+    uv_entries = os.pathsep.join([str(tmp_path / "env-bin"), str(tmp_path / "python-bin")]) + os.pathsep
+    result = _run_shim(tmp_path, env={PATH_ENV_VAR: caller, UV_PATH_ENV_VAR: given, "PATH": uv_entries + given})
+    assert _shim_path(result) == uv_entries + caller
+
+
+@pytest.mark.os_agnostic
+def test_the_shim_keeps_uvs_entry_when_uv_was_given_an_empty_path(tmp_path: Path) -> None:
+    """[107]: every caller directory left off, uv runs on "" and makes it "<bin>" plus a separator
+    (measured, uv 0.13); that entry stays in front of the caller's PATH."""
+    caller = os.pathsep.join([str(tmp_path / "untrusted-one"), str(tmp_path / "untrusted-two")])
+    uv_entry = str(tmp_path / "python-bin") + os.pathsep
+    result = _run_shim(tmp_path, env={PATH_ENV_VAR: caller, UV_PATH_ENV_VAR: "", "PATH": uv_entry})
+    assert _shim_path(result) == uv_entry + caller
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("given", "current"),
+    [
+        # As long as "given-dir", so the part in front would be "uv-bin" plus a separator if taken.
+        pytest.param("given-dir", "uv-bin" + os.pathsep + "elsewhere", id="not-a-suffix"),
+        pytest.param("dir", "a-dir", id="suffix-inside-an-entry"),
+        # Ends with a separator, as uv's PATH from an empty one does: an unset variable is not "".
+        pytest.param(None, "uv-bin" + os.pathsep, id="uv-path-not-handed-over"),
+    ],
+)
+def test_the_shim_gives_back_the_callers_path_when_the_hand_over_does_not_fit(
+    tmp_path: Path, given: str | None, current: str
+) -> None:
+    """[107]: when the PATH it runs on does not end with the one uv was given (or that was not handed
+    over), what uv added cannot be told apart, so the script gets the caller's PATH as it was and runs."""
+    caller = os.pathsep.join([str(tmp_path / "caller-one"), str(tmp_path / "caller-two")])
+    handed_over = {PATH_ENV_VAR: caller} if given is None else {PATH_ENV_VAR: caller, UV_PATH_ENV_VAR: given}
+    result = _run_shim(tmp_path, env={**handed_over, "PATH": current})
+    assert _shim_path(result) == caller
 
 
 @pytest.mark.os_agnostic

@@ -2098,14 +2098,59 @@ def test_not_root_uv_runs_the_git_first_on_path(tmp_path: Path) -> None:
     assert "off uv's PATH" not in result.stderr, result.stderr
 
 
+def _reported_path(result: subprocess.CompletedProcess[str]) -> str:
+    lines = [line[5:] for line in result.stdout.splitlines() if line.startswith("path:")]
+    assert len(lines) == 1, result.stdout + result.stderr
+    return lines[0]
+
+
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
 def test_as_root_the_script_still_gets_the_callers_whole_path(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
     """[107]: only uv's PATH is filtered; the packed script sees every directory the caller had, in order,
-    the one left off uv's PATH included."""
+    the one left off uv's PATH included, behind the entries uv puts in front - the same PATH the same
+    script sees in a run that is not root (user decision: "Keep uv's entry first")."""
     _needs_managed_python()
     planted = _planted_uv(tmp_path).parent
     runner, uv = _python_runner(tmp_path, as_root=True, source=_ENTRY_REPORTING_PATH, entry_name="report_path.py")
+    plain = _pack_sh(tmp_path / "report_path.py", tmp_path / "report_path_plain.sh", as_root=False)
     environment = _trust_env(tmp_path, planted, uv.parent)
+    caller = environment["PATH"]
+    result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    control = _run_in(shell, plain, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert control.returncode == 0, control.stdout + control.stderr
+    seen, seen_unprivileged = _reported_path(result), _reported_path(control)
+    assert seen.endswith(os.pathsep + caller), seen
+    uv_entries = seen[: -len(caller)]
+    assert uv_entries.strip(os.pathsep), f"uv put nothing in front of the caller's PATH: {seen}"
+    assert seen == seen_unprivileged, (seen, seen_unprivileged)
+
+
+@pytest.mark.skipif(not Path("/usr/bin/git").is_file(), reason="needs a git in /usr/bin, a directory root owns")
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize(
+    ("gits", "hinted"),
+    [("planted-only", True), ("planted-and-trusted", False), ("none", False)],
+    ids=["planted-only", "planted-and-trusted", "none"],
+)
+def test_as_root_a_hint_names_why_uv_has_no_git(
+    tmp_path: Path, shell_id: str, shell: list[str], gits: str, hinted: bool
+) -> None:
+    """[107]: when every git on the caller's PATH sits in a directory left off uv's PATH, one stderr line
+    says a git dependency will fail and why; none when a trusted git is left, or when there is no git."""
+    _needs_managed_python()
+    runner, uv = _python_runner(tmp_path, as_root=True, source=_ENTRY_REPORTING_PATH, entry_name="report_path.py")
+    planted = _planted_git(tmp_path, tmp_path / "git-ran.txt")
+    first = {"planted-only": [planted], "planted-and-trusted": [planted, Path("/usr/bin")], "none": []}[gits]
+    environment = _trust_env(tmp_path, uv.parent)
+    environment["PATH"] = os.pathsep.join(map(str, [*first, uv.parent]))
+    # The shell is looked up on the child's PATH, which no longer holds the system directories.
+    shell = [shutil.which(shell[0]) or shell[0], *shell[1:]]
     result = _run_in(shell, runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
-    assert f"path:{environment['PATH']}\n" in result.stdout, result.stdout + result.stderr
+    hints = [line for line in result.stderr.splitlines() if line.startswith("pwshpy: no git on uv's PATH: ")]
+    assert len(hints) == (1 if hinted else 0), result.stderr
+    if hinted:
+        assert f"{planted}/git" in hints[0], hints[0]
+        assert "only root can modify" in hints[0], hints[0]
+    assert not (tmp_path / "git-ran.txt").exists(), "the hint ran git"

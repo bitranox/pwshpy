@@ -554,6 +554,17 @@ pwshpy_trusted_path() {
     printf '%s' "$_tp_out"
 }
 
+# Prints the git the PATH "$1" finds, or nothing. The search runs in a subshell, so this runner's own
+# PATH stays the fixed one, and command -v only searches, never runs it. An empty PATH holds no git:
+# searched, it would name the working directory.
+pwshpy_git_on() {
+    [ -n "$1" ] || return 0
+    (
+        PATH=$1
+        command -v git
+    ) || :
+}
+
 # The variables through which a caller names the interpreter itself, past --python-preference
 # only-managed (measured with uv 0.13: an explicit UV_PYTHON path and an active virtual or conda
 # environment each run their own python), or that uv refuses beside that flag; then the ones that
@@ -1072,9 +1083,21 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     pwshpy_resolve_managed_python
     # uv sees only the caller's PATH directories no other account can modify (computed while the
     # helpers still come from the fixed PATH); the packed script gets the caller's whole PATH back
-    # from the shim, through @@PWSHPY_PATH_ENV@@ ([107]).
+    # from the shim, through @@PWSHPY_PATH_ENV@@ ([107]). The shim is handed uv's PATH too
+    # (@@PWSHPY_UV_PATH_ENV@@): uv puts its own bin directory in front of it, and the shim keeps
+    # what precedes it in front of the caller's PATH, as an unelevated run has it.
     PWSHPY_UV_PATH=$(pwshpy_trusted_path "$PWSHPY_CALLER_PATH")
     export "@@PWSHPY_PATH_ENV@@=$PWSHPY_CALLER_PATH"
+    export "@@PWSHPY_UV_PATH_ENV@@=$PWSHPY_UV_PATH"
+    # A git dependency would fail with uv's bare "git not found" when the only gits are in directories
+    # left off; name the cause.
+    PWSHPY_UV_GIT=$(pwshpy_git_on "$PWSHPY_UV_PATH")
+    PWSHPY_CALLER_GIT=$(pwshpy_git_on "$PWSHPY_CALLER_PATH")
+    if [ -z "$PWSHPY_UV_GIT" ] && [ -n "$PWSHPY_CALLER_GIT" ]; then
+        PWSHPY_GIT_WHY="$PWSHPY_CALLER_GIT and any other git on the caller's PATH are in directories another"
+        PWSHPY_GIT_WHY="$PWSHPY_GIT_WHY account can modify; a git dependency fails as root until git is"
+        printf '%s\n' "pwshpy: no git on uv's PATH: $PWSHPY_GIT_WHY installed in a directory only root can modify" >&2
+    fi
     PATH=$PWSHPY_UV_PATH
     export PATH
     # --no-config: a uv.toml (system-wide under XDG_CONFIG_DIRS or /etc, or the user's own) can name a

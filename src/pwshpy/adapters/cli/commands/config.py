@@ -36,6 +36,7 @@ from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import CLIContext, get_cli_context
 from ..exit_codes import ExitCode
 from ..typed_click import get_current_context, option
+from ._common import CaseInsensitiveChoice
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,7 +48,7 @@ logger = logging.getLogger(__name__)
 @option(
     "--format",
     "output_format",
-    type=click.Choice([f.value for f in OutputFormat], case_sensitive=False),
+    type=CaseInsensitiveChoice([f.value for f in OutputFormat]),
     default=OutputFormat.HUMAN.value,
     help="Output format (human-readable or JSON)",
 )
@@ -191,7 +192,7 @@ def _check_profile_name(_ctx: click.Context, _param: click.Parameter, value: str
 @option(
     "--target",
     "targets",
-    type=click.Choice([t.value for t in DeployTarget], case_sensitive=False),
+    type=CaseInsensitiveChoice([t.value for t in DeployTarget]),
     multiple=True,
     required=True,
     help="Target configuration layer(s) to deploy to (can specify multiple)",

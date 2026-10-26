@@ -500,6 +500,43 @@ def test_register_scheduled_task_cli_refuses_an_unknown_multiple_instances_value
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("option", "spelled", "folded"),
+    [
+        ("--run-level", "'Highest'", "highest"),
+        ("--logon-type", "'InteractiveToken'", "interactivetoken"),
+        ("--multiple-instances", "'StopExisting'", "stopexisting"),
+    ],
+)
+def test_register_scheduled_task_cli_bad_choice_lists_the_dotnet_spellings(
+    option: str, spelled: str, folded: str
+) -> None:
+    """A bad case-insensitive choice is a usage error naming every accepted value as written."""
+    fake, result = _register_settings([option, "bogus"])
+    assert result.exit_code == 2
+    assert spelled in result.output
+    assert folded not in result.output
+    assert fake.calls == []
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("metavar_start", "folded"),
+    [
+        ("[Limited|Highest]", "[limited|"),
+        ("[InteractiveToken|", "[interactivetoken|"),
+        ("[Parallel|Queue|", "[parallel|"),
+    ],
+)
+def test_register_scheduled_task_help_shows_the_dotnet_spellings(metavar_start: str, folded: str) -> None:
+    """The option metavars keep the .NET spelling (rich-click may cut a long metavar's tail)."""
+    result = CliRunner().invoke(cli, ["register_scheduled_task", "--help"], obj=_factory(_FakePs()))
+    assert result.exit_code == 0, result.output
+    assert metavar_start in result.output
+    assert folded not in result.output
+
+
+@pytest.mark.os_agnostic
 def test_register_scheduled_task_cli_builds_pve_winrepairs_settings() -> None:
     """[45] The flag set pve-winrepair registers its task with arrives as that exact TaskSettings."""
     fake, result = _register_settings(

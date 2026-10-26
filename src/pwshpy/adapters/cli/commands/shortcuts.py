@@ -27,7 +27,7 @@ from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..output import RecordFormat, emit, emit_json, emit_lines, emit_text
 from ..typed_click import argument, option
-from ._common import enum_by_value, resolve_format
+from ._common import CaseInsensitiveChoice, enum_by_value, resolve_format
 
 
 @click.command("get_known_folder", context_settings=CLICK_CONTEXT_SETTINGS)
@@ -35,7 +35,7 @@ from ._common import enum_by_value, resolve_format
     "folder",
     # The values (the .NET SpecialFolder names), not the members: click matches an Enum choice
     # on the member NAME, which would refuse the documented spelling.
-    type=click.Choice(sorted(member.value for member in KnownFolder), case_sensitive=False),
+    type=CaseInsensitiveChoice(sorted(member.value for member in KnownFolder)),
 )
 @option("--json", "as_json", is_flag=True, default=False, help="Emit the path as a JSON string.")
 @click.pass_context

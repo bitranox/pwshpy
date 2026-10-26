@@ -144,9 +144,38 @@ def test_get_known_folder_accepts_exactly_the_dotnet_names() -> None:
 
 @pytest.mark.os_agnostic
 def test_get_known_folder_help_names_every_folder_in_its_dotnet_spelling() -> None:
-    """click 8.5 shows a case-insensitive choice lowercased, so the help text lists the real spellings."""
+    """The help text lists the six .NET names as written."""
     help_text = _invoke(_FakePs(), ["get_known_folder", "--help"]).output
     assert [member.value for member in KnownFolder if member.value not in help_text] == []
+
+
+@pytest.mark.os_agnostic
+def test_get_known_folder_usage_shows_the_dotnet_spelling(strip_ansi: Callable[[str], str]) -> None:
+    """The FOLDER metavar in the usage line keeps the .NET spelling (rich-click may cut its tail)."""
+    help_text = strip_ansi(_invoke(_FakePs(), ["get_known_folder", "--help"]).output)
+    assert "{ApplicationData|CommonApplicationData|" in help_text
+    assert "applicationdata" not in help_text
+
+
+@pytest.mark.os_agnostic
+def test_get_known_folder_bad_value_error_lists_the_dotnet_spellings(strip_ansi: Callable[[str], str]) -> None:
+    """The usage error names every accepted folder as written, never casefolded."""
+    result = _invoke(_FakePs(folder=Path("/x")), ["get_known_folder", "bogus"])
+    output = strip_ansi(result.output)
+    assert result.exit_code == 2
+    assert "'MyDocuments'" in output
+    assert "'CommonApplicationData'" in output
+    assert "mydocuments" not in output
+
+
+@pytest.mark.os_agnostic
+def test_get_known_folder_missing_folder_lists_the_dotnet_spellings(strip_ansi: Callable[[str], str]) -> None:
+    """A missing FOLDER is a usage error whose "Choose from" list keeps the .NET spelling."""
+    result = _invoke(_FakePs(folder=Path("/x")), ["get_known_folder"])
+    output = strip_ansi(result.output)
+    assert result.exit_code == 2
+    assert "MyDocuments" in output
+    assert "mydocuments" not in output
 
 
 @pytest.mark.os_agnostic

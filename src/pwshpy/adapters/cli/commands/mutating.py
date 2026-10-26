@@ -46,7 +46,7 @@ from ....domain.scheduling import (
 )
 from ..context import get_cli_context
 from ..typed_click import argument, option
-from ._common import enum_by_value
+from ._common import CaseInsensitiveChoice, enum_by_value
 
 if TYPE_CHECKING:
     from pwshpy.composition import Ps
@@ -528,14 +528,14 @@ def _settings(
 )
 @option(
     "--run-level",
-    type=click.Choice([e.value for e in TaskRunLevel], case_sensitive=False),
+    type=CaseInsensitiveChoice([e.value for e in TaskRunLevel]),
     default=TaskRunLevel.LIMITED.value,
     show_default=True,
     help="Token the task runs with (Highest = elevated).",
 )
 @option(
     "--logon-type",
-    type=click.Choice([e.value for e in TaskLogonType], case_sensitive=False),
+    type=CaseInsensitiveChoice([e.value for e in TaskLogonType]),
     default=None,
     help="Windows logon type; default follows --run-as (service account, S4U, or interactive).",
 )
@@ -567,7 +567,7 @@ def _settings(
 )
 @option(
     "--multiple-instances",
-    type=click.Choice([e.value for e in TaskMultipleInstances], case_sensitive=False),
+    type=CaseInsensitiveChoice([e.value for e in TaskMultipleInstances]),
     default=None,
     help="What a start does while a run is active; Linux supports only IgnoreNew, and refuses it together "
     "with --daily. Default: the OS default.",

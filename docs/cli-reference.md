@@ -33,8 +33,12 @@ A record field holding a byte that is not valid UTF-8 (a POSIX environment varia
 or account name) is written with U+FFFD for each such byte, so `--json` / `--jsonl` stay valid UTF-8
 JSON and the stream goes on, exit 0; one line per affected record on stderr names the record type,
 its position and the field, never the value (`warning: EnvVar record 7, field value: not valid
-UTF-8; each undecodable byte written as U+FFFD`). The original bytes cannot be recovered from the
-JSON, which matches what pwsh 7 shows for the same value.
+UTF-8; each undecodable byte written as U+FFFD`). The JSON that `get_known_folder --json`, `run`,
+`cmdlet`, `get_command` and `invoke_rest_method` print follows the same rule, with one
+`warning: output field <path>: ...` line (`warning: output: ...` for a bare string). A mapping key
+that collides with another once repaired is kept as `<key>~2` (`~3`, ...), and the field paths in a
+warning show each non-ASCII key character as `?`. The original bytes cannot be recovered from the
+JSON; for a single undecodable byte this is what pwsh 7 shows.
 
 Every other line the CLI writes to a piped or redirected stdout or stderr is UTF-8 with LF line ends
 too, on every OS: the human table, the status lines (`wrote`, `created`, `copied`, `moved`,

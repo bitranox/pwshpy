@@ -23,6 +23,7 @@ from fake_services import services_with_ps
 from pwshpy.adapters.cli.root import cli
 from pwshpy.adapters.native.fileio import write_records
 from pwshpy.composition import build_production
+from pwshpy.domain.enums import KnownFolder
 from pwshpy.domain.pipeline import Pipeline
 from pwshpy.domain.records import EnvVar, PSRecord
 
@@ -122,6 +123,27 @@ def test_real_env_with_a_non_utf8_byte_prints_and_exits_0(monkeypatch: pytest.Mo
         line.endswith("field value: not valid UTF-8; each undecodable byte written as U+FFFD")
         for line in _warnings(result.stderr)
     )
+
+
+class _FolderPs:
+    """A facade double whose ``get_known_folder`` returns one fixed path."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def get_known_folder(self, folder: KnownFolder) -> Path:
+        return self._path
+
+
+@pytest.mark.os_agnostic
+def test_get_known_folder_json_writes_fffd_and_warns_without_a_field() -> None:
+    """emit_json follows the same rule: a valid JSON string, exit 0, one 'output' warning."""
+    folder = Path("/opt/data/a" + _BAD + "b")
+    services = services_with_ps(_FolderPs(folder))
+    result = CliRunner().invoke(cli, ["get_known_folder", "Desktop", "--json"], obj=lambda: services)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == str(folder).replace(_BAD, _FFFD)
+    assert _warnings(result.stderr) == ["warning: output: not valid UTF-8; each undecodable byte written as U+FFFD"]
 
 
 # --- the library: write_records ------------------------------------------------------------------

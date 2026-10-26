@@ -15,8 +15,8 @@ JSON output (``--json``, ``--jsonl``, :func:`emit_json`) is written as UTF-8 byt
 the text layer, whatever the console code page, ``PYTHONIOENCODING`` or ``PYTHONUTF8``
 say: JSON is UTF-8 by spec, and a cp1252 stdout (German Windows) turned every non-ASCII
 field into mojibake for a consumer reading the pipe.  Lines end in LF on every OS.  A record
-field holding a byte that is not valid UTF-8 is written with U+FFFD for that byte, and one
-``warning:`` line on stderr names the record and field; the stream goes on.  Text
+field or JSON value holding a byte that is not valid UTF-8 is written with U+FFFD for that byte,
+and one ``warning:`` line on stderr names the record and field; the stream goes on.  Text
 passed through from elsewhere (:func:`emit_text`: a child's output, a web response, a status
 line naming a path; :func:`emit_lines`: a file's lines) is written the same way when its stream
 is not a terminal, because a character outside cp1252 raised ``UnicodeEncodeError`` there after
@@ -52,7 +52,6 @@ import sys
 from collections.abc import Generator, Iterable
 from typing import Any, BinaryIO, TextIO
 
-import orjson
 import rich_click as click
 from pydantic import BaseModel
 from rich import box
@@ -62,7 +61,12 @@ from rich.table import Table
 from rich.text import Text
 
 from ...domain.records import PSRecord
-from ..native.record_json import describe_replacements, record_json_bytes
+from ..native.record_json import (
+    describe_output_replacements,
+    describe_replacements,
+    json_bytes,
+    record_json_bytes,
+)
 
 #: Windows error codes for a downstream reader closing the pipe: ERROR_BROKEN_PIPE (109)
 #: and ERROR_NO_DATA (232, "the pipe is being closed"). On Windows these surface as a
@@ -362,15 +366,20 @@ def emit_json(data: object) -> None:
 
     For .NET / web output that is not a typed :class:`PSRecord` (marshaled PowerShell
     objects, parsed REST JSON). ``default=str`` keeps it total - a ``SecretStr`` renders
-    masked, a ``datetime`` as ISO text - so it never raises on an exotic value.
+    masked, a ``datetime`` as ISO text - so it never raises on an exotic value. Text holding a
+    byte that is not valid UTF-8 is written with U+FFFD for that byte, and one ``warning: output``
+    line on stderr names where (never the value).
 
     Example:
         >>> emit_json({"ok": True, "n": 1})
         {"ok":true,"n":1}
     """
     with _clean_broken_pipe():
+        result = json_bytes(data, default=str)
+        if result.replaced:
+            emit_text(f"warning: {describe_output_replacements(result.replaced)}\n", err=True)
         out = _Utf8Writer(sys.stdout)
-        out.write(orjson.dumps(data, default=str) + b"\n")
+        out.write(result.data + b"\n")
         out.flush()
 
 

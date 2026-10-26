@@ -331,7 +331,8 @@ POSIX `/bin/sh` (not only bash - dash, busybox ash, macOS `sh`, ...)**. The form
 the `-o` suffix, or force it with `--format ps1|sh` (API: `PackOptions(format=RunnerFormat.SH)`).
 Both pack and unpack are pure Python, so you can build a `.sh` on Windows and a `.ps1` on Linux, and
 `unpack` reads either format on either OS. An elevated run (administrator, SYSTEM or root) only runs
-a `uv` no other account can modify and only a uv-managed Python; `-PwshPyUv PATH` /
+a `uv` no other account can modify and only a uv-managed Python, and gives uv only the `PATH`
+directories no other account can modify (the packed script still gets the whole `PATH`); `-PwshPyUv PATH` /
 `--pwshpy-uv PATH` pins the `uv` to run. The runner's own exit codes (64, 70, 77, 127) are listed in
 [CLI Reference](docs/cli-reference.md#exit-codes); the trust rule in
 [Power Tools](docs/power-tools.md#ship-a-script-as-one-file---pspack_script).

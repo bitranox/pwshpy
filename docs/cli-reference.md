@@ -354,7 +354,10 @@ administrator token, SYSTEM or root) a runner only executes a `uv` that no accou
 running one, SYSTEM, Administrators, LOCAL SERVICE, NETWORK SERVICE and TrustedInstaller can modify,
 in its own directory or any directory above (on POSIX: root alone), skipping any other with a
 `pwshpy: skipping uv at` line on stderr; an untrusted `-PwshPyUv` / `--pwshpy-uv` path is refused with exit 127, and a
-relative one is a usage error (exit 64).
+relative one is a usage error (exit 64). Elevated, uv also runs on only the directories of the
+caller's `PATH` that pass the same rule, each one left out named with a
+`pwshpy: leaving <dir> off uv's PATH:` line, so a git dependency needs a `git` in such a directory
+(a system-wide install); the packed script gets the caller's whole `PATH` back.
 
 Exit code 77 (`EX_NOPERM`) means an elevation was refused or declined: `pwshpy --elevate`, a `.sh`
 runner's `--pwshpy-elevate` and a `.ps1` runner's `-PwshPyElevate` all exit 77 and write a line

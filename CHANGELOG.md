@@ -18,6 +18,19 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `tests` (which keeps the root `conftest.py` out of doctest collection), adds `tests` to `pythonpath`
   and pyright's `extraPaths`, and gives pyright an execution environment rooted at `tests/`. A test
   checks that every doctest collected from `src/` gets both redirects.
+- An elevated or root pack run no longer lets uv run a `git` (or another tool) planted in a `PATH`
+  directory another account can write. uv runs git for a git dependency by searching `PATH`, and it
+  got the caller's whole `PATH`: measured, a root run reached with the caller's `PATH`
+  (`sudo env PATH=...`) ran a planted `git` six times as uid 0, and in an already-elevated Windows
+  session uv ran a planted `git.exe`. A Linux `--pwshpy-elevate` relaunch was not affected, because
+  sudo's `secure_path` replaced the `PATH`. Both runners now give uv only the caller's `PATH`
+  directories that pass the trust rule already applied to a `uv` (root alone on POSIX; on Windows
+  the running account, SYSTEM, Administrators, LOCAL SERVICE, NETWORK SERVICE and TrustedInstaller)
+  and name each one left out on stderr (`pwshpy: leaving <dir> off uv's PATH: ...`). When the
+  caller's `PATH` has a `git` but none is left, one line (`pwshpy: no git on uv's PATH: ...`) names
+  the cause: a git dependency then needs a `git` in a directory only root or the Administrators can
+  modify, such as a system-wide install. The packed script still gets the caller's whole `PATH`,
+  behind the entry uv puts in front, as in an unelevated run. An unelevated run is unchanged.
 
 
 ## [1.8.1] 2026-10-26 13:51:55

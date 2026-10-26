@@ -394,6 +394,30 @@ Details worth knowing:
   `uv` on `PATH` runs. Accepted residual risk: a process already running as the same account could
   swap that account's `uv`, before the elevated run starts or between its check and its exec; no
   other account can.
+- **An elevated run gives uv only the `PATH` directories no other account can modify.** uv runs
+  `git` for a git dependency (a PEP 723 git source or a `--with` value), and a build backend may run
+  other tools, by searching `PATH`, so a `git` planted in a `PATH` directory another account can
+  write would run with the elevated rights. Elevated (an administrator token, SYSTEM, or root,
+  decided exactly as for the `uv` check above), the runner judges each directory of the caller's
+  `PATH` by the same rule as a `uv` (on POSIX root alone; on Windows the trusted accounts listed
+  above) and starts uv on the ones that pass, in their order. Each directory left out is named on
+  stderr with a `pwshpy: leaving <dir> off uv's PATH: <reason> (...)` line. A relative entry names
+  the working directory and is left out like any untrusted one; so is an empty entry in a `.sh` run,
+  while the `.ps1` drops an empty entry silently (a trailing `;` is common on Windows). A root run
+  judges the `PATH` while its own helpers still come from the fixed system directories. When the
+  caller's `PATH` holds a `git` but every one is in a directory left off, one more line names the
+  cause, since uv would otherwise fail with only its bare "git not found": `pwshpy: no git on uv's
+  PATH: <git> and any other git on the caller's PATH are in directories another account can modify;
+  a git dependency fails as root until git is installed in a directory only root can modify` (on
+  Windows: `fails elevated until git is installed in a directory only Administrators can modify`).
+  That lookup only searches `PATH`; it never runs a `git`. A git dependency in an elevated run
+  therefore needs a `git` in a directory only root or the Administrators can modify, such as a
+  system-wide install. The packed script still sees the caller's whole `PATH`: the shim puts it back
+  before the script starts, behind the entry uv put in front of the `PATH` it was given (the script
+  environment's `bin`, or the interpreter's directory for a script with no dependencies), so the
+  script sees the same `PATH` as an unelevated run; the two variables that carry it over
+  (`PWSHPY_PACK_PATH`, `PWSHPY_PACK_UV_PATH`) are removed before the script starts. Not elevated,
+  nothing changes: uv and the script get the caller's `PATH` as it is.
 - **An elevated run only runs a Python uv manages, named to uv outright.** uv picks the interpreter
   the script runs on, and it executes every interpreter it considers to ask its version, so a
   `python` planted in a `PATH` directory another account can write would run with the elevated

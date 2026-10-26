@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
+from com_fakes import com_error, error
 
 from pwshpy.adapters.native import scheduled_tasks as st_mod
 from pwshpy.adapters.native import task_readback
@@ -544,18 +545,20 @@ _ACCESS_DENIED = -2147024891  # HRESULT 0x80070005
 _INVALID_NAME = -2147024773  # HRESULT 0x8007007B
 
 
-class _ComError(Exception):
-    """Shaped like pywintypes.com_error: hresult, strerror, excepinfo, argerror."""
-
-    def __init__(self, hresult: int, excepinfo: tuple[Any, ...] | None = None) -> None:
-        super().__init__(hresult, "error", excepinfo, None)
-        self.hresult = hresult
-        self.excepinfo = excepinfo
+def _com_error(hresult: int, excepinfo: tuple[Any, ...] | None = None) -> com_error:
+    """A ``pywintypes.com_error`` double carrying ``hresult`` and ``excepinfo``."""
+    return com_error(hresult, "error", excepinfo)
 
 
-def _measured(scode: int) -> _ComError:
+class _NotPywintypesError(Exception):
+    """Carries the not-found HRESULT but is not pywin32's: its status is not a COM answer."""
+
+    hresult = _NOT_FOUND
+
+
+def _measured(scode: int) -> com_error:
     """The shape pywin32's late-bound CDispatch raises (measured 2026-10-23): the status in the scode."""
-    return _ComError(_DISP_E_EXCEPTION, (0, None, None, None, 0, scode))
+    return _com_error(_DISP_E_EXCEPTION, (0, None, None, None, 0, scode))
 
 
 class _LookupFolder(_FakeFolder):
@@ -637,7 +640,7 @@ def test_task_name_absent_is_empty_even_under_strict(monkeypatch: pytest.MonkeyP
 @pytest.mark.os_agnostic
 def test_task_name_absent_reported_as_a_direct_hresult(monkeypatch: pytest.MonkeyPatch) -> None:
     """[50] Not-found carried directly in ``hresult`` (an early-bound wrapper's shape) is absent too."""
-    direct = _ComError(_NOT_FOUND)
+    direct = _com_error(_NOT_FOUND)
     _install(monkeypatch, {"\\": _LookupFolder("\\", [], [], lookup_error=direct)})
     assert list(iter_scheduled_tasks("\\", task_name="missing", strict=True)) == []
 
@@ -655,7 +658,7 @@ def test_other_lookup_error_raises_under_strict_and_warns_without(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """[50] Any failure but not-found follows the strict rule: raise naming the task, or skip with a WARNING."""
-    denied = _ComError(_ACCESS_DENIED)
+    denied = _com_error(_ACCESS_DENIED)
     folder = _LookupFolder("\\Folder", [], [], lookup_error=denied)
     _install(monkeypatch, {"\\": _LookupFolder("\\", [], [folder]), "\\Folder": folder})
     with pytest.raises(NativeCallError) as caught:
@@ -753,15 +756,18 @@ def test_task_name_that_is_not_one_name_is_refused(monkeypatch: pytest.MonkeyPat
 @pytest.mark.parametrize(
     ("exc", "expected"),
     [
-        (_ComError(_NOT_FOUND), True),
-        (_ComError(0x80070002), True),  # an unsigned code, as some callers carry it
-        (_ComError(_DISP_E_EXCEPTION, (0, "src", "desc", None, 0, _NOT_FOUND)), True),
-        (_ComError(_DISP_E_EXCEPTION, (0, "src", "desc", None, 0, _ACCESS_DENIED)), False),
-        (_ComError(_DISP_E_EXCEPTION, None), False),  # wrapped, but no inner code to read
-        (_ComError(_DISP_E_EXCEPTION, (0, "src", "desc", None, 0, None)), False),
+        (_com_error(_NOT_FOUND), True),
+        (_com_error(0x80070002), True),  # an unsigned code, as some callers carry it
+        (_com_error(_DISP_E_EXCEPTION, (0, "src", "desc", None, 0, _NOT_FOUND)), True),
+        (_com_error(_DISP_E_EXCEPTION, (0, "src", "desc", None, 0, _ACCESS_DENIED)), False),
+        (_com_error(_DISP_E_EXCEPTION, None), False),  # wrapped, but no inner code to read
+        (_com_error(_DISP_E_EXCEPTION, (0, "src", "desc", None, 0, None)), False),
         (_measured(_INVALID_NAME), False),  # GetFolder's answer to a trailing backslash: not an absence
-        (_ComError(_ACCESS_DENIED), False),
+        (_com_error(_ACCESS_DENIED), False),
         (OSError("no such task"), False),  # no hresult at all: never guessed from the text
+        (error(2), True),  # Win32 ERROR_FILE_NOT_FOUND is HRESULT 0x80070002
+        (error(5), False),
+        (_NotPywintypesError(), False),
     ],
     ids=[
         "signed",
@@ -773,6 +779,9 @@ def test_task_name_that_is_not_one_name_is_refused(monkeypatch: pytest.MonkeyPat
         "wrapped-invalid-name",
         "denied",
         "plain",
+        "win32-not-found",
+        "win32-denied",
+        "not-pywintypes",
     ],
 )
 def test_is_not_found_reads_only_0x80070002(exc: BaseException, expected: bool) -> None:

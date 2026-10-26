@@ -22,11 +22,11 @@ from __future__ import annotations
 import importlib
 import logging
 from collections.abc import Iterator
-from typing import Any, cast
+from typing import Any
 
 from ...domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
-from .marshal import skip_or_raise, to_task_state
+from .marshal import com_hresult, skip_or_raise, to_task_state
 from .task_readback import read_task_extras
 
 logger = logging.getLogger(__name__)
@@ -37,10 +37,6 @@ _ROOT = "\\"
 # folder and a task in a missing folder as ERROR_FILE_NOT_FOUND (measured 2026-10-23 through
 # the COM API). Every other status is a failure to read, never an absence.
 _ERROR_FILE_NOT_FOUND = 0x80070002
-# A late-bound IDispatch call can wrap the callee's status as DISP_E_EXCEPTION with the real
-# code in excepinfo[5] (the scode), so both shapes are read.
-_DISP_E_EXCEPTION = 0x80020009
-_EXCEPINFO_SCODE = 5
 # Measured 2026-10-23: pywin32's late-bound CDispatch reports every GetFolder/GetTask failure as
 # DISP_E_EXCEPTION with the status in the scode, and GetFolder refuses a trailing backslash on a
 # non-root folder with ERROR_INVALID_NAME (0x8007007B) whether or not the folder exists.
@@ -140,30 +136,13 @@ def _subfolders(folder: Any, folder_path: str, *, strict: bool) -> Iterator[tupl
         yield child, child_path
 
 
-def _com_code(exc: BaseException) -> int | None:
-    """The COM status an error carries, unsigned; None when it carries none.
-
-    pywin32 reports an HRESULT signed (0x80070002 arrives as -2147024894), so it is masked to
-    32 bits; a DISP_E_EXCEPTION is unwrapped to the scode in its excepinfo when one is there.
-    """
-    hresult = getattr(exc, "hresult", None)
-    if not isinstance(hresult, int):
-        return None
-    code = hresult & 0xFFFFFFFF
-    excepinfo: object = getattr(exc, "excepinfo", None)
-    if code != _DISP_E_EXCEPTION or not isinstance(excepinfo, tuple):
-        return code
-    fields = cast("tuple[object, ...]", excepinfo)  # pywin32's excepinfo is an untyped 6-tuple
-    scode = fields[_EXCEPINFO_SCODE] if len(fields) > _EXCEPINFO_SCODE else None
-    return scode & 0xFFFFFFFF if isinstance(scode, int) else code
-
-
 def is_not_found(exc: BaseException) -> bool:
     """Whether a Task Scheduler COM error means the task or its folder does not exist.
 
-    Only HRESULT 0x80070002 (ERROR_FILE_NOT_FOUND) counts, reported directly or wrapped in a
-    DISP_E_EXCEPTION's excepinfo; an error carrying no COM status is never read as absent,
-    whatever its message says.
+    Only HRESULT 0x80070002 (ERROR_FILE_NOT_FOUND) counts, as :func:`~.marshal.com_hresult`
+    reads it: reported directly, wrapped in a DISP_E_EXCEPTION's excepinfo, or as Win32 code 2
+    on a ``pywintypes.error``. An error that is not pywin32's, or carries no status, is never
+    read as absent, whatever its message says.
 
     Args:
         exc: The error a ``GetFolder`` / ``GetTask`` call raised.
@@ -175,7 +154,7 @@ def is_not_found(exc: BaseException) -> bool:
         >>> is_not_found(OSError("The system cannot find the file specified"))
         False
     """
-    return _com_code(exc) == _ERROR_FILE_NOT_FOUND
+    return com_hresult(exc) == _ERROR_FILE_NOT_FOUND
 
 
 def _check_task_name(task_name: str) -> None:

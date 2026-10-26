@@ -45,7 +45,8 @@
 # whose name starts with GIT_ (git, which uv runs for a git source, reads them) or GCM_ (Git
 # Credential Manager, the credential helper git runs, reads them), SSH_ASKPASS and PASSWORD_STORE_DIR
 # are ignored, each with a line on stderr; git reads no global config file (GIT_CONFIG_GLOBAL=/dev/null,
-# so not the ~/.gitconfig or $XDG_CONFIG_HOME/git/config of the HOME it was given; git 2.32 or later);
+# so not the ~/.gitconfig or $XDG_CONFIG_HOME/git/config of the HOME it was given), and for a script
+# with a git source a git older than 2.32, which ignores that variable, is refused with exit code 127;
 # the user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file (--no-env-file).
 # In a network that reaches the internet only through a proxy, a root run can download nothing: the
 # managed Python and every package the script needs must already be in root's directories named
@@ -114,6 +115,9 @@ PWSHPY_FILE_HASHES=@@PWSHPY_FILE_HASHES@@
 PWSHPY_ANCHOR=/
 # The packed script's requires-python ('' for none): the request a root run hands `uv python find`.
 PWSHPY_PYTHON_REQUEST=@@PWSHPY_PYTHON_REQUEST@@
+# 1 when the packed script has a git source (pack-time detection, which errs towards 1): a root run then
+# refuses a git older than 2.32.
+PWSHPY_GIT_SOURCE=@@PWSHPY_GIT_SOURCE@@
 
 # The base64 payload, as a heredoc so a very long blob needs no shell quoting.
 pwshpy_payload_b64() {
@@ -565,6 +569,46 @@ pwshpy_git_on() {
     ) || :
 }
 
+# Returns when the git "$1" is 2.32 or later, else exits 127 (user decision on [116]): git honours
+# GIT_CONFIG_GLOBAL from 2.32 on, and an older one run by uv as root reads the caller's global git
+# configuration, whose core.fsmonitor, core.sshCommand or credential.helper runs a command as root. A
+# version this cannot read, or a git --version that fails, is refused too: the check fails closed.
+pwshpy_require_git_config_global() {
+    _gc_why="as root it would read the caller's git configuration (a script with a git source needs git"
+    _gc_why="$_gc_why 2.32 or later as root): upgrade git, or run the script without root"
+    _gc_out=$("$1" --version </dev/null 2>/dev/null) || _gc_out=
+    # The first line only, for a git that prints more.
+    _gc_nl='
+'
+    _gc_out=${_gc_out%%"$_gc_nl"*}
+    case $_gc_out in
+        'git version '*.*) _gc_version=${_gc_out#git version } ;;
+        *) _gc_version= ;;
+    esac
+    _gc_major=${_gc_version%%.*}
+    _gc_minor=${_gc_version#*.}
+    # What follows the minor number (".1.windows.1", "rc0", " (Apple Git-145)") does not matter.
+    _gc_minor=${_gc_minor%%[!0-9]*}
+    case $_gc_major:$_gc_minor in
+        [0-9]*:[0-9]*) ;;
+        *) _gc_version= ;;
+    esac
+    case $_gc_major in
+        *[!0-9]* | ???????*) _gc_version= ;;
+    esac
+    case $_gc_minor in
+        ???????*) _gc_version= ;;
+    esac
+    if [ -z "$_gc_version" ]; then
+        _gc_unread="git --version names no version this runner can read, and a git older than 2.32 ignores"
+        pwshpy_die "refusing git at $1: $_gc_unread GIT_CONFIG_GLOBAL, so $_gc_why" 127
+    fi
+    if [ "$_gc_major" -gt 2 ] || { [ "$_gc_major" -eq 2 ] && [ "$_gc_minor" -ge 32 ]; }; then
+        return 0
+    fi
+    pwshpy_die "refusing git ${_gc_version%% *} at $1: it ignores GIT_CONFIG_GLOBAL, so $_gc_why" 127
+}
+
 # The variables through which a caller names the interpreter itself, past --python-preference
 # only-managed (measured with uv 0.13: an explicit UV_PYTHON path and an active virtual or conda
 # environment each run their own python), or that uv refuses beside that flag; then the ones that
@@ -870,6 +914,11 @@ pwshpy_write_manifest() {
     printf 'entry      : %s\n' "$PWSHPY_ENTRY"
     printf 'payload    : sha256 %s\n' "$PWSHPY_SHA"
     printf 'uv args    : %s\n' "$PWSHPY_UV_ARGS_RAW"
+    if [ "$PWSHPY_GIT_SOURCE" = "1" ]; then
+        printf 'git source : %s\n' "yes (a root run needs git 2.32 or later)"
+    else
+        printf 'git source : %s\n' "no"
+    fi
     printf 'cache dir  : %s\n' "$PWSHPY_CACHE"
     printf 'files      :\n'
     _oldifs=$IFS
@@ -1053,9 +1102,10 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # With every GIT_ variable gone git still reads its global files, $HOME/.gitconfig and
     # $XDG_CONFIG_HOME/git/config, from the HOME and XDG_CONFIG_HOME this run got (a sudo that keeps
     # HOME, or sudo -E), and a core.fsmonitor, core.sshCommand or credential.helper there runs a command
-    # as root when uv fetches a git source. A set GIT_CONFIG_GLOBAL replaces both (git 2.32 and later;
-    # an older git ignores it and still reads them); /dev/null is a file only root can change. Set after
-    # the drop, which would remove it. The system file (/etc/gitconfig) is root's and still applies.
+    # as root when uv fetches a git source. A set GIT_CONFIG_GLOBAL replaces both from git 2.32 on (an
+    # older git ignores it, so for a script with a git source one is refused below); /dev/null is a file
+    # only root can change. Set after the drop, which would remove it. The system file (/etc/gitconfig) is
+    # root's and still applies.
     GIT_CONFIG_GLOBAL=/dev/null
     export GIT_CONFIG_GLOBAL
     printf '%s\n' "pwshpy: setting GIT_CONFIG_GLOBAL=/dev/null: as root git reads no caller's global config" >&2
@@ -1097,6 +1147,10 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
         PWSHPY_GIT_WHY="$PWSHPY_CALLER_GIT and any other git on the caller's PATH are in directories another"
         PWSHPY_GIT_WHY="$PWSHPY_GIT_WHY account can modify; a git dependency fails as root until git is"
         printf '%s\n' "pwshpy: no git on uv's PATH: $PWSHPY_GIT_WHY installed in a directory only root can modify" >&2
+    fi
+    # The git uv will run, asked only for a script that needs one; with none, uv fails on its own.
+    if [ "$PWSHPY_GIT_SOURCE" = "1" ] && [ -n "$PWSHPY_UV_GIT" ]; then
+        pwshpy_require_git_config_global "$PWSHPY_UV_GIT"
     fi
     PATH=$PWSHPY_UV_PATH
     export PATH

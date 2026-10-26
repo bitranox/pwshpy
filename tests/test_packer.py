@@ -640,3 +640,24 @@ def test_the_powershell_runner_carries_a_utf8_byte_order_mark(tmp_path: Path) ->
     assert ps1.startswith(_UTF8_BOM + b"#Requires")
     assert sh.startswith(b"#!/bin/sh")
     assert unpack_script(tmp_path / "app.ps1", tmp_path / "out").entry == "app.py"
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("block", "with_packages", "flag"),
+    [
+        ('# /// script\n# dependencies = ["pkg @ git+https://example.invalid/r.git"]\n# ///\n', (), "'1'"),
+        ("", ["git+https://example.invalid/r.git"], "'1'"),
+        (_PEP723, ["rich"], "'0'"),
+    ],
+    ids=["pep723-git-source", "with-git-source", "no-git-source"],
+)
+def test_sh_pack_records_whether_the_script_has_a_git_source(
+    tmp_path: Path, block: str, with_packages: list[str], flag: str
+) -> None:
+    """[116]: the .sh runner learns at pack time whether a root run must check the git version."""
+    entry = tmp_path / "app.py"
+    entry.write_text(block + "print('hi')\n", newline="\n")
+    options = PackOptions(format=RunnerFormat.SH, with_packages=with_packages)
+    runner = Path(pack_script(entry, tmp_path / "app.sh", options=options).output_path)
+    assert runner.read_text(encoding="utf-8").count(f"\nPWSHPY_GIT_SOURCE={flag}\n") == 1

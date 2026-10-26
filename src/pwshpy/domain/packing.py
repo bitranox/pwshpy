@@ -24,6 +24,7 @@ Contents:
     * :func:`candidate_relative_paths` - the file paths a dotted name may live at.
     * :func:`extract_script_metadata` - lift the entry's PEP 723 block onto the shim.
     * :func:`extract_requires_python` - the block's ``requires-python``, the request an elevated run makes.
+    * :func:`has_git_source` - whether uv runs git for the script, which a root ``.sh`` run checks.
     * :func:`render_shim` - the generated ``__main__`` shim for one entry.
     * :func:`render_runner` - substitute a payload into the runner template.
     * :func:`split_relative_requirement` - a ``--with`` path an elevated run re-anchors.
@@ -88,6 +89,8 @@ class RunnerContent:
         file_hashes: ``(digest, path)`` pairs the runner verifies before running.
         python_request: The entry's ``requires-python`` (see :func:`extract_requires_python`), which
             an elevated run hands ``uv python find``; ``""`` for none.
+        has_git_source: Whether the script has a git source (see :func:`has_git_source`), for which a
+            root ``.sh`` run refuses a git older than 2.32.
     """
 
     payload_b64: str
@@ -96,6 +99,7 @@ class RunnerContent:
     uv_args: Sequence[str] = ()
     file_hashes: Sequence[FileDigest] = field(default_factory=tuple)
     python_request: str = ""
+    has_git_source: bool = False
 
 
 class FileDigest(NamedTuple):
@@ -181,7 +185,8 @@ _POWERSHELL_COMMENT_END = "#>"
 #: Placeholders the POSIX ``.sh`` runner exposes. It needs no out-of-band argv channel (POSIX
 #: ``sh`` forwards ``"$@"`` intact), and an unelevated run executes the entry itself; only a root run
 #: goes through the shim (to change back to the caller's directory and give back its PATH), so it
-#: names the shim, the variables the shim reads, and the uv args with relative paths re-anchored.
+#: names the shim, the variables the shim reads, and the uv args with relative paths re-anchored; and
+#: whether the script has a git source, for which a root run checks the git version ([116]).
 _SH_PLACEHOLDERS = (
     "@@PWSHPY_PAYLOAD_B64@@",
     "@@PWSHPY_PAYLOAD_SHA256@@",
@@ -195,6 +200,7 @@ _SH_PLACEHOLDERS = (
     "@@PWSHPY_UV_PATH_ENV@@",
     "@@PWSHPY_UV_ARGS_ANCHORED@@",
     "@@PWSHPY_PYTHON_REQUEST@@",
+    "@@PWSHPY_GIT_SOURCE@@",
 )
 
 #: The variable the POSIX runner sets, for a root run, to the caller's directory with one trailing
@@ -481,7 +487,38 @@ def _scan_toml_line(line: str, open_string: str = "") -> tuple[int, str]:
         >>> _scan_toml_line("[x] ''', [", "'''")
         (1, '')
     """
-    change = 0
+    scan = _scan_toml_characters(line, open_string)
+    change = sum({"[": 1, "]": -1}.get(line[index], 0) for index in scan.code)
+    return change, scan.open_string
+
+
+class _TomlLineScan(NamedTuple):
+    """One TOML line as :func:`_scan_toml_characters` reads it.
+
+    Attributes:
+        code: The indexes of its characters outside every string and before any comment.
+        comment: Where its comment starts, ``len(line)`` for none.
+        open_string: The multi-line string delimiter still open at its end, or ``""``.
+    """
+
+    code: tuple[int, ...]
+    comment: int
+    open_string: str
+
+
+def _scan_toml_characters(line: str, open_string: str = "") -> _TomlLineScan:
+    """Scan one TOML line for its code characters, its comment and the multi-line string left open.
+
+    ``open_string`` is as for :func:`_scan_toml_line`. A ``#`` inside a string starts no comment.
+
+    Example:
+        >>> scan = _scan_toml_characters('a = "#" # c')
+        >>> scan.code, scan.comment, scan.open_string
+        ((0, 1, 2, 3, 7), 8, '')
+        >>> _scan_toml_characters("x = '''#").open_string
+        "'''"
+    """
+    code: list[int] = []
     index = 0
     quote = open_string
     while index < len(line):
@@ -490,16 +527,16 @@ def _scan_toml_line(line: str, open_string: str = "") -> tuple[int, str]:
             continue
         character = line[index]
         if character == "#":
-            break
+            return _TomlLineScan(tuple(code), index, "")
         if character in "\"'":
             # Three quotes open a multi-line string; fewer are a single-line one (or an empty one).
             multi_line = character * _MULTI_LINE_DELIMITER
             quote = multi_line if line.startswith(multi_line, index) else character
             index += len(quote)
             continue
-        change += {"[": 1, "]": -1}.get(character, 0)
+        code.append(index)
         index += 1
-    return change, quote if len(quote) == _MULTI_LINE_DELIMITER else ""
+    return _TomlLineScan(tuple(code), len(line), quote if len(quote) == _MULTI_LINE_DELIMITER else "")
 
 
 def _string_end(line: str, start: int, quote: str) -> tuple[int, str]:
@@ -580,6 +617,69 @@ def _requires_python_value(line: str) -> str:
             f"the entry's requires-python must be one quoted string of version specifiers, got: {line.strip()!r}"
         )
     return value.strip()
+
+
+#: What starts a git requirement (``git+https://...``, ``pkg @ git+ssh://...``), compared lower-cased:
+#: the scheme is case-insensitive.
+_GIT_REQUIREMENT = "git+"
+
+#: A TOML key named ``git`` (bare, quoted, or the last part of a dotted key) and its ``=``: the key a
+#: ``[tool.uv.sources]`` entry names a git repository with.
+_GIT_KEY = re.compile(r"""(?:^|[\s{,.])(?:git|"git"|'git')\s*=(?!=)""")
+
+#: A TOML escape that can spell any character (``\u``, ``\U``, and TOML 1.1's ``\x``): a key or a
+#: requirement could spell ``git`` or ``git+`` with one, without those letters in the text.
+_SPELLING_ESCAPE = re.compile(r"\\[uUx]")
+
+
+def has_git_source(metadata: str, with_packages: Sequence[str]) -> bool:
+    r"""Whether the script has a git source: a dependency uv runs git to fetch, as root too.
+
+    A root run of a ``.sh`` runner refuses a git older than 2.32 for such a script (git ignores
+    ``GIT_CONFIG_GLOBAL`` before 2.32, so as root it would read the caller's global git
+    configuration); for one without, it never asks git. True when a ``--with`` value holds ``git+``
+    (any case), or when the TOML of the PEP 723 block ``metadata`` (as
+    :func:`extract_script_metadata` returns it) holds, outside its comments:
+
+    * ``git+`` (any case) anywhere: a ``dependencies`` requirement such as ``"pkg @ git+https://..."``,
+      but also any other string that spells it;
+    * a key named ``git`` anywhere: a ``[tool.uv.sources]`` entry (``pkg = { git = "..." }``, a
+      ``[tool.uv.sources.pkg]`` table, a dotted ``sources.pkg.git``), but also one in any other table;
+    * a ``\u``, ``\U`` or ``\x`` escape anywhere, which could spell either of them.
+
+    This rule over-detects on purpose instead of parsing TOML (the domain cannot rely on ``tomllib``
+    on Python 3.10): a false positive costs only a refused root run on a git older than 2.32, while a
+    missed git source would let that git read the caller's configuration as root. It sees only what
+    the script itself declares: a git requirement inside a local wheel or path dependency is not seen.
+
+    Example:
+        >>> has_git_source('# /// script\n# dependencies = ["pkg @ git+https://h/r"]\n# ///\n', [])
+        True
+        >>> has_git_source('# /// script\n# dependencies = ["rich"]  # git+https://h/r\n# ///\n', [])
+        False
+        >>> has_git_source("", ["git+https://h/r"])
+        True
+    """
+    if any(_GIT_REQUIREMENT in package.lower() for package in with_packages):
+        return True
+    open_string = ""
+    for raw in metadata.splitlines()[1:-1]:
+        line = raw[2:] if raw.startswith("# ") else raw[1:]
+        scan = _scan_toml_characters(line, open_string)
+        if _may_name_a_git_source(line[: scan.comment]):
+            return True
+        open_string = scan.open_string
+    return False
+
+
+def _may_name_a_git_source(toml: str) -> bool:
+    """Whether a comment-free piece of the block's TOML may name a git source (see :func:`has_git_source`).
+
+    Example:
+        >>> _may_name_a_git_source('pkg = { git = "https://h/r" }'), _may_name_a_git_source('pkg = { path = "p" }')
+        (True, False)
+    """
+    return _GIT_REQUIREMENT in toml.lower() or bool(_GIT_KEY.search(toml) or _SPELLING_ESCAPE.search(toml))
 
 
 def render_shim(*, entry: str, metadata: str) -> str:
@@ -784,8 +884,8 @@ def render_posix_runner(template: str, content: RunnerContent) -> str:
         >>> content = RunnerContent(payload_b64="Ym9keQ==", payload_sha256="ab12", entry="t.py",
         ...                         uv_args=["--with", "httpx>=2"], file_hashes=[FileDigest("ff", "t.py")])
         >>> rendered = render_posix_runner("|".join(_SH_PLACEHOLDERS), content).split("|")
-        >>> print(rendered[2], rendered[3], rendered[4])
-        't.py' ''\\''--with'\\'' '\\''httpx>=2'\\''' 'ff  t.py'
+        >>> print(rendered[2], rendered[3], rendered[4], rendered[12])
+        't.py' ''\\''--with'\\'' '\\''httpx>=2'\\''' 'ff  t.py' '0'
     """
     missing = [token for token in _SH_PLACEHOLDERS if token not in template]
     if missing:
@@ -808,6 +908,7 @@ def render_posix_runner(template: str, content: RunnerContent) -> str:
             "@@PWSHPY_UV_PATH_ENV@@": UV_PATH_ENV_VAR,
             "@@PWSHPY_UV_ARGS_ANCHORED@@": _posix_shell_word(_posix_anchored_args(content.uv_args)),
             "@@PWSHPY_PYTHON_REQUEST@@": _posix_shell_word(content.python_request),
+            "@@PWSHPY_GIT_SOURCE@@": _posix_shell_word("1" if content.has_git_source else "0"),
         },
     )
 
@@ -937,6 +1038,7 @@ __all__ = [
     "classify_import",
     "extract_requires_python",
     "extract_script_metadata",
+    "has_git_source",
     "iter_import_candidates",
     "render_posix_runner",
     "render_runner",

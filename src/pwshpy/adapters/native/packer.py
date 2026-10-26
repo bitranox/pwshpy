@@ -48,6 +48,7 @@ from ...domain.packing import (
     classify_import,
     extract_requires_python,
     extract_script_metadata,
+    has_git_source,
     iter_import_candidates,
     render_posix_runner,
     render_runner,
@@ -144,6 +145,7 @@ def pack_script(
         uv_args=uv_args,
         file_hashes=[FileDigest(hashlib.sha256(body).hexdigest(), name) for name, body in sorted(members.items())],
         python_request=extract_requires_python(metadata),
+        has_git_source=has_git_source(metadata, options.with_packages),
     )
     template = _read_template(fmt)
     runner = render_runner(template, content) if fmt is RunnerFormat.PS1 else render_posix_runner(template, content)

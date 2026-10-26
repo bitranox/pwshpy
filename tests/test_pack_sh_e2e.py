@@ -1360,10 +1360,13 @@ def test_as_root_the_variables_that_steer_the_managed_python_are_dropped(
             assert recorded.get(name) == value and not dropped_line, (name, recorded, result.stderr)
 
 
-def _recording_python_runner(tmp_path: Path, *, as_root: bool, real_data_home: bool = False) -> tuple[Path, Path, Path]:
+def _recording_python_runner(
+    tmp_path: Path, *, as_root: bool, real_data_home: bool = False, with_packages: Sequence[str] = ()
+) -> tuple[Path, Path, Path]:
     """A which-python runner whose uv is a recording double in a tree counted as root's: the runner,
-    the double, and the file it records the ``uv run`` call into."""
-    runner, _ = _python_runner(tmp_path, as_root=as_root, real_data_home=real_data_home)
+    the double, and the file it records the ``uv run`` call into. ``with_packages`` as for
+    :func:`_python_runner`."""
+    runner, _ = _python_runner(tmp_path, as_root=as_root, real_data_home=real_data_home, with_packages=with_packages)
     leaf = tmp_path / "rec" / "bin"
     leaf.mkdir(parents=True)
     record = tmp_path / "argv.txt"
@@ -2317,3 +2320,108 @@ def test_as_root_uv_runs_on_exactly_the_trusted_path_entries(
     for name, why in left_off:
         line = f"pwshpy: leaving {_fill(name, names)} off uv's PATH: {_fill(why, names)} (as root uv runs git"
         assert line in result.stderr, result.stderr
+
+
+# --- [116] root runs of a script with a git source refuse a git older than 2.32 ----------------------
+
+#: The start of the refusal a root run prints for a git that may ignore GIT_CONFIG_GLOBAL.
+_OLD_GIT_REFUSED = "pwshpy pack: refusing git "
+#: The remedy that refusal names.
+_OLD_GIT_REMEDY = "upgrade git, or run the script without root"
+
+
+def _git_version_setup(
+    tmp_path: Path, *, as_root: bool, git_source: bool, version_output: str, git_exit: int = 0
+) -> tuple[Path, Path, Path, Path, dict[str, str]]:
+    """A recording runner (see :func:`_recording_python_runner`), with a --with git source when
+    ``git_source``, and a git double first on the caller's PATH, in the trusted directory beside the
+    uv double, that records it ran, prints ``version_output`` and exits ``git_exit``. Returns the
+    runner, the uv, the ``uv run`` record, the git's marker and the environment."""
+    packages = ["pwshpy-git-probe @ git+https://example.invalid/r.git"] if git_source else []
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root, with_packages=packages)
+    marker = tmp_path / "git-ran.txt"
+    _marker_tool(uv.parent, "git", marker, body=f"printf '%s\\n' '{version_output}'\nexit {git_exit}")
+    return runner, uv, record, marker, _trust_env(tmp_path, uv.parent)
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize(
+    ("version_output", "git_exit", "refused_version"),
+    [
+        pytest.param("git version 2.31.0", 0, "2.31.0", id="2.31-refused"),
+        pytest.param("git version 1.99.9", 0, "1.99.9", id="older-major-refused"),
+        pytest.param("git version 2.32.0", 0, None, id="2.32-runs"),
+        pytest.param("git version 2.43.1.windows.1", 0, None, id="windows-suffix-runs"),
+        pytest.param("git version 2.39.3 (Apple Git-145)", 0, None, id="apple-suffix-runs"),
+        pytest.param("git version 3.0.0", 0, None, id="3.0-runs"),
+        pytest.param("git version 10.0.0", 0, None, id="two-digit-major-runs"),
+        pytest.param("not git at all", 0, "", id="unparsable-refused"),
+        pytest.param("git version 2", 0, "", id="no-minor-refused"),
+        pytest.param("git version 2.x", 0, "", id="non-numeric-minor-refused"),
+        pytest.param("git version 2.40.0", 1, "", id="failing-git-refused"),
+    ],
+)
+def test_as_root_a_git_source_needs_git_2_32(
+    tmp_path: Path,
+    shell_id: str,
+    shell: list[str],
+    *,
+    version_output: str,
+    git_exit: int,
+    refused_version: str | None,
+) -> None:
+    """[116]: git honours GIT_CONFIG_GLOBAL from 2.32 on, so an older one run by uv as root would read the
+    caller's ~/.gitconfig. A root run of a script with a git source asks the git uv will run for its
+    version and exits 127 when it is older than 2.32, unreadable, or the command fails, before uv runs
+    the script; 2.32 or later (a vendor suffix included) runs."""
+    runner, uv, record, marker, environment = _git_version_setup(
+        tmp_path, as_root=True, git_source=True, version_output=version_output, git_exit=git_exit
+    )
+    result = _run_in(shell, runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    assert marker.exists(), "the runner never asked git for its version: " + result.stderr
+    refusals = [line for line in result.stderr.splitlines() if line.startswith(_OLD_GIT_REFUSED)]
+    if refused_version is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert refusals == [], result.stderr
+        assert "run" in record.read_text(encoding="utf-8").splitlines(), "uv never ran the script"
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert not record.exists(), "uv ran the script: " + record.read_text(encoding="utf-8")
+    assert len(refusals) == 1, result.stderr
+    (refusal,) = refusals
+    spelled = f"{_OLD_GIT_REFUSED}{refused_version} at " if refused_version else f"{_OLD_GIT_REFUSED}at "
+    assert refusal.startswith(spelled + f"{uv.parent}/git: "), refusal
+    assert "GIT_CONFIG_GLOBAL" in refusal and "2.32 or later" in refusal, refusal
+    assert refusal.endswith(_OLD_GIT_REMEDY), refusal
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize(
+    ("as_root", "git_source"), [(True, False), (False, True)], ids=["root-without-git-source", "not-root"]
+)
+def test_an_old_git_is_neither_asked_nor_refused_without_root_and_a_git_source(
+    tmp_path: Path, shell_id: str, shell: list[str], as_root: bool, git_source: bool
+) -> None:
+    """[116]: the check is for a root run of a script with a git source only: a root run of a script
+    without one, and a run that is not root, never run git --version and run the script on an old git."""
+    runner, uv, record, marker, environment = _git_version_setup(
+        tmp_path, as_root=as_root, git_source=git_source, version_output="git version 2.25.1"
+    )
+    result = _run_in(shell, runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not marker.exists(), "the runner ran git --version"
+    assert _OLD_GIT_REFUSED not in result.stderr, result.stderr
+    assert "run" in record.read_text(encoding="utf-8").splitlines(), "uv never ran the script"
+
+
+@pytest.mark.parametrize("git_source", [True, False], ids=["git-source", "none"])
+def test_info_names_whether_the_script_has_a_git_source(tmp_path: Path, git_source: bool) -> None:
+    """[116]: --pwshpy-info shows what the pack recorded, so a refused root run can be explained."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('hi')\n")
+    packages = ["pkg @ git+https://example.invalid/r.git"] if git_source else []
+    runner = _pack_sh(entry, tmp_path / "app.sh", with_packages=packages)
+    result = _run(["sh"], runner, "--pwshpy-info", env=_env(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected = "git source : yes (a root run needs git 2.32 or later)" if git_source else "git source : no"
+    assert expected in result.stdout.splitlines(), result.stdout

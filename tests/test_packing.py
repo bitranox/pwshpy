@@ -22,6 +22,7 @@ from pwshpy.domain.packing import (
     classify_import,
     extract_requires_python,
     extract_script_metadata,
+    has_git_source,
     iter_import_candidates,
     render_posix_runner,
     render_runner,
@@ -39,7 +40,7 @@ _FULL_TEMPLATE = (
 _SH_TEMPLATE = (
     "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@|"
     "@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@|@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_ANCHORED@@|@@PWSHPY_PYTHON_REQUEST@@|"
-    "@@PWSHPY_PATH_ENV@@|@@PWSHPY_UV_PATH_ENV@@"
+    "@@PWSHPY_PATH_ENV@@|@@PWSHPY_UV_PATH_ENV@@|@@PWSHPY_GIT_SOURCE@@"
 )
 
 
@@ -229,10 +230,11 @@ def test_render_posix_runner_substitutes_its_placeholders() -> None:
         ),
     )
     assert "@@PWSHPY" not in rendered
-    payload, sha, entry, uv_args, hashes, shim, argv_env, cwd_env, anchored, request, path_env, uv_path_env = (
+    payload, sha, entry, uv_args, hashes, shim, argv_env, cwd_env, anchored, request, path_env, uv_path_env, git = (
         rendered.split("|")
     )
     assert shlex.split(request) == [">=3.11"]
+    assert git == "'0'"
     assert [payload, sha, shim, argv_env, cwd_env, path_env, uv_path_env] == [
         "Ym9keQ==",
         "ab12",
@@ -248,10 +250,13 @@ def test_render_posix_runner_substitutes_its_placeholders() -> None:
 
 
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize("placeholder", ["@@PWSHPY_ENTRY@@", "@@PWSHPY_PATH_ENV@@", "@@PWSHPY_UV_PATH_ENV@@"])
+@pytest.mark.parametrize(
+    "placeholder", ["@@PWSHPY_ENTRY@@", "@@PWSHPY_PATH_ENV@@", "@@PWSHPY_UV_PATH_ENV@@", "@@PWSHPY_GIT_SOURCE@@"]
+)
 def test_render_posix_runner_rejects_a_template_missing_a_placeholder(placeholder: str) -> None:
     """A literal placeholder in a shipped .sh would break on the target host; one the .sh must carry
-    (the variables a root run hands the caller's PATH and uv's over in, [107]) is required, not optional."""
+    (the variables a root run hands the caller's PATH and uv's over in, [107]; whether the script has a
+    git source, [116]) is required, not optional."""
     with pytest.raises(PackError, match=placeholder):
         render_posix_runner(
             _SH_TEMPLATE.replace(placeholder, ""),
@@ -538,3 +543,91 @@ def test_a_requires_python_that_is_not_a_plain_specifier_string_is_refused(line:
     """[A1]: the value travels into both runners and onto uv's command line; anything odd is refused."""
     with pytest.raises(PackError, match="requires-python"):
         extract_requires_python(f"# /// script\n# {line}\n# ///\n")
+
+
+def _block(*lines: str) -> str:
+    """A PEP 723 script block holding ``lines`` as its TOML, the way the entry spells it."""
+    return "# /// script\n" + "".join(f"# {line}\n" for line in lines) + "# ///\n"
+
+
+_GIT_URL = "https://example.invalid/r.git"
+
+#: (metadata, --with packages, whether the script has a git source). [116]: a root .sh run of a script
+#: with a git source refuses a git older than 2.32, so a real git source must never read as none; the
+#: rule may over-detect (the last rows), since that costs only a refused root run on an old git.
+_GIT_SOURCE_CASES = [
+    pytest.param(_block('dependencies = ["rich"]'), (), False, id="plain-dependency"),
+    pytest.param(_block(f'dependencies = ["git+{_GIT_URL}"]'), (), True, id="git-plus-https-dependency"),
+    pytest.param(_block(f'dependencies = ["pkg @ git+{_GIT_URL}@v1"]'), (), True, id="named-git-reference"),
+    pytest.param(_block(f'dependencies = ["pkg @ GIT+{_GIT_URL}"]'), (), True, id="upper-case-scheme"),
+    pytest.param(
+        _block("dependencies = [", '  "rich",', f'  "pkg @ git+{_GIT_URL}",', "]"), (), True, id="multi-line-array"
+    ),
+    pytest.param(_block(f'dependencies = ["a#b", "pkg @ git+{_GIT_URL}"]'), (), True, id="hash-inside-a-string"),
+    pytest.param("", [f"git+{_GIT_URL}"], True, id="with-git-plus"),
+    pytest.param("", ["pkg @ git+file:///opt/data/repo"], True, id="with-named-git-reference"),
+    pytest.param("", ["rich", "./local.whl"], False, id="with-no-git"),
+    pytest.param("", (), False, id="no-block-no-with"),
+    pytest.param(
+        _block('dependencies = ["pkg"]', "[tool.uv.sources]", f'pkg = {{ git = "{_GIT_URL}" }}'),
+        (),
+        True,
+        id="uv-sources-inline-git",
+    ),
+    pytest.param(
+        _block('dependencies = ["pkg"]', "[tool.uv.sources.pkg]", f'git = "{_GIT_URL}"', 'tag = "v1"'),
+        (),
+        True,
+        id="uv-sources-table-git",
+    ),
+    pytest.param(
+        _block('dependencies = ["pkg"]', "[tool.uv.sources]", f'"pkg" = {{ "git" = "{_GIT_URL}" }}'),
+        (),
+        True,
+        id="uv-sources-quoted-git-key",
+    ),
+    pytest.param(
+        _block('dependencies = ["pkg"]', "[tool.uv]", f"sources.pkg.git = '{_GIT_URL}'"),
+        (),
+        True,
+        id="uv-sources-dotted-git-key",
+    ),
+    pytest.param(
+        _block('dependencies = ["pkg"]', "[tool.uv.sources]", 'pkg = { path = "/opt/data/pkg" }'),
+        (),
+        False,
+        id="uv-sources-path",
+    ),
+    pytest.param(
+        _block(f'# pkg = {{ git = "{_GIT_URL}" }}', f'dependencies = ["rich"]  # was "pkg @ git+{_GIT_URL}"'),
+        (),
+        False,
+        id="git-only-in-comments",
+    ),
+    pytest.param(
+        _block('dependencies = ["pkg @ https://example.invalid/pkg-1.0.tar.gz", "gitpython", "git-filter-repo==2"]'),
+        (),
+        False,
+        id="url-and-git-named-packages-without-git-plus",
+    ),
+    pytest.param(_block(f'description = "mirrors git+{_GIT_URL}"'), (), True, id="over-detect-git-plus-in-any-string"),
+    pytest.param(_block("[tool.other]", 'git = "yes"'), (), True, id="over-detect-git-key-in-any-table"),
+]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("metadata", "with_packages", "expected"), _GIT_SOURCE_CASES)
+def test_has_git_source_detects_every_git_source(metadata: str, with_packages: list[str], expected: bool) -> None:
+    """[116]: a git+ requirement in the block or in --with, and a git key in [tool.uv.sources], each
+    count; text in a TOML comment does not."""
+    assert has_git_source(metadata, with_packages) is expected
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("git_source", [True, False], ids=["git-source", "none"])
+def test_the_posix_runner_carries_the_git_source_flag_as_one_shell_word(git_source: bool) -> None:
+    """[116]: the root run's git-version check reads the flag the pack recorded."""
+    rendered = render_posix_runner(
+        _SH_TEMPLATE, RunnerContent(payload_b64="x", payload_sha256="y", entry="e", has_git_source=git_source)
+    )
+    assert rendered.split("|")[12] == ("'1'" if git_source else "'0'")

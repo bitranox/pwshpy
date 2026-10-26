@@ -20,7 +20,15 @@ import pytest
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.enums import RunnerFormat
 from pwshpy.domain.errors import PackError
-from pwshpy.domain.packing import ARGV_ENV_VAR, CWD_ENV_VAR, SHIM_CWD_EXIT, SHIM_MODULE, PackOptions, render_shim
+from pwshpy.domain.packing import (
+    ARGV_ENV_VAR,
+    CWD_ENV_VAR,
+    PATH_ENV_VAR,
+    SHIM_CWD_EXIT,
+    SHIM_MODULE,
+    PackOptions,
+    render_shim,
+)
 
 _PEP723 = '# /// script\n# requires-python = ">=3.10"\n# dependencies = ["cowsay"]\n# ///\n'
 
@@ -464,13 +472,14 @@ def test_a_data_file_named_with_a_line_break_is_refused(tmp_path: Path) -> None:
 
 
 def _run_shim(tmp_path: Path, *arguments: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    """Run a generated shim fronting an entry that prints its cwd and argv, from ``tmp_path``."""
+    """Run a generated shim fronting an entry that prints its cwd, argv and PATH, from ``tmp_path``."""
     (tmp_path / "entry.py").write_text(
         "import os, sys\nprint('cwd:' + os.getcwd())\nprint('argv:' + repr(sys.argv[1:]))\n"
+        f"print('path:' + os.environ.get('PATH', ''))\nprint('leak:' + repr({PATH_ENV_VAR!r} in os.environ))\n"
     )
     shim = tmp_path / SHIM_MODULE
     shim.write_text(render_shim(entry="entry.py", metadata=""), encoding="utf-8")
-    child = {k: v for k, v in os.environ.items() if k not in (CWD_ENV_VAR, ARGV_ENV_VAR)}
+    child = {k: v for k, v in os.environ.items() if k not in (CWD_ENV_VAR, ARGV_ENV_VAR, PATH_ENV_VAR)}
     return subprocess.run(  # noqa: S603 - the running interpreter and a file this test wrote
         [sys.executable, str(shim), *arguments],
         capture_output=True,
@@ -519,6 +528,24 @@ def test_the_shim_prefers_the_out_of_band_argument_vector(tmp_path: Path) -> Non
     result = _run_shim(tmp_path, "ignored", env={ARGV_ENV_VAR: "v1|" + "eA=="})
     assert result.returncode == 0, result.stderr
     assert "argv:['x']" in result.stdout, result.stdout
+
+
+@pytest.mark.os_agnostic
+def test_the_shim_gives_the_entry_the_path_an_elevated_run_hands_over(tmp_path: Path) -> None:
+    """[107]: uv ran with a trusted PATH only; the script gets the caller's whole PATH back, variable consumed."""
+    caller = os.pathsep.join([str(tmp_path / "caller-one"), str(tmp_path / "caller-two")])
+    result = _run_shim(tmp_path, env={PATH_ENV_VAR: caller})
+    assert result.returncode == 0, result.stderr
+    assert f"path:{caller}" in result.stdout, result.stdout
+    assert "leak:False" in result.stdout, result.stdout
+
+
+@pytest.mark.os_agnostic
+def test_the_shim_keeps_its_own_path_without_the_variable(tmp_path: Path) -> None:
+    """[107]: unset (every non-elevated run), the entry sees the PATH the shim was started with."""
+    result = _run_shim(tmp_path, env={})
+    assert result.returncode == 0, result.stderr
+    assert f"path:{os.environ.get('PATH', '')}" in result.stdout, result.stdout
 
 
 #: The UTF-8 byte-order mark: Windows PowerShell 5.1 reads a .ps1 without it in the ANSI code page.

@@ -379,12 +379,16 @@ Details worth knowing:
   through its mask). Every symlink on the way (the `uv` itself, a `PATH` entry, `/bin -> usr/bin` on
   a merged-`/usr` system) is resolved where it is met, its owner judged and the directories it leads
   through judged like the rest. On Windows an elevated run never trusts a network (UNC) path, for a
-  `uv` or for a `PATH` directory: `\\server\share\...` in any separator, its `\\?\UNC\` long form
-  and a link whose target is one are refused with `it is a network path`, whatever ACL the server
-  reports, because whoever runs the server decides what the share holds (a drive letter mapped to a
-  share is not detected). As root on POSIX the runner also runs its own helpers (`ls`, `id`,
-  `tar`, `base64`, `sha256sum`, the installer's `curl` and `sh`, ...) only from the system
-  directories
+  `uv` or for a `PATH` directory: `\\server\share\...` in any separator, its `\\?\UNC\` and
+  `\\.\UNC\` long forms and a link whose target is one are refused with `it is a network path, and
+  an elevated run trusts only local paths`, whatever ACL the server reports, because whoever runs the
+  server decides what the share holds (a drive letter mapped to a share is not detected). Any other
+  device-namespace path (`\\.\...`, or `\\?\...` other than the long form of a drive path,
+  `\\?\C:\...`) is refused with `it is a device path, and an elevated run trusts only local drive
+  paths`: the object manager resolves such a name (`\\?\GLOBALROOT\Device\Mup\...` reaches the
+  network redirector), and neither a `uv` nor a `PATH` directory lives there. As root on POSIX the
+  runner also runs its own helpers (`ls`, `id`, `tar`, `base64`, `sha256sum`, the installer's `curl`
+  and `sh`, ...) only from the system directories
   `/usr/bin:/bin:/usr/sbin:/sbin:/run/current-system/sw/bin:/run/current-system/profile/bin` (not
   `/usr/local`, which local installs populate), never from the `PATH` it was given, and asks the
   euid of an `id` in those same directories, never one on `PATH`; when none answers with a uid, the
@@ -471,8 +475,13 @@ Details worth knowing:
   Python uv found at <path>: <reason>` and exit code 127. Both refusals name the remedy: on POSIX
   make the path named in the reason root's alone (`chown root`, then `chmod go-w`, with `-R` for a
   directory), on Windows take every other account's write access off it; or remove uv's
-  managed-Python directory and install the Python again elevated (`uv python install`). The run is
-  then `uv run --no-config --python-preference only-managed --no-env-file --python <that path>`,
+  managed-Python directory and install the Python again elevated (`uv python install`). On Windows a
+  refusal for the network rule (above) names no remedy but says `the running account's AppData is
+  on a network share; an elevated run cannot use it`: with RoamingAppData redirected to a share no
+  elevated `.ps1` run is available, since neither an ACL change nor a fresh install makes the share
+  local (such a data directory already stops the run at the git configuration file, see below). The
+  run is then
+  `uv run --no-config --python-preference only-managed --no-env-file --python <that path>`,
   started in `/` on POSIX or `System32` on Windows (`--directory`, `--project`), so the
   `.python-version` uv would read from the script's directory upwards (the cache, which
   `PWSHPY_PACK_CACHE` can put anywhere) and every `.venv` above the caller's directory or above
@@ -544,8 +553,12 @@ Details worth knowing:
   directory. The file and every directory above it pass the same trust rule as a `uv`; when another
   account could change them, or the file is not empty, the run stops with `pwshpy: refusing the git
   configuration file <path>: <reason>` and exit code 127, naming the remedy (take the other
-  account's write access off, or remove the directory so the next elevated run creates it). The
-  packed script inherits the variable, so a git it runs reads no global configuration file either:
+  account's write access off, or remove the directory so the next elevated run creates it). When
+  the reason is the network rule, that is the RoamingAppData known folder redirected to a share, the
+  refusal says `the running account's AppData is on a network share; an elevated run cannot use it`
+  instead: elevated `.ps1` runs are unavailable while it is redirected, because the next run would
+  create the file on the same share. The packed script inherits the variable, so a git it runs
+  reads no global configuration file either:
   no `user.name`/`user.email` and no `credential.helper` from the elevated account's own
   `.gitconfig` (an elevated 1.5.x run read them). A script that needs them
   passes them itself (`git -c user.name=... -c user.email=...`) or points `GIT_CONFIG_GLOBAL` at a

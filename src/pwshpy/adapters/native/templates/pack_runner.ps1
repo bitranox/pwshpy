@@ -327,7 +327,30 @@ function Get-PwshPyNetworkDistrust {
     if ($spelled -match '^\\\\[?.]\\' -and $spelled -notmatch '^\\\\[?.]\\UNC(\\|$)') {
         return 'it is a device path, and an elevated run trusts only local drive paths'
     }
+    return (Get-PwshPyNetworkReason)
+}
+
+function Get-PwshPyNetworkReason {
+    # The reason Get-PwshPyNetworkDistrust gives for a network path, kept in one place because the
+    # refusals below the account's data directory pick their remedy by it (Test-PwshPyNetworkReason).
     return 'it is a network path, and an elevated run trusts only local paths'
+}
+
+function Test-PwshPyNetworkReason {
+    param([string] $Why)
+
+    # Whether the refusal $Why is the network rule's: the walk returns its reason alone, or after "the
+    # link L points to T: " for a link target. Our own fixed text, never a localised system message.
+    return ([bool]$Why -and $Why.EndsWith((Get-PwshPyNetworkReason)))
+}
+
+function Get-PwshPyNetworkRemedy {
+    # What an elevated run says in place of a remedy when a path below the running account's data
+    # directory (the RoamingAppData known folder, see Get-PwshPyAccountDataHome) failed the network
+    # rule. Folder redirection can put that folder on a share, and then neither remedy the run names
+    # otherwise (take write access off, remove the directory and run again) can work: the next run
+    # meets the same share ([146]).
+    return 'the running account''s AppData is on a network share; an elevated run cannot use it'
 }
 
 function Get-PwshPyAclDistrust {
@@ -842,7 +865,10 @@ function Invoke-PwshPyUvPython {
 }
 
 function Get-PwshPyPythonRemedy {
-    # What an elevated run that refused a managed-Python path tells the caller to do about it.
+    param([string] $Why)
+
+    # What an elevated run that refused a managed-Python path for $Why tells the caller to do about it.
+    if (Test-PwshPyNetworkReason -Why $Why) { return (Get-PwshPyNetworkRemedy) }
     if ($PwshPyOnWindows) {
         return 'take every other account''s write access off the path named above (only the running account, SYSTEM and Administrators may change it), or remove uv''s managed-Python directory and install the Python again elevated (uv python install)'
     }
@@ -1067,7 +1093,7 @@ function Resolve-PwshPyManagedPython {
     }
     $why = Get-PwshPyUvDistrust -Path $python
     if ($why) {
-        Write-PwshPyFailure "pwshpy: refusing the Python uv found at ${python}: $why (an elevated run only runs a Python no other account can modify): $(Get-PwshPyPythonRemedy)"
+        Write-PwshPyFailure "pwshpy: refusing the Python uv found at ${python}: $why (an elevated run only runs a Python no other account can modify): $(Get-PwshPyPythonRemedy -Why $why)"
         exit 127
     }
     return $python
@@ -1561,7 +1587,10 @@ $PwshPyPrepare = {
             $PwshPyGitGlobal = Join-Path (Join-Path (Get-PwshPyAccountDataHome) 'pwshpy') 'empty.gitconfig'
             $PwshPyGitGlobalWhy = Get-PwshPyEmptyFileDistrust -Path $PwshPyGitGlobal
             if ($PwshPyGitGlobalWhy) {
-                Write-PwshPyFailure "pwshpy: refusing the git configuration file ${PwshPyGitGlobal}: $PwshPyGitGlobalWhy (an elevated run points GIT_CONFIG_GLOBAL only at an empty file no other account can modify): take every other account's write access off the path named above and leave the file empty, or remove its directory and run again elevated, which creates it"
+                $PwshPyGitGlobalRemedy = "take every other account's write access off the path named above and leave the file empty, or remove its directory and run again elevated, which creates it"
+                # A share is no less a share on the next run, which would create the file there again.
+                if (Test-PwshPyNetworkReason -Why $PwshPyGitGlobalWhy) { $PwshPyGitGlobalRemedy = Get-PwshPyNetworkRemedy }
+                Write-PwshPyFailure "pwshpy: refusing the git configuration file ${PwshPyGitGlobal}: $PwshPyGitGlobalWhy (an elevated run points GIT_CONFIG_GLOBAL only at an empty file no other account can modify): $PwshPyGitGlobalRemedy"
                 exit 127
             }
         }
@@ -1579,7 +1608,7 @@ $PwshPyPrepare = {
         # The directory before uv searches it: uv runs every Python it finds there.
         $PwshPyPythonDirWhy = Get-PwshPyPythonDirDistrust -Path $env:UV_PYTHON_INSTALL_DIR
         if ($PwshPyPythonDirWhy) {
-            Write-PwshPyFailure "pwshpy: refusing uv's managed-Python directory $($env:UV_PYTHON_INSTALL_DIR): $PwshPyPythonDirWhy (an elevated run lets uv search only a directory no other account can modify, nor anything below it): $(Get-PwshPyPythonRemedy)"
+            Write-PwshPyFailure "pwshpy: refusing uv's managed-Python directory $($env:UV_PYTHON_INSTALL_DIR): $PwshPyPythonDirWhy (an elevated run lets uv search only a directory no other account can modify, nor anything below it): $(Get-PwshPyPythonRemedy -Why $PwshPyPythonDirWhy)"
             exit 127
         }
         # Script scope by name: the run preparation, a block of its own, reads it.

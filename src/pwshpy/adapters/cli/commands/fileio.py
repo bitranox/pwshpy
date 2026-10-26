@@ -54,7 +54,7 @@ def _stdin_encoding(input_encoding: str | None) -> str | None:
         click.exceptions.BadParameter: unknown text encoding 'no-such-codec'
     """
     if input_encoding is not None:
-        _require_text_encoding(input_encoding)
+        _require_text_encoding(input_encoding, option="--input-encoding")
     if is_terminal(sys.stdin):
         return None
     chosen = input_encoding or "utf-8"
@@ -74,12 +74,12 @@ def _shown_encoding(source_encoding: str | None, input_encoding: str | None) -> 
     return input_encoding or "utf-8"
 
 
-def _require_text_encoding(name: str) -> None:
-    """Refuse ``name`` unless a text stream can use it (``codecs.lookup`` also accepts ``base64``)."""
+def _require_text_encoding(name: str, *, option: str) -> None:
+    """Refuse ``name`` for ``option`` unless a text stream can use it (``codecs.lookup`` also accepts ``base64``)."""
     try:
         io.TextIOWrapper(io.BytesIO(), encoding=name)
     except LookupError:
-        raise click.BadParameter(f"unknown text encoding {name!r}", param_hint="'--input-encoding'") from None
+        raise click.BadParameter(f"unknown text encoding {name!r}", param_hint=f"'{option}'") from None
 
 
 def _read_stdin_as(encoding: str | None) -> None:
@@ -115,6 +115,7 @@ def cli_write_text(
         >>> CliRunner().invoke(cli_write_text, ["--help"]).exit_code
         0
     """
+    _require_text_encoding(encoding, option="--encoding")
     source_encoding = _stdin_encoding(input_encoding)
     _read_stdin_as(source_encoding)
     # Stream stdin in fixed-size blocks so a huge pipe stays memory-bounded (never sys.stdin.read()).

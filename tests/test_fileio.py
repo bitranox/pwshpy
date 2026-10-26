@@ -75,7 +75,7 @@ def test_write_text_stream_crlf_split_between_chunks_is_one_line_end(tmp_path: P
 
 #: Spellings of BOM-writing codecs that Python accepts but the hyphenated BOM-less map did not
 #: name, each with the BOM-less bytes "hi\n" must become.
-_ALIASES = [("utf_16", "utf-16-le"), ("utf16", "utf-16-le"), ("UTF-32", "utf-32-le"), ("utf_8_sig", "utf-8")]
+_ALIASES = [("utf_16", "utf-16-le"), ("utf16", "utf-16-le"), ("utf_32", "utf-32-le"), ("utf_8_sig", "utf-8")]
 
 
 @pytest.mark.os_agnostic
@@ -94,6 +94,16 @@ def test_write_text_writes_no_bom_for_a_codec_alias(tmp_path: Path, alias: str, 
     target = tmp_path / "out.txt"
     write_text(target, "hi\n", encoding=alias)
     assert target.read_bytes() == "hi\n".encode(bomless)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("name", ["base64", "rot13"])
+def test_write_text_stream_refuses_a_codec_that_is_not_a_text_encoding(tmp_path: Path, name: str) -> None:
+    """A bytes-to-bytes or text-transform codec is refused before PATH is opened, even with no chunks."""
+    target = tmp_path / "out.txt"
+    with pytest.raises(LookupError):
+        write_text_stream(target, [], encoding=name)
+    assert not target.exists()
 
 
 @pytest.mark.os_agnostic

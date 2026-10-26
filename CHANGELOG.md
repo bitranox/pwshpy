@@ -29,6 +29,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   a BOM unasked for a codec spelled other than its canonical hyphenated name: `utf_16`, `utf16` or
   `utf_8_sig` wrote one BOM per streamed chunk without `bom=True`. Every spelling now maps to the
   BOM-less codec. Naming UTF-8 with `--input-encoding` drops a leading input BOM like the default.
+- `write_text --encoding` with a name that is no text encoding (unknown, `base64`, `rot13`) is a
+  usage error (exit 2) before PATH is opened. It used to fail with a raw `LookupError` after
+  truncating PATH, and with an empty stdin it reported success. `write_text_stream` raises its
+  `LookupError` before opening PATH too.
 - `write_text_stream` (and so `write_text`) no longer writes one line end twice when a CRLF is split
   between two chunks: POSIX stdin does no newline translation, so a CRLF falling on the 65536-character
   block boundary became an extra blank line.

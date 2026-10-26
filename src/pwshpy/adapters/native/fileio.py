@@ -17,6 +17,7 @@ Contents:
 from __future__ import annotations
 
 import codecs
+import io
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -145,12 +146,14 @@ def _bomless_codec(encoding: str) -> str:
     writes a BOM on every ``encode`` call - one per chunk, and one for an empty string.
 
     Raises:
-        LookupError: ``encoding`` names no codec.
+        LookupError: ``encoding`` names no codec, or one that is not a text encoding (``base64``,
+            ``rot13``): ``codecs.lookup`` accepts those, so a text stream is asked instead.
 
     Example:
         >>> _bomless_codec("utf_16"), _bomless_codec("UTF8"), _bomless_codec("cp1252")
         ('utf-16-le', 'utf-8', 'cp1252')
     """
+    io.TextIOWrapper(io.BytesIO(), encoding=encoding)
     name = codecs.lookup(encoding).name
     return _BOMLESS_CODEC.get(name, name)
 

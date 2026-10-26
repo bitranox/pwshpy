@@ -175,6 +175,17 @@ def test_write_text_refuses_a_codec_that_is_not_a_text_encoding(tmp_path: Path) 
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("stdin", [b"", b"x\n"], ids=["empty", "text"])
+def test_write_text_refuses_an_output_encoding_that_is_not_a_text_encoding(tmp_path: Path, stdin: bytes) -> None:
+    """--encoding base64 is a usage error (exit 2) naming the value, whether or not stdin holds anything."""
+    dest = tmp_path / "out.txt"
+    completed = _run_pwshpy("write_text", str(dest), "--encoding", "base64", stdin=stdin)
+    assert completed.returncode == 2
+    assert b"base64" in completed.stderr
+    assert not dest.exists()
+
+
+@pytest.mark.os_agnostic
 @pytest.mark.parametrize("extra", [[], ["--input-encoding", "utf-8"]], ids=["no-option", "with-option"])
 def test_write_text_keeps_a_terminal_stdin_on_its_own_encoding(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra: list[str]

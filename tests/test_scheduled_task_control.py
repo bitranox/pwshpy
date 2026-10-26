@@ -895,8 +895,8 @@ def test_run_info_for_a_just_run_and_a_never_run_task() -> None:
 
 # --- [45] TaskSettings on a real Task Scheduler: throwaway VM only ------------
 
-# Each written TaskSettings, with what Task Scheduler then holds (``stored``, all measured on VM
-# 24000): the ExecutionTimeLimit text it reports, the task XML's ExecutionTimeLimit element, the
+# Each written TaskSettings, with what Task Scheduler then holds (``stored``, all measured on a
+# throwaway Windows VM): the ExecutionTimeLimit text it reports, the task XML's ExecutionTimeLimit element, the
 # MultipleInstances COM integer and the XML's MultipleInstancesPolicy element. "" is an absent
 # element: a written PT259200S is stored as PT72H, the default, and the XML then holds no limit,
 # whereas a written IgnoreNew (the default policy too) keeps its element. The CIM enum behind

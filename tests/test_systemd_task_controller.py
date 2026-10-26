@@ -389,7 +389,7 @@ def test_a_start_on_ac_power_runs_in_a_host_without_a_battery(ondemand_task: str
     controller.run(ondemand_task)
     _wait_for(marker.exists, 15)
     # The marker is the evidence the condition passed: ConditionResult is no witness, as a finished
-    # oneshot is unloaded and a fresh load reads it "no" (measured on CT 24001).
+    # oneshot is unloaded and a fresh load reads it "no" (measured on a throwaway systemd container).
     assert marker.exists()
 
 

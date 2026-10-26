@@ -2398,7 +2398,7 @@ def test_a_refuse_manual_start_that_is_no_boolean_reads_unknown(monkeypatch: pyt
     assert task.settings.allow_hard_terminate is True  # the other fields still read
 
 
-#: systemd 259's answer to StartUnit on a RefuseManualStart=yes service (busctl call, measured on CT 24001).
+#: systemd 259's answer to StartUnit on a RefuseManualStart=yes service (measured with busctl).
 _MANUAL_START_REFUSED = (
     "Operation refused, unit job.service may be requested by dependency only "
     "(it is configured to refuse manual start/stop)."

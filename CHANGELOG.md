@@ -6,6 +6,53 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Fixed
+
+- `--json` and `--jsonl` output, and `ps.write_records`, no longer fail on text that is not valid
+  UTF-8. On POSIX, an environment variable, file name, process name or account name holding such a
+  byte reaches Python as a lone surrogate, which the JSON encoder refused: `env --jsonl` exited 22,
+  and the record holding the byte was never written. Each undecodable byte is now written as U+FFFD,
+  and one warning on stderr names the record and field, for example
+  `warning: EnvVar record 3, field(s) value: not valid UTF-8; each undecodable byte written as U+FFFD`.
+  `ps.write_records` sends the warning to the module logger instead. Commands that print a plain
+  value as JSON (`get_known_folder --json`, `run`, `cmdlet`, `get_command`, `invoke_rest_method`) follow the same
+  rule, and warn `warning: output field <path>: ...`. The warning never quotes the value. Its field
+  path is plain ASCII: a non-ASCII or non-printable character in a key is written as `?`. Two keys
+  that differ only in undecodable bytes both survive, the later one renamed `<key>~2`, `<key>~3`,
+  and so on. Clean output is byte-for-byte unchanged.
+- A choice pwshpy accepts in any case is shown in its documented spelling again. Under click 8.5,
+  `get_known_folder bogus` listed `'applicationdata', ... 'mydocuments'`, and `--help` showed
+  `[limited|highest]`. The bad-value message, the missing-value message, the `--help` metavar and
+  shell completion now show `MyDocuments`, `Highest`, `InteractiveToken`, `StopExisting` and the
+  rest as documented. This covers the `get_known_folder` folder, `register_scheduled_task`'s
+  `--run-level`, `--logon-type` and `--multiple-instances`, `config --format` and
+  `config-deploy --target`. Matching is unchanged, so a lowercase value is still accepted.
+- One decoder now turns a pywin32 COM or Win32 error into its HRESULT. It replaces three private
+  copies that disagreed:
+  - A Win32 error code is reported as its HRESULT (`5` becomes `0x80070005`).
+  - A `DISP_E_EXCEPTION` (0x80020009) is unwrapped to the code the called object reported, when it
+    reported one.
+  - Only an exception from `pywintypes` counts as a COM error. `struct.error`, `zlib.error` and
+    `re.error` were taken for one, because only the class name was checked.
+  - A failed Windows Update search now also reports a Win32 `pywintypes.error`. Before, only a
+    `com_error` was turned into a message. A failure that carries no code says `without an HRESULT`
+    instead of `HRESULT 0x00000000`.
+  - A failed CIM query now names its code: `(HRESULT 0x...)`, or `(callee HRESULT 0x...)` when the
+    code was unwrapped.
+- An elevated (root) `.sh` pack run of a script with a git source now refuses a `git` older than
+  2.32, exiting 127. Such a git ignores `GIT_CONFIG_GLOBAL`, so as root it would read the caller's
+  git configuration. The runner asks the git that uv will run for its version, before uv is called
+  at all, and refuses that git when it is too old, when its output does not parse, or when it fails.
+  A git source is decided at pack time and shown by `--pwshpy-info` (`git source : yes/no`). The
+  check over-detects on purpose: `git+` anywhere in the PEP 723 block or a `--with` value counts,
+  and so do a `git` key, a `\u`/`\U`/`\x` escape, or a line-ending backslash. A git source the
+  packer cannot see is not detected: one inside a local wheel or a path dependency's own metadata,
+  or a build backend that runs git itself. An elevated `.ps1` run has no such check yet.
+- The mutating test suites fail for the right reason. The systemd settings read-back checks
+  `systemctl`'s exit code and the `ExecStart=` line, and the fixtures reset failed units. The
+  scheduled-task tests take the task name from one constant, and every `ValidationError` test in
+  `test_scheduling_domain.py` names the expected error.
+
 ## [1.9.0] 2026-10-26 22:23:51
 
 ### Added

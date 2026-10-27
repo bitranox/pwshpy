@@ -2385,6 +2385,8 @@ def test_as_root_a_git_source_needs_git_2_32(
         assert result.returncode == 0, result.stdout + result.stderr
         assert refusals == [], result.stderr
         assert "run" in record.read_text(encoding="utf-8").splitlines(), "uv never ran the script"
+        # The control for the refused branch: an accepted run does ask uv for a Python here.
+        assert Path(f"{record}.python").exists(), "uv was never asked for a Python"
         return
     assert result.returncode == 127, result.stdout + result.stderr
     assert not record.exists(), "uv ran the script: " + record.read_text(encoding="utf-8")

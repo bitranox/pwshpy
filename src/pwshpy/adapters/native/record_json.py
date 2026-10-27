@@ -2,8 +2,9 @@
 
 A record is dumped with ``orjson.dumps(record.to_dict())`` (``--json`` / ``--jsonl`` and
 ``write_records``), a plain value with ``orjson.dumps(value, default=str)`` (``emit_json``:
-``get_known_folder --json``, ``run``, ``invoke_rest_method``). Text holding a byte that is not valid
-UTF-8 (a POSIX environment variable, file name, process or account name) reaches Python as a lone
+``get_known_folder --json``, ``run``, ``cmdlet`` and its wrappers, ``invoke_rest_method``). Text
+holding a byte that is not valid UTF-8 (a POSIX environment variable, file name, process or account
+name) reaches Python as a lone
 surrogate, because ``os`` decodes with ``surrogateescape``, and orjson refuses a lone surrogate. Only
 then is the value walked again: each code point in U+D800-U+DFFF is written as U+FFFD, one per
 undecodable byte (for a single undecodable byte this is what pwsh 7 shows), and the paths that held

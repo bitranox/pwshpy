@@ -13,13 +13,17 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   byte reaches Python as a lone surrogate, which the JSON encoder refused: `env --jsonl` exited 22,
   and the record holding the byte was never written. Each undecodable byte is now written as U+FFFD,
   and one warning on stderr names the record and field, for example
-  `warning: EnvVar record 3, field(s) value: not valid UTF-8; each undecodable byte written as U+FFFD`.
-  `ps.write_records` sends the warning to the module logger instead. Commands that print a plain
-  value as JSON (`get_known_folder --json`, `run`, `cmdlet`, `get_command`, `invoke_rest_method`) follow the same
-  rule, and warn `warning: output field <path>: ...`. The warning never quotes the value. Its field
-  path is plain ASCII: a non-ASCII or non-printable character in a key is written as `?`. Two keys
-  that differ only in undecodable bytes both survive, the later one renamed `<key>~2`, `<key>~3`,
-  and so on. Clean output is byte-for-byte unchanged.
+  `warning: EnvVar record 3, field value: not valid UTF-8; each undecodable byte written as U+FFFD`
+  (`fields name, value` when several are affected). `ps.write_records` sends the warning to the
+  module logger instead. Commands that print a plain value as JSON (`get_known_folder --json`,
+  `run`, `cmdlet`, `get_ad_user`, `get_ad_group`, `get_ad_computer`, `get_mailbox`, `get_az_vm`,
+  `get_az_resource_group`, `invoke_rest_method`) follow the same rule, and warn
+  `warning: output field <path>: ...`, or `warning: output: ...` for a bare string such as
+  `get_known_folder`'s path. The warning never quotes the value. Its field path is plain ASCII: a
+  non-ASCII or non-printable character in a key is written as `?`. Two keys that differ only in
+  undecodable bytes both survive, the later one renamed `<key>~2`, `<key>~3`, and so on. Clean
+  output is byte-for-byte unchanged. Not covered yet: `config --format json`, which still fails on
+  such a value.
 - A choice pwshpy accepts in any case is shown in its documented spelling again. Under click 8.5,
   `get_known_folder bogus` listed `'applicationdata', ... 'mydocuments'`, and `--help` showed
   `[limited|highest]`. The bad-value message, the missing-value message, the `--help` metavar and
@@ -43,7 +47,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   2.32, exiting 127. Such a git ignores `GIT_CONFIG_GLOBAL`, so as root it would read the caller's
   git configuration. The runner asks the git that uv will run for its version, before uv is called
   at all, and refuses that git when it is too old, when its output does not parse, or when it fails.
-  A git source is decided at pack time and shown by `--pwshpy-info` (`git source : yes/no`). The
+  A git source is decided at pack time and shown by `--pwshpy-info`
+  (`git source : yes (a root run needs git 2.32 or later)`, or `no`). The
   check over-detects on purpose: `git+` anywhere in the PEP 723 block or a `--with` value counts,
   and so do a `git` key, a `\u`/`\U`/`\x` escape, or a line-ending backslash. A git source the
   packer cannot see is not detected: one inside a local wheel or a path dependency's own metadata,

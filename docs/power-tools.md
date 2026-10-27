@@ -309,14 +309,14 @@ On the recipient's side the artefact takes a few switches of its own; everything
 to your script untouched. The `.ps1` spells them `-PwshPy...`; the `.sh` spells the same switches
 `--pwshpy-...`:
 
-| `.ps1` switch        | `.sh` switch             | Effect                                                                          |
-|----------------------|--------------------------|---------------------------------------------------------------------------------|
-| `-PwshPyInfo`        | `--pwshpy-info`          | print the manifest (entry, hash, file list, cache dir) without running anything |
-| `-PwshPyClean`       | `--pwshpy-clean`         | discard the cached extraction and unpack again                                  |
-| `-PwshPyNoInstallUv` | `--pwshpy-no-install-uv` | fail with exit 127 instead of installing uv                                     |
-| `-PwshPyElevate`     | `--pwshpy-elevate`       | relaunch elevated first (UAC on Windows, `sudo` on POSIX); exit 77 if refused   |
-| `-PwshPyUv PATH`     | `--pwshpy-uv PATH`       | run the uv at this absolute path, no search and no install; exit 64 if relative |
-| `-PwshPyHelp`        | `--pwshpy-help`          | show the artefact's own help                                                    |
+| `.ps1` switch        | `.sh` switch             | Effect                                                                                                                              |
+|----------------------|--------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| `-PwshPyInfo`        | `--pwshpy-info`          | print the manifest (entry, hash, file list, cache dir; the `.sh` also prints its uv args and `git source`) without running anything |
+| `-PwshPyClean`       | `--pwshpy-clean`         | discard the cached extraction and unpack again                                                                                      |
+| `-PwshPyNoInstallUv` | `--pwshpy-no-install-uv` | fail with exit 127 instead of installing uv                                                                                         |
+| `-PwshPyElevate`     | `--pwshpy-elevate`       | relaunch elevated first (UAC on Windows, `sudo` on POSIX); exit 77 if refused                                                       |
+| `-PwshPyUv PATH`     | `--pwshpy-uv PATH`       | run the uv at this absolute path, no search and no install; exit 64 if relative                                                     |
+| `-PwshPyHelp`        | `--pwshpy-help`          | show the artefact's own help                                                                                                        |
 
 Details worth knowing:
 
@@ -575,7 +575,8 @@ Details worth knowing:
   <major>.<minor>` it can read; the remedy it names is to upgrade git or to run the script without
   root. With no git on uv's `PATH` nothing is asked (uv then fails on its own); for a script without
   a git source the runner never runs git, and a run that is not root checks nothing. Whether the script has
-  a git source is decided at pack time, and `--pwshpy-info` shows it (`git source : yes` or `no`):
+  a git source is decided at pack time, and `--pwshpy-info` shows it
+  (`git source : yes (a root run needs git 2.32 or later)`, or `no`):
   a `git+` (in any case) in a `--with` value, or, outside a TOML comment in the PEP 723 block,
   `git+` anywhere, a key named `git` anywhere (a `[tool.uv.sources]` entry such as
   `pkg = { git = "..." }` or a `[tool.uv.sources.pkg]` table), a `\u`, `\U` or `\x` escape, or a

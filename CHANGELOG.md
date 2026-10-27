@@ -6,6 +6,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.10.0] 2026-10-27 08:35:45
+
 ### Fixed
 
 - `--json` and `--jsonl` output, and `ps.write_records`, no longer fail on text that is not valid

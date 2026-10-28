@@ -7,12 +7,24 @@ from pathlib import Path
 
 import pytest
 
+from pwshpy.domain.errors import NativeCallError
+
 pytestmark = pytest.mark.os_agnostic
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "pwshpy"
 #: Built directly on purpose: a timeout carries no native code, and its constructor needs timeout=.
 _ALLOWED_DIRECT = frozenset({"OperationTimeoutError"})
-_WRAPPED = frozenset({"NativeCallError", "NativeAccessDeniedError", "ElevationDeclinedError"})
+
+
+def _family(cls: type[NativeCallError]) -> set[str]:
+    """``cls`` and every subclass below it, by name, so a new subclass is guarded the day it lands."""
+    names = {cls.__name__}
+    for sub in cls.__subclasses__():
+        names |= _family(sub)
+    return names
+
+
+_WRAPPED = frozenset(_family(NativeCallError) - _ALLOWED_DIRECT)
 
 
 def _offenders() -> tuple[list[str], int]:
@@ -25,9 +37,15 @@ def _offenders() -> tuple[list[str], int]:
                 continue
             func = node.exc.func
             name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
-            if name in _WRAPPED and name not in _ALLOWED_DIRECT:
+            if name in _WRAPPED:
                 offenders.append(f"{path.relative_to(_SRC)}:{node.lineno} raise {name}(...) from ...")
     return offenders, examined
+
+
+def test_the_guarded_names_are_the_whole_family_minus_the_allow_list() -> None:
+    assert {"NativeCallError", "NativeAccessDeniedError", "ElevationDeclinedError"} <= _WRAPPED
+    assert _family(NativeCallError) >= _ALLOWED_DIRECT, "an allow-list entry that is no subclass guards nothing"
+    assert not _ALLOWED_DIRECT & _WRAPPED
 
 
 def test_no_wrapping_site_bypasses_the_factory() -> None:

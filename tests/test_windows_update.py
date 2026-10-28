@@ -21,7 +21,7 @@ from com_fakes import codeless_com_error, com_error, dispatch_error, error, sign
 
 from pwshpy.adapters.native import windows_update
 from pwshpy.adapters.native.bounded import run_bounded
-from pwshpy.adapters.native.marshal import E_ACCESSDENIED, com_hresult
+from pwshpy.adapters.native.marshal import E_ACCESSDENIED
 from pwshpy.domain.errors import NativeAccessDeniedError, NativeCallError, PlatformUnsupportedError
 from pwshpy.domain.records import UpdateCategory, WindowsUpdate
 
@@ -258,14 +258,17 @@ def _child_with(failure: BaseException) -> tuple[Callable[[str], object], _FakeP
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(
-    "failure",
-    [com_error(-2147024894, "The system cannot find the file specified.", None, None), error(5, "f", "denied")],
+    ("failure", "hresult"),
+    [
+        (com_error(-2147024894, "The system cannot find the file specified.", None, None), 0x80070002),
+        (error(5, "f", "denied"), 0x80070005),
+    ],
     ids=["com_error", "error"],
 )
-def test_child_returns_a_pywin32_failure_as_data(failure: BaseException) -> None:
+def test_child_returns_a_pywin32_failure_as_data(failure: BaseException, hresult: int) -> None:
     load, pythoncom = _child_with(failure)
     outcome = _windows_update_search("IsInstalled=0", load)
-    assert outcome == _Outcome(error=_com_failure_message(failure), updates=(), hresult=com_hresult(failure))
+    assert outcome == _Outcome(error=_com_failure_message(failure), updates=(), hresult=hresult)
     assert pythoncom.calls == ["init", "uninit"]
 
 

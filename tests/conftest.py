@@ -231,11 +231,16 @@ def deterministic_cli_output(monkeypatch: pytest.MonkeyPatch) -> None:
     removing the variable for the test reaches it. A console built at import time is out of reach
     of all of this: lib_layered_config's default display console is one, so the
     ``display_config`` tests still see colour when FORCE_COLOR is exported for the whole run.
+
+    COLUMNS is removed too: the human table honours an explicit COLUMNS even off a terminal, so a
+    runner that exports one (COLUMNS=80 cuts a shortcut table's target cell) failed a table test
+    that passed locally. A test about the width sets COLUMNS itself.
     """
     monkeypatch.setattr(rich_click.rich_click, "FORCE_TERMINAL", None)
     monkeypatch.setattr(rich_click.rich_click, "WIDTH", _CLI_OUTPUT_WIDTH)
     monkeypatch.setattr(rich_click.rich_click, "MAX_WIDTH", _CLI_OUTPUT_WIDTH)
     monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("COLUMNS", raising=False)
 
 
 def _layer_config_file(target: str, redirected_root: Path) -> Path:

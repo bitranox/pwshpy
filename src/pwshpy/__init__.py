@@ -51,6 +51,7 @@ from .domain.errors import (
     ElevationDeclinedError,
     ElevationRequiredError,
     FeatureUnavailableError,
+    NativeAccessDeniedError,
     NativeCallError,
     OperationTimeoutError,
     PackError,
@@ -179,6 +180,7 @@ __all__ = [
     "AceType",
     # Errors
     "PwshPyError",
+    "NativeAccessDeniedError",
     "NativeCallError",
     "ElevationDeclinedError",
     "OperationTimeoutError",

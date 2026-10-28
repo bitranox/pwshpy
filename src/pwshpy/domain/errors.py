@@ -8,6 +8,7 @@ HRESULT, .NET ``ErrorRecord``) into this tree.
 Contents:
     * :class:`PwshPyError` - root of the hierarchy.
     * :class:`NativeCallError` - a native binding call failed.
+    * :class:`NativeAccessDeniedError` - a native call was refused for lack of rights.
     * :class:`ElevationDeclinedError` - the person refused the Administrator prompt.
     * :class:`OperationTimeoutError` - a native call outlived its timeout and its worker was killed.
     * :class:`PowerShellError` - a .NET hosted-PowerShell call failed.
@@ -59,11 +60,17 @@ class PwshPyError(Exception):
 def _rebuild_without_init(cls: type[BaseException], args: tuple[object, ...]) -> BaseException:
     """Create ``cls`` with ``args`` but without running ``__init__`` (the pickle state follows).
 
+    ``args`` is assigned explicitly: an ``OSError`` subclass with its own ``__init__`` (such as
+    :class:`NativeAccessDeniedError`) leaves ``args`` empty under ``__new__``, so the rebuilt
+    error would have no message.
+
     Example:
         >>> _rebuild_without_init(OperationTimeoutError, ("slow",)).args
         ('slow',)
     """
-    return cls.__new__(cls, *args)
+    rebuilt = cls.__new__(cls, *args)
+    rebuilt.args = args
+    return rebuilt
 
 
 class NativeCallError(PwshPyError):
@@ -74,12 +81,59 @@ class NativeCallError(PwshPyError):
     the boundary. Also raised by a ``strict=True`` listing for an item it cannot read,
     and by :meth:`~pwshpy.domain.records.ProcessResult.check` for a nonzero exit.
 
+    ``hresult`` is the failure's status as an unsigned 32-bit HRESULT when the native error
+    carried one (a pywin32 COM/Win32 error, or a Windows ``OSError`` whose ``winerror`` is
+    mapped as HRESULT_FROM_WIN32), else ``None``. Branch on it, never on the (localized)
+    message.
+
+    Args:
+        message: The human-readable description.
+        hresult: The unsigned HRESULT, or ``None`` when the failure carried none.
+
+    Attributes:
+        hresult: The unsigned HRESULT, or ``None``.
+
     Example:
         >>> raise NativeCallError("OpenSCManager failed")
         Traceback (most recent call last):
         ...
         pwshpy.domain.errors.NativeCallError: OpenSCManager failed
+        >>> f"0x{NativeCallError('x', hresult=0x80070002).hresult:08X}"
+        '0x80070002'
     """
+
+    hresult: int | None = None
+
+    def __init__(self, message: str, *, hresult: int | None = None) -> None:
+        super().__init__(message)
+        self.hresult = hresult
+
+
+class NativeAccessDeniedError(NativeCallError, PermissionError):
+    """A native call was refused for lack of rights (E_ACCESSDENIED, EACCES, EPERM).
+
+    A :class:`NativeCallError`, so existing handlers keep catching it, and a
+    :class:`PermissionError`, so ``except PermissionError`` catches it and the ``pwshpy`` CLI
+    exits as for one (13 on POSIX, 5 on Windows, via lib_cli_exit_tools). ``errno`` is the
+    POSIX code when the failure carried one, else ``None``.
+
+    Args:
+        message: The human-readable description.
+        hresult: The unsigned HRESULT (``0x80070005`` on Windows), or ``None``.
+
+    Example:
+        >>> isinstance(NativeAccessDeniedError("denied"), PermissionError)
+        True
+    """
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Keep ``errno`` across pickle: it is an OSError slot, not part of ``__dict__``.
+
+        Returns:
+            The reduce triple of :meth:`PwshPyError.__reduce__` with ``errno`` in its state.
+        """
+        rebuild, args, state = super().__reduce__()
+        return (rebuild, args, {**state, "errno": self.errno})
 
 
 class ElevationDeclinedError(NativeCallError):
@@ -220,6 +274,7 @@ __all__ = [
     "ElevationDeclinedError",
     "ElevationRequiredError",
     "FeatureUnavailableError",
+    "NativeAccessDeniedError",
     "NativeCallError",
     "OperationTimeoutError",
     "PlatformUnsupportedError",

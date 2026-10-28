@@ -13,7 +13,7 @@ import pytest
 
 import pwshpy
 from pwshpy.adapters.logging.setup import InvalidLoggingConfigError
-from pwshpy.domain.errors import ConfigurationError, OperationTimeoutError
+from pwshpy.domain.errors import ConfigurationError, NativeCallError, OperationTimeoutError
 
 
 @pytest.mark.os_agnostic
@@ -72,6 +72,7 @@ _PROBLEMS = ["lib_log_rich.rate_limit: Input should be a valid tuple", "lib_log_
 #: One instance of every pwshpy exception class whose ``__init__`` differs from ``BaseException``'s.
 #: Such an ``__init__`` is what breaks the default reduce, which calls ``type(self)(*self.args)``.
 _CUSTOM_INIT_ERRORS: list[BaseException] = [
+    NativeCallError("refused", hresult=0x80070005),
     OperationTimeoutError("slow call", timeout=1.5),
     InvalidLoggingConfigError(_PROBLEMS),
 ]

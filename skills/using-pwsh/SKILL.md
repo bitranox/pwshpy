@@ -205,9 +205,15 @@ catch a subclass before its parent:
   local-account verbs (`new_local_user`, `remove_local_user`, `enable_local_user`,
   `disable_local_user`, `new_local_group`, `remove_local_group`, `add_local_group_member` and
   `remove_local_group_member`, `timeout=` default 30 s)) and `ElevationDeclinedError` (the UAC
-  prompt or sudo's password refused).
-  A control the OS refuses (a service stop denied, a missing executable) is the plain
-  `NativeCallError`: `except OperationTimeoutError` first, then `except NativeCallError`.
+  prompt or sudo's password refused) and `NativeAccessDeniedError` (a call refused for lack of
+  rights: `E_ACCESSDENIED`, `EACCES`, `EPERM`, psutil `AccessDenied` - a Windows service stop
+  denied, a file or registry key the caller cannot open). `NativeAccessDeniedError` is also a
+  `PermissionError`, so `except PermissionError` catches it; `errno` holds the POSIX code when the
+  failure carried one. Any other refusal (a missing executable, an error reply from systemd over
+  D-Bus) is the plain `NativeCallError`. Every `NativeCallError` carries `.hresult`, the unsigned
+  32-bit HRESULT when the native error had one (`0x80070005` for access denied), else `None`:
+  branch on it, never on the localized message. Catch `NativeAccessDeniedError` and
+  `OperationTimeoutError` first, then `NativeCallError`.
 - `ElevationRequiredError` (`require_elevation()`), `PlatformUnsupportedError` (no analog on this OS),
   `ConfigurationError`, `PowerShellError` / `FeatureUnavailableError` (.NET, `[full]`; `run`, `cmdlet`
   and the module wrappers `get_ad_user`, `get_ad_group`, `get_ad_computer`, `get_mailbox`, `get_az_vm`
@@ -229,7 +235,9 @@ never through `categories` or `title`, which the Windows Update agent localizes:
 written before a timeout.
 
 CLI and packed-runner exit codes (an error also writes one `ErrorName: message` line, or a `pwshpy: ...`
-line from a runner, to stderr): 0 ok, 1 any other `PwshPyError`, 2 usage error, 22 a refused value
+line from a runner, to stderr): 0 ok, 1 any other `PwshPyError`, 2 usage error, 13 a native call
+refused for lack of rights (`NativeAccessDeniedError`; 5 on Windows, whatever errno or HRESULT the
+call reported), 22 a refused value
 (`ValueError`; 87 on Windows), 64 a relative `-PwshPyUv` / `--pwshpy-uv`, 70 the runner failed before the script ran
 (the elevated `.ps1` child, or an elevated run that cannot return to the caller's directory), 77
 elevation declined (`pwshpy --elevate`, `-PwshPyElevate`, `--pwshpy-elevate`; stderr line `pwshpy:

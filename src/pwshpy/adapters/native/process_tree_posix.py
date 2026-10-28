@@ -75,7 +75,7 @@ class _HelperRequest(BaseModel):
 class _HelperStatus(BaseModel):
     """The helper's one status report; every field is absent from the variants that do not carry it.
 
-    The helper writes ``{"exit_code": N}``, ``{"error": ..., "message": ...}`` or
+    The helper writes ``{"exit_code": N}``, ``{"error": ..., "message": ...[, "errno": N]}`` or
     ``{"killed": true}``; a missing, undecodable or malformed report parses as the empty status.
 
     Example:
@@ -90,6 +90,7 @@ class _HelperStatus(BaseModel):
     exit_code: int | None = None
     error: str | None = None
     message: str = ""
+    errno: int | None = None
     killed: bool = False
 
     @classmethod
@@ -107,8 +108,15 @@ class _HelperStatus(BaseModel):
 
 def _status_error(args: Sequence[str], status: _HelperStatus) -> NativeCallError:
     if status.error == "FileNotFoundError":
-        return NativeCallError(f"Executable not found: {args[0]!r} ({status.message})")
-    return NativeCallError(f"Failed to run {args[0]!r}: {status.error}: {status.message}")
+        text = f"Executable not found: {args[0]!r} ({status.message})"
+    else:
+        text = f"Failed to run {args[0]!r}: {status.error}: {status.message}"
+    if status.errno is None:
+        return NativeCallError(text)
+    # The OSError died in the helper process; rebuilding it from its errno lets native_error type
+    # a refused start exactly as the in-process path (wait_tree=False) does. OSError(errno, ...)
+    # picks the matching subclass itself (EACCES gives PermissionError).
+    return native_error(text, OSError(status.errno, status.message))
 
 
 def _no_status_error(args: Sequence[str], status: _HelperStatus) -> NativeCallError:

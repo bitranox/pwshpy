@@ -1,13 +1,14 @@
 """The wire contract between ``process_tree_posix`` (parent) and ``_tree_reaper`` (helper).
 
 The two ends run in different processes, so the JSON on both pipes is the contract.  The
-byte literals below are what the helper and the parent wrote before their payloads became
-typed models; each test proves the typed code still writes, and still reads, exactly those
-bytes - including an argv element that is not valid UTF-8, which travels surrogate-escaped.
+byte literals below are what the helper and the parent write; each test proves the typed code
+writes, and reads, exactly those bytes - including an argv element that is not valid UTF-8,
+which travels surrogate-escaped, and the errno a start failure carries.
 """
 
 from __future__ import annotations
 
+import errno
 import os
 import signal
 import subprocess
@@ -31,7 +32,7 @@ from pwshpy.adapters.native.process_tree_posix import (
     _no_status_error,  # pyright: ignore[reportPrivateUsage]
     _status_error,  # pyright: ignore[reportPrivateUsage]
 )
-from pwshpy.domain.errors import NativeCallError
+from pwshpy.domain.errors import NativeAccessDeniedError, NativeCallError
 
 _HELPER = Path(__file__).resolve().parents[1] / "src" / "pwshpy" / "adapters" / "native" / "_tree_reaper.py"
 # The POSIX decoding of a non-UTF-8 name (it carries the lone surrogate U+DCFF). Spelled out
@@ -41,7 +42,8 @@ _BAD_NAME = b"/nonexistent-\xff-prog".decode("utf-8", "surrogateescape")
 
 _REQUEST_BYTES = b'{"argv": ["/nonexistent-\\udcff-prog", "x"], "cwd": null, "env": null}'
 _FAILED_BYTES = (
-    b'{"error": "FileNotFoundError", "message": "[Errno 2] No such file or directory: \'/nonexistent-\\\\udcff-prog\'"}'
+    b'{"error": "FileNotFoundError", '
+    b'"message": "[Errno 2] No such file or directory: \'/nonexistent-\\\\udcff-prog\'", "errno": 2}'
 )
 _FAILED_MESSAGE = "[Errno 2] No such file or directory: '/nonexistent-\\udcff-prog'"
 #: Popen's own refusal of a non-str argv element, env value or cwd, as the helper reports it.
@@ -121,7 +123,7 @@ def test_each_status_variant_encodes_to_its_old_bytes() -> None:
     assert encode_status(_Exited(exit_code=3)) == '{"exit_code": 3}'
     assert encode_status(_Exited(exit_code=-9)) == '{"exit_code": -9}'
     assert encode_status(_Killed()) == '{"killed": true}'
-    failed = _Failed(error="FileNotFoundError", message=_FAILED_MESSAGE)
+    failed = _Failed(error="FileNotFoundError", message=_FAILED_MESSAGE, errno=errno.ENOENT)
     assert encode_status(failed).encode("utf-8") == _FAILED_BYTES
 
 
@@ -138,7 +140,9 @@ def test_the_parent_parses_each_status_variant() -> None:
     """The parent reads each helper variant into the one typed status."""
     assert _HelperStatus.from_wire(b'{"exit_code": 3}') == _HelperStatus(exit_code=3)
     assert _HelperStatus.from_wire(b'{"killed": true}') == _HelperStatus(killed=True)
-    assert _HelperStatus.from_wire(_FAILED_BYTES) == _HelperStatus(error="FileNotFoundError", message=_FAILED_MESSAGE)
+    assert _HelperStatus.from_wire(_FAILED_BYTES) == _HelperStatus(
+        error="FileNotFoundError", message=_FAILED_MESSAGE, errno=errno.ENOENT
+    )
 
 
 @pytest.mark.os_agnostic
@@ -163,6 +167,21 @@ def test_the_status_errors_keep_their_messages() -> None:
     assert str(killed) == "The wait_tree helper for 'prog' ended without a status: {'killed': True}"
     nothing = _no_status_error(args, _HelperStatus())
     assert str(nothing) == "The wait_tree helper for 'prog' ended without a status: {}"
+
+
+@pytest.mark.os_agnostic
+def test_a_start_failure_is_typed_by_the_errno_it_carried() -> None:
+    """EACCES over the wire is a NativeAccessDeniedError; ENOENT and a failure without errno stay plain."""
+    args = ["prog"]
+    denied = _status_error(args, _HelperStatus(error="PermissionError", message="denied", errno=errno.EACCES))
+    assert type(denied) is NativeAccessDeniedError
+    assert denied.errno == errno.EACCES
+    assert str(denied) == "Failed to run 'prog': PermissionError: denied"
+    missing = _status_error(args, _HelperStatus(error="FileNotFoundError", message="gone", errno=errno.ENOENT))
+    assert type(missing) is NativeCallError
+    assert str(missing) == "Executable not found: 'prog' (gone)"
+    untyped = _status_error(args, _HelperStatus(error="TypeError", message="not int"))
+    assert type(untyped) is NativeCallError
 
 
 def _helper_status_bytes(request: bytes, *, terminate_after: Path | None = None) -> bytes:

@@ -245,6 +245,26 @@ def test_wait_tree_missing_executable_raises_native_call_error() -> None:
 
 
 @pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the wait_tree helper runs on POSIX only")
+@pytest.mark.skipif(sys.platform != "win32" and os.geteuid() == 0, reason="root may execute a mode-644 file")
+def test_wait_tree_types_a_refused_start_like_the_default_path(tmp_path: Path) -> None:
+    """A program the caller may not execute is a NativeAccessDeniedError with or without wait_tree.
+
+    The helper starts the program in its own process, so the errno has to cross the status pipe;
+    without it the parent could only build a plain NativeCallError from the text.
+    """
+    program = tmp_path / "not-executable"
+    program.write_bytes(b"#!/bin/sh\nexit 0\n")
+    program.chmod(0o644)
+    with pytest.raises(NativeAccessDeniedError) as default_path:
+        build_ps().exec([str(program)])
+    with pytest.raises(NativeAccessDeniedError) as tree_path:
+        build_ps().exec([str(program)], wait_tree=True, timeout=60)
+    assert tree_path.value.errno == default_path.value.errno == errno.EACCES
+    assert str(tree_path.value).startswith(f"Failed to run {str(program)!r}: PermissionError: ")
+
+
+@pytest.mark.os_posix
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal semantics")
 def test_wait_tree_reports_a_signal_death_like_the_default_path() -> None:
     """A program killed by a signal reports -N, exactly as subprocess (and wait_tree=False) does."""

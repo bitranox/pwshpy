@@ -18,9 +18,9 @@ in its host:
 The program inherits the helper's stdin/stdout/stderr, so its output reaches the caller's
 pipes directly; the helper itself never writes to them (a traceback there would pollute the
 captured stderr).  It reports through the status pipe as one JSON object:
-``{"exit_code": N}``, ``{"error": "<ExceptionName>", "message": "..."}`` or
-``{"killed": true}``.  SIGTERM from the caller means "timeout": kill the whole tree, report,
-exit.
+``{"exit_code": N}``, ``{"error": "<ExceptionName>", "message": "..."}`` (plus ``"errno": N``
+when the failure is an OSError that carries one) or ``{"killed": true}``.  SIGTERM from the
+caller means "timeout": kill the whole tree, report, exit.
 
 Stdlib only, and started with ``-I``: the helper must not import pwshpy or anything a user's
 ``PYTHONPATH`` or working directory could shadow.
@@ -82,17 +82,28 @@ class _Exited:
 
 @dataclass(frozen=True)
 class _Failed:
-    """The program could not be started, or the helper itself failed before it could run it."""
+    """The program could not be started, or the helper itself failed before it could run it.
+
+    ``errno`` travels beside the text because the parent decides from it whether the start was
+    refused for lack of rights (a NativeAccessDeniedError); the exception class name alone would
+    leave that to string matching. Only an OSError has one. ``winerror`` is never sent: the
+    helper runs on POSIX only, where CPython sets no ``winerror``.
+    """
 
     error: str
     message: str
+    errno: int | None = None
 
     @classmethod
     def of(cls, exc: Exception) -> _Failed:
-        return cls(error=type(exc).__name__, message=str(exc))
+        code = exc.errno if isinstance(exc, OSError) else None
+        return cls(error=type(exc).__name__, message=str(exc), errno=code)
 
     def wire(self) -> dict[str, Any]:
-        return {"error": self.error, "message": self.message}
+        wire: dict[str, Any] = {"error": self.error, "message": self.message}
+        if self.errno is not None:
+            wire["errno"] = self.errno
+        return wire
 
 
 @dataclass(frozen=True)

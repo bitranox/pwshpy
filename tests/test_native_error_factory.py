@@ -202,15 +202,96 @@ def test_carrier_five_links_down_is_not_reached() -> None:
 
 
 def test_self_referencing_context_terminates() -> None:
+    # Suppressed, so the walk follows the loop and only the link bound ends it.
     looped = ValueError("loop")
     looped.__context__ = looped
+    looped.__suppress_context__ = True
     assert native_error("x", looped).hresult is None
 
 
 def test_psutil_access_denied_over_a_chain_without_a_carrier_stays_denied() -> None:
+    # Suppressed contexts, so the walk really goes down both links, finds no carrier, and the
+    # refusal is judged by psutil's own type.
+    middle = KeyError("k")
+    middle.__context__ = ValueError("v")
+    middle.__suppress_context__ = True
     denied = _psutil_access_denied()
-    denied.__context__ = KeyError("k")
-    assert type(native_error("x", denied)) is NativeAccessDeniedError
+    denied.__context__ = middle
+    denied.__suppress_context__ = True
+    err = native_error("x", denied)
+    assert type(err) is NativeAccessDeniedError
+    assert (err.hresult, err.errno) == (None, None)
+
+
+# --- psutil's AccessDenied is psutil's judgement, whatever code its cause carries --------
+#
+# psutil 7.2.2 (_pswindows.py convert_oserror) raises AccessDenied `from` the OSError it
+# converts, for ERROR_ACCESS_DENIED AND for ERROR_PRIVILEGE_NOT_HELD (1314); the chain's
+# HRESULT 0x80070522 is not E_ACCESSDENIED, but the refusal is still one for lack of rights.
+
+_E_PRIVILEGE_NOT_HELD = 0x80070522  # HRESULT_FROM_WIN32(ERROR_PRIVILEGE_NOT_HELD = 1314)
+
+
+def _psutil_denied_from(oserror: OSError) -> BaseException:
+    denied = _psutil_access_denied()
+    denied.__cause__ = oserror
+    return denied
+
+
+def test_psutil_access_denied_over_privilege_not_held_is_denied() -> None:
+    inner = WindowsOSError(1314, errno.EINVAL)
+    err = native_error("x", _psutil_denied_from(inner))
+    assert type(err) is NativeAccessDeniedError
+    # The codes still come from the chain: the caller sees which right was missing.
+    assert (err.hresult, err.errno) == (_E_PRIVILEGE_NOT_HELD, errno.EINVAL)
+
+
+def test_psutil_access_denied_over_access_denied_keeps_its_codes() -> None:
+    err = native_error("x", _psutil_denied_from(WindowsPermissionError()))
+    assert type(err) is NativeAccessDeniedError
+    assert (err.hresult, err.errno) == (E_ACCESSDENIED, errno.EACCES)
+
+
+def test_hresult_wins_over_errno() -> None:
+    # A sharing violation (32) whose errno reads EACCES is not a refusal for lack of rights:
+    # the Win32 code says what happened, the errno is CPython's coarse mapping of it.
+    err = native_error("x", WindowsOSError(32, errno.EACCES))
+    assert type(err) is NativeCallError
+    assert err.hresult == 0x80070020
+
+
+# --- A pwshpy error that is already typed is authoritative ------------------------------
+#
+# An outer handler re-wrapping a NativeCallError must keep its type and codes: a COM-built
+# NativeAccessDeniedError carries the HRESULT and no errno, so treating it as a plain OSError
+# would read neither and drop the denial.
+
+
+def test_rewrapped_com_denial_stays_denied_with_its_hresult() -> None:
+    inner = native_error("open failed", com_error_for(E_ACCESSDENIED))
+    assert (type(inner), inner.errno) == (NativeAccessDeniedError, None)
+    err = native_error("outer", inner)
+    assert type(err) is NativeAccessDeniedError
+    assert (err.hresult, err.errno) == (E_ACCESSDENIED, None)
+
+
+def test_rewrapped_posix_denial_keeps_its_errno() -> None:
+    err = native_error("outer", native_error("open failed", OSError(errno.EPERM, "denied")))
+    assert type(err) is NativeAccessDeniedError
+    assert (err.hresult, err.errno) == (None, errno.EPERM)
+
+
+def test_rewrapped_plain_error_keeps_its_hresult() -> None:
+    err = native_error("outer", native_error("open failed", com_error_for(_E_FILE_NOT_FOUND)))
+    assert (type(err), err.hresult) == (NativeCallError, _E_FILE_NOT_FOUND)
+
+
+def test_typed_error_down_the_chain_is_authoritative() -> None:
+    wrapper = _RegistryError("wrapped")
+    wrapper.__cause__ = NativeCallError("inner", hresult=_E_FILE_NOT_FOUND)
+    wrapper.__cause__.__cause__ = WindowsPermissionError()  # older history, not the answer
+    err = native_error("outer", wrapper)
+    assert (type(err), err.hresult) == (NativeCallError, _E_FILE_NOT_FOUND)
 
 
 # --- An unsuppressed implicit context is the CALLER's history, never the native cause ----

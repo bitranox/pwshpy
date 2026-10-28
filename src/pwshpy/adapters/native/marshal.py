@@ -833,18 +833,18 @@ _PSUTIL_DENIED = "AccessDenied"
 _PSUTIL_MODULE = "psutil"
 
 
-#: How many chain links :func:`_native_cause` follows below the given cause. A wrapper library
+#: How many chain links :func:`_walked_links` follows below the given cause. A wrapper library
 #: adds one or two; the bound also ends a chain that loops back on itself.
 _MAX_CHAIN_LINKS: Final = 4
 
 
 def _is_code_carrier(exc: BaseException) -> bool:
-    """Whether ``exc`` is a native error that carries its own code: pywin32's, or an OSError."""
-    return is_com_error(exc) or isinstance(exc, OSError)
+    """Whether ``exc`` carries its own code: pywin32's error, an OSError, or a pwshpy NativeCallError."""
+    return is_com_error(exc) or isinstance(exc, (OSError, NativeCallError))
 
 
-def _native_cause(cause: BaseException) -> BaseException:
-    """The native error behind ``cause``: itself if it carries a code, else the first one down its chain.
+def _walked_links(cause: BaseException) -> list[BaseException]:
+    """``cause`` and the links below it, down to and including the first code carrier.
 
     Each link follows ``__cause__``, else ``__context__`` ONLY when ``__suppress_context__`` is
     set, which is exactly a wrapper's ``raise ... from None``: lib_registry raises its own
@@ -853,18 +853,20 @@ def _native_cause(cause: BaseException) -> BaseException:
     it on any raise to whatever the thread is handling, including an exception a CALLER frames
     up is handling, so a KeyError raised inside a caller's ``except PermissionError:`` would
     otherwise take the caller's errno. One exotic gap remains: a wrapper's ``raise ... from
-    None`` placed outside any ``except`` block still suppresses a context the caller set. When
-    no carrier lies within :data:`_MAX_CHAIN_LINKS` links, ``cause`` itself is returned, so a
-    non-carrier such as psutil.AccessDenied is still judged by its own type.
+    None`` placed outside any ``except`` block still suppresses a context the caller set. At
+    most :data:`_MAX_CHAIN_LINKS` links below ``cause`` are followed, which also ends a chain
+    that loops back on itself.
     """
+    links: list[BaseException] = []
     link: BaseException | None = cause
     for _ in range(_MAX_CHAIN_LINKS + 1):
         if link is None:
             break
+        links.append(link)
         if _is_code_carrier(link):
-            return link
+            break
         link = _next_link(link)
-    return cause
+    return links
 
 
 def _next_link(link: BaseException) -> BaseException | None:
@@ -883,14 +885,26 @@ def _cause_hresult(cause: BaseException) -> int | None:
     return None if winerror is None else _win32_to_hresult(winerror)
 
 
-def _is_denied(cause: BaseException, hresult: int | None) -> bool:
-    """Whether the cause is a refusal for lack of rights, judged by code and type, never text."""
-    if hresult is not None:
-        return hresult == E_ACCESSDENIED
-    if isinstance(cause, OSError):
-        return cause.errno in _DENIED_ERRNOS
-    cls = type(cause)
+def _is_psutil_denied(exc: BaseException) -> bool:
+    """Whether ``exc`` is psutil's AccessDenied, matched by class name and root module."""
+    cls = type(exc)
     return cls.__name__ == _PSUTIL_DENIED and cls.__module__.split(".")[0] == _PSUTIL_MODULE
+
+
+def _judge(native: BaseException) -> tuple[int | None, bool]:
+    """The HRESULT ``native`` carries and whether it is a refusal for lack of rights, by code only.
+
+    A pwshpy NativeCallError was typed when it was built and is taken as is: a COM-built
+    denial carries its HRESULT and no errno, which the OSError reading below would lose. Else
+    the HRESULT decides when there is one (a sharing violation whose errno CPython maps to
+    EACCES is not a denial), and the errno when there is none.
+    """
+    if isinstance(native, NativeCallError):
+        return native.hresult, isinstance(native, NativeAccessDeniedError)
+    hresult = _cause_hresult(native)
+    if hresult is not None:
+        return hresult, hresult == E_ACCESSDENIED
+    return None, isinstance(native, OSError) and native.errno in _DENIED_ERRNOS
 
 
 def native_error(
@@ -906,14 +920,18 @@ def native_error(
     (``tests/test_native_error_sites.py``) refuses a bare ``raise NativeCallError(...) from <cause>``
     anywhere in ``src``.
 
-    The code is read from the EFFECTIVE native cause: ``cause`` itself when it is a pywin32 error
-    or an ``OSError``, else the first such error down its chain (``__cause__``, else a
-    ``__context__`` that ``raise ... from None`` suppressed, at most four links). A wrapper
-    library's own error carries no code, and lib_registry raises its RegistryError ``from None``
-    over winreg's ``OSError``, so judging only the given exception lost the Win32 code of every
-    missing or denied registry key. An implicit, unsuppressed context is never read: it can be
-    an unrelated exception a caller is handling. The caller still raises ``from cause``, so the
-    traceback keeps the original chain.
+    The code is read from the EFFECTIVE native cause: ``cause`` itself when it is a pywin32 error,
+    an ``OSError`` or a pwshpy ``NativeCallError``, else the first such error down its chain
+    (``__cause__``, else a ``__context__`` that ``raise ... from None`` suppressed, at most four
+    links). A wrapper library's own error carries no code, and lib_registry raises its
+    RegistryError ``from None`` over winreg's ``OSError``, so judging only the given exception
+    lost the Win32 code of every missing or denied registry key. An implicit, unsuppressed
+    context is never read: it can be an unrelated exception a caller is handling. A
+    ``NativeCallError`` found there (an outer handler re-wrapping one) is authoritative: its
+    type, ``hresult`` and ``errno`` are kept. A psutil ``AccessDenied`` on the walked links is a
+    denial whatever code its cause carries, because psutil also raises it for
+    ERROR_PRIVILEGE_NOT_HELD (1314); the codes still come from the chain. The caller still
+    raises ``from cause``, so the traceback keeps the original chain.
 
     Args:
         message: The human-readable description.
@@ -937,11 +955,13 @@ def native_error(
         >>> type(native_error("open failed", wrapper)).__name__
         'NativeAccessDeniedError'
     """
-    native = _native_cause(cause)
-    hresult = _cause_hresult(native)
+    links = _walked_links(cause)
+    native = links[-1] if _is_code_carrier(links[-1]) else cause
+    hresult, denied = _judge(native)
+    denied = denied or any(_is_psutil_denied(link) for link in links)
     # An explicit kind is the call site's own judgement (a declined UAC prompt is a decision,
     # not a missing right), so only the default is ever upgraded.
-    if kind is not NativeCallError or not _is_denied(native, hresult):
+    if kind is not NativeCallError or not denied:
         return kind(message, hresult=hresult)
     denied = NativeAccessDeniedError(message, hresult=hresult)
     # Only errno: NativeAccessDeniedError.__reduce__ carries errno across pickle and no other

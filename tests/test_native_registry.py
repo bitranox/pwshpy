@@ -121,3 +121,24 @@ def test_denied_open_key_is_typed_access_denied(
     with pytest.raises(NativeAccessDeniedError) as info:
         list(read("HKLM/SAM/SAM"))
     assert (info.value.hresult, info.value.errno) == (E_ACCESSDENIED, errno.EACCES)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("read", [iter_registry_keys, iter_registry_values], ids=["keys", "values"])
+def test_unknown_hive_inside_a_callers_except_is_not_access_denied(
+    read: Callable[[str], Iterator[object]],
+) -> None:
+    """A caller's handled PermissionError is not the native cause of an unknown hive.
+
+    The unknown-hive KeyError picks the caller's PermissionError up as its implicit,
+    unsuppressed ``__context__``; that is the caller's history, so the result stays a plain
+    NativeCallError with no code.
+    """
+    try:
+        raise PermissionError(errno.EACCES, "the caller's own refusal")
+    except PermissionError:
+        with pytest.raises(NativeCallError) as info:
+            list(read("BOGUS/SOFTWARE"))
+    assert type(info.value) is NativeCallError
+    assert info.value.hresult is None
+    assert not hasattr(info.value, "errno")

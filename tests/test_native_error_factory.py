@@ -154,11 +154,13 @@ def _raised_over(inner: BaseException, *, suppress: bool) -> _RegistryError:
 
 
 def _chain(depth: int, carrier: BaseException) -> BaseException:
-    """``depth`` non-carriers linked by ``__context__``, with ``carrier`` at the end."""
+    """``depth`` non-carriers linked by a ``from None`` context, with ``carrier`` at the end."""
     head: BaseException = carrier
     for index in range(depth):
         outer = ValueError(f"link {index}")
         outer.__context__ = head
+        # What `raise ... from None` sets; an unsuppressed context is never walked.
+        outer.__suppress_context__ = True
         head = outer
     return head
 
@@ -221,3 +223,38 @@ def test_psutil_access_denied_over_a_chain_without_a_carrier_stays_denied() -> N
     denied = _psutil_access_denied()
     denied.__context__ = KeyError("k")
     assert type(native_error("x", denied)) is NativeAccessDeniedError
+
+
+# --- An unsuppressed implicit context is the CALLER's history, never the native cause ----
+#
+# Python sets __context__ on any raise to whatever the thread is handling, including an
+# exception a caller frames up is handling. A pwshpy site raising a non-carrier (a KeyError
+# from a lookup, a parse error) inside a caller's `except PermissionError:` must not take
+# that unrelated errno or winerror.
+
+
+def _raised_while_handling(unrelated: BaseException) -> BaseException:
+    """A KeyError raised (and caught) while ``unrelated`` is being handled: implicit context."""
+    try:
+        raise unrelated
+    except OSError:
+        try:
+            raise KeyError("lookup")
+        except KeyError as exc:
+            assert exc.__context__ is unrelated  # proves the context is set
+            assert exc.__suppress_context__ is False
+            return exc
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def test_unsuppressed_posix_context_is_not_taken() -> None:
+    err = native_error("x", _raised_while_handling(PermissionError(errno.EACCES, "caller")))
+    assert type(err) is NativeCallError
+    assert err.hresult is None
+    assert not hasattr(err, "errno")
+
+
+def test_unsuppressed_windows_context_is_not_taken() -> None:
+    err = native_error("x", _raised_while_handling(_winerror_oserror(5)))
+    assert type(err) is NativeCallError
+    assert err.hresult is None

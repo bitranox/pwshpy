@@ -846,9 +846,14 @@ def _is_code_carrier(exc: BaseException) -> bool:
 def _native_cause(cause: BaseException) -> BaseException:
     """The native error behind ``cause``: itself if it carries a code, else the first one down its chain.
 
-    Each link follows ``__cause__``, else ``__context__`` even when ``__suppress_context__`` is
-    set: a wrapper library's ``raise ... from None`` hides exactly the native error wanted here
-    (lib_registry raises its own RegistryError that way over winreg's FileNotFoundError). When
+    Each link follows ``__cause__``, else ``__context__`` ONLY when ``__suppress_context__`` is
+    set, which is exactly a wrapper's ``raise ... from None``: lib_registry raises its own
+    RegistryError that way over winreg's FileNotFoundError, so the suppressed context is the
+    library's own caught native error. An unsuppressed context is never followed: Python sets
+    it on any raise to whatever the thread is handling, including an exception a CALLER frames
+    up is handling, so a KeyError raised inside a caller's ``except PermissionError:`` would
+    otherwise take the caller's errno. One exotic gap remains: a wrapper's ``raise ... from
+    None`` placed outside any ``except`` block still suppresses a context the caller set. When
     no carrier lies within :data:`_MAX_CHAIN_LINKS` links, ``cause`` itself is returned, so a
     non-carrier such as psutil.AccessDenied is still judged by its own type.
     """
@@ -858,8 +863,15 @@ def _native_cause(cause: BaseException) -> BaseException:
             break
         if _is_code_carrier(link):
             return link
-        link = link.__cause__ if link.__cause__ is not None else link.__context__
+        link = _next_link(link)
     return cause
+
+
+def _next_link(link: BaseException) -> BaseException | None:
+    """The explicit cause, else the context a ``from None`` suppressed; never an implicit one."""
+    if link.__cause__ is not None:
+        return link.__cause__
+    return link.__context__ if link.__suppress_context__ else None
 
 
 def _cause_hresult(cause: BaseException) -> int | None:
@@ -895,11 +907,13 @@ def native_error(
     anywhere in ``src``.
 
     The code is read from the EFFECTIVE native cause: ``cause`` itself when it is a pywin32 error
-    or an ``OSError``, else the first such error down its chain (``__cause__``, else
-    ``__context__``, at most four links). A wrapper library's own error carries no code, and
-    lib_registry raises its RegistryError ``from None`` over winreg's ``OSError``, so judging
-    only the given exception lost the Win32 code of every missing or denied registry key. The
-    caller still raises ``from cause``, so the traceback keeps the original chain.
+    or an ``OSError``, else the first such error down its chain (``__cause__``, else a
+    ``__context__`` that ``raise ... from None`` suppressed, at most four links). A wrapper
+    library's own error carries no code, and lib_registry raises its RegistryError ``from None``
+    over winreg's ``OSError``, so judging only the given exception lost the Win32 code of every
+    missing or denied registry key. An implicit, unsuppressed context is never read: it can be
+    an unrelated exception a caller is handling. The caller still raises ``from cause``, so the
+    traceback keeps the original chain.
 
     Args:
         message: The human-readable description.
@@ -919,6 +933,7 @@ def native_error(
         >>> class RegistryError(Exception): ...
         >>> wrapper = RegistryError("key not found")
         >>> wrapper.__context__ = PermissionError(errno.EACCES, "x")
+        >>> wrapper.__suppress_context__ = True  # what `raise ... from None` sets
         >>> type(native_error("open failed", wrapper)).__name__
         'NativeAccessDeniedError'
     """

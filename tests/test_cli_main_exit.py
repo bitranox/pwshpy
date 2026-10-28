@@ -11,6 +11,7 @@ itself, as a console script does, with the services replaced at the composition 
 from __future__ import annotations
 
 import dataclasses
+import errno
 import os
 import subprocess
 import sys
@@ -18,11 +19,16 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import click
+import lib_cli_exit_tools
 import pytest
+from com_fakes import com_error_for
+from fake_services import services_with_ps
 from lib_layered_config import Config
 
 import pwshpy.adapters.native.dns as dns_module
+from pwshpy import NativeAccessDeniedError
 from pwshpy.adapters.cli.main import main
+from pwshpy.adapters.native.marshal import native_error
 from pwshpy.composition import AppServices, build_testing
 
 if TYPE_CHECKING:
@@ -190,3 +196,63 @@ def test_an_exec_timeout_outside_the_accepted_range_is_refused(value: str, code:
     was: -1 a timeout at once (110), NaN an internal message (22), 1e12 a raw OverflowError."""
     argv = ["exec", "--timeout", value, "--", sys.executable, "-c", "pass"]
     assert main(argv, services_factory=_services({})) == code
+
+
+#: E_ACCESSDENIED, the HRESULT a refused COM or Win32 call carries.
+_E_ACCESSDENIED = 0x80070005
+
+#: Every shape a refused native call takes on its way into NativeAccessDeniedError: two POSIX
+#: OSErrors whose errno differs, and a pywin32 COM error that carries no errno at all.
+_DENIED_CAUSES: list[BaseException] = [
+    PermissionError(errno.EACCES, "Permission denied"),
+    PermissionError(errno.EPERM, "Operation not permitted"),
+    com_error_for(_E_ACCESSDENIED),
+]
+
+
+class _RefusingAcl:
+    """A facade double whose ``get_acl`` is refused the way the native adapter refuses it."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    def get_acl(self, _path: str) -> Any:
+        raise self._error
+
+
+def _refused_get_acl_exit_code(cause: BaseException) -> int:
+    """Run ``get_acl`` through main() with the facade raising what ``native_error`` makes of ``cause``."""
+    error = native_error("refused", cause)
+    assert isinstance(error, NativeAccessDeniedError)
+    services = _services({}, ps=services_with_ps(_RefusingAcl(error)).ps)
+    return main(["get_acl", "/opt/locked/file"], services_factory=services)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("cause", _DENIED_CAUSES, ids=["eacces", "eperm", "com-e-accessdenied"])
+def test_a_refused_native_call_exits_with_the_permission_error_code_whatever_its_cause(
+    capsys: pytest.CaptureFixture[str], cause: BaseException
+) -> None:
+    """One error type, one exit code: the errno a cause carried must not pick it (EPERM gave 1)."""
+    expected = lib_cli_exit_tools.get_system_exit_code(PermissionError())
+
+    assert _refused_get_acl_exit_code(cause) == expected
+    assert expected != lib_cli_exit_tools.get_system_exit_code(RuntimeError())
+    assert "NativeAccessDeniedError: refused" in capsys.readouterr().err
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("cause", _DENIED_CAUSES, ids=["eacces", "eperm", "com-e-accessdenied"])
+def test_a_refused_native_call_exits_with_the_windows_permission_error_code_on_windows(
+    monkeypatch: pytest.MonkeyPatch, cause: BaseException
+) -> None:
+    """lib_cli_exit_tools picks its table by os.name, so patching it reads the Windows arm on any OS."""
+    posix_code = lib_cli_exit_tools.get_system_exit_code(PermissionError())
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "name", "nt")
+        windows_code = lib_cli_exit_tools.get_system_exit_code(PermissionError())
+        code = _refused_get_acl_exit_code(cause)
+
+    assert code == windows_code
+    # The patch reached the library: on Windows a PermissionError has its own code.
+    assert windows_code != posix_code or os.name == "nt"

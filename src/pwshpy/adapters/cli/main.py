@@ -18,7 +18,7 @@ import lib_log_rich.runtime
 
 from pwshpy import __init__conf__
 
-from ...domain.errors import OperationTimeoutError
+from ...domain.errors import NativeAccessDeniedError, OperationTimeoutError
 from .constants import TRACEBACK_SUMMARY_LIMIT, TRACEBACK_VERBOSE_LIMIT
 from .context import (
     apply_traceback_preferences,
@@ -84,8 +84,14 @@ def _exit_code_for(exc: BaseException) -> int:
 
     An :class:`OperationTimeoutError` exits ETIMEDOUT (110) on every OS. lib_cli_exit_tools
     cannot give that: the error is a ``NativeCallError``, not a ``TimeoutError``, so it falls
-    through to the generic 1, the same code a refused call gets - and its ``TimeoutError`` row
-    is 1460 on Windows anyway. Everything else keeps lib_cli_exit_tools' mapping.
+    through to the generic 1 - and its ``TimeoutError`` row is 1460 on Windows anyway.
+
+    A :class:`NativeAccessDeniedError` exits as a plain ``PermissionError``: 13 on POSIX, 5 on
+    Windows. lib_cli_exit_tools reads an exception's ``errno`` before its platform table, and the
+    errno is whatever the refused OS call carried, so passing the error itself would give one
+    refusal three codes: 13 for EACCES, 1 for EPERM (the generic failure code), and 13 or 5 for a
+    COM ``E_ACCESSDENIED``, which has no errno. A fresh ``PermissionError`` carries no errno, so the
+    platform table decides. Everything else keeps lib_cli_exit_tools' mapping.
 
     Args:
         exc: The exception the command raised.
@@ -96,9 +102,16 @@ def _exit_code_for(exc: BaseException) -> int:
     Example:
         >>> _exit_code_for(OperationTimeoutError("slow", timeout=1.0))
         110
+        >>> import errno
+        >>> denied = NativeAccessDeniedError("refused")
+        >>> denied.errno = errno.EPERM
+        >>> _exit_code_for(denied) == lib_cli_exit_tools.get_system_exit_code(PermissionError())
+        True
     """
     if isinstance(exc, OperationTimeoutError):
         return int(ExitCode.TIMEOUT)
+    if isinstance(exc, NativeAccessDeniedError):
+        return lib_cli_exit_tools.get_system_exit_code(PermissionError())
     return lib_cli_exit_tools.get_system_exit_code(exc)
 
 

@@ -22,9 +22,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 - A refused native call reaching the `pwshpy` CLI exits as a `PermissionError` instead of 1:
   `pwshpy get_acl /opt/locked/file`, where the caller cannot enter `/opt/locked`, exits 13 on
-  Linux. The code comes from `lib_cli_exit_tools`: the error's `errno` when the failed OS call
-  carried one (13 for `EACCES`), else its `PermissionError` code, 13 on POSIX and 5 on Windows (a
-  pywin32 or COM `E_ACCESSDENIED`, a psutil `AccessDenied`).
+  Linux. Every refusal exits 13 on POSIX and 5 on Windows, whatever the failed call reported
+  (`EACCES`, `EPERM`, a pywin32 or COM `E_ACCESSDENIED`, a psutil `AccessDenied`).
 
 ### Fixed
 

@@ -25,6 +25,7 @@ _LINUX = sys.platform.startswith("linux")
 _os: Any = os  # funnel the POSIX-only os.geteuid past the type checker's platform pruning
 
 pytestmark = [
+    pytest.mark.os_posix,
     pytest.mark.os_linux,
     pytest.mark.skipif(not _LINUX, reason="the refused read is staged with Linux mode bits"),
     pytest.mark.skipif(_LINUX and _os.geteuid() == 0, reason="root reads through a mode-000 directory"),
@@ -60,7 +61,7 @@ def test_cli_get_acl_on_a_refused_path_exits_with_the_permission_error_code(deni
     assert result.returncode == lib_cli_exit_tools.get_system_exit_code(PermissionError())
     assert result.returncode != lib_cli_exit_tools.get_system_exit_code(RuntimeError())
     assert result.stdout == ""
-    assert "cannot stat" in result.stderr
+    assert "NativeAccessDeniedError: cannot stat" in result.stderr
 
 
 def test_library_get_acl_on_a_refused_path_raises_a_permission_error_that_is_a_native_call_error(

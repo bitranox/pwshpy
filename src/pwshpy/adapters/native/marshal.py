@@ -19,15 +19,20 @@ Contents:
     * :func:`is_com_error` / :func:`com_hresult` / :func:`com_outer_hresult` /
       :func:`com_error_text` - recognise a pywin32 COM/Win32 error and read its unsigned
       HRESULT (unwrapped or as carried) and its text.
+    * :func:`native_error` / :func:`native_error_for_hresult` - the typed
+      :class:`~pwshpy.domain.errors.NativeCallError` for a caught native failure or a bare
+      HRESULT, upgraded to :class:`~pwshpy.domain.errors.NativeAccessDeniedError` for a
+      refusal for lack of rights.
 """
 
 from __future__ import annotations
 
+import errno
 import logging
 import re
 import socket
 from datetime import datetime, timedelta, timezone
-from typing import cast
+from typing import Final, cast
 
 from ...domain.enums import (
     AceType,
@@ -46,7 +51,7 @@ from ...domain.enums import (
     TaskState,
     TransportProtocol,
 )
-from ...domain.errors import NativeCallError
+from ...domain.errors import NativeAccessDeniedError, NativeCallError
 
 
 def epoch_to_datetime(value: float | None) -> datetime | None:
@@ -818,7 +823,97 @@ def com_error_text(exc: BaseException) -> str:
     return text if isinstance(text, str) else ""
 
 
+#: E_ACCESSDENIED, which is also HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED = 5).
+E_ACCESSDENIED: Final = 0x80070005
+#: The POSIX codes a refused-for-rights call reports; both map to PermissionError in CPython.
+_DENIED_ERRNOS = frozenset({errno.EACCES, errno.EPERM})
+#: psutil.AccessDenied is not an OSError; matched by name AND module, like the pywin32 classes,
+#: so a portable module never imports psutil just to recognise it.
+_PSUTIL_DENIED = "AccessDenied"
+_PSUTIL_MODULE = "psutil"
+
+
+def _cause_hresult(cause: BaseException) -> int | None:
+    """The unsigned HRESULT a caught error carries: pywin32 first, then an OSError's winerror."""
+    if is_com_error(cause):
+        return com_hresult(cause)
+    # getattr, not cause.winerror: CPython sets winerror only on Windows (typeshed agrees).
+    winerror = _as_int(getattr(cause, "winerror", None)) if isinstance(cause, OSError) else None
+    return None if winerror is None else _win32_to_hresult(winerror)
+
+
+def _is_denied(cause: BaseException, hresult: int | None) -> bool:
+    """Whether the cause is a refusal for lack of rights, judged by code and type, never text."""
+    if hresult is not None:
+        return hresult == E_ACCESSDENIED
+    if isinstance(cause, OSError):
+        return cause.errno in _DENIED_ERRNOS
+    cls = type(cause)
+    return cls.__name__ == _PSUTIL_DENIED and cls.__module__.split(".")[0] == _PSUTIL_MODULE
+
+
+def native_error(
+    message: str, cause: BaseException, *, kind: type[NativeCallError] = NativeCallError
+) -> NativeCallError:
+    """Return the typed pwshpy error for a caught native failure; the caller raises it ``from cause``.
+
+    The single place an adapter turns a caught exception into a
+    :class:`~pwshpy.domain.errors.NativeCallError`, so every wrapped failure carries its HRESULT
+    and a refusal for lack of rights becomes a
+    :class:`~pwshpy.domain.errors.NativeAccessDeniedError` (a ``PermissionError`` too). The
+    decision reads codes and types only, never the localized message text.
+
+    Args:
+        message: The human-readable description.
+        cause: The exception the native call raised.
+        kind: A more specific subclass the call site means (e.g. ``ElevationDeclinedError``);
+            it is kept as is, never replaced by the access-denied type.
+
+    Returns:
+        The error to raise.
+
+    Example:
+        >>> import errno
+        >>> type(native_error("read failed", PermissionError(errno.EACCES, "x"))).__name__
+        'NativeAccessDeniedError'
+        >>> native_error("lookup failed", KeyError("k")).hresult is None
+        True
+    """
+    hresult = _cause_hresult(cause)
+    # An explicit kind is the call site's own judgement (a declined UAC prompt is a decision,
+    # not a missing right), so only the default is ever upgraded.
+    if kind is not NativeCallError or not _is_denied(cause, hresult):
+        return kind(message, hresult=hresult)
+    denied = NativeAccessDeniedError(message, hresult=hresult)
+    # Only errno: NativeAccessDeniedError.__reduce__ carries errno across pickle and no other
+    # OSError slot, so a strerror or filename set here would be lost on a multiprocessing pipe.
+    denied.errno = cause.errno if isinstance(cause, OSError) else None
+    return denied
+
+
+def native_error_for_hresult(message: str, hresult: int | None) -> NativeCallError:
+    """Return the typed error for an HRESULT that crossed a process boundary as a plain int.
+
+    Args:
+        message: The human-readable description.
+        hresult: The unsigned HRESULT, or ``None``.
+
+    Returns:
+        A :class:`~pwshpy.domain.errors.NativeAccessDeniedError` for E_ACCESSDENIED, else a
+        :class:`~pwshpy.domain.errors.NativeCallError`, either with ``hresult`` set.
+
+    Example:
+        >>> type(native_error_for_hresult("x", 0x80070005)).__name__
+        'NativeAccessDeniedError'
+        >>> type(native_error_for_hresult("x", None)).__name__
+        'NativeCallError'
+    """
+    cls = NativeAccessDeniedError if hresult == E_ACCESSDENIED else NativeCallError
+    return cls(message, hresult=hresult)
+
+
 __all__ = [
+    "E_ACCESSDENIED",
     "com_date_to_datetime",
     "com_error_text",
     "com_hresult",
@@ -828,6 +923,8 @@ __all__ = [
     "from_service_start_type",
     "from_task_multiple_instances",
     "is_com_error",
+    "native_error",
+    "native_error_for_hresult",
     "normalize_registry_data",
     "parse_event_time",
     "skip_or_raise",

@@ -1284,7 +1284,7 @@ wheels = [
 
 [[package]]
 name = "lib-log-rich"
-version = "8.0.3"
+version = "8.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lib-cli-exit-tools" },
@@ -1294,9 +1294,9 @@ dependencies = [
     { name = "rich" },
     { name = "rich-click" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/76/f8/4f4164bd42fae21d0aa449b9cb7ab3b4b0c27e0423364d496bf07f2eeee1/lib_log_rich-8.0.3.tar.gz", hash = "sha256:bb29a87650e0d2af2898a04f7a06088bc93d18abe7691953a03885f466184430", size = 409976, upload-time = "2026-10-27T09:49:23.065Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4d/e7/47bf96dc87f57ba3f289fb0d812ce817f74c340bb6f79388f4b053fb4775/lib_log_rich-8.1.0.tar.gz", hash = "sha256:e07b92230b41c03410b9f6d47c83f219203991631139d644f5a32855524f1c55", size = 415519, upload-time = "2026-10-28T21:51:02.467Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a5/cf/60ea6bd3ce43ec7ec7a9f964a56951fc56932c9ae21f1ea89e288d7ef565/lib_log_rich-8.0.3-py3-none-any.whl", hash = "sha256:f2361f51fdaf052178968e3ca40afc2c56db867302250a1f6b83e1a675e3bc4f", size = 240455, upload-time = "2026-10-27T09:49:21.323Z" },
+    { url = "https://files.pythonhosted.org/packages/95/ef/39e0cf9f572ba7a5112ced366606bb7b7449bfc6b9573796f42847ffba93/lib_log_rich-8.1.0-py3-none-any.whl", hash = "sha256:960474b18335078a3508491a21834bee2fc0fc4fe0dfa69b50a781a4fd7a6c22", size = 242662, upload-time = "2026-10-28T21:51:00.741Z" },
 ]
 
 [[package]]
@@ -1843,7 +1843,7 @@ requires-dist = [
     { name = "jeepney", marker = "sys_platform == 'linux'", specifier = ">=0.9.0" },
     { name = "lib-cli-exit-tools", specifier = ">=2.4.1" },
     { name = "lib-layered-config", specifier = ">=7.3.0" },
-    { name = "lib-log-rich", specifier = ">=8.0.3" },
+    { name = "lib-log-rich", specifier = ">=8.1.0" },
     { name = "lib-registry", marker = "sys_platform == 'win32'", specifier = ">=3.1.7" },
     { name = "lib-registry", marker = "extra == 'dev'", specifier = ">=3.1.7" },
     { name = "orjson", specifier = ">=3.13.0" },

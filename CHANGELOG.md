@@ -6,6 +6,33 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `NativeCallError.hresult`: the failure's status as an unsigned 32-bit HRESULT when the native
+  error carried one (a pywin32 COM or Win32 error, or a Windows `OSError` whose Win32 code is mapped
+  as `HRESULT_FROM_WIN32`), else `None`. Branch on it rather than on the localized message, for
+  example `exc.hresult == 0x80070002` for a missing file.
+- `NativeAccessDeniedError`, exported from `pwshpy`: a native call refused for lack of rights
+  (HRESULT `E_ACCESSDENIED` 0x80070005, POSIX `EACCES` or `EPERM`, psutil `AccessDenied`). It is a
+  `NativeCallError`, so existing handlers still catch it, and a `PermissionError`, so
+  `except PermissionError` catches it too. `errno` holds the POSIX code when the failure carried
+  one, and survives pickling, so the error crosses a `multiprocessing` pipe unchanged.
+
+### Changed
+
+- A refused native call reaching the `pwshpy` CLI exits as a `PermissionError` instead of 1:
+  `pwshpy get_acl /opt/locked/file`, where the caller cannot enter `/opt/locked`, exits 13 on
+  Linux. The code comes from `lib_cli_exit_tools`: the error's `errno` when the failed OS call
+  carried one (13 for `EACCES`), else its `PermissionError` code, 13 on POSIX and 5 on Windows (a
+  pywin32 or COM `E_ACCESSDENIED`, a psutil `AccessDenied`).
+
+### Fixed
+
+- A registry failure carries its Win32 code as an HRESULT on `NativeCallError.hresult`, and a
+  denied registry key raises `NativeAccessDeniedError`.
+- A failed Windows Update search keeps its HRESULT across the worker process: the error raised in
+  the caller has `.hresult` set, and an `E_ACCESSDENIED` search raises `NativeAccessDeniedError`.
+
 ## [1.10.0] 2026-10-27 08:35:45
 
 ### Fixed

@@ -599,7 +599,12 @@ The other timeouts exit 1: `pwshpy run`, `pwshpy cmdlet` and the module shortcut
 Every failure across both backends raises a subclass of `PwshPyError`, all exported from `pwshpy`:
 
 - `NativeCallError` - a wrapped native/OS failure, a `strict=True` listing that cannot read an item,
-  or `ProcessResult.check()` on a nonzero exit.
+  or `ProcessResult.check()` on a nonzero exit. `.hresult` holds the failure's unsigned 32-bit
+  HRESULT when the native error carried one (a pywin32 COM or Win32 error, or a Windows `OSError`
+  mapped as `HRESULT_FROM_WIN32`), else `None`; branch on it, never on the localized message.
+  - `NativeAccessDeniedError` - a call refused for lack of rights (`E_ACCESSDENIED`, `EACCES`,
+    `EPERM`, psutil `AccessDenied`). It is also a `PermissionError`, so `except PermissionError`
+    catches it; `errno` holds the POSIX code when the failure carried one.
   - `OperationTimeoutError` - a call ran out of its `timeout` (`.timeout` holds the limit).
   - `ElevationDeclinedError` - the UAC prompt or sudo's password was refused by `ps.elevate()`.
 - `ElevationRequiredError` - `ps.require_elevation()` in a process that is not elevated.
@@ -612,8 +617,19 @@ Every failure across both backends raises a subclass of `PwshPyError`, all expor
 - `PackError` - a script could not be packed or unpacked.
 
 No terminating-vs-non-terminating distinction, no `-ErrorAction Stop` to remember, no silently
-swallowed error. Catch a subclass before its parent (`OperationTimeoutError` and
-`ElevationDeclinedError` before `NativeCallError`).
+swallowed error. Catch a subclass before its parent (`NativeAccessDeniedError`,
+`OperationTimeoutError` and `ElevationDeclinedError` before `NativeCallError`):
+
+```python
+from pwshpy import NativeAccessDeniedError, NativeCallError, ps
+
+try:
+    entries = ps.get_acl("/opt/locked/file").to_list()
+except NativeAccessDeniedError:
+    print("not allowed to read it; ask again elevated")
+except NativeCallError as exc:
+    print(f"failed: {exc} (HRESULT {exc.hresult})")
+```
 
 ## Building your own facade
 

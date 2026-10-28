@@ -147,12 +147,14 @@ if __name__ == "__main__":  # required: the search child re-imports this script
 
 Read-only: only `Search` is called, never Download or Install. `criteria=` takes any WUA search
 string and is passed to `IUpdateSearcher.Search` verbatim (`"IsInstalled=1"` lists what is
-installed; a malformed string is the agent's error, raised as `NativeCallError` with its HRESULT).
+installed; a malformed string is the agent's error, raised as `NativeCallError` with its HRESULT
+on `.hresult`).
 The timeout must be in `(0, 2147483]` seconds (`ValueError` otherwise, at the call). The search
 starts when the pipeline is first iterated, and it is not streamed: the agent returns the whole
 result before the first record is yielded, so `.take(n)` or `.first()` does not make it shorter.
 A timed-out search raises `OperationTimeoutError` (its `.timeout` holds the limit), a subclass of the
-`NativeCallError` a Windows Update agent failure raises (its HRESULT is in the message): catch
+`NativeCallError` a Windows Update agent failure raises (its HRESULT is in the message and in
+`.hresult`; an `E_ACCESSDENIED` search raises the subclass `NativeAccessDeniedError`): catch
 `OperationTimeoutError` first to tell the two apart.
 
 The child is started with the `spawn` method on every OS, which re-imports the calling script in

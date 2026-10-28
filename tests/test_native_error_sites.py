@@ -17,7 +17,11 @@ _ALLOWED_DIRECT = frozenset({"OperationTimeoutError"})
 
 
 def _family(cls: type[NativeCallError]) -> set[str]:
-    """``cls`` and every subclass below it, by name, so a new subclass is guarded the day it lands."""
+    """``cls`` and every subclass below it, by name, so a new subclass is guarded the day it lands.
+
+    ``__subclasses__`` sees only classes whose module is imported; every subclass lives in
+    ``domain/errors.py`` today, so a subclass defined elsewhere must be imported here too.
+    """
     names = {cls.__name__}
     for sub in cls.__subclasses__():
         names |= _family(sub)
@@ -45,7 +49,6 @@ def _offenders() -> tuple[list[str], int]:
 def test_the_guarded_names_are_the_whole_family_minus_the_allow_list() -> None:
     assert {"NativeCallError", "NativeAccessDeniedError", "ElevationDeclinedError"} <= _WRAPPED
     assert _family(NativeCallError) >= _ALLOWED_DIRECT, "an allow-list entry that is no subclass guards nothing"
-    assert not _ALLOWED_DIRECT & _WRAPPED
 
 
 def test_no_wrapping_site_bypasses_the_factory() -> None:

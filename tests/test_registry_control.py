@@ -11,15 +11,17 @@ removing everything it touches; it runs only on the disposable throwaway VM.
 
 from __future__ import annotations
 
+import errno
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 
 from pwshpy.adapters.native import registry_control as mod
-from pwshpy.adapters.native.marshal import from_registry_value_type
+from pwshpy.adapters.native.marshal import E_ACCESSDENIED, from_registry_value_type
 from pwshpy.adapters.native.registry_control import NativeRegistryController
 from pwshpy.domain.enums import RegistryValueType
-from pwshpy.domain.errors import NativeCallError
+from pwshpy.domain.errors import NativeAccessDeniedError, NativeCallError
 
 
 class _FakeRegError(Exception):
@@ -103,6 +105,43 @@ def test_backend_failure_wrapped_in_native_call_error(monkeypatch: pytest.Monkey
     _use(monkeypatch, fake)
     with pytest.raises(NativeCallError):
         NativeRegistryController().set_value("HKCU/Software/pwshpy_test", "N", 1, RegistryValueType.REG_SZ)
+
+
+class _WindowsPermissionError(PermissionError):
+    """A PermissionError with winerror, which only Windows sets; pinned here on any OS."""
+
+    winerror: int
+
+
+class _DeniedRegistry:
+    """A registry double whose every write fails as a denied ``winreg.OpenKey`` does (raw)."""
+
+    def _deny(self, *args: object, **kwargs: object) -> None:
+        exc = _WindowsPermissionError(errno.EACCES, "denied")
+        exc.winerror = 5
+        raise exc
+
+    set_value = delete_value = create_key = delete_key = _deny
+
+
+_CONTROL_CALLS: list[Callable[[NativeRegistryController], object]] = [
+    lambda c: c.set_value("HKLM/SAM/SAM", "N", 1, RegistryValueType.REG_DWORD),
+    lambda c: c.remove_value("HKLM/SAM/SAM", "N"),
+    lambda c: c.create_key("HKLM/SAM/SAM/Sub"),
+    lambda c: c.remove_key("HKLM/SAM/SAM"),
+]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("call", _CONTROL_CALLS, ids=["set_value", "remove_value", "create_key", "remove_key"])
+def test_denied_open_key_is_typed_access_denied(
+    monkeypatch: pytest.MonkeyPatch, call: Callable[[NativeRegistryController], object]
+) -> None:
+    """A raw denied OpenKey surfaces as NativeAccessDeniedError carrying E_ACCESSDENIED."""
+    monkeypatch.setattr(mod, "load_registry_backend", lambda: (_DeniedRegistry, _FakeRegError))
+    with pytest.raises(NativeAccessDeniedError) as info:
+        call(NativeRegistryController())
+    assert (info.value.hresult, info.value.errno) == (E_ACCESSDENIED, errno.EACCES)
 
 
 # --- Real integration: run only on the disposable throwaway VM ---------------

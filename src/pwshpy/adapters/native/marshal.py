@@ -833,6 +833,35 @@ _PSUTIL_DENIED = "AccessDenied"
 _PSUTIL_MODULE = "psutil"
 
 
+#: How many chain links :func:`_native_cause` follows below the given cause. A wrapper library
+#: adds one or two; the bound also ends a chain that loops back on itself.
+_MAX_CHAIN_LINKS: Final = 4
+
+
+def _is_code_carrier(exc: BaseException) -> bool:
+    """Whether ``exc`` is a native error that carries its own code: pywin32's, or an OSError."""
+    return is_com_error(exc) or isinstance(exc, OSError)
+
+
+def _native_cause(cause: BaseException) -> BaseException:
+    """The native error behind ``cause``: itself if it carries a code, else the first one down its chain.
+
+    Each link follows ``__cause__``, else ``__context__`` even when ``__suppress_context__`` is
+    set: a wrapper library's ``raise ... from None`` hides exactly the native error wanted here
+    (lib_registry raises its own RegistryError that way over winreg's FileNotFoundError). When
+    no carrier lies within :data:`_MAX_CHAIN_LINKS` links, ``cause`` itself is returned, so a
+    non-carrier such as psutil.AccessDenied is still judged by its own type.
+    """
+    link: BaseException | None = cause
+    for _ in range(_MAX_CHAIN_LINKS + 1):
+        if link is None:
+            break
+        if _is_code_carrier(link):
+            return link
+        link = link.__cause__ if link.__cause__ is not None else link.__context__
+    return cause
+
+
 def _cause_hresult(cause: BaseException) -> int | None:
     """The unsigned HRESULT a caught error carries: pywin32 first, then an OSError's winerror."""
     if is_com_error(cause):
@@ -865,6 +894,13 @@ def native_error(
     (``tests/test_native_error_sites.py``) refuses a bare ``raise NativeCallError(...) from <cause>``
     anywhere in ``src``.
 
+    The code is read from the EFFECTIVE native cause: ``cause`` itself when it is a pywin32 error
+    or an ``OSError``, else the first such error down its chain (``__cause__``, else
+    ``__context__``, at most four links). A wrapper library's own error carries no code, and
+    lib_registry raises its RegistryError ``from None`` over winreg's ``OSError``, so judging
+    only the given exception lost the Win32 code of every missing or denied registry key. The
+    caller still raises ``from cause``, so the traceback keeps the original chain.
+
     Args:
         message: The human-readable description.
         cause: The exception the native call raised.
@@ -880,16 +916,22 @@ def native_error(
         'NativeAccessDeniedError'
         >>> native_error("lookup failed", KeyError("k")).hresult is None
         True
+        >>> class RegistryError(Exception): ...
+        >>> wrapper = RegistryError("key not found")
+        >>> wrapper.__context__ = PermissionError(errno.EACCES, "x")
+        >>> type(native_error("open failed", wrapper)).__name__
+        'NativeAccessDeniedError'
     """
-    hresult = _cause_hresult(cause)
+    native = _native_cause(cause)
+    hresult = _cause_hresult(native)
     # An explicit kind is the call site's own judgement (a declined UAC prompt is a decision,
     # not a missing right), so only the default is ever upgraded.
-    if kind is not NativeCallError or not _is_denied(cause, hresult):
+    if kind is not NativeCallError or not _is_denied(native, hresult):
         return kind(message, hresult=hresult)
     denied = NativeAccessDeniedError(message, hresult=hresult)
     # Only errno: NativeAccessDeniedError.__reduce__ carries errno across pickle and no other
     # OSError slot, so a strerror or filename set here would be lost on a multiprocessing pipe.
-    denied.errno = cause.errno if isinstance(cause, OSError) else None
+    denied.errno = native.errno if isinstance(native, OSError) else None
     return denied
 
 

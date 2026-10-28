@@ -126,3 +126,98 @@ def test_factory_built_denial_survives_pickle() -> None:
 def test_for_hresult(hresult: int | None, kind: type[NativeCallError]) -> None:
     err = native_error_for_hresult("x", hresult)
     assert (type(err), err.hresult) == (kind, hresult)
+
+
+# --- The effective native cause behind a wrapper library's own error --------------------
+#
+# lib_registry raises its own RegistryError family (not an OSError), some `from None` (the
+# winreg OSError survives only as the suppressed __context__), some `from exc`. Measured on
+# Windows: a missing key reached pwshpy with hresult None until the chain was walked.
+
+
+class _RegistryError(Exception):
+    """Shaped like lib_registry's RegistryError: a plain Exception, no code of its own."""
+
+
+def _raised_over(inner: BaseException, *, suppress: bool) -> _RegistryError:
+    """Raise ``_RegistryError`` while handling ``inner``, ``from None`` or ``from inner``."""
+    try:
+        try:
+            raise inner
+        except OSError as exc:
+            if suppress:
+                raise _RegistryError("registry key not found") from None
+            raise _RegistryError("registry key not found") from exc
+    except _RegistryError as wrapper:
+        return wrapper
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _chain(depth: int, carrier: BaseException) -> BaseException:
+    """``depth`` non-carriers linked by ``__context__``, with ``carrier`` at the end."""
+    head: BaseException = carrier
+    for index in range(depth):
+        outer = ValueError(f"link {index}")
+        outer.__context__ = head
+        head = outer
+    return head
+
+
+@pytest.mark.parametrize("suppress", [True, False], ids=["from-None", "from-exc"])
+def test_wrapper_is_judged_by_the_winreg_error_it_hides(suppress: bool) -> None:
+    err = native_error("x", _raised_over(_winerror_oserror(2), suppress=suppress))
+    assert (type(err), err.hresult) == (NativeCallError, _E_FILE_NOT_FOUND)
+
+
+def test_wrapper_over_a_denied_winreg_error_is_access_denied() -> None:
+    err = native_error("x", _raised_over(_winerror_oserror(5), suppress=True))
+    assert type(err) is NativeAccessDeniedError
+    assert (err.hresult, err.errno) == (E_ACCESSDENIED, errno.EACCES)
+
+
+def test_wrapper_over_a_pywin32_error_carries_its_code() -> None:
+    wrapper = _RegistryError("wrapped")
+    wrapper.__cause__ = com_error_for(E_ACCESSDENIED)
+    err = native_error("x", wrapper)
+    assert (type(err), err.hresult) == (NativeAccessDeniedError, E_ACCESSDENIED)
+
+
+def test_explicit_cause_wins_over_the_context() -> None:
+    wrapper = _RegistryError("wrapped")
+    wrapper.__cause__ = _winerror_oserror(2)
+    wrapper.__context__ = _winerror_oserror(5)
+    assert native_error("x", wrapper).hresult == _E_FILE_NOT_FOUND
+
+
+def test_a_carrier_cause_is_not_walked_past() -> None:
+    # The given OSError is the native error itself, even with no code: its own context is
+    # older history, not a better answer.
+    outer = FileNotFoundError(errno.ENOENT, "gone")
+    outer.__context__ = _winerror_oserror(5)
+    err = native_error("x", outer)
+    assert (type(err), err.hresult) == (NativeCallError, None)
+
+
+def test_chain_without_a_carrier() -> None:
+    err = native_error("x", _chain(3, KeyError("k")))
+    assert (type(err), err.hresult) == (NativeCallError, None)
+
+
+def test_carrier_four_links_down_is_found() -> None:
+    assert native_error("x", _chain(4, _winerror_oserror(2))).hresult == _E_FILE_NOT_FOUND
+
+
+def test_carrier_five_links_down_is_not_reached() -> None:
+    assert native_error("x", _chain(5, _winerror_oserror(2))).hresult is None
+
+
+def test_self_referencing_context_terminates() -> None:
+    looped = ValueError("loop")
+    looped.__context__ = looped
+    assert native_error("x", looped).hresult is None
+
+
+def test_psutil_access_denied_over_a_chain_without_a_carrier_stays_denied() -> None:
+    denied = _psutil_access_denied()
+    denied.__context__ = KeyError("k")
+    assert type(native_error("x", denied)) is NativeAccessDeniedError

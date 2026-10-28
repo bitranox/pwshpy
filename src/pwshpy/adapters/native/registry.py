@@ -14,8 +14,8 @@ present on every OS and transparently uses the in-memory ``fake_winreg`` backend
 so the whole subsystem is tested hermetically (even on Linux).
 
 Contents:
-    * :func:`iter_registry_values` — yield one :class:`RegistryValue` per value under a key.
-    * :func:`iter_registry_keys` — yield one :class:`RegistryKey` per immediate subkey.
+    * :func:`iter_registry_values` - yield one :class:`RegistryValue` per value under a key.
+    * :func:`iter_registry_keys` - yield one :class:`RegistryKey` per immediate subkey.
 """
 
 from __future__ import annotations
@@ -87,7 +87,8 @@ def iter_registry_values(key: str) -> Iterator[RegistryValue]:
                 type=to_registry_value_type(int(value_type)),
                 data=normalize_registry_data(value_data),
             )
-    except registry_error as exc:
+    # OSError too: lib_registry lets a denied winreg.OpenKey escape raw, past RegistryError.
+    except (registry_error, OSError) as exc:
         raise native_error(str(exc) or type(exc).__name__, exc) from exc
 
 
@@ -106,7 +107,8 @@ def iter_registry_keys(key: str) -> Iterator[RegistryKey]:
     try:
         for subkey_name in reg.subkeys(normalized):
             yield RegistryKey.model_construct(hive=hive, key=sub_key, name=str(subkey_name))
-    except registry_error as exc:
+    # OSError too: lib_registry lets a denied winreg.OpenKey escape raw, past RegistryError.
+    except (registry_error, OSError) as exc:
         raise native_error(str(exc) or type(exc).__name__, exc) from exc
 
 

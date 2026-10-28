@@ -10,11 +10,16 @@ structural contract and the error mapping, deterministically on every OS.
 
 from __future__ import annotations
 
+import errno
+from collections.abc import Callable, Iterator
+
 import pytest
 
+from pwshpy.adapters.native import registry as mod
+from pwshpy.adapters.native.marshal import E_ACCESSDENIED
 from pwshpy.adapters.native.registry import iter_registry_keys, iter_registry_values
 from pwshpy.domain.enums import RegistryHive, RegistryValueType
-from pwshpy.domain.errors import NativeCallError
+from pwshpy.domain.errors import NativeAccessDeniedError, NativeCallError
 from pwshpy.domain.records import RegistryKey, RegistryValue
 
 # Present on any real Windows install AND in fake_winreg's minimal test registry.
@@ -75,3 +80,44 @@ def test_missing_key_raises_native_error() -> None:
     """A non-existent key surfaces lib_registry's failure as a NativeCallError."""
     with pytest.raises(NativeCallError):
         list(iter_registry_keys("HKLM/SOFTWARE/pwshpy_does_not_exist_1a2b3c"))
+
+
+class _WindowsPermissionError(PermissionError):
+    """A PermissionError with winerror, which only Windows sets; pinned here on any OS."""
+
+    winerror: int
+
+
+class _FakeRegError(Exception):
+    """Stand-in for lib_registry.exceptions.RegistryError (not an OSError)."""
+
+
+class _DeniedRegistry:
+    """A ``lib_registry.Registry`` double whose reads fail as a denied ``winreg.OpenKey`` does.
+
+    lib_registry's ``_open_key`` catches only FileNotFoundError, so on Windows the
+    PermissionError (winerror 5) escapes raw, past its own RegistryError family.
+    """
+
+    def _denied(self, key: str) -> Iterator[object]:
+        exc = _WindowsPermissionError(errno.EACCES, "denied")
+        exc.winerror = 5
+        raise exc
+
+    def subkeys(self, key: str) -> Iterator[object]:
+        return self._denied(key)
+
+    def values(self, key: str) -> Iterator[object]:
+        return self._denied(key)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("read", [iter_registry_keys, iter_registry_values], ids=["keys", "values"])
+def test_denied_open_key_is_typed_access_denied(
+    monkeypatch: pytest.MonkeyPatch, read: Callable[[str], Iterator[object]]
+) -> None:
+    """A denied OpenKey surfaces as NativeAccessDeniedError carrying E_ACCESSDENIED, not raw."""
+    monkeypatch.setattr(mod, "load_registry_backend", lambda: (_DeniedRegistry, _FakeRegError))
+    with pytest.raises(NativeAccessDeniedError) as info:
+        list(read("HKLM/SAM/SAM"))
+    assert (info.value.hresult, info.value.errno) == (E_ACCESSDENIED, errno.EACCES)

@@ -6,6 +6,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.11.0] 2026-10-29 00:00:55
+
 ### Added
 
 - `NativeCallError.hresult`: the failure's status as an unsigned 32-bit HRESULT when the native

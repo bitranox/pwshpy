@@ -20,10 +20,20 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Changed
 
-- A refused native call reaching the `pwshpy` CLI exits as a `PermissionError` instead of 1:
-  `pwshpy get_acl /opt/locked/file`, where the caller cannot enter `/opt/locked`, exits 13 on
-  Linux. Every refusal exits 13 on POSIX and 5 on Windows, whatever the failed call reported
-  (`EACCES`, `EPERM`, a pywin32 or COM `E_ACCESSDENIED`, a psutil `AccessDenied`).
+- A refused native call raised as `NativeAccessDeniedError` exits the `pwshpy` CLI as a
+  `PermissionError` instead of 1: `pwshpy get_acl /opt/locked/file`, where the caller cannot enter
+  `/opt/locked`, exits 13 on Linux. Such a refusal exits 13 on POSIX and 5 on Windows, whatever the
+  failed call reported (`EACCES`, `EPERM`, a pywin32 or COM `E_ACCESSDENIED`, a psutil
+  `AccessDenied`).
+- A refusal pwshpy reads only from a reply or an exit status, not from an exception carrying a
+  code, is still a plain `NativeCallError` and exits 1: a D-Bus error reply from systemd (a polkit
+  refusal) or from the Secret Service, and a non-zero exit of a shadow-utils command (`useradd`,
+  `usermod`, `gpasswd`, ...).
+- `NativeAccessDeniedError` is an `OSError` (a `PermissionError`), so a caller's `except OSError:`
+  or `except PermissionError:` around a pwshpy call now also catches a refused native call.
+- A registry read or write whose denied or failed `winreg` call used to escape lib_registry as a
+  raw `OSError` or `PermissionError` now raises `NativeCallError`, or `NativeAccessDeniedError`
+  when access was denied.
 
 ### Fixed
 

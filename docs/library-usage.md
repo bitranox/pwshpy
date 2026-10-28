@@ -604,7 +604,10 @@ Every failure across both backends raises a subclass of `PwshPyError`, all expor
   mapped as `HRESULT_FROM_WIN32`), else `None`; branch on it, never on the localized message.
   - `NativeAccessDeniedError` - a call refused for lack of rights (`E_ACCESSDENIED`, `EACCES`,
     `EPERM`, psutil `AccessDenied`). It is also a `PermissionError`, so `except PermissionError`
-    catches it; `errno` holds the POSIX code when the failure carried one.
+    (and `except OSError`) catches it; `errno` holds the POSIX code when the failure carried one.
+    A refusal pwshpy reads only from a reply or an exit status is a plain `NativeCallError`: a
+    D-Bus error reply from systemd (a polkit refusal) or from the Secret Service, and a non-zero
+    exit of a shadow-utils command.
   - `OperationTimeoutError` - a call ran out of its `timeout` (`.timeout` holds the limit).
   - `ElevationDeclinedError` - the UAC prompt or sudo's password was refused by `ps.elevate()`.
 - `ElevationRequiredError` - `ps.require_elevation()` in a process that is not elevated.

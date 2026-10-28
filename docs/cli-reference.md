@@ -406,7 +406,13 @@ also writes one `ErrorName: message` line (or a `pwshpy: ...` line from a runner
 | 110  | a timeout (`OperationTimeoutError`, ETIMEDOUT): `exec --timeout`, a service start, stop or restart that did not settle, `get_windows_update --timeout`, `wait_process --timeout`, `resolve_dns_name --timeout`, a Linux local-account command whose shadow-utils command outlasts 30 s                                                                                                                                            | `exec`, `start_service`, `stop_service`, `restart_service`, `get_windows_update`, `wait_process`, `resolve_dns_name`, `new_local_user`, `remove_local_user`, `enable_local_user`, `disable_local_user`, `new_local_group`, `remove_local_group`, `add_local_group_member`, `remove_local_group_member` (Linux) |
 | 127  | a missing or untrusted tool: no `uv` and `-PwshPyNoInstallUv` / `--pwshpy-no-install-uv`, no `uv` an elevated run can trust, a refused `-PwshPyUv` pin, a managed Python an elevated run cannot trust (`refusing the Python uv found at`), a git older than 2.32 (or of no readable version) for a root `.sh` run of a script with a git source (`refusing git`), or no `sudo` for `-PwshPyElevate` / `--pwshpy-elevate` on POSIX | packed runners                                                                                                                                                                                                                                                                                                 |
 
-Any other exception that reaches the CLI keeps `lib_cli_exit_tools`' errno mapping
+A refusal pwshpy reads only from a reply or an exit status is a plain `NativeCallError` and exits
+1: a D-Bus error reply from systemd (a polkit refusal) or from the Secret Service, and a non-zero
+exit of a shadow-utils command.
+
+Any other exception that reaches the CLI keeps `lib_cli_exit_tools`' mapping, which reads the codes
+an `OSError` carries before its type: its `winerror` on Windows, else its `errno` (a raw
+`PermissionError` with `EPERM` exits 1, with `EACCES` 13), and only a code-less one exits by type
 (`FileNotFoundError` 2, `PermissionError` 13 on POSIX and 5 on Windows). A runner otherwise exits
 with the packed script's own code, so a script that itself exits 70, 77 or 127 gives the same number:
 the runner's stderr line is what tells them apart. `pwshpy is-elevated` exits 0 when elevated and 1

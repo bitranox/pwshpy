@@ -30,7 +30,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from ...domain.errors import ElevationDeclinedError, NativeCallError, PlatformUnsupportedError
+from ...domain.errors import ElevationDeclinedError, PlatformUnsupportedError
+from .marshal import native_error
 
 
 def is_elevated() -> bool:
@@ -57,11 +58,11 @@ def _is_elevated_windows() -> bool:
     try:
         token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
     except Exception as exc:  # pywintypes.error - keep the PwshPyError invariant
-        raise NativeCallError(f"OpenProcessToken failed: {exc}") from exc
+        raise native_error(f"OpenProcessToken failed: {exc}", exc) from exc
     try:
         return bool(win32security.GetTokenInformation(token, win32security.TokenElevation))
     except Exception as exc:
-        raise NativeCallError(f"GetTokenInformation(TokenElevation) failed: {exc}") from exc
+        raise native_error(f"GetTokenInformation(TokenElevation) failed: {exc}", exc) from exc
     finally:
         win32api.CloseHandle(token)
 
@@ -131,7 +132,7 @@ def _sudo_relaunch(executable: str, argv: Sequence[str], cwd: str, *, wait: bool
             return completed.returncode
         subprocess.Popen(command, cwd=cwd)  # noqa: S603  # nosec B603 - fixed argv, no shell
     except OSError as exc:
-        raise NativeCallError(f"elevated relaunch via sudo failed: {exc}") from exc
+        raise native_error(f"elevated relaunch via sudo failed: {exc}", exc) from exc
     return None
 
 
@@ -146,7 +147,7 @@ def _ask_sudo_for_root(cwd: str) -> None:
     try:
         granted = subprocess.run(["sudo", "-v"], cwd=cwd, check=False).returncode == 0  # noqa: S607  # nosec B603 B607 - fixed argv, no shell; sudo resolved from PATH like the relaunch
     except KeyboardInterrupt as exc:
-        raise ElevationDeclinedError("The sudo password prompt was interrupted.") from exc
+        raise native_error("The sudo password prompt was interrupted.", exc, kind=ElevationDeclinedError) from exc
     if not granted:
         raise ElevationDeclinedError("sudo did not grant root (refused, a wrong password, or not allowed).")
 
@@ -230,8 +231,8 @@ def _shell_execute(
         )
     except Exception as exc:  # pywintypes.error, its Windows code on .winerror
         if getattr(exc, "winerror", None) == ERROR_CANCELLED:
-            raise ElevationDeclinedError("The Administrator prompt was declined.") from exc
-        raise NativeCallError(f"Elevated relaunch (ShellExecuteEx {verb}) failed: {exc}") from exc
+            raise native_error("The Administrator prompt was declined.", exc, kind=ElevationDeclinedError) from exc
+        raise native_error(f"Elevated relaunch (ShellExecuteEx {verb}) failed: {exc}", exc) from exc
     handle = result["hProcess"]
     if not wait:
         return None

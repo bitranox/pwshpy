@@ -603,7 +603,7 @@ def skip_or_raise(what: str, exc: Exception, *, strict: bool, log: logging.Logge
         cannot read 'x': denied
     """
     if strict:
-        raise NativeCallError(f"{what}: {exc}") from exc
+        raise native_error(f"{what}: {exc}", exc) from exc
     log.warning("skipped (pass strict=True to raise instead) - %s: %s", what, exc)
 
 
@@ -861,7 +861,9 @@ def native_error(
     :class:`~pwshpy.domain.errors.NativeCallError`, so every wrapped failure carries its HRESULT
     and a refusal for lack of rights becomes a
     :class:`~pwshpy.domain.errors.NativeAccessDeniedError` (a ``PermissionError`` too). The
-    decision reads codes and types only, never the localized message text.
+    decision reads codes and types only, never the localized message text. A guard test
+    (``tests/test_native_error_sites.py``) refuses a bare ``raise NativeCallError(...) from <cause>``
+    anywhere in ``src``.
 
     Args:
         message: The human-readable description.

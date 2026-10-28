@@ -40,9 +40,9 @@ from enum import Enum
 from typing import Any
 
 from ...domain.enums import ServiceStartType
-from ...domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
+from ...domain.errors import OperationTimeoutError, PlatformUnsupportedError
 from ...domain.records import ServiceInfo
-from .marshal import from_service_start_type, to_service_kind, to_service_start_type, to_service_state
+from .marshal import from_service_start_type, native_error, to_service_kind, to_service_start_type, to_service_state
 
 _POLL_INTERVAL = 0.25
 _DEFAULT_TIMEOUT = 30.0
@@ -114,7 +114,7 @@ def _open_scm(win32service: Any) -> Any:
     try:
         return win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
     except Exception as exc:
-        raise NativeCallError(str(exc) or "cannot open the service control manager") from exc
+        raise native_error(str(exc) or "cannot open the service control manager", exc) from exc
 
 
 def _open_service(win32service: Any, scm: Any, name: str, access: int) -> Any:
@@ -122,7 +122,7 @@ def _open_service(win32service: Any, scm: Any, name: str, access: int) -> Any:
     try:
         return win32service.OpenService(scm, name, access)
     except Exception as exc:
-        raise NativeCallError(str(exc) or f"cannot open service {name!r}") from exc
+        raise native_error(str(exc) or f"cannot open service {name!r}", exc) from exc
 
 
 def _current_state(win32service: Any, handle: Any) -> int:
@@ -134,7 +134,7 @@ def _current_state(win32service: Any, handle: Any) -> int:
     try:
         return int(win32service.QueryServiceStatus(handle)[1])
     except Exception as exc:
-        raise NativeCallError(str(exc) or "cannot query the service status") from exc
+        raise native_error(str(exc) or "cannot query the service status", exc) from exc
 
 
 @dataclass(frozen=True)
@@ -245,7 +245,7 @@ def _query_one(win32service: Any, scm: Any, name: str) -> ServiceInfo:
         status = win32service.QueryServiceStatusEx(handle)
         config = win32service.QueryServiceConfig(handle)
     except Exception as exc:
-        raise NativeCallError(str(exc) or f"cannot query service {name!r}") from exc
+        raise native_error(str(exc) or f"cannot query service {name!r}", exc) from exc
     finally:
         win32service.CloseServiceHandle(handle)
     controls = int(status["ControlsAccepted"])
@@ -296,7 +296,7 @@ class NativeServiceController:
                 try:
                     win32service.StartService(handle, [])
                 except Exception as exc:
-                    raise NativeCallError(str(exc) or f"cannot start service {name!r}") from exc
+                    raise native_error(str(exc) or f"cannot start service {name!r}", exc) from exc
 
             try:
                 control = _Control(issue, target=_SERVICE_RUNNING, target_pending=_SERVICE_START_PENDING)
@@ -334,7 +334,7 @@ class NativeServiceController:
                 try:
                     win32service.ControlService(handle, win32service.SERVICE_CONTROL_STOP)
                 except Exception as exc:
-                    raise NativeCallError(str(exc) or f"cannot stop service {name!r}") from exc
+                    raise native_error(str(exc) or f"cannot stop service {name!r}", exc) from exc
 
             try:
                 control = _Control(issue, target=_SERVICE_STOPPED, target_pending=_SERVICE_STOP_PENDING)
@@ -376,7 +376,7 @@ class NativeServiceController:
                     None,
                 )
             except Exception as exc:
-                raise NativeCallError(str(exc) or f"cannot reconfigure service {name!r}") from exc
+                raise native_error(str(exc) or f"cannot reconfigure service {name!r}", exc) from exc
             finally:
                 win32service.CloseServiceHandle(handle)
             return _query_one(win32service, scm, name)

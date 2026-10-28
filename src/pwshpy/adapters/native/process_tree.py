@@ -42,6 +42,7 @@ from typing import IO, Protocol
 
 from ...domain.errors import NativeCallError, OperationTimeoutError
 from ...domain.records import ProcessResult
+from .marshal import native_error
 
 # How long the output readers may take after the tree has exited.  With nothing outside
 # the tree holding the pipes, EOF arrives as soon as the pipes are drained; the grace only
@@ -152,10 +153,14 @@ def _launch(
 ) -> subprocess.Popen[bytes]:
     try:
         return tree.launch(args, cwd=cwd, env=env, with_stdin=with_stdin)
+    except NativeCallError:
+        # The strategy's own typed failure (the POSIX helper, a Windows job call) already says what
+        # failed; a denied one is a PermissionError too and would otherwise be re-wrapped below.
+        raise
     except FileNotFoundError as exc:
-        raise NativeCallError(f"Executable not found: {args[0]!r} ({exc})") from exc
+        raise native_error(f"Executable not found: {args[0]!r} ({exc})", exc) from exc
     except OSError as exc:
-        raise NativeCallError(f"Failed to run {args[0]!r}: {exc}") from exc
+        raise native_error(f"Failed to run {args[0]!r}: {exc}", exc) from exc
 
 
 def run_process_tree(

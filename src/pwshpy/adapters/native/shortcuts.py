@@ -43,7 +43,7 @@ from ...domain.errors import NativeCallError, PlatformUnsupportedError
 from ...domain.records import ShortcutInfo
 from ...domain.shortcuts import ShortcutSpec
 from .com_thread import run_in_com_thread
-from .marshal import com_hresult, is_com_error
+from .marshal import com_hresult, is_com_error, native_error
 
 __all__ = ["NativeShortcutController"]
 
@@ -152,7 +152,7 @@ class NativeShortcutController:
                 raise
             code = com_hresult(exc)
             shown = "without an HRESULT" if code is None else f"with HRESULT 0x{code:08X}"
-            raise NativeCallError(f"{verb} the shortcut {path} failed at {progress.step} {shown}") from exc
+            raise native_error(f"{verb} the shortcut {path} failed at {progress.step} {shown}", exc) from exc
 
 
 def _require_shortcut_file(path: str) -> None:
@@ -160,9 +160,9 @@ def _require_shortcut_file(path: str) -> None:
     try:
         info = Path(path).stat()
     except (FileNotFoundError, NotADirectoryError) as exc:
-        raise NativeCallError(f"the shortcut {path} does not exist") from exc
+        raise native_error(f"the shortcut {path} does not exist", exc) from exc
     except OSError as exc:
-        raise NativeCallError(f"cannot read the shortcut {path}: {exc}") from exc
+        raise native_error(f"cannot read the shortcut {path}: {exc}", exc) from exc
     if not stat.S_ISREG(info.st_mode):
         raise NativeCallError(f"the shortcut {path} is not a file")
     if info.st_size == 0:

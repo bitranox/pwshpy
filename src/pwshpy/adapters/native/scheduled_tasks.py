@@ -24,9 +24,9 @@ import logging
 from collections.abc import Iterator
 from typing import Any
 
-from ...domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError
+from ...domain.errors import ConfigurationError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
-from .marshal import com_hresult, skip_or_raise, to_task_state
+from .marshal import com_hresult, native_error, skip_or_raise, to_task_state
 from .task_readback import read_task_extras
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ def _connect_scheduler() -> Any:
         service = win32com_client.Dispatch("Schedule.Service")
         service.Connect()
     except Exception as exc:
-        raise NativeCallError(str(exc) or "cannot connect to the Task Scheduler service") from exc
+        raise native_error(str(exc) or "cannot connect to the Task Scheduler service", exc) from exc
     return service
 
 
@@ -269,7 +269,7 @@ def iter_scheduled_tasks(
         root = service.GetFolder(folder_path)
         root_path = _folder_path(root)
     except Exception as exc:
-        raise NativeCallError(f"cannot open task folder '{folder_path}': {exc}") from exc
+        raise native_error(f"cannot open task folder '{folder_path}': {exc}", exc) from exc
     yield from _walk(root, root_path, strict=strict)
 
 

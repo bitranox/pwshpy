@@ -18,8 +18,9 @@ import importlib
 from collections.abc import Iterator
 from typing import Any
 
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import PlatformUnsupportedError
 from ...domain.records import LocalGroup, LocalUser
+from .marshal import native_error
 
 _UF_ACCOUNTDISABLE = 0x0002
 _FILTER_NORMAL_ACCOUNT = 0x0002  # win32netcon.FILTER_NORMAL_ACCOUNT
@@ -62,7 +63,7 @@ def iter_local_users() -> Iterator[LocalUser]:
         try:
             data, _total, resume = net.NetUserEnum(None, 2, _FILTER_NORMAL_ACCOUNT, resume, _MAX_PREFERRED_LENGTH)
         except Exception as exc:
-            raise NativeCallError(str(exc) or "cannot enumerate local users") from exc
+            raise native_error(str(exc) or "cannot enumerate local users", exc) from exc
         for entry in data:
             name = str(entry["name"])
             yield LocalUser.model_construct(
@@ -91,7 +92,7 @@ def iter_local_groups() -> Iterator[LocalGroup]:
         try:
             data, _total, resume = net.NetLocalGroupEnum(None, 1, resume, _MAX_PREFERRED_LENGTH)
         except Exception as exc:
-            raise NativeCallError(str(exc) or "cannot enumerate local groups") from exc
+            raise native_error(str(exc) or "cannot enumerate local groups", exc) from exc
         for entry in data:
             name = str(entry["name"])
             yield LocalGroup.model_construct(

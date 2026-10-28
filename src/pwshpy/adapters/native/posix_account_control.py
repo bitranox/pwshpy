@@ -22,6 +22,7 @@ from typing import Any
 
 from ...domain.errors import NativeCallError, PlatformUnsupportedError
 from ...domain.records import LocalGroup, LocalUser
+from .marshal import native_error
 from .process_exec import run_process as _run_process
 
 #: A portable POSIX login / group name: a lowercase-letter/underscore start, then letters/digits/_/-,
@@ -68,7 +69,7 @@ def _read_user(name: str, *, enabled: bool) -> LocalUser:
     try:
         entry = _load("pwd").getpwnam(name)
     except KeyError as exc:
-        raise NativeCallError(f"user {name!r} not found") from exc
+        raise native_error(f"user {name!r} not found", exc) from exc
     return LocalUser(
         name=str(entry.pw_name),
         sid=str(entry.pw_uid),
@@ -83,7 +84,7 @@ def _read_group(name: str) -> LocalGroup:
     try:
         entry = _load("grp").getgrnam(name)
     except KeyError as exc:
-        raise NativeCallError(f"group {name!r} not found") from exc
+        raise native_error(f"group {name!r} not found", exc) from exc
     return LocalGroup(name=str(entry.gr_name), sid=str(entry.gr_gid), description="")
 
 

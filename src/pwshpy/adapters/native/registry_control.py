@@ -19,9 +19,8 @@ from __future__ import annotations
 from typing import Any
 
 from ...domain.enums import RegistryValueType
-from ...domain.errors import NativeCallError
 from ...domain.records import RegistryKey, RegistryValue
-from .marshal import from_registry_value_type
+from .marshal import from_registry_value_type, native_error
 from .registry import load_registry_backend, normalize_key, split_hive
 
 _RegistryData = str | int | list[str] | None
@@ -39,7 +38,7 @@ class NativeRegistryController:
         try:
             reg.set_value(normalized, name, data, from_registry_value_type(value_type))
         except registry_error as exc:
-            raise NativeCallError(str(exc) or type(exc).__name__) from exc
+            raise native_error(str(exc) or type(exc).__name__, exc) from exc
         return RegistryValue.model_construct(hive=hive, key=sub_key, name=name, type=value_type, data=data)
 
     def remove_value(self, key: str, name: str) -> None:
@@ -50,7 +49,7 @@ class NativeRegistryController:
         try:
             reg.delete_value(normalized, name)
         except registry_error as exc:
-            raise NativeCallError(str(exc) or type(exc).__name__) from exc
+            raise native_error(str(exc) or type(exc).__name__, exc) from exc
 
     def create_key(self, key: str) -> RegistryKey:
         """Create registry ``key`` (with any missing parents); return the created key."""
@@ -61,7 +60,7 @@ class NativeRegistryController:
         try:
             reg.create_key(normalized, parents=True)
         except registry_error as exc:
-            raise NativeCallError(str(exc) or type(exc).__name__) from exc
+            raise native_error(str(exc) or type(exc).__name__, exc) from exc
         parent, _, name = sub_key.rpartition("\\")
         return RegistryKey.model_construct(hive=hive, key=parent, name=name)
 
@@ -73,7 +72,7 @@ class NativeRegistryController:
         try:
             reg.delete_key(normalized, delete_subkeys=recursive)
         except registry_error as exc:
-            raise NativeCallError(str(exc) or type(exc).__name__) from exc
+            raise native_error(str(exc) or type(exc).__name__, exc) from exc
 
 
 __all__ = ["NativeRegistryController"]

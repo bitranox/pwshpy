@@ -70,7 +70,7 @@ from ...domain.errors import ConfigurationError, NativeCallError, PlatformUnsupp
 from ...domain.records import ScheduledTaskInfo
 from ...domain.scheduling import BootTrigger, DailyTrigger, OnceTrigger, TaskPrincipal, TaskSettings, TaskTrigger
 from . import systemd_dbus as _dbus
-from .marshal import skip_or_raise
+from .marshal import native_error, skip_or_raise
 from .systemd_dbus import ActiveState, LoadState, UnitFileState
 
 logger = logging.getLogger(__name__)
@@ -1238,7 +1238,7 @@ def _owned_unit_file(unit: str) -> bool:
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        raise NativeCallError(f"cannot read {path} to tell whether pwshpy wrote it: {exc}") from exc
+        raise native_error(f"cannot read {path} to tell whether pwshpy wrote it: {exc}", exc) from exc
     if not is_pwshpy_unit(text):
         raise NativeCallError(
             f"{path} was not written by pwshpy (no {OWNERSHIP_KEY}= in its [Unit] section); it is left as it is."
@@ -1369,14 +1369,14 @@ class SystemdScheduledTaskController:
         try:
             path.write_text(text, encoding="utf-8")
         except OSError as exc:
-            raise NativeCallError(f"cannot write unit {path}: {exc}") from exc
+            raise native_error(f"cannot write unit {path}: {exc}", exc) from exc
 
     @staticmethod
     def _remove(path: Path) -> None:
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
-            raise NativeCallError(f"cannot delete unit {path}: {exc}") from exc
+            raise native_error(f"cannot delete unit {path}: {exc}", exc) from exc
 
     @classmethod
     def _retire_timer(cls, bus: _dbus.Bus, timer: str, *, remove: bool) -> None:

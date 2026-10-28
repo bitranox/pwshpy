@@ -18,9 +18,9 @@ from collections.abc import Iterator
 from typing import Any
 
 from ...domain.enums import AceType, WellKnownSid
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import PlatformUnsupportedError
 from ...domain.records import AclEntry
-from .marshal import to_ace_type
+from .marshal import native_error, to_ace_type
 
 _INHERITED_ACE = 0x10
 _GENERIC_ALL = 0x10000000
@@ -66,7 +66,7 @@ def iter_acl(path: str) -> Iterator[AclEntry]:
         owner_sid = str(security.ConvertSidToStringSid(owner)) if owner is not None else ""
         dacl = descriptor.GetSecurityDescriptorDacl()
     except Exception as exc:
-        raise NativeCallError(str(exc) or f"cannot read ACL of {path!r}") from exc
+        raise native_error(str(exc) or f"cannot read ACL of {path!r}", exc) from exc
     if dacl is None:  # null DACL: unprotected object -> everyone has full access (distinct from empty DACL)
         yield AclEntry.model_construct(
             path=path,

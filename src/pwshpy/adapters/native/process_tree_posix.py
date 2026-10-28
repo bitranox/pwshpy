@@ -27,6 +27,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ...domain.errors import NativeCallError
+from .marshal import native_error
 
 _HELPER = Path(__file__).with_name("_tree_reaper.py")
 # The helper's own kill loop is bounded at 10 s; past this the helper is SIGKILLed itself.
@@ -146,7 +147,7 @@ class PosixReaperTree:
             )
         except OSError as exc:
             _close_quietly(control_w)
-            raise NativeCallError(f"Failed to start the wait_tree helper: {exc}") from exc
+            raise native_error(f"Failed to start the wait_tree helper: {exc}", exc) from exc
         finally:
             _close_quietly(control_r)
             _close_quietly(status_w)
@@ -163,7 +164,7 @@ class PosixReaperTree:
             with os.fdopen(control_w, "wb") as control:
                 control.write(payload)
         except OSError as exc:
-            raise NativeCallError(f"The wait_tree helper did not accept its request: {exc}") from exc
+            raise native_error(f"The wait_tree helper did not accept its request: {exc}", exc) from exc
 
     def wait(self, deadline: float | None) -> bool:
         """Wait for the helper, which exits once the tree is gone; ``False`` if ``deadline`` passed."""

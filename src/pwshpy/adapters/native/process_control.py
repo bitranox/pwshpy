@@ -17,6 +17,7 @@ from typing import Any
 import psutil as _psutil_module  # pyright: ignore[reportMissingTypeStubs]
 
 from ...domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
+from .marshal import native_error
 
 _psutil: Any = _psutil_module
 _NO_SUCH_PROCESS: type[BaseException] = _psutil.NoSuchProcess
@@ -38,11 +39,11 @@ class NativeProcessControl:
         try:
             proc = _psutil.Process(pid)
         except _NO_SUCH_PROCESS as exc:
-            raise NativeCallError(f"no process with PID {pid}") from exc
+            raise native_error(f"no process with PID {pid}", exc) from exc
         try:
             proc.kill() if force else proc.terminate()
         except (_NO_SUCH_PROCESS, _ACCESS_DENIED, OSError) as exc:
-            raise NativeCallError(f"cannot stop PID {pid}: {exc}") from exc
+            raise native_error(f"cannot stop PID {pid}: {exc}", exc) from exc
 
     def wait_process(self, pid: int, *, timeout: float | None = None) -> int | None:
         """Wait for a process to exit; return its exit code (like Wait-Process).
@@ -88,7 +89,7 @@ class NativeProcessControl:
                 argv, capture_output=True, text=True, check=False
             )
         except OSError as exc:
-            raise NativeCallError(f"shutdown failed: {exc}") from exc
+            raise native_error(f"shutdown failed: {exc}", exc) from exc
         if completed.returncode != 0:
             raise NativeCallError(f"shutdown exited {completed.returncode}: {completed.stderr.strip()}")
 

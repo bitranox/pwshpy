@@ -23,9 +23,9 @@ from typing import Any
 
 from defusedxml.ElementTree import fromstring as _xml_fromstring
 
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import PlatformUnsupportedError
 from ...domain.records import EventLogEntry
-from .marshal import parse_event_time, to_event_level
+from .marshal import native_error, parse_event_time, to_event_level
 
 _NS = "{http://schemas.microsoft.com/win/2004/08/events/event}"
 _BATCH = 64
@@ -186,7 +186,7 @@ def iter_event_log(log_name: str, *, evtlog_api: Any | None = None) -> Generator
     try:
         query = win32evtlog.EvtQuery(log_name, flags)
     except Exception as exc:
-        raise NativeCallError(str(exc) or f"cannot query event log {log_name!r}") from exc
+        raise native_error(str(exc) or f"cannot query event log {log_name!r}", exc) from exc
     messages = PublisherMessages(win32evtlog)
     try:
         yield from _stream(win32evtlog, query, log_name, messages)
@@ -203,14 +203,14 @@ def _stream(win32evtlog: Any, query: Any, log_name: str, messages: PublisherMess
         except Exception as exc:
             if getattr(exc, "winerror", None) == _ERROR_NO_MORE_ITEMS:
                 return
-            raise NativeCallError(str(exc) or "EvtNext failed") from exc
+            raise native_error(str(exc) or "EvtNext failed", exc) from exc
         if not handles:
             return
         for handle in handles:
             try:
                 xml_text = str(win32evtlog.EvtRender(handle, win32evtlog.EvtRenderEventXml))
             except Exception as exc:
-                raise NativeCallError(str(exc) or "failed to render an event record") from exc
+                raise native_error(str(exc) or "failed to render an event record", exc) from exc
             system = _parse_system(xml_text)
             yield _to_entry(system, log_name, messages.render(handle, _provider_name(system)))
 

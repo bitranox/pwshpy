@@ -22,8 +22,9 @@ import importlib
 from collections.abc import Iterator
 from typing import Any
 
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import PlatformUnsupportedError
 from ...domain.records import LocalGroup, LocalUser
+from .marshal import native_error
 
 #: Login shells that mark a non-interactive / system account. Without /etc/shadow (root),
 #: this is the best-effort "enabled" signal - a nologin shell means the account cannot log in.
@@ -54,7 +55,7 @@ def iter_local_users() -> Iterator[LocalUser]:
     try:
         entries = pwd.getpwall()
     except OSError as exc:
-        raise NativeCallError(f"cannot read the user database: {exc}") from exc
+        raise native_error(f"cannot read the user database: {exc}", exc) from exc
     for entry in entries:
         yield LocalUser(
             name=str(entry.pw_name),
@@ -78,7 +79,7 @@ def iter_local_groups() -> Iterator[LocalGroup]:
     try:
         entries = grp.getgrall()
     except OSError as exc:
-        raise NativeCallError(f"cannot read the group database: {exc}") from exc
+        raise native_error(f"cannot read the group database: {exc}", exc) from exc
     for entry in entries:
         yield LocalGroup(name=str(entry.gr_name), sid=str(entry.gr_gid), description="")
 

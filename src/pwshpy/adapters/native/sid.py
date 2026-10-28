@@ -12,7 +12,8 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import PlatformUnsupportedError
+from .marshal import native_error
 
 
 def _load_security() -> Any:
@@ -51,7 +52,7 @@ def sid_string(name_or_sid: str) -> str:
         sid, _domain, _kind = security.LookupAccountName(None, name_or_sid)
         return str(security.ConvertSidToStringSid(sid))
     except Exception as exc:
-        raise NativeCallError(str(exc) or f"cannot resolve account {name_or_sid!r} to a SID") from exc
+        raise native_error(str(exc) or f"cannot resolve account {name_or_sid!r} to a SID", exc) from exc
 
 
 __all__ = ["sid_string"]

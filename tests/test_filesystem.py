@@ -6,13 +6,15 @@ verified on every OS without mocking.
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pytest
 
 from pwshpy.adapters.native.filesystem import NativeFileSystem
 from pwshpy.domain.enums import FileItemType
-from pwshpy.domain.errors import NativeCallError
+from pwshpy.domain.errors import NativeAccessDeniedError, NativeCallError
 from pwshpy.domain.records import FileSystemItem
 
 
@@ -122,3 +124,28 @@ def test_errors_wrap_in_nativecallerror(tmp_path: Path) -> None:
         fs.get_content(str(tmp_path / "missing"))
     with pytest.raises(NativeCallError):
         fs.remove_item(str(tmp_path / "missing"))
+
+
+#: Guarded by ``sys.platform`` because ``os.geteuid`` does not exist on Windows.
+_POSIX_NON_ROOT = sys.platform != "win32" and os.geteuid() != 0
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(not _POSIX_NON_ROOT, reason="needs POSIX search permission enforced (non-root)")
+def test_a_denied_entry_stat_is_raised_as_is_not_as_a_listing_error(tmp_path: Path) -> None:
+    """A directory readable but not searchable: listing names works, stat-ing an entry is EACCES.
+
+    The entry's own typed error ("cannot stat ...") must reach the caller unchanged, not be caught
+    again by the listing's OSError clause because a denied error is a PermissionError too.
+    """
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "a.txt").write_text("x", encoding="utf-8")
+    locked.chmod(0o600)
+    try:
+        with pytest.raises(NativeAccessDeniedError, match=r"^cannot stat ") as caught:
+            list(NativeFileSystem().get_child_item(str(locked)))
+    finally:
+        locked.chmod(0o700)
+    assert isinstance(caught.value.__cause__, PermissionError)
+    assert not isinstance(caught.value.__cause__, NativeCallError)

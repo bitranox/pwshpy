@@ -21,6 +21,7 @@ from pathlib import Path
 from ...domain.enums import FileItemType
 from ...domain.errors import NativeCallError
 from ...domain.records import FileSystemItem
+from .marshal import native_error
 
 
 def _to_item(entry: Path) -> FileSystemItem:
@@ -29,7 +30,7 @@ def _to_item(entry: Path) -> FileSystemItem:
         stat = entry.stat()
         is_dir = entry.is_dir()
     except OSError as exc:
-        raise NativeCallError(f"cannot stat {str(entry)!r}: {exc}") from exc
+        raise native_error(f"cannot stat {str(entry)!r}: {exc}", exc) from exc
     return FileSystemItem(
         path=str(entry),
         name=entry.name,
@@ -54,12 +55,14 @@ class NativeFileSystem:
         try:
             entries = root.rglob("*") if recurse else root.iterdir()
         except OSError as exc:
-            raise NativeCallError(f"cannot list {path!r}: {exc}") from exc
+            raise native_error(f"cannot list {path!r}: {exc}", exc) from exc
         try:
             for entry in entries:
                 yield _to_item(entry)
+        except NativeCallError:
+            raise  # _to_item already typed it; a denied stat is a PermissionError too, never re-wrap
         except OSError as exc:
-            raise NativeCallError(f"error while listing {path!r}: {exc}") from exc
+            raise native_error(f"error while listing {path!r}: {exc}", exc) from exc
 
     def get_item(self, path: str) -> FileSystemItem:
         """Return one file/directory as a record (like Get-Item)."""
@@ -77,7 +80,7 @@ class NativeFileSystem:
         try:
             return Path(path).read_text(encoding=encoding)
         except OSError as exc:
-            raise NativeCallError(f"cannot read {path!r}: {exc}") from exc
+            raise native_error(f"cannot read {path!r}: {exc}", exc) from exc
 
     def get_content_lines(self, path: str, *, encoding: str = "utf-8") -> Iterator[str]:
         """Yield a file's lines lazily, **memory-bounded** (like ``Get-Content`` line-by-line).
@@ -90,14 +93,14 @@ class NativeFileSystem:
             # below closes it via `with handle` (SIM115's context-manager requirement is met there).
             handle = Path(path).open(encoding=encoding)  # noqa: SIM115
         except OSError as exc:
-            raise NativeCallError(f"cannot read {path!r}: {exc}") from exc
+            raise native_error(f"cannot read {path!r}: {exc}", exc) from exc
 
         def _lines() -> Iterator[str]:
             with handle:
                 try:
                     yield from handle
                 except OSError as exc:
-                    raise NativeCallError(f"error while reading {path!r}: {exc}") from exc
+                    raise native_error(f"error while reading {path!r}: {exc}", exc) from exc
 
         return _lines()
 
@@ -115,7 +118,7 @@ class NativeFileSystem:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.touch()
         except OSError as exc:
-            raise NativeCallError(f"cannot create {path!r}: {exc}") from exc
+            raise native_error(f"cannot create {path!r}: {exc}", exc) from exc
         return _to_item(target)
 
     def copy_item(self, source: str, destination: str, *, recurse: bool = False) -> None:
@@ -127,14 +130,14 @@ class NativeFileSystem:
             else:
                 shutil.copy2(src, destination)
         except OSError as exc:
-            raise NativeCallError(f"cannot copy {source!r} -> {destination!r}: {exc}") from exc
+            raise native_error(f"cannot copy {source!r} -> {destination!r}: {exc}", exc) from exc
 
     def move_item(self, source: str, destination: str) -> None:
         """Move/rename a file or directory (like Move-Item) (**mutating**)."""
         try:
             shutil.move(source, destination)
         except OSError as exc:
-            raise NativeCallError(f"cannot move {source!r} -> {destination!r}: {exc}") from exc
+            raise native_error(f"cannot move {source!r} -> {destination!r}: {exc}", exc) from exc
 
     def remove_item(self, path: str, *, recurse: bool = False) -> None:
         """Delete a file, or a directory (``recurse`` removes its contents too) (**mutating**)."""
@@ -145,7 +148,7 @@ class NativeFileSystem:
             else:
                 target.unlink()
         except OSError as exc:
-            raise NativeCallError(f"cannot remove {path!r}: {exc}") from exc
+            raise native_error(f"cannot remove {path!r}: {exc}", exc) from exc
 
 
 __all__ = ["NativeFileSystem"]

@@ -7,6 +7,8 @@ import errno
 import pytest
 
 from pwshpy.adapters.cli.output import is_pipe_closed
+from pwshpy.adapters.native.marshal import native_error
+from pwshpy.domain.errors import NativeAccessDeniedError
 
 
 class _FakeWindowsPipeError(OSError):
@@ -46,3 +48,11 @@ def test_unrelated_winerror_is_not_pipe_closed() -> None:
 def test_unrelated_oserror_is_not_pipe_closed() -> None:
     """A genuine write failure (e.g. ENOSPC) must NOT be treated as a closed pipe."""
     assert is_pipe_closed(OSError(errno.ENOSPC, "no space left on device")) is False
+
+
+@pytest.mark.os_agnostic
+def test_a_denied_native_error_is_not_a_closed_pipe() -> None:
+    """A NativeAccessDeniedError is an OSError too, so the stream guard sees it; it must re-raise."""
+    denied = native_error("cannot read", PermissionError(errno.EACCES, "denied"))
+    assert isinstance(denied, NativeAccessDeniedError)
+    assert is_pipe_closed(denied) is False

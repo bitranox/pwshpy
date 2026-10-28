@@ -25,9 +25,9 @@ from collections.abc import Iterator
 from typing import Any
 
 from ...domain.enums import RegistryHive
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import PlatformUnsupportedError
 from ...domain.records import RegistryKey, RegistryValue
-from .marshal import normalize_registry_data, to_registry_hive, to_registry_value_type
+from .marshal import native_error, normalize_registry_data, to_registry_hive, to_registry_value_type
 
 
 def load_registry_backend() -> tuple[Any, type[BaseException]]:
@@ -58,7 +58,7 @@ def split_hive(normalized: str) -> tuple[RegistryHive, str]:
     try:
         hive = to_registry_hive(hive_token)
     except KeyError as exc:
-        raise NativeCallError(f"Unknown registry hive: {hive_token!r}") from exc
+        raise native_error(f"Unknown registry hive: {hive_token!r}", exc) from exc
     return hive, sub_key
 
 
@@ -88,7 +88,7 @@ def iter_registry_values(key: str) -> Iterator[RegistryValue]:
                 data=normalize_registry_data(value_data),
             )
     except registry_error as exc:
-        raise NativeCallError(str(exc) or type(exc).__name__) from exc
+        raise native_error(str(exc) or type(exc).__name__, exc) from exc
 
 
 def iter_registry_keys(key: str) -> Iterator[RegistryKey]:
@@ -107,7 +107,7 @@ def iter_registry_keys(key: str) -> Iterator[RegistryKey]:
         for subkey_name in reg.subkeys(normalized):
             yield RegistryKey.model_construct(hive=hive, key=sub_key, name=str(subkey_name))
     except registry_error as exc:
-        raise NativeCallError(str(exc) or type(exc).__name__) from exc
+        raise native_error(str(exc) or type(exc).__name__, exc) from exc
 
 
 __all__ = ["iter_registry_keys", "iter_registry_values", "load_registry_backend", "normalize_key", "split_hive"]

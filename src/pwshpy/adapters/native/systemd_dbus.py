@@ -39,6 +39,7 @@ from enum import Enum
 from typing import Any, NamedTuple, cast
 
 from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from .marshal import native_error
 
 MANAGER_PATH = "/org/freedesktop/systemd1"
 MANAGER_BUS = "org.freedesktop.systemd1"
@@ -199,7 +200,7 @@ def open_bus() -> Bus:
     try:
         conn = blocking.open_dbus_connection(bus="SYSTEM")
     except OSError as exc:
-        raise NativeCallError(f"cannot connect to the system D-Bus: {exc}") from exc
+        raise native_error(f"cannot connect to the system D-Bus: {exc}", exc) from exc
     mgr = core.DBusAddress(MANAGER_PATH, bus_name=MANAGER_BUS, interface=MANAGER_IFACE)
     return Bus(conn=conn, core=core, mgr=mgr)
 

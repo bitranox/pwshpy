@@ -28,8 +28,9 @@ from typing import Any
 
 from pydantic import SecretStr
 
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import PlatformUnsupportedError
 from ...domain.records import Credential
+from .marshal import native_error
 
 #: Win32 ``ERROR_NOT_FOUND`` - CredRead raises this when the target is absent.
 _ERROR_NOT_FOUND = 1168
@@ -84,7 +85,7 @@ class NativeCredentialStore:
         try:
             win32cred.CredWrite(blob, 0)
         except Exception as exc:  # pywintypes.error - keep the PwshPyError invariant
-            raise NativeCallError(f"CredWrite({target!r}) failed: {exc}") from exc
+            raise native_error(f"CredWrite({target!r}) failed: {exc}", exc) from exc
         return Credential(target=target, username=username, secret=SecretStr(secret))
 
     def load(self, target: str) -> Credential | None:
@@ -95,7 +96,7 @@ class NativeCredentialStore:
         except Exception as exc:
             if getattr(exc, "winerror", None) == _ERROR_NOT_FOUND:
                 return None
-            raise NativeCallError(f"CredRead({target!r}) failed: {exc}") from exc
+            raise native_error(f"CredRead({target!r}) failed: {exc}", exc) from exc
         raw = stored.get("CredentialBlob")
         secret = raw.decode("utf-16-le", errors="replace") if isinstance(raw, bytes) else str(raw or "")
         return Credential(target=target, username=stored.get("UserName") or "", secret=SecretStr(secret))
@@ -106,7 +107,7 @@ class NativeCredentialStore:
         try:
             win32cred.CredDelete(target, win32cred.CRED_TYPE_GENERIC, 0)
         except Exception as exc:  # pywintypes.error - keep the PwshPyError invariant
-            raise NativeCallError(f"CredDelete({target!r}) failed: {exc}") from exc
+            raise native_error(f"CredDelete({target!r}) failed: {exc}", exc) from exc
 
 
 def _load_win32cred() -> Any:

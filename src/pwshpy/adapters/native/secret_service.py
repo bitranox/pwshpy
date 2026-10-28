@@ -27,6 +27,7 @@ from pydantic import SecretStr
 
 from ...domain.errors import NativeCallError, PlatformUnsupportedError
 from ...domain.records import Credential
+from .marshal import native_error
 
 _BUS = "org.freedesktop.secrets"
 _SERVICE_PATH = "/org/freedesktop/secrets"
@@ -86,13 +87,13 @@ def _open() -> _Session:
     try:
         conn = blocking.open_dbus_connection(bus="SESSION")
     except Exception as exc:  # no session bus at all (bare server, no login session)
-        raise NativeCallError("no session D-Bus is available; the credential store needs a desktop session.") from exc
+        raise native_error("no session D-Bus is available; the credential store needs a desktop session.", exc) from exc
     session = _Session(core, conn, "")
     try:
         _out, path = session.call(_SERVICE_PATH, _SERVICE_IFACE, "OpenSession", "sv", ("plain", ("s", "")))
     except NativeCallError as exc:
         conn.close()
-        raise NativeCallError("no Secret Service (desktop keyring) is available on the session bus.") from exc
+        raise native_error("no Secret Service (desktop keyring) is available on the session bus.", exc) from exc
     session.session = str(path)
     return session
 

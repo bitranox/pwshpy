@@ -23,6 +23,7 @@ import orjson
 
 from ...domain.errors import NativeCallError
 from ...domain.records import WebResponse
+from .marshal import native_error
 
 
 def _require_http_scheme(url: str) -> None:
@@ -74,7 +75,7 @@ def invoke_web_request(
             headers=dict(exc.headers),
         )
     except (urllib.error.URLError, OSError) as exc:
-        raise NativeCallError(f"web request to {url!r} failed: {exc}") from exc
+        raise native_error(f"web request to {url!r} failed: {exc}", exc) from exc
 
 
 def invoke_rest_method(
@@ -104,7 +105,7 @@ def invoke_rest_method(
     try:
         return orjson.loads(response.text)
     except orjson.JSONDecodeError as exc:
-        raise NativeCallError(f"response from {url!r} is not JSON: {exc}") from exc
+        raise native_error(f"response from {url!r} is not JSON: {exc}", exc) from exc
 
 
 def download_file(url: str, dest: str | Path, *, chunk_size: int = 65536, timeout: float = 30.0) -> Path:
@@ -130,10 +131,10 @@ def download_file(url: str, dest: str | Path, *, chunk_size: int = 65536, timeou
             shutil.copyfileobj(response, handle, chunk_size)
     except urllib.error.HTTPError as exc:
         destination.unlink(missing_ok=True)
-        raise NativeCallError(f"download of {url!r} failed: HTTP {exc.code}") from exc
+        raise native_error(f"download of {url!r} failed: HTTP {exc.code}", exc) from exc
     except (urllib.error.URLError, OSError) as exc:
         destination.unlink(missing_ok=True)
-        raise NativeCallError(f"download of {url!r} failed: {exc}") from exc
+        raise native_error(f"download of {url!r} failed: {exc}", exc) from exc
     return destination
 
 

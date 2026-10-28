@@ -22,6 +22,7 @@ from collections.abc import Mapping, Sequence
 
 from ...domain.errors import NativeCallError, OperationTimeoutError
 from ...domain.records import ProcessResult
+from .marshal import native_error
 from .process_tree import run_process_tree
 
 
@@ -84,9 +85,9 @@ def run_process(  # noqa: PLR0913 - mirrors the ProcessRunner port: independent,
             check=False,
         )
     except FileNotFoundError as exc:
-        raise NativeCallError(f"Executable not found: {args[0]!r} ({exc})") from exc
+        raise native_error(f"Executable not found: {args[0]!r} ({exc})", exc) from exc
     except OSError as exc:
-        raise NativeCallError(f"Failed to run {args[0]!r}: {exc}") from exc
+        raise native_error(f"Failed to run {args[0]!r}: {exc}", exc) from exc
     except subprocess.TimeoutExpired as exc:
         # exc.timeout is the value subprocess enforced, so the attribute cannot drift from the message.
         raise OperationTimeoutError(

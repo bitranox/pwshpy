@@ -23,9 +23,9 @@ from collections.abc import Callable
 from typing import Any
 
 from ...domain.enums import WellKnownSid
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import PlatformUnsupportedError
 from ...domain.records import CurrentIdentity
-from .marshal import to_integrity_level
+from .marshal import native_error, to_integrity_level
 
 
 def _load(module: str) -> Any:
@@ -65,7 +65,7 @@ def windows_current_identity(*, load: Callable[[str], Any] | None = None) -> Cur
     try:
         token = security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
     except Exception as exc:  # pywintypes.error - keep the PwshPyError invariant
-        raise NativeCallError(f"OpenProcessToken failed: {exc}") from exc
+        raise native_error(f"OpenProcessToken failed: {exc}", exc) from exc
     try:
         user_sid, _attributes = _query(security, token, security.TokenUser, "TokenUser")
         label_sid, _attributes = _query(security, token, security.TokenIntegrityLevel, "TokenIntegrityLevel")
@@ -90,7 +90,7 @@ def _query(security: Any, token: Any, info_class: int, label: str) -> Any:
     try:
         return security.GetTokenInformation(token, info_class)
     except Exception as exc:
-        raise NativeCallError(f"GetTokenInformation({label}) failed: {exc}") from exc
+        raise native_error(f"GetTokenInformation({label}) failed: {exc}", exc) from exc
 
 
 def _sid_text(security: Any, sid: Any) -> str:
@@ -98,7 +98,7 @@ def _sid_text(security: Any, sid: Any) -> str:
     try:
         return str(security.ConvertSidToStringSid(sid))
     except Exception as exc:
-        raise NativeCallError(f"ConvertSidToStringSid failed: {exc}") from exc
+        raise native_error(f"ConvertSidToStringSid failed: {exc}", exc) from exc
 
 
 def _display_names(security: Any, sid: Any) -> tuple[str, str]:
@@ -120,7 +120,7 @@ def _last_sub_authority(sid: Any) -> int:
     try:
         return int(sid.GetSubAuthority(sid.GetSubAuthorityCount() - 1))
     except Exception as exc:
-        raise NativeCallError(f"cannot read the integrity label RID: {exc}") from exc
+        raise native_error(f"cannot read the integrity label RID: {exc}", exc) from exc
 
 
 def posix_current_identity(
@@ -159,7 +159,7 @@ def posix_current_identity(
     except KeyError:
         name = ""
     except OSError as exc:
-        raise NativeCallError(f"cannot read the user database: {exc}") from exc
+        raise native_error(f"cannot read the user database: {exc}", exc) from exc
     return CurrentIdentity.model_construct(
         sid=str(euid),
         account=name,

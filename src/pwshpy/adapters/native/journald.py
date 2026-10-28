@@ -25,8 +25,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ...domain.enums import EventLevel
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import PlatformUnsupportedError
 from ...domain.records import EventLogEntry
+from .marshal import native_error
 
 
 def _load_journal() -> Any:
@@ -128,7 +129,7 @@ def iter_event_log(log_name: str) -> Iterator[EventLogEntry]:
     try:
         reader = journal.Reader()
     except OSError as exc:
-        raise NativeCallError(f"cannot open the systemd journal: {exc}") from exc
+        raise native_error(f"cannot open the systemd journal: {exc}", exc) from exc
     try:
         if log_name and log_name not in ("System", "*"):
             unit = log_name if "." in log_name else f"{log_name}.service"
@@ -140,7 +141,7 @@ def iter_event_log(log_name: str) -> Iterator[EventLogEntry]:
                 break
             yield to_entry(log_name, entry)
     except OSError as exc:
-        raise NativeCallError(f"error reading the systemd journal: {exc}") from exc
+        raise native_error(f"error reading the systemd journal: {exc}", exc) from exc
     finally:
         reader.close()
 

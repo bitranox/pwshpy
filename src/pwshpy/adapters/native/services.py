@@ -23,9 +23,9 @@ from collections.abc import Iterator
 from typing import Any
 
 from ...domain.enums import ServiceStartType
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import PlatformUnsupportedError
 from ...domain.records import ServiceInfo
-from .marshal import to_service_kind, to_service_start_type, to_service_state
+from .marshal import native_error, to_service_kind, to_service_start_type, to_service_state
 
 
 def _load_win32service() -> Any:
@@ -88,12 +88,12 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
     try:
         scm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_ENUMERATE_SERVICE)
     except Exception as exc:
-        raise NativeCallError(str(exc) or "cannot open the service control manager") from exc
+        raise native_error(str(exc) or "cannot open the service control manager", exc) from exc
     try:
         entries = win32service.EnumServicesStatusEx(scm)
     except Exception as exc:
         win32service.CloseServiceHandle(scm)
-        raise NativeCallError(str(exc) or "cannot enumerate services") from exc
+        raise native_error(str(exc) or "cannot enumerate services", exc) from exc
     try:
         for entry in entries:
             name = str(entry["ServiceName"])

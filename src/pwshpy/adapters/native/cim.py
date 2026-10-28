@@ -28,7 +28,7 @@ from typing import Any, cast
 
 from ...domain.errors import NativeCallError, PlatformUnsupportedError
 from ...domain.records import CimInstance
-from .marshal import com_hresult, com_outer_hresult, is_com_error
+from .marshal import com_hresult, com_outer_hresult, is_com_error, native_error
 
 _CLASS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DEFAULT_NAMESPACE = "root/cimv2"
@@ -48,7 +48,7 @@ def _load_wbem_service(namespace: str) -> Any:
         locator = win32com_client.Dispatch("WbemScripting.SWbemLocator")
         return locator.ConnectServer(".", namespace)
     except Exception as exc:
-        raise NativeCallError(str(exc) or f"cannot connect to WMI namespace {namespace!r}") from exc
+        raise native_error(str(exc) or f"cannot connect to WMI namespace {namespace!r}", exc) from exc
 
 
 def _marshal_value(value: Any) -> Any:
@@ -91,7 +91,7 @@ def iter_cim(
     except Exception as exc:
         if not is_com_error(exc):
             raise
-        raise NativeCallError(_query_failure(exc, wql)) from exc
+        raise native_error(_query_failure(exc, wql), exc) from exc
 
 
 def _query_failure(exc: BaseException, wql: str) -> str:

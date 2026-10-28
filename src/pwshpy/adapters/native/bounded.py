@@ -23,6 +23,7 @@ from multiprocessing.context import SpawnContext, SpawnProcess
 from typing import Any, NamedTuple
 
 from ...domain.errors import NativeCallError, OperationTimeoutError
+from .marshal import native_error
 
 # Pipe() returns a PipeConnection on Windows and a Connection elsewhere; the two share only the
 # private _ConnectionBase, so name the concrete class per platform (pyright narrows on
@@ -130,7 +131,7 @@ def _start(context: SpawnContext, child: PipeEnd, target: Callable[..., Any], ar
         process.start()
     except OSError as exc:
         name = getattr(target, "__name__", "call")
-        raise NativeCallError(f"{name} worker could not be started: {exc}") from exc
+        raise native_error(f"{name} worker could not be started: {exc}", exc) from exc
     finally:
         # The parent's copy of the write end must close, or recv() never sees EOF when the child
         # dies; on a failed start it would otherwise stay open until garbage collection.
@@ -158,7 +159,7 @@ def _await_result(parent: PipeEnd, process: SpawnProcess, *, name: str, timeout:
     # which raises BrokenPipeError instead when the child died before the parent reached poll.
     except (EOFError, BrokenPipeError, ConnectionResetError) as exc:
         _reap_exited(process)
-        raise NativeCallError(f"{name} worker exited without a result (exit code {process.exitcode})") from exc
+        raise native_error(f"{name} worker exited without a result (exit code {process.exitcode})", exc) from exc
     finally:
         _reap(process)
     return message

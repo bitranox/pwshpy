@@ -20,9 +20,9 @@ import threading
 from collections.abc import Iterator
 from typing import Any
 
-from ...domain.errors import NativeCallError, OperationTimeoutError
+from ...domain.errors import OperationTimeoutError
 from ...domain.records import DnsRecord
-from .marshal import to_address_family
+from .marshal import native_error, to_address_family
 
 
 def _resolve_addrinfo(name: str, timeout: float | None) -> list[Any]:
@@ -37,7 +37,7 @@ def _resolve_addrinfo(name: str, timeout: float | None) -> list[Any]:
         try:
             return socket.getaddrinfo(name, None)
         except socket.gaierror as exc:
-            raise NativeCallError(f"DNS resolution failed for {name!r}: {exc}") from exc
+            raise native_error(f"DNS resolution failed for {name!r}: {exc}", exc) from exc
 
     results: list[Any] = []
     errors: list[OSError] = []
@@ -54,7 +54,7 @@ def _resolve_addrinfo(name: str, timeout: float | None) -> list[Any]:
     if thread.is_alive():
         raise OperationTimeoutError(f"DNS resolution for {name!r} timed out after {timeout}s", timeout=timeout)
     if errors:
-        raise NativeCallError(f"DNS resolution failed for {name!r}: {errors[0]}") from errors[0]
+        raise native_error(f"DNS resolution failed for {name!r}: {errors[0]}", errors[0]) from errors[0]
     return results[0]
 
 

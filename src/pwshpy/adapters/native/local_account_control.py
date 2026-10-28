@@ -20,8 +20,9 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import PlatformUnsupportedError
 from ...domain.records import LocalGroup, LocalUser
+from .marshal import native_error
 
 _UF_SCRIPT = 0x0001
 _UF_ACCOUNTDISABLE = 0x0002
@@ -55,7 +56,7 @@ def _get_user(net: Any, security: Any, name: str) -> LocalUser:
     try:
         info: Any = net.NetUserGetInfo(None, name, 2)
     except Exception as exc:
-        raise NativeCallError(str(exc) or f"cannot read user {name!r}") from exc
+        raise native_error(str(exc) or f"cannot read user {name!r}", exc) from exc
     return LocalUser.model_construct(
         name=name,
         sid=_sid_for(security, name),
@@ -99,7 +100,7 @@ class NativeLocalAccountController:
             if full_name:
                 net.NetUserSetInfo(None, name, 1011, {"full_name": full_name})
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot create user {name!r}") from exc
+            raise native_error(str(exc) or f"cannot create user {name!r}", exc) from exc
         return _get_user(net, security, name)
 
     def remove_user(self, name: str, *, timeout: float = 30.0) -> None:
@@ -108,7 +109,7 @@ class NativeLocalAccountController:
         try:
             net.NetUserDel(None, name)
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot remove user {name!r}") from exc
+            raise native_error(str(exc) or f"cannot remove user {name!r}", exc) from exc
 
     def set_user_enabled(self, name: str, *, enabled: bool, timeout: float = 30.0) -> LocalUser:
         """Enable or disable a local user (toggles ``UF_ACCOUNTDISABLE``); return the new state."""
@@ -119,7 +120,7 @@ class NativeLocalAccountController:
             flags = flags & ~_UF_ACCOUNTDISABLE if enabled else flags | _UF_ACCOUNTDISABLE
             net.NetUserSetInfo(None, name, 1008, {"flags": flags})
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot update user {name!r}") from exc
+            raise native_error(str(exc) or f"cannot update user {name!r}", exc) from exc
         return _get_user(net, security, name)
 
     def new_group(self, name: str, *, description: str = "", timeout: float = 30.0) -> LocalGroup:
@@ -128,7 +129,7 @@ class NativeLocalAccountController:
         try:
             net.NetLocalGroupAdd(None, 1, {"name": name, "comment": description})
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot create group {name!r}") from exc
+            raise native_error(str(exc) or f"cannot create group {name!r}", exc) from exc
         return LocalGroup.model_construct(name=name, sid=_sid_for(security, name), description=description)
 
     def remove_group(self, name: str, *, timeout: float = 30.0) -> None:
@@ -137,7 +138,7 @@ class NativeLocalAccountController:
         try:
             net.NetLocalGroupDel(None, name)
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot remove group {name!r}") from exc
+            raise native_error(str(exc) or f"cannot remove group {name!r}", exc) from exc
 
     def add_group_member(self, group: str, member: str, *, timeout: float = 30.0) -> None:
         """Add ``member`` (a user/group name) to ``group`` (``NetLocalGroupAddMembers``)."""
@@ -145,7 +146,7 @@ class NativeLocalAccountController:
         try:
             net.NetLocalGroupAddMembers(None, group, 3, [{"domainandname": member}])
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot add {member!r} to group {group!r}") from exc
+            raise native_error(str(exc) or f"cannot add {member!r} to group {group!r}", exc) from exc
 
     def remove_group_member(self, group: str, member: str, *, timeout: float = 30.0) -> None:
         """Remove ``member`` from ``group`` (``NetLocalGroupDelMembers``)."""
@@ -153,7 +154,7 @@ class NativeLocalAccountController:
         try:
             net.NetLocalGroupDelMembers(None, group, [member])
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot remove {member!r} from group {group!r}") from exc
+            raise native_error(str(exc) or f"cannot remove {member!r} from group {group!r}", exc) from exc
 
 
 __all__ = ["NativeLocalAccountController"]

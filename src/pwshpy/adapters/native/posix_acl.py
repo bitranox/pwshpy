@@ -30,6 +30,7 @@ from typing import Any, NamedTuple
 from ...domain.enums import AceType, AclEntryKind
 from ...domain.errors import NativeCallError
 from ...domain.records import AclEntry
+from .marshal import native_error
 
 _os: Any = os  # funnel the Unix-only os calls (getxattr/setxattr/chown) past the type checker's platform pruning
 
@@ -170,7 +171,7 @@ def _current_acl(path: str) -> list[_XattrAclEntry]:
     try:
         return _base_entries(Path(path).stat().st_mode)
     except OSError as exc:
-        raise NativeCallError(f"cannot stat {path!r}: {exc}") from exc
+        raise native_error(f"cannot stat {path!r}: {exc}", exc) from exc
 
 
 def _to_entry(path: str, info: os.stat_result, entry: _XattrAclEntry) -> AclEntry:
@@ -211,7 +212,7 @@ def iter_acl(path: str) -> Iterator[AclEntry]:
     try:
         info = Path(path).stat()
     except OSError as exc:
-        raise NativeCallError(f"cannot stat {path!r}: {exc}") from exc
+        raise native_error(f"cannot stat {path!r}: {exc}", exc) from exc
     for entry in _current_acl(path):
         yield _to_entry(path, info, entry)
 
@@ -222,7 +223,7 @@ def _resolve_uid(owner: str) -> int:
     try:
         return int(_load("pwd").getpwnam(owner).pw_uid)
     except (KeyError, OSError) as exc:
-        raise NativeCallError(f"no such user {owner!r}") from exc
+        raise native_error(f"no such user {owner!r}", exc) from exc
 
 
 def _resolve_gid(group: str) -> int:
@@ -231,7 +232,7 @@ def _resolve_gid(group: str) -> int:
     try:
         return int(_load("grp").getgrnam(group).gr_gid)
     except (KeyError, OSError) as exc:
-        raise NativeCallError(f"no such group {group!r}") from exc
+        raise native_error(f"no such group {group!r}", exc) from exc
 
 
 def _parse_trustee(trustee: str) -> tuple[_AclTag, int]:
@@ -262,7 +263,7 @@ def _write_acl(path: str, entries: list[_XattrAclEntry]) -> None:
     try:
         _os.setxattr(path, _XATTR_ACCESS, _HEADER.pack(_ACL_VERSION) + body)
     except OSError as exc:
-        raise NativeCallError(f"cannot set ACL on {path!r}: {exc}") from exc
+        raise native_error(f"cannot set ACL on {path!r}: {exc}", exc) from exc
 
 
 class PosixAclController:
@@ -283,7 +284,7 @@ class PosixAclController:
         try:
             _os.chown(path, uid, -1)  # -1 leaves the owning group unchanged
         except OSError as exc:
-            raise NativeCallError(f"cannot set owner of {path!r}: {exc}") from exc
+            raise native_error(f"cannot set owner of {path!r}: {exc}", exc) from exc
 
     def add_ace(self, path: str, trustee: str, rights: int, *, access_type: AceType = AceType.ALLOW) -> None:
         """Grant a named user/group ``rights`` (low 3 bits as rwx) on ``path``; the mask is recomputed."""

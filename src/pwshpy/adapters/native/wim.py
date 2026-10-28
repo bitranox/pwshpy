@@ -41,6 +41,7 @@ from defusedxml.ElementTree import iterparse as _xml_iterparse
 from ...domain.enums import ImageArchitecture
 from ...domain.errors import NativeCallError
 from ...domain.records import WindowsImage
+from .marshal import native_error
 
 # Real install images carry a few KB of XML per image; the cap only bounds a hostile header.
 MAX_XML_BYTES = 16 * 1024 * 1024
@@ -126,7 +127,7 @@ def _read_xml_resource(path: Path) -> bytes:
             handle.seek(offset)
             raw = handle.read(size)
     except OSError as exc:
-        raise NativeCallError(f"cannot read {path}: {exc}") from exc
+        raise native_error(f"cannot read {path}: {exc}", exc) from exc
     if len(raw) != size:
         # The size check saw the file as it was; one cut between that check and the read
         # shows up only here.
@@ -155,9 +156,9 @@ def _top_level_elements(raw: bytes, path: Path) -> Iterator[_XmlNode]:
                 yield element
                 root.clear()
     except DefusedXmlException as exc:
-        raise NativeCallError(f"{path}: XML resource carries a DTD or entity declaration; refused ({exc})") from exc
+        raise native_error(f"{path}: XML resource carries a DTD or entity declaration; refused ({exc})", exc) from exc
     except ParseError as exc:
-        raise NativeCallError(f"{path}: malformed image XML: {exc}") from exc
+        raise native_error(f"{path}: malformed image XML: {exc}", exc) from exc
 
 
 def _text_of(element: _XmlNode) -> str:

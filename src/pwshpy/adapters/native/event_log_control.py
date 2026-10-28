@@ -16,7 +16,8 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import PlatformUnsupportedError
+from .marshal import native_error
 
 
 def _load_win32evtlog() -> Any:
@@ -43,7 +44,7 @@ class NativeEventLogController:
             else:
                 win32evtlog.EvtClearLog(log_name, backup_path)
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot clear event log {log_name!r}") from exc
+            raise native_error(str(exc) or f"cannot clear event log {log_name!r}", exc) from exc
 
 
 __all__ = ["NativeEventLogController"]

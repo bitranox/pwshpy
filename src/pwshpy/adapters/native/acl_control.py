@@ -25,8 +25,8 @@ import importlib
 from typing import Any
 
 from ...domain.enums import AceType
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
-from .marshal import to_ace_type
+from ...domain.errors import PlatformUnsupportedError
+from .marshal import native_error, to_ace_type
 
 
 def _load() -> Any:
@@ -67,7 +67,7 @@ class NativeAclController:
             descriptor.SetSecurityDescriptorDacl(1, dacl, 0)
             security.SetFileSecurity(path, security.DACL_SECURITY_INFORMATION, descriptor)
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot add ACE to {path!r}") from exc
+            raise native_error(str(exc) or f"cannot add ACE to {path!r}", exc) from exc
 
     def remove_ace(self, path: str, trustee: str, *, access_type: AceType | None = None) -> None:
         """Remove the ACEs of ``trustee`` on ``path`` (optionally only of ``access_type``)."""
@@ -87,7 +87,7 @@ class NativeAclController:
             descriptor.SetSecurityDescriptorDacl(1, dacl, 0)
             security.SetFileSecurity(path, security.DACL_SECURITY_INFORMATION, descriptor)
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot remove ACE from {path!r}") from exc
+            raise native_error(str(exc) or f"cannot remove ACE from {path!r}", exc) from exc
 
     def set_owner(self, path: str, owner: str) -> None:
         """Set the owner of ``path`` to ``owner`` (needs SeRestorePrivilege for other principals)."""
@@ -98,7 +98,7 @@ class NativeAclController:
             descriptor.SetSecurityDescriptorOwner(sid, 0)
             security.SetFileSecurity(path, security.OWNER_SECURITY_INFORMATION, descriptor)
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot set owner of {path!r}") from exc
+            raise native_error(str(exc) or f"cannot set owner of {path!r}", exc) from exc
 
 
 __all__ = ["NativeAclController"]

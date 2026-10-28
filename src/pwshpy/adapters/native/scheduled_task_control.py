@@ -23,7 +23,7 @@ from datetime import timedelta
 from typing import Any, NoReturn
 
 from ...domain.enums import TaskLogonType, TaskRunLevel
-from ...domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError
+from ...domain.errors import ConfigurationError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
 from ...domain.scheduling import (
     BootTrigger,
@@ -34,7 +34,7 @@ from ...domain.scheduling import (
     TaskSettings,
     TaskTrigger,
 )
-from .marshal import from_task_multiple_instances, to_task_state
+from .marshal import from_task_multiple_instances, native_error, to_task_state
 from .task_readback import read_task_extras
 
 _TASK_ACTION_EXEC = 0
@@ -66,7 +66,7 @@ def _connect_scheduler() -> Any:
         service = win32com_client.Dispatch("Schedule.Service")
         service.Connect()
     except Exception as exc:
-        raise NativeCallError(str(exc) or "cannot connect to the Task Scheduler service") from exc
+        raise native_error(str(exc) or "cannot connect to the Task Scheduler service", exc) from exc
     return service
 
 
@@ -299,7 +299,7 @@ class NativeScheduledTaskController:
             task.Enabled = True
             return _task_info(task, folder_path)
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot enable task {task_path!r}") from exc
+            raise native_error(str(exc) or f"cannot enable task {task_path!r}", exc) from exc
 
     def disable(self, task_path: str) -> ScheduledTaskInfo:
         """Disable a scheduled task; return its new state."""
@@ -309,7 +309,7 @@ class NativeScheduledTaskController:
             task.Enabled = False
             return _task_info(task, folder_path)
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot disable task {task_path!r}") from exc
+            raise native_error(str(exc) or f"cannot disable task {task_path!r}", exc) from exc
 
     def run(self, task_path: str) -> None:
         """Start a scheduled task now (on demand)."""
@@ -318,7 +318,7 @@ class NativeScheduledTaskController:
             _folder_path, task = self._fetch(service, task_path)
             task.Run(None)
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot run task {task_path!r}") from exc
+            raise native_error(str(exc) or f"cannot run task {task_path!r}", exc) from exc
 
     def stop(self, task_path: str) -> None:
         """Stop a running scheduled task."""
@@ -327,7 +327,7 @@ class NativeScheduledTaskController:
             _folder_path, task = self._fetch(service, task_path)
             task.Stop(0)
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot stop task {task_path!r}") from exc
+            raise native_error(str(exc) or f"cannot stop task {task_path!r}", exc) from exc
 
     def unregister(self, task_path: str) -> None:
         """Delete (unregister) a scheduled task."""
@@ -336,7 +336,7 @@ class NativeScheduledTaskController:
             folder_path, name = _split_path(task_path)
             service.GetFolder(folder_path).DeleteTask(name, 0)
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot unregister task {task_path!r}") from exc
+            raise native_error(str(exc) or f"cannot unregister task {task_path!r}", exc) from exc
 
     def register(  # noqa: PLR0913 - mirrors Register-ScheduledTask's independent, all-optional parameters
         self,
@@ -409,7 +409,7 @@ class NativeScheduledTaskController:
             )
             return _task_info(task, folder_path)
         except Exception as exc:
-            raise NativeCallError(str(exc) or f"cannot register task {task_path!r}") from exc
+            raise native_error(str(exc) or f"cannot register task {task_path!r}", exc) from exc
 
 
 __all__ = ["NativeScheduledTaskController"]

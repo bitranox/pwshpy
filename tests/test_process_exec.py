@@ -8,9 +8,12 @@ is data, stdin/env/timeout/missing-exe all behave.
 
 from __future__ import annotations
 
+import errno
 import os
+import subprocess  # nosec B404 - only the Popen type is used
 import sys
 import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -18,10 +21,15 @@ import psutil
 import pytest
 from process_tree_programs import finished, is_stopped, parent_argv, wait_for_beats
 
+from pwshpy.adapters.native.marshal import native_error
 from pwshpy.adapters.native.process_exec import run_process
-from pwshpy.adapters.native.process_tree import ProcessTree, _Reader  # pyright: ignore[reportPrivateUsage]
+from pwshpy.adapters.native.process_tree import (
+    ProcessTree,
+    _launch,  # pyright: ignore[reportPrivateUsage]
+    _Reader,  # pyright: ignore[reportPrivateUsage]
+)
 from pwshpy.composition import build_ps
-from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
+from pwshpy.domain.errors import NativeAccessDeniedError, NativeCallError, OperationTimeoutError
 from pwshpy.domain.records import ProcessResult
 
 
@@ -322,3 +330,38 @@ def test_a_launch_that_finds_no_thread_to_resume_raises_and_reaps(monkeypatch: p
     finally:
         tree.close()
     assert launched and not psutil.pid_exists(launched[0])
+
+
+class _FailingLaunchTree:
+    """A ProcessTree whose launch fails the way a strategy reports a refused start."""
+
+    def __init__(self, error: NativeCallError) -> None:
+        self.error = error
+
+    def launch(
+        self, args: Sequence[str], *, cwd: str | None, env: Mapping[str, str] | None, with_stdin: bool
+    ) -> subprocess.Popen[bytes]:
+        raise self.error
+
+    def wait(self, deadline: float | None) -> bool:
+        return True
+
+    def kill(self) -> None:
+        return None
+
+    def exit_code(self, args: Sequence[str]) -> int:
+        return 0
+
+    def close(self) -> None:
+        return None
+
+
+@pytest.mark.os_agnostic
+def test_a_strategys_denied_launch_error_is_raised_as_is() -> None:
+    """A denied helper start is a PermissionError too; _launch must not re-wrap it as "Failed to run"."""
+    denied = native_error("Failed to start the wait_tree helper: denied", PermissionError(errno.EACCES, "denied"))
+    assert isinstance(denied, NativeAccessDeniedError)
+    tree: ProcessTree = _FailingLaunchTree(denied)
+    with pytest.raises(NativeAccessDeniedError) as caught:
+        _launch(tree, ["prog"], cwd=None, env=None, with_stdin=False)
+    assert caught.value is denied

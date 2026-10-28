@@ -36,6 +36,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from .marshal import native_error
 
 _CREATE_SUSPENDED = 0x00000004
 _THREAD_SUSPEND_RESUME = 0x0002
@@ -58,7 +59,7 @@ def _native(what: str, call: Any, *args: Any) -> Any:
     try:
         return call(*args)
     except Exception as exc:
-        raise NativeCallError(f"wait_tree: {what} failed: {exc}") from exc
+        raise native_error(f"wait_tree: {what} failed: {exc}", exc) from exc
 
 
 def _create_job(win32job: Any) -> Any:

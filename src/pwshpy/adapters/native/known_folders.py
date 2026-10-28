@@ -45,8 +45,8 @@ from pathlib import Path
 from typing import Any
 
 from ...domain.enums import KnownFolder
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
-from .marshal import com_hresult, is_com_error
+from ...domain.errors import PlatformUnsupportedError
+from .marshal import com_hresult, is_com_error, native_error
 
 if sys.platform != "win32":
     import pwd
@@ -454,8 +454,8 @@ def windows_known_folder(
         code = com_hresult(exc)
         if code not in _NOT_FOUND:
             shown = "without an HRESULT" if code is None else f"with HRESULT 0x{code:08X}"
-            raise NativeCallError(
-                f"SHGetKnownFolderPath for KnownFolder.{folder.name} ({folder.value}) failed {shown}"
+            raise native_error(
+                f"SHGetKnownFolderPath for KnownFolder.{folder.name} ({folder.value}) failed {shown}", exc
             ) from exc
         return _env_fallback(folder, os.environ if environ is None else environ)
     return Path(found)

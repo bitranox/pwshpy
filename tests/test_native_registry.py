@@ -14,6 +14,7 @@ import errno
 from collections.abc import Callable, Iterator
 
 import pytest
+from oserror_fakes import WindowsPermissionError
 
 from pwshpy.adapters.native import registry as mod
 from pwshpy.adapters.native.marshal import E_ACCESSDENIED
@@ -82,12 +83,6 @@ def test_missing_key_raises_native_error() -> None:
         list(iter_registry_keys("HKLM/SOFTWARE/pwshpy_does_not_exist_1a2b3c"))
 
 
-class _WindowsPermissionError(PermissionError):
-    """A PermissionError with winerror, which only Windows sets; pinned here on any OS."""
-
-    winerror: int
-
-
 class _FakeRegError(Exception):
     """Stand-in for lib_registry.exceptions.RegistryError (not an OSError)."""
 
@@ -100,9 +95,7 @@ class _DeniedRegistry:
     """
 
     def _denied(self, key: str) -> Iterator[object]:
-        exc = _WindowsPermissionError(errno.EACCES, "denied")
-        exc.winerror = 5
-        raise exc
+        raise WindowsPermissionError()
 
     def subkeys(self, key: str) -> Iterator[object]:
         return self._denied(key)

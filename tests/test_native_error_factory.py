@@ -2,8 +2,8 @@
 
 The pywin32 doubles come from ``com_fakes`` (class name AND module ``pywintypes``, as the seam
 recognises them); the psutil double is a class named ``AccessDenied`` from a ``psutil`` module.
-A Windows ``OSError`` carries ``winerror``, which CPython sets only on Windows, so
-:class:`_WindowsOSError` pins it here on any OS.
+A Windows ``OSError`` carries ``winerror``, which CPython sets only on Windows, so the
+``oserror_fakes`` doubles pin it here on any OS.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import pickle
 
 import pytest
 from com_fakes import com_error_for, dispatch_error, error, signed
+from oserror_fakes import WindowsOSError, WindowsPermissionError
 
 from pwshpy import ElevationDeclinedError, NativeAccessDeniedError, NativeCallError
 from pwshpy.adapters.native.marshal import E_ACCESSDENIED, native_error, native_error_for_hresult
@@ -21,19 +22,6 @@ pytestmark = pytest.mark.os_agnostic
 
 _E_FILE_NOT_FOUND = 0x80070002
 _E_CANCELLED = 0x800704C7  # HRESULT_FROM_WIN32(ERROR_CANCELLED = 1223)
-
-
-class _WindowsOSError(OSError):
-    """An OSError with winerror, which only Windows sets; pinned here on any OS."""
-
-    winerror: int
-
-
-def _winerror_oserror(code: int) -> OSError:
-    """A Windows-shaped OSError for Win32 ``code``, with the errno CPython derives from it."""
-    exc = _WindowsOSError(errno.EACCES if code == 5 else errno.ENOENT, "text")
-    exc.winerror = code
-    return exc
 
 
 def _psutil_access_denied(module: str = "psutil._exceptions") -> BaseException:
@@ -65,12 +53,12 @@ def test_win32_error_mapped() -> None:
 
 
 def test_windows_oserror_maps_winerror() -> None:  # [155]
-    err = native_error("x", _winerror_oserror(2))
+    err = native_error("x", WindowsOSError(2, errno.ENOENT))
     assert (type(err), err.hresult) == (NativeCallError, _E_FILE_NOT_FOUND)
 
 
 def test_windows_oserror_access_denied_keeps_errno() -> None:
-    err = native_error("x", _winerror_oserror(5))
+    err = native_error("x", WindowsPermissionError())
     assert type(err) is NativeAccessDeniedError
     assert (err.hresult, err.errno) == (E_ACCESSDENIED, errno.EACCES)
 
@@ -167,12 +155,12 @@ def _chain(depth: int, carrier: BaseException) -> BaseException:
 
 @pytest.mark.parametrize("suppress", [True, False], ids=["from-None", "from-exc"])
 def test_wrapper_is_judged_by_the_winreg_error_it_hides(suppress: bool) -> None:
-    err = native_error("x", _raised_over(_winerror_oserror(2), suppress=suppress))
+    err = native_error("x", _raised_over(WindowsOSError(2, errno.ENOENT), suppress=suppress))
     assert (type(err), err.hresult) == (NativeCallError, _E_FILE_NOT_FOUND)
 
 
 def test_wrapper_over_a_denied_winreg_error_is_access_denied() -> None:
-    err = native_error("x", _raised_over(_winerror_oserror(5), suppress=True))
+    err = native_error("x", _raised_over(WindowsPermissionError(), suppress=True))
     assert type(err) is NativeAccessDeniedError
     assert (err.hresult, err.errno) == (E_ACCESSDENIED, errno.EACCES)
 
@@ -186,8 +174,8 @@ def test_wrapper_over_a_pywin32_error_carries_its_code() -> None:
 
 def test_explicit_cause_wins_over_the_context() -> None:
     wrapper = _RegistryError("wrapped")
-    wrapper.__cause__ = _winerror_oserror(2)
-    wrapper.__context__ = _winerror_oserror(5)
+    wrapper.__cause__ = WindowsOSError(2, errno.ENOENT)
+    wrapper.__context__ = WindowsPermissionError()
     assert native_error("x", wrapper).hresult == _E_FILE_NOT_FOUND
 
 
@@ -195,7 +183,7 @@ def test_a_carrier_cause_is_not_walked_past() -> None:
     # The given OSError is the native error itself, even with no code: its own context is
     # older history, not a better answer.
     outer = FileNotFoundError(errno.ENOENT, "gone")
-    outer.__context__ = _winerror_oserror(5)
+    outer.__context__ = WindowsPermissionError()
     err = native_error("x", outer)
     assert (type(err), err.hresult) == (NativeCallError, None)
 
@@ -206,11 +194,11 @@ def test_chain_without_a_carrier() -> None:
 
 
 def test_carrier_four_links_down_is_found() -> None:
-    assert native_error("x", _chain(4, _winerror_oserror(2))).hresult == _E_FILE_NOT_FOUND
+    assert native_error("x", _chain(4, WindowsOSError(2, errno.ENOENT))).hresult == _E_FILE_NOT_FOUND
 
 
 def test_carrier_five_links_down_is_not_reached() -> None:
-    assert native_error("x", _chain(5, _winerror_oserror(2))).hresult is None
+    assert native_error("x", _chain(5, WindowsOSError(2, errno.ENOENT))).hresult is None
 
 
 def test_self_referencing_context_terminates() -> None:
@@ -255,6 +243,6 @@ def test_unsuppressed_posix_context_is_not_taken() -> None:
 
 
 def test_unsuppressed_windows_context_is_not_taken() -> None:
-    err = native_error("x", _raised_while_handling(_winerror_oserror(5)))
+    err = native_error("x", _raised_while_handling(WindowsPermissionError()))
     assert type(err) is NativeCallError
     assert err.hresult is None

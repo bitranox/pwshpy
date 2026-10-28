@@ -5,18 +5,11 @@ from __future__ import annotations
 import errno
 
 import pytest
+from oserror_fakes import WindowsOSError
 
 from pwshpy.adapters.cli.output import is_pipe_closed
 from pwshpy.adapters.native.marshal import native_error
 from pwshpy.domain.errors import NativeAccessDeniedError
-
-
-class _FakeWindowsPipeError(OSError):
-    """OSError carrying a Windows-style ``winerror``, for cross-platform testing."""
-
-    def __init__(self, winerror: int) -> None:
-        super().__init__("pipe closing")
-        self.winerror = winerror
 
 
 @pytest.mark.os_agnostic
@@ -35,13 +28,13 @@ def test_epipe_oserror_is_pipe_closed() -> None:
 @pytest.mark.parametrize("winerror", [109, 232])
 def test_windows_pipe_closed_winerror_is_pipe_closed(winerror: int) -> None:
     """The Windows OSError variants (winerror 109/232) count as a closed pipe."""
-    assert is_pipe_closed(_FakeWindowsPipeError(winerror)) is True
+    assert is_pipe_closed(WindowsOSError(winerror)) is True
 
 
 @pytest.mark.os_agnostic
 def test_unrelated_winerror_is_not_pipe_closed() -> None:
     """A non-pipe Windows error (e.g. ERROR_ACCESS_DENIED 5) is NOT a closed pipe."""
-    assert is_pipe_closed(_FakeWindowsPipeError(5)) is False
+    assert is_pipe_closed(WindowsOSError(5)) is False
 
 
 @pytest.mark.os_agnostic

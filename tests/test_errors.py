@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import ast
 import builtins
-import copy
-import pickle
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from exception_round_trips import deepcopy_round_trip, pickle_round_trip
 
 import pwshpy
 from pwshpy.adapters.logging.setup import InvalidLoggingConfigError
@@ -23,18 +22,7 @@ def test_configuration_error_preserves_message() -> None:
     assert str(exc) == "output format not configured"
 
 
-def _pickle_round_trip(exc: BaseException) -> BaseException:
-    """What a multiprocessing pipe does to an error: dumps in one process, loads in the other."""
-    # The loaded bytes are the ones this line just dumped, so the untrusted-data warning has no subject.
-    rebuilt: BaseException = pickle.loads(pickle.dumps(exc))  # noqa: S301 - self-produced bytes
-    return rebuilt
-
-
-def _deepcopy_round_trip(exc: BaseException) -> BaseException:
-    return copy.deepcopy(exc)
-
-
-_ROUND_TRIPS: list[Callable[[BaseException], BaseException]] = [_pickle_round_trip, _deepcopy_round_trip]
+_ROUND_TRIPS: list[Callable[[BaseException], BaseException]] = [pickle_round_trip, deepcopy_round_trip]
 
 
 class _LabelledTimeoutError(OperationTimeoutError):

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import copy
 import errno
-import pickle
 from collections.abc import Callable
 
 import lib_cli_exit_tools
 import pytest
+from exception_round_trips import deepcopy_round_trip, pickle_round_trip
 
 from pwshpy import NativeAccessDeniedError, NativeCallError, OperationTimeoutError
 
@@ -17,17 +16,6 @@ pytestmark = pytest.mark.os_agnostic
 _E_ACCESSDENIED = 0x80070005
 
 _Clone = Callable[[NativeAccessDeniedError], NativeAccessDeniedError]
-
-
-def _pickle_round_trip(exc: NativeAccessDeniedError) -> NativeAccessDeniedError:
-    """What a multiprocessing pipe does to an error: dumps in one process, loads in the other."""
-    # The loaded bytes are the ones this line just dumped, so the untrusted-data warning has no subject.
-    rebuilt: NativeAccessDeniedError = pickle.loads(pickle.dumps(exc))  # noqa: S301 - our own bytes
-    return rebuilt
-
-
-def _deepcopy(exc: NativeAccessDeniedError) -> NativeAccessDeniedError:
-    return copy.deepcopy(exc)
 
 
 def test_hresult_defaults_to_none() -> None:
@@ -51,7 +39,7 @@ def test_access_denied_exits_like_a_permission_error() -> None:
     assert lib_cli_exit_tools.get_system_exit_code(NativeAccessDeniedError("denied")) == expected
 
 
-@pytest.mark.parametrize("clone", [_pickle_round_trip, _deepcopy], ids=["pickle", "deepcopy"])
+@pytest.mark.parametrize("clone", [pickle_round_trip, deepcopy_round_trip], ids=["pickle", "deepcopy"])
 def test_access_denied_survives_pickle_and_deepcopy(clone: _Clone) -> None:
     original = NativeAccessDeniedError("denied", hresult=_E_ACCESSDENIED)
     original.errno = errno.EACCES
@@ -62,5 +50,5 @@ def test_access_denied_survives_pickle_and_deepcopy(clone: _Clone) -> None:
 
 
 def test_plain_error_survives_pickle_with_hresult() -> None:
-    rebuilt = pickle.loads(pickle.dumps(NativeCallError("x", hresult=0x80041328)))  # noqa: S301 - our own bytes
+    rebuilt = pickle_round_trip(NativeCallError("x", hresult=0x80041328))
     assert (str(rebuilt), rebuilt.hresult) == ("x", 0x80041328)

@@ -16,6 +16,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from oserror_fakes import WindowsPermissionError
 
 from pwshpy.adapters.native import registry_control as mod
 from pwshpy.adapters.native.marshal import E_ACCESSDENIED, from_registry_value_type
@@ -107,19 +108,11 @@ def test_backend_failure_wrapped_in_native_call_error(monkeypatch: pytest.Monkey
         NativeRegistryController().set_value("HKCU/Software/pwshpy_test", "N", 1, RegistryValueType.REG_SZ)
 
 
-class _WindowsPermissionError(PermissionError):
-    """A PermissionError with winerror, which only Windows sets; pinned here on any OS."""
-
-    winerror: int
-
-
 class _DeniedRegistry:
     """A registry double whose every write fails as a denied ``winreg.OpenKey`` does (raw)."""
 
     def _deny(self, *args: object, **kwargs: object) -> None:
-        exc = _WindowsPermissionError(errno.EACCES, "denied")
-        exc.winerror = 5
-        raise exc
+        raise WindowsPermissionError()
 
     set_value = delete_value = create_key = delete_key = _deny
 

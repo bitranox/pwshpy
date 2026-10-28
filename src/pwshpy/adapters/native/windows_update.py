@@ -7,11 +7,13 @@ objects cannot cross a process boundary, so the child reads each ``IUpdate`` int
 :class:`~pwshpy.domain.records.WindowsUpdate` record, which pickles by its importable class
 and crosses the pipe as plain data.
 
-The child returns a COM failure as DATA (an error message beside no updates) rather than
-raising it: ``run_bounded`` keeps only the text of a child exception, so a raised error would
-arrive as ``"NativeCallError: ..."`` with its HRESULT buried; returned, the parent raises one
-clean :class:`~pwshpy.domain.errors.NativeCallError` naming the HRESULT.  Anything else the
-child raises (a programming error) still arrives as a ``NativeCallError`` via ``run_bounded``.
+The child returns a COM failure as DATA (an error message and its HRESULT beside no updates)
+rather than raising it: ``run_bounded`` keeps only the text of a child exception, so a raised
+error would arrive as ``"NativeCallError: ..."`` with its HRESULT buried in the text; returned,
+the HRESULT crosses the pipe as an int and the parent raises the error typed by it
+(:class:`~pwshpy.domain.errors.NativeAccessDeniedError` for E_ACCESSDENIED, else
+:class:`~pwshpy.domain.errors.NativeCallError`), ``.hresult`` set.  Anything else the child
+raises (a programming error) still arrives as a ``NativeCallError`` via ``run_bounded``.
 
 Read-only: only ``Search`` is called - never ``Download``, ``Install`` or a settings change.
 
@@ -26,10 +28,10 @@ import sys
 from collections.abc import Callable, Iterator
 from typing import Any, NamedTuple
 
-from ...domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
+from ...domain.errors import OperationTimeoutError, PlatformUnsupportedError
 from ...domain.records import UpdateCategory, WindowsUpdate
 from .bounded import run_bounded
-from .marshal import com_error_text, com_hresult, is_com_error
+from .marshal import com_error_text, com_hresult, is_com_error, native_error_for_hresult
 
 
 class _Outcome(NamedTuple):
@@ -37,6 +39,9 @@ class _Outcome(NamedTuple):
 
     error: str  # empty means the search succeeded
     updates: tuple[WindowsUpdate, ...]
+    # The failure's unsigned HRESULT, carried as a plain int because the COM error itself
+    # cannot cross the pipe; None on success or when the error carried no code.
+    hresult: int | None = None
 
 
 def _strings(collection: Any) -> list[str]:
@@ -109,7 +114,7 @@ def _windows_update_search(criteria: str, load: Callable[[str], object] | None =
     except Exception as exc:
         if not is_com_error(exc):
             raise
-        return _Outcome(error=_com_failure_message(exc), updates=())
+        return _Outcome(error=_com_failure_message(exc), updates=(), hresult=com_hresult(exc))
     finally:
         pythoncom.CoUninitialize()
 
@@ -127,9 +132,12 @@ def _search_updates(criteria: str, load: Callable[[str], object]) -> _Outcome:
 
 
 def _updates_or_raise(outcome: _Outcome) -> tuple[WindowsUpdate, ...]:
-    """The child's updates, or its COM failure raised as NativeCallError."""
+    """The child's updates, or its COM failure raised as the error its HRESULT types.
+
+    No ``from`` cause: the COM exception lived in the child and never crossed the pipe.
+    """
     if outcome.error:
-        raise NativeCallError(outcome.error)
+        raise native_error_for_hresult(outcome.error, outcome.hresult)
     return outcome.updates
 
 
@@ -150,8 +158,10 @@ def search_updates(criteria: str, *, timeout: float) -> Iterator[WindowsUpdate]:
     Raises:
         PlatformUnsupportedError: Off Windows (raised before any child is started).
         OperationTimeoutError: The search outlived ``timeout``; the child was killed.
-        NativeCallError: The Windows Update agent reported a COM failure (its HRESULT is
-            in the message), or the child died or could not be started.
+        NativeAccessDeniedError: The Windows Update agent denied the search
+            (E_ACCESSDENIED); a ``NativeCallError`` and a ``PermissionError``.
+        NativeCallError: The Windows Update agent reported another COM failure (its HRESULT
+            is in the message and on ``.hresult``), or the child died or could not be started.
 
     Example:
         >>> callable(search_updates)

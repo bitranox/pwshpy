@@ -17,11 +17,12 @@ from typing import Any
 
 import pytest
 from bounded_targets import echo, load_access_denied_wu
-from com_fakes import codeless_com_error, com_error, error
+from com_fakes import codeless_com_error, com_error, dispatch_error, error, signed
 
 from pwshpy.adapters.native import windows_update
 from pwshpy.adapters.native.bounded import run_bounded
-from pwshpy.domain.errors import NativeCallError, PlatformUnsupportedError
+from pwshpy.adapters.native.marshal import E_ACCESSDENIED, com_hresult
+from pwshpy.domain.errors import NativeAccessDeniedError, NativeCallError, PlatformUnsupportedError
 from pwshpy.domain.records import UpdateCategory, WindowsUpdate
 
 # White-box tests of the adapter's pure helpers (no public path reaches them off Windows).
@@ -264,7 +265,7 @@ def _child_with(failure: BaseException) -> tuple[Callable[[str], object], _FakeP
 def test_child_returns_a_pywin32_failure_as_data(failure: BaseException) -> None:
     load, pythoncom = _child_with(failure)
     outcome = _windows_update_search("IsInstalled=0", load)
-    assert outcome == _Outcome(error=_com_failure_message(failure), updates=())
+    assert outcome == _Outcome(error=_com_failure_message(failure), updates=(), hresult=com_hresult(failure))
     assert pythoncom.calls == ["init", "uninit"]
 
 
@@ -282,15 +283,77 @@ def test_child_lets_a_non_pywin32_failure_propagate(failure: BaseException) -> N
 def test_child_takes_its_loader_through_a_real_spawn_pipe() -> None:
     """The ``load`` seam pickles by name into a spawn child, as run_bounded hands it over."""
     outcome = run_bounded(_windows_update_search, ("IsInstalled=0", load_access_denied_wu), timeout=30)
-    assert outcome == _Outcome(error="Windows Update search failed: HRESULT 0x80070005 (Access is denied.)", updates=())
+    assert outcome == _Outcome(
+        error="Windows Update search failed: HRESULT 0x80070005 (Access is denied.)", updates=(), hresult=E_ACCESSDENIED
+    )
+
+
+@pytest.mark.os_agnostic
+def test_an_access_denied_search_through_a_real_spawn_pipe_raises_the_typed_error() -> None:
+    """The HRESULT survives the pickle, so the parent raises the typed error, not a bare NativeCallError."""
+    outcome = run_bounded(_windows_update_search, ("IsInstalled=0", load_access_denied_wu), timeout=30)
+    with pytest.raises(NativeAccessDeniedError) as info:
+        _updates_or_raise(outcome)
+    assert info.value.hresult == E_ACCESSDENIED
+
+
+class _DeniedSearcher:
+    """``IUpdateSearcher`` whose Search fails as the WU agent does: DISP_E_EXCEPTION over E_ACCESSDENIED."""
+
+    def Search(self, criteria: str) -> object:  # noqa: N802 - WUA API name
+        raise dispatch_error(signed(E_ACCESSDENIED), "Access is denied.")
+
+
+class _DeniedSession:
+    """``IUpdateSession`` handing out the denying searcher."""
+
+    def CreateUpdateSearcher(self) -> _DeniedSearcher:  # noqa: N802 - WUA API name
+        return _DeniedSearcher()
+
+
+class _DeniedSearchClient:
+    """``win32com.client`` whose session's searcher denies the search."""
+
+    def Dispatch(self, name: str) -> _DeniedSession:  # noqa: N802 - win32com API name
+        return _DeniedSession()
+
+
+def _load_denied_search(name: str) -> object:
+    """A module-level ``load=`` (the real seam pickles it by name): the searcher denies Search."""
+    modules: dict[str, object] = {"pythoncom": _FakePythoncom(), "win32com.client": _DeniedSearchClient()}
+    return modules[name]
+
+
+@pytest.mark.os_agnostic
+def test_a_denied_search_raises_nativeaccessdeniederror_with_the_unwrapped_hresult() -> None:
+    """The child keeps the inner E_ACCESSDENIED of a DISP_E_EXCEPTION; the parent types the error by it."""
+    outcome = _windows_update_search("IsInstalled=0", _load_denied_search)
+    with pytest.raises(NativeAccessDeniedError) as info:
+        _updates_or_raise(outcome)
+    assert info.value.hresult == 0x80070005
+    assert str(info.value) == "Windows Update search failed: HRESULT 0x80070005 (Access is denied.)"
+    assert isinstance(info.value, PermissionError)
 
 
 @pytest.mark.os_agnostic
 def test_updates_or_raise_raises_the_childs_error_as_nativecallerror() -> None:
     """A child outcome carrying an error message becomes a NativeCallError with that exact text."""
     with pytest.raises(NativeCallError) as info:
-        _updates_or_raise(_Outcome(error="Windows Update search failed: HRESULT 0x80240032", updates=()))
+        _updates_or_raise(
+            _Outcome(error="Windows Update search failed: HRESULT 0x80240032", updates=(), hresult=0x80240032)
+        )
+    assert type(info.value) is NativeCallError
     assert str(info.value) == "Windows Update search failed: HRESULT 0x80240032"
+    assert info.value.hresult == 0x80240032
+
+
+@pytest.mark.os_agnostic
+def test_updates_or_raise_raises_a_plain_nativecallerror_for_a_codeless_failure() -> None:
+    """An outcome built without an HRESULT (the field's default) still raises, with hresult None."""
+    with pytest.raises(NativeCallError) as info:
+        _updates_or_raise(_Outcome(error="Windows Update search failed without an HRESULT", updates=()))
+    assert type(info.value) is NativeCallError
+    assert info.value.hresult is None
 
 
 @pytest.mark.os_agnostic

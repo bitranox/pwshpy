@@ -269,7 +269,8 @@ def test_hresult_wins_over_errno() -> None:
 
 def test_rewrapped_com_denial_stays_denied_with_its_hresult() -> None:
     inner = native_error("open failed", com_error_for(E_ACCESSDENIED))
-    assert (type(inner), inner.errno) == (NativeAccessDeniedError, None)
+    assert type(inner) is NativeAccessDeniedError
+    assert inner.errno is None
     err = native_error("outer", inner)
     assert type(err) is NativeAccessDeniedError
     assert (err.hresult, err.errno) == (E_ACCESSDENIED, None)

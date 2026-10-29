@@ -4839,12 +4839,13 @@ def test_an_elevated_windows_run_of_a_git_source_runs_only_a_git_no_other_accoun
 def test_an_elevated_windows_run_judges_the_git_uv_would_run_not_the_first_git_exe(
     tmp_path: Path, earlier: str
 ) -> None:
-    """[R2]: uv finds git as Windows does (each PATH directory in turn, there each PATHEXT extension in
-    order, then the bare name; measured with uv 0.13.6), so a git.cmd in an earlier directory is the git
-    it runs, while the runner looked for git.exe only and judged the good one behind it. The runner now
-    resolves git the same way and judges that file: an old git.cmd or git.bat is refused for its version,
-    a bare extensionless git, which is no program the runner asks for a version, is refused as such; the
-    good git.exe further down is never asked."""
+    """[R2]: uv finds git as Windows does (each PATH directory in turn, there the bare name when it is a
+    program, then each PATHEXT extension in order; which 8.0.0), so a git.cmd in an earlier directory is
+    the git it runs, while the runner looked for git.exe only and judged the good one behind it. The
+    runner now resolves git the same way and judges that file: an old git.cmd or git.bat is refused for
+    its version; a bare extensionless git, which is no program the runner asks for a version, is
+    refused as such (uv would skip this one, a batch text, and take the git.exe behind it: the runner
+    fails closed); the good git.exe further down is never asked."""
     managed = _needs_managed_python()
     runner, head = _python_runner(tmp_path, elevated="$true", with_packages=[_GIT_SOURCE_PACKAGE])
     first, second = _private_dir(tmp_path / "first-bin"), _private_dir(tmp_path / "second-bin")
@@ -4868,6 +4869,55 @@ def test_an_elevated_windows_run_judges_the_git_uv_would_run_not_the_first_git_e
         assert "is not a program" in refusals[0], refusals
     else:
         assert planted_marker.exists(), "the runner never asked the planted git for its version"
+        assert ": git 2.31.1.windows.1 ignores GIT_CONFIG_GLOBAL" in refusals[0], refusals
+    assert "python:" not in result.stdout, result.stdout
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.skipif(not _CSC.is_file(), reason="needs the .NET Framework C# compiler to build a git.exe double")
+@pytest.mark.parametrize("beside", ["git", "git.cmd", None], ids=["bare-program", "old-git-cmd", "exe-only-control"])
+def test_an_elevated_windows_run_judges_every_git_in_the_directory_uv_takes_it_from(
+    tmp_path: Path, beside: str | None
+) -> None:
+    """[R2] round 3: in one PATH directory uv's which (8.0.0, PathsIter) tries the bare name first, then
+    each PATHEXT extension, and takes a bare file when it is a program. The runner judged only the first
+    name it looked for (bare last), so a bare program beside a good git.exe was never judged. It now
+    judges every git file in that directory and refuses if one fails: a bare program as no program it
+    asks for a version (never run), an old git.cmd for its version even with .EXE ahead of it in
+    PATHEXT (fails closed). The control, git.exe alone, passes the check."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated="$true", with_packages=[_GIT_SOURCE_PACKAGE])
+    directory = _private_dir(tmp_path / "git-bin")
+    good_marker, beside_marker = tmp_path / "good-git-ran.txt", tmp_path / "beside-git-ran.txt"
+    _windows_git_double(directory, good_marker, version_output="git version 2.45.0.windows.1")
+    if beside == "git":
+        build = _windows_git_double(
+            _private_dir(tmp_path / "build"), beside_marker, version_output="git version 2.45.0.windows.1"
+        )
+        shutil.copyfile(build, directory / beside)
+    elif beside is not None:
+        (directory / beside).write_bytes(
+            f'@echo off\r\necho ran>>"{beside_marker}"\r\necho git version 2.31.1.windows.1\r\n'.encode("ascii")
+        )
+    environment = {**interpreter_probe_env(tmp_path, managed=managed), "PATHEXT": ".COM;.EXE;.BAT;.CMD"}
+    result = _run_with_path(tmp_path, runner, path_first=[directory, *head], env=environment, cwd=_clean_cwd(tmp_path))
+    refusals = [line for line in result.stderr.splitlines() if line.startswith(_OLD_GIT_REFUSED)]
+    if beside is None:
+        assert good_marker.exists(), "the runner never asked git.exe for its version: " + result.stderr
+        assert refusals == [], result.stderr
+        assert result.returncode != 127, result.stdout + result.stderr
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert len(refusals) == 1, result.stderr
+    assert refusals[0].startswith(f"{_OLD_GIT_REFUSED}{directory / beside}: "), refusals
+    if beside == "git":
+        assert not beside_marker.exists(), "the runner ran a file it refuses as no program"
+        assert not good_marker.exists(), "the runner asked git.exe before judging the bare git uv takes first"
+        assert "is not a program" in refusals[0], refusals
+    else:
+        assert beside_marker.exists(), "the runner never asked git.cmd for its version"
         assert ": git 2.31.1.windows.1 ignores GIT_CONFIG_GLOBAL" in refusals[0], refusals
     assert "python:" not in result.stdout, result.stdout
 

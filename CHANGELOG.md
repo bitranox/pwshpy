@@ -67,10 +67,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   judged as a file, like `uv` (owner, write access, every directory and link on the way), and one
   another account can modify stops the run with `refusing git at <path>` and exit code 127 before
   it runs. Before, only the directories on uv's `PATH` were judged, so such a git ran as root.
-- Packed `.ps1` runner, elevated on Windows: the git that is judged is the one uv runs, found in each
-  `PATH` directory by the `PATHEXT` extensions in order and then the bare name, so a `git.cmd` in an
-  earlier directory is no longer passed over for a `git.exe` further down. A git that is not a
-  `.exe`, `.com`, `.cmd` or `.bat` is refused with exit code 127.
+- Packed `.ps1` runner, elevated on Windows: the gits that are judged are the ones uv chooses from.
+  In the first `PATH` directory holding a git, every git file uv tries there is judged (the bare
+  name, then each `PATHEXT` extension in order), and one that fails stops the run. So a `git.cmd`
+  in an earlier directory is no longer passed over for a `git.exe` further down, and a bare `git`
+  beside a `git.exe` is judged too. A git that is not a `.exe`, `.com`, `.cmd` or `.bat` is refused
+  with exit code 127.
 - Packed `.ps1` runner, elevated on Windows: a symlink or junction whose target is rooted on the
   current drive (`\Users\...`), a volume GUID name or a `GLOBALROOT` device path is refused (exit
   code 127, `points to <target>, which names no drive or share path`) in uv's managed-Python

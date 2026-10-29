@@ -727,16 +727,19 @@ function Get-PwshPyTrustedPath {
     return ($kept -join [IO.Path]::PathSeparator)
 }
 
-function Get-PwshPyGitOn {
+function Get-PwshPyGitCandidate {
     param([string] $Path)
 
-    # The git the PATH $Path finds, the file uv would run, or ''. Looked up by name in each directory
-    # and never run; Get-Command would also answer with an alias or function of this session, and read
-    # '[', '*' and '?' in an entry as wildcards. POSIX: an executable 'git', its mode read with the
-    # fixed-PATH ls. Windows: the names uv tries (Get-PwshPyWindowsGitName), in each directory in turn.
+    # Every git file in the first directory on the PATH $Path that holds one, in the order uv tries
+    # them, or none. Looked up by name and never run; Get-Command would also answer with an alias or
+    # function of this session, and read '[', '*' and '?' in an entry as wildcards. POSIX: an
+    # executable 'git', its mode read with the fixed-PATH ls. Windows: the names uv tries
+    # (Get-PwshPyWindowsGitName). uv takes one of them, which one depends on what each file is (a bare
+    # name only when it is a program), so an elevated run judges them all ([R2]).
     $names = if ($PwshPyOnWindows) { Get-PwshPyWindowsGitName } else { @('git') }
     foreach ($directory in ($Path -split [IO.Path]::PathSeparator)) {
         if (-not $directory) { continue }
+        $found = New-Object System.Collections.Generic.List[string]
         foreach ($name in $names) {
             $candidate = $directory + [IO.Path]::DirectorySeparatorChar + $name
             try {
@@ -745,10 +748,25 @@ function Get-PwshPyGitOn {
                 continue
             }
             if (-not $PwshPyOnWindows -and -not (Test-PwshPyExecutable -Path $candidate)) { continue }
-            if ($PwshPyOnWindows) { return (Get-PwshPyOnDiskSpelling -Path $candidate) }
-            return $candidate
+            if ($PwshPyOnWindows) { $candidate = Get-PwshPyOnDiskSpelling -Path $candidate }
+            # A PATHEXT entry written twice in different case names the same file once.
+            $known = $false
+            foreach ($seen in $found) {
+                if ([string]::Equals($seen, $candidate, [StringComparison]::OrdinalIgnoreCase)) { $known = $true }
+            }
+            if (-not $known) { $found.Add($candidate) }
         }
+        if ($found.Count -gt 0) { return $found.ToArray() }
     }
+    return @()
+}
+
+function Get-PwshPyGitOn {
+    param([string] $Path)
+
+    # The first git file Get-PwshPyGitCandidate finds on the PATH $Path, or ''.
+    $candidates = @(Get-PwshPyGitCandidate -Path $Path)
+    if ($candidates.Count -gt 0) { return $candidates[0] }
     return ''
 }
 
@@ -774,16 +792,17 @@ function Get-PwshPyOnDiskSpelling {
 }
 
 function Get-PwshPyWindowsGitName {
-    # The file names, in order, under which uv finds git in one PATH directory on Windows (measured with
-    # uv 0.13.6, [R2]): 'git' with each PATHEXT entry appended as written, in PATHEXT order (an entry
-    # without its dot names a file nobody has), then the bare 'git'. With PATHEXT unset or empty only
-    # the bare name. So a git.cmd ahead of git.exe in PATHEXT, or in an earlier directory, is the git uv
-    # runs, and the one judged here.
+    # The file names, in order, under which uv finds git in one PATH directory on Windows ([R2]; uv
+    # finds it with the which crate, 8.0.0: PathsIter in src/finder.rs): the bare 'git' first, taken
+    # only when it is a program (GetBinaryType), then 'git' with each PATHEXT entry appended as
+    # written, in PATHEXT order (an entry without its dot names a file nobody has). With PATHEXT unset
+    # or empty only the bare name. So a git.cmd ahead of git.exe in PATHEXT, or in an earlier
+    # directory, is the git uv runs.
     $names = New-Object System.Collections.Generic.List[string]
+    $names.Add('git')
     foreach ($extension in ([string]$env:PATHEXT).Split(';')) {
         if ($extension) { $names.Add('git' + $extension) }
     }
-    $names.Add('git')
     return $names.ToArray()
 }
 
@@ -793,13 +812,14 @@ function Get-PwshPyGitKindDistrust {
     # Why the git file $Git is not one an elevated run may ask for its version, or ''. Windows: only a
     # program or a batch file (.exe, .com, .cmd, .bat) is run for its version; anything else PATHEXT
     # makes uv find (a bare file, a .js or .vbs a script host would open) is refused, which fails closed
-    # ([R2]). POSIX: any executable file.
+    # ([R2]): uv takes a bare file only when it is a program, which this does not tell apart. POSIX: any
+    # executable file.
     if (-not $PwshPyOnWindows) { return '' }
     $extension = [IO.Path]::GetExtension($Git)
     foreach ($known in @('.exe', '.com', '.cmd', '.bat')) {
         if ([string]::Equals($extension, $known, [StringComparison]::OrdinalIgnoreCase)) { return '' }
     }
-    return 'it is not a program an elevated run asks for its version (a .exe, .com, .cmd or .bat), and uv would run it for a git source: install git as a program, or run the script without elevation'
+    return 'it is not a program an elevated run asks for its version (a .exe, .com, .cmd or .bat), and uv may run it for a git source: remove it, install git as a program, or run the script without elevation'
 }
 
 function Initialize-PwshPyStderrFile {
@@ -2089,11 +2109,12 @@ $PwshPyPrepare = {
         # Before uv is asked for a managed Python, which it may download: a run refused here calls no uv
         # ([156], as the .sh root run).
         if ($PwshPyGitSource) {
-            $PwshPyUvGit = Get-PwshPyGitOn -Path $script:PwshPyTrustedUvPath
-            if ($PwshPyUvGit) {
-                # The directories on uv's PATH were judged, the git file found there was not: one another
-                # account can modify, or a link to one, runs elevated when uv fetches a git source ([157],
-                # user decision: judge the git file). Judged like uv, and before it is run for its version.
+            # The directories on uv's PATH were judged, the git files found there were not: one another
+            # account can modify, or a link to one, runs elevated when uv fetches a git source ([157],
+            # user decision: judge the git file). Judged like uv, and before it is run for its version.
+            # Every git file in the directory uv takes git from, since which one uv runs depends on what
+            # each file is ([R2]); one that fails stops the run.
+            foreach ($PwshPyUvGit in @(Get-PwshPyGitCandidate -Path $script:PwshPyTrustedUvPath)) {
                 $PwshPyGitWhy = Get-PwshPyUvDistrust -Path $PwshPyUvGit
                 if ($PwshPyGitWhy) {
                     $PwshPyGitRemedy = if ($PwshPyOnWindows) { 'take every other account''s write access off the path named above (only the running account, SYSTEM and Administrators may change it), or run the script without elevation' } else { 'make the path named above root''s alone (chown root, then chmod go-w on it), or run the script without elevation' }

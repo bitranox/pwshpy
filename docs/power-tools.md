@@ -619,11 +619,14 @@ Details worth knowing:
   of them that another account owns or can write, or a link to one in a directory it can write,
   would run as root when uv fetches the source. Such a git stops the run with `pwshpy pack: refusing
   git at <path>: <reason> ...` (`.sh`) or `pwshpy: refusing git at <path>: <reason> ...` (`.ps1`)
-  and exit code 127, before it runs. On Windows the git judged is the one uv runs: uv looks in each
-  `PATH` directory in turn for `git` with each `PATHEXT` extension appended, in `PATHEXT` order,
-  then for a bare `git` (measured with uv 0.13.6), so a `git.cmd` in an earlier directory is the git
-  it runs, not a `git.exe` further down. A git found that way that is not a `.exe`, `.com`, `.cmd`
-  or `.bat` is refused (`it is not a program an elevated run asks for its version`). A root run (the
+  and exit code 127, before it runs. On Windows the gits judged are the ones uv chooses from: uv
+  (through the `which` crate) looks in each `PATH` directory in turn for a bare `git`, taken only
+  when it is a program, then for `git` with each `PATHEXT` extension appended, in `PATHEXT` order.
+  So a `git.cmd` in an earlier directory is the git it runs, not a `git.exe` further down. Which file
+  in a directory uv takes depends on what each file is, so the runner judges every one it finds in
+  the first directory holding a git, and one that fails stops the run. A git found that way that is
+  not a `.exe`, `.com`, `.cmd` or `.bat` is refused (`it is not a program an elevated run asks for
+  its version`), a bare `git` included. A root run (the
   `.sh` as root, the `.ps1` elevated on Linux or macOS) also hands uv and the git it runs the running
   account's own home, never the caller's: `HOME` is the home the passwd database records,
   `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME` are below it, and `XDG_STATE_HOME`,

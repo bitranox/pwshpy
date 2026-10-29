@@ -754,7 +754,7 @@ _WHOLE_RUNNER_SUBSTITUTIONS = (
 )
 
 
-def _whole_runner_stand_in(runner: Path, output: Path, *, elevated: str = "$false") -> Path:
+def _whole_runner_stand_in(runner: Path, output: Path, *, elevated: str = "$false", judge_cache: bool = False) -> Path:
     """Turn a whole packed runner into a Windows-relaunch stand-in that runs its REAL body.
 
     Three exact, counted substitutions and nothing else: the host is declared Windows so the UAC
@@ -764,11 +764,14 @@ def _whole_runner_stand_in(runner: Path, output: Path, *, elevated: str = "$fals
     starts is this same file, so it unpacks, finds uv and fails exactly where the shipped runner
     would. ``[bool]$PwshPyRelay`` answers "elevated" in the relaunched child only, as UAC would. A
     stand-in that can answer "elevated" also names a cache of its own ([X22 C1], see
-    :func:`elevation_doubles.with_account_cache_home`), never the real account's.
+    :func:`elevation_doubles.with_account_cache_home`), never the real account's, and takes its pack
+    cache as trusted (:func:`_trusting_the_cache`) unless ``judge_cache`` keeps that check ([98]).
     """
     text = runner.read_text(encoding="utf-8")
     if elevated != "$false":
         text = with_account_cache_home(text, output.parent, powershell=True)
+        if not judge_cache:
+            text = _trusting_the_cache(text)
     probe = (
         "function Test-PwshPyElevated {",
         f"function Test-PwshPyElevated {{\n    return {elevated}\n}}\n\nfunction Test-PwshPyElevatedOnHost {{",
@@ -1176,6 +1179,19 @@ def _trusted_uv(tmp_path: Path) -> Path | None:
     return None
 
 
+#: Where an elevated run judges its pack cache ([98]). A runner forced elevated answers "trusted" there
+#: unless the test is about that check: a test's cache sits in its temp directory, below one the test's
+#: own account owns, which the POSIX root rule refuses (and a stand-in declared Windows off Windows has
+#: no drive path to judge).
+_CACHE_CHECK = "function Get-PwshPyCacheDistrust {"
+
+
+def _trusting_the_cache(text: str) -> str:
+    """``text`` with the elevated run's cache check answering "trusted" (one counted substitution)."""
+    assert text.count(_CACHE_CHECK) == 1
+    return text.replace(_CACHE_CHECK, f"{_CACHE_CHECK}\n    return ''\n}}\n\nfunction Get-PwshPyCacheDistrustOnHost {{")
+
+
 #: The runner's POSIX trusted owners (root alone); a test widens it so its own files stand in for
 #: root-owned ones, which no unprivileged test can create.
 _TRUSTED_UIDS = "$PwshPyTrustedUids = @('0')"
@@ -1190,6 +1206,7 @@ def _elevation_stand_in(
     trust_my_uid: bool = False,
     real_data_home: bool = False,
     data_scratch: Path | None = None,
+    judge_cache: bool = False,
 ) -> Path:
     """The whole runner with its elevation probe answering ``elevated`` (a PowerShell expression).
 
@@ -1202,9 +1219,13 @@ def _elevation_stand_in(
     for its account's data directory (see :func:`elevation_doubles.with_data_home`) unless
     ``real_data_home`` keeps the passwd or known-folder lookup; that real directory is then taken as
     trusted (see :func:`elevation_doubles.without_python_dir_check`). ``data_scratch`` replaces
-    ``output.parent`` there, for a data directory the runner file cannot sit next to (a share).
+    ``output.parent`` there, for a data directory the runner file cannot sit next to (a share). A runner
+    forced elevated takes its pack cache as trusted (:func:`_trusting_the_cache`) unless ``judge_cache``
+    keeps that check ([98]).
     """
     text = runner.read_text(encoding="utf-8")
+    if elevated != "$false" and not judge_cache:
+        text = _trusting_the_cache(text)
     if elevated != "$false" and not real_data_home:
         text = with_data_home(text, data_scratch or output.parent, powershell=True)
     elif elevated != "$false":
@@ -2376,7 +2397,8 @@ def test_an_unanswered_posix_euid_probe_applies_the_root_rule(tmp_path: Path, pr
     text = runner.read_text(encoding="utf-8")
     assert text.count(_FIXED_IDS) == 1
     replacement = "@(" + ", ".join(_ps_literal(fixed / f"id{n}") for n in range(6)) + ")"
-    runner.write_text(text.replace(_FIXED_IDS, replacement), encoding="utf-8")
+    # Treated as root, the run would first refuse its cache below this test's own directory ([98]).
+    runner.write_text(_trusting_the_cache(text.replace(_FIXED_IDS, replacement)), encoding="utf-8")
     result = _run_with_path(tmp_path, runner, path_first=[planted.parent], real_probe=True)
     assert not marker.exists(), "the runner asked an id on PATH"
     assert not _same(_reported_uv(result), planted), result.stdout + result.stderr
@@ -3766,3 +3788,103 @@ def test_an_elevated_run_on_windows_refuses_a_git_config_file_it_cannot_trust(tm
     assert result.returncode == 127, result.stdout + result.stderr
     assert _GIT_GLOBAL_REFUSED in result.stderr and str(empty) in result.stderr, result.stderr
     assert _reported_git_global(result) is None, result.stdout
+
+
+def _cache_root(path: Path, *, others_can_modify: bool) -> Path:
+    """A pack-cache root: one another account can modify, or one only this account (and the admins) can.
+
+    POSIX: mode 0777, or 0755 whatever the umask (an elevated test run counts this account as root).
+    """
+    if others_can_modify:
+        return _user_writable_dir(path)
+    if sys.platform == "win32":
+        return _private_dir(path)
+    path.mkdir(parents=True)
+    path.chmod(0o755)
+    return path
+
+
+def _open_to_others(path: Path) -> None:
+    """Let every account modify the file ``path`` (Users on Windows, world write on POSIX)."""
+    if sys.platform == "win32":
+        _icacls(path, "/grant", f"{_SID_USERS}:M")
+    else:
+        path.chmod(0o666)
+
+
+def _cache_trust_runner(tmp_path: Path) -> tuple[Path, Path, str]:
+    """An elevated stand-in whose cache check is the shipped one, the marker its script writes, its key.
+
+    The packed script writes the marker when it runs. The key is the cache directory's name.
+    """
+    marker = tmp_path / "ran.marker"
+    entry = tmp_path / "mark.py"
+    entry.write_text(f"open({str(marker)!r}, 'w').close()\n")
+    manifest = pack_script(entry)
+    runner = _elevation_stand_in(
+        Path(manifest.output_path),
+        tmp_path / "cache_stand_in.ps1",
+        elevated="$true",
+        trust_my_uid=True,
+        judge_cache=True,
+    )
+    return runner, marker, manifest.payload_sha256[:16]
+
+
+def _cache_trust_run(tmp_path: Path, runner: Path, root: Path) -> subprocess.CompletedProcess[str]:
+    """Run the stand-in from :func:`_cache_trust_runner` with its pack cache below ``root``.
+
+    No managed Python is offered, so a run that gets past the cache check stops later: these tests are
+    about whether the cache was judged, not about the run that follows. Under umask 022, as sudo runs
+    root (its default umask is the union of the caller's and 022): a host's 002 would make the unpacked
+    tree group-writable, which the root rule refuses.
+    """
+    env = {"PWSHPY_PACK_CACHE": str(root), **managed_python_env(tmp_path, managed=None)}
+    saved = os.umask(0o022)
+    try:
+        return _run_with_path(tmp_path, runner, path_first=[_UvLocation.directory], env=env)
+    finally:
+        os.umask(saved)
+
+
+#: What an elevated run says when it refuses its pack cache ([98]).
+_CACHE_REFUSAL = "pwshpy: refusing the cache directory "
+
+
+@pytest.mark.parametrize("others_can_modify", [False, True], ids=["private-root", "root-others-can-modify"])
+def test_an_elevated_run_refuses_a_pack_cache_another_account_can_modify(
+    tmp_path: Path, others_can_modify: bool
+) -> None:
+    """[98]: an elevated run judges the cache root before it writes anything there, and refuses with 127.
+
+    The private root is the liveness arm: the same run gets past the check and unpacks there.
+    """
+    root = _cache_root(tmp_path / "cache-root", others_can_modify=others_can_modify)
+    runner, marker, key = _cache_trust_runner(tmp_path)
+    result = _cache_trust_run(tmp_path, runner, root)
+    cache = root / key
+    if not others_can_modify:
+        assert _CACHE_REFUSAL not in result.stderr, result.stderr
+        assert (cache / "mark.py").is_file(), result.stdout + result.stderr
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert f"{_CACHE_REFUSAL}{cache}: " in result.stderr, result.stderr
+    assert not cache.exists(), "the elevated run unpacked into a cache another account can modify"
+    assert not marker.exists()
+
+
+def test_an_elevated_run_refuses_a_cached_file_another_account_can_modify(tmp_path: Path) -> None:
+    """[98]: a file below the cache directory that another account can modify refuses a warm run too.
+
+    Its content still matches its recorded hash, so the per-file check alone would run it.
+    """
+    root = _cache_root(tmp_path / "cache-root", others_can_modify=False)
+    runner, marker, key = _cache_trust_runner(tmp_path)
+    cache = root / key
+    first = _cache_trust_run(tmp_path, runner, root)
+    assert (cache / "mark.py").is_file(), first.stdout + first.stderr
+    _open_to_others(cache / "mark.py")
+    result = _cache_trust_run(tmp_path, runner, root)
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert _CACHE_REFUSAL in result.stderr and "mark.py" in result.stderr, result.stderr
+    assert not marker.exists()

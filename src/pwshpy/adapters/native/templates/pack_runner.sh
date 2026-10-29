@@ -53,6 +53,8 @@
 # above.
 #
 # Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
+# As root it unpacks and runs only from a cache directory that passes the same check as uv's
+# managed-Python directory (itself, every directory above it and everything below it), or exits 127.
 
 set -eu
 
@@ -854,6 +856,27 @@ pwshpy_uv_python() {
     fi
 }
 
+# Prints why a root run must not unpack into, or run the script from, the cache directory "$1" (an
+# absolute path), or nothing ([98]). The tree is verified against its hashes and executed later, so an
+# account that can write the directory, or rename one above it, could swap a file between the check and
+# uv reading it; and an unpack removes and rewrites the directory as root. Its root is whatever
+# PWSHPY_PACK_CACHE, XDG_CACHE_HOME or HOME the caller handed over, so it is judged like uv's
+# managed-Python directory: itself, every directory above it and every entry below it, or, before the
+# first unpack, the nearest directory that exists.
+pwshpy_cache_distrust() {
+    pwshpy_python_dir_distrust "$1"
+}
+
+# Exits 127 when a root run may not use the cache directory "$PWSHPY_CACHE" (pwshpy_cache_distrust).
+pwshpy_require_trusted_cache() {
+    _rc_why=$(pwshpy_cache_distrust "$PWSHPY_CACHE")
+    [ -n "$_rc_why" ] || return 0
+    _rc_why="$_rc_why (as root the script is unpacked and run only from a directory no other account can"
+    _rc_why="$_rc_why modify, nor anything below it): set PWSHPY_PACK_CACHE to a directory only root can"
+    _rc_why="$_rc_why modify, or make the path named above root's alone (chown root, chmod go-w)"
+    pwshpy_die "refusing the cache directory $PWSHPY_CACHE: $_rc_why" 127
+}
+
 # Sets PWSHPY_PYTHON to the uv-managed Python a root run hands `uv run --python`, or exits. uv run
 # probes a .venv in its working directory and EVERY directory above it, and under only-managed even
 # runs the script on that venv's python (measured with uv 0.13.0), so neither the caller's directory
@@ -1030,11 +1053,27 @@ fi
 
 # --- unpack -----------------------------------------------------------------------------
 
+# As root the cache is judged before anything is removed or written in it, and the tree an unpack wrote
+# is judged again ([98]). Absolute first: the walk refuses a relative path, and a relative
+# PWSHPY_PACK_CACHE names the caller's directory.
+if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+    case $PWSHPY_CACHE in
+        /*) ;;
+        *)
+            pwshpy_caller_cwd
+            PWSHPY_CACHE=${PWSHPY_CALLER_CWD%/}/$PWSHPY_CACHE
+            ;;
+    esac
+    pwshpy_require_trusted_cache
+fi
 if [ "$PWSHPY_CLEAN" = "1" ]; then
     rm -rf "$PWSHPY_CACHE"
 fi
 if ! pwshpy_verify_tree; then
     pwshpy_unpack_locked
+    if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+        pwshpy_require_trusted_cache
+    fi
 fi
 
 # --- uv ---------------------------------------------------------------------------------

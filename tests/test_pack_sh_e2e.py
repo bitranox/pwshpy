@@ -116,9 +116,21 @@ def _project(root: Path, *, exit_code: int = 0) -> Path:
 #: run that is not root has (used when the suite itself runs as root).
 _ROOT_PROBE = ('if [ "$(pwshpy_euid)" = "0" ]; then\n    PWSHPY_AS_ROOT=1', "if true; then\n    PWSHPY_AS_ROOT=1")
 _NOT_ROOT_PROBE = "if false; then\n    PWSHPY_AS_ROOT=1"
+#: Where a root run judges its cache directory ([98]); a runner forced to root answers "trusted" there
+#: unless the test is about that check, since a test's cache sits below a directory the test's own
+#: account owns, which the root rule refuses.
+_CACHE_CHECK = "pwshpy_cache_distrust() {"
 
 
-def _force_probe(runner: Path, *, as_root: bool | None, real_data_home: bool = False) -> None:
+def _trusting_the_cache(text: str) -> str:
+    """``text`` with the root run's cache check answering "trusted" (one counted substitution)."""
+    assert text.count(_CACHE_CHECK) == 1
+    return text.replace(_CACHE_CHECK, f"{_CACHE_CHECK}\n    return 0\n}}\n\npwshpy_cache_distrust_on_host() {{")
+
+
+def _force_probe(
+    runner: Path, *, as_root: bool | None, real_data_home: bool = False, judge_cache: bool = False
+) -> None:
     """Make ``runner``'s root probe answer ``as_root`` (one counted substitution); None keeps the real one.
 
     False only changes anything when the suite runs as root, where the real probe would say root.
@@ -127,7 +139,8 @@ def _force_probe(runner: Path, *, as_root: bool | None, real_data_home: bool = F
     that real directory is then taken as trusted (:func:`elevation_doubles.without_python_dir_check`).
     None on a root run of the suite still answers the cache-home lookup inside ``runner.parent``: the
     real probe then says root, and a root run names uv's cache from root's passwd home ([X22 C1]),
-    which no uv this suite starts may write ([93], [111]).
+    which no uv this suite starts may write ([93], [111]). A runner forced to root takes its cache as
+    trusted (:func:`_trusting_the_cache`) unless ``judge_cache`` keeps the check ([98]).
     """
     if as_root is None and RUNNING_AS_ROOT:
         text = with_account_cache_home(runner.read_text(encoding="utf-8"), runner.parent, powershell=False)
@@ -142,16 +155,24 @@ def _force_probe(runner: Path, *, as_root: bool | None, real_data_home: bool = F
         text = with_data_home(text, runner.parent, powershell=False)
     elif as_root:
         text = without_python_dir_check(text, powershell=False)
+    if as_root and not judge_cache:
+        text = _trusting_the_cache(text)
     runner.write_text(text, encoding="utf-8")
 
 
 def _pack_sh(
-    entry: Path, dest: Path, *, as_root: bool | None = False, real_data_home: bool = False, **opts: object
+    entry: Path,
+    dest: Path,
+    *,
+    as_root: bool | None = False,
+    real_data_home: bool = False,
+    judge_cache: bool = False,
+    **opts: object,
 ) -> Path:
     """Pack ``entry`` to a .sh runner whose root probe answers ``as_root`` (see :func:`_force_probe`)."""
     manifest = pack_script(entry, dest, options=PackOptions(format=RunnerFormat.SH, **opts))  # type: ignore[arg-type]
     runner = Path(manifest.output_path)
-    _force_probe(runner, as_root=as_root, real_data_home=real_data_home)
+    _force_probe(runner, as_root=as_root, real_data_home=real_data_home, judge_cache=judge_cache)
     return runner
 
 
@@ -1028,7 +1049,9 @@ def test_an_unanswered_euid_probe_applies_the_root_rule(
     runner = _trust_runner(tmp_path, hide_system_uv=True, as_root=None)
     text = runner.read_text(encoding="utf-8")
     assert text.count(_FIXED_IDS) == 1
-    runner.write_text(text.replace(_FIXED_IDS, replacement), encoding="utf-8", newline="\n")
+    # Treated as root, the run would first refuse its cache below this test's own directory ([98]).
+    text = _trusting_the_cache(text.replace(_FIXED_IDS, replacement))
+    runner.write_text(text, encoding="utf-8", newline="\n")
     environment = _trust_env(tmp_path, planted.parent)
     if probe == "no-id":
         # No id anywhere the runner could reach: the planted one goes, and PATH holds only the
@@ -2430,3 +2453,116 @@ def test_info_names_whether_the_script_has_a_git_source(tmp_path: Path, git_sour
     assert result.returncode == 0, result.stdout + result.stderr
     expected = "git source : yes (a root run needs git 2.32 or later)" if git_source else "git source : no"
     assert expected in result.stdout.splitlines(), result.stdout
+
+
+def _cache_trust_runner(tmp_path: Path) -> tuple[Path, Path, str]:
+    """A .sh forced to root whose cache check is the shipped one, the marker its script writes, its key.
+
+    This test's own uid counts as root for ownership, so the cache root the test builds passes or fails
+    on everything but its owner. The key is the cache directory's name.
+    """
+    marker = tmp_path / "ran.marker"
+    entry = tmp_path / "mark.py"
+    entry.write_text(f"open({str(marker)!r}, 'w').close()\n")
+    runner = _pack_sh(entry, tmp_path / "mark.sh", as_root=True, judge_cache=True)
+    text = runner.read_text(encoding="utf-8")
+    assert text.count(_TRUSTED_UIDS) == 1
+    runner.write_text(
+        text.replace(_TRUSTED_UIDS, f"PWSHPY_TRUSTED_UIDS='0 {tmp_path.stat().st_uid}'\n"),
+        encoding="utf-8",
+        newline="\n",
+    )
+    key = next(line for line in text.splitlines() if line.startswith("PWSHPY_SHA="))
+    return runner, marker, key.split("'")[1][:16]
+
+
+def _cache_trust_run(shell: list[str], tmp_path: Path, runner: Path, root: Path) -> subprocess.CompletedProcess[str]:
+    """Run the runner from :func:`_cache_trust_runner` with its pack cache below ``root``.
+
+    No managed Python is offered, so a run that gets past the cache check stops later: these tests are
+    about whether the cache was judged. Under umask 022, as sudo runs root (its default umask is the
+    union of the caller's and 022): a host's 002 would make the unpacked tree group-writable.
+    """
+    env = {**_env(tmp_path), "PWSHPY_PACK_CACHE": str(root), **managed_python_env(tmp_path, managed=None)}
+    saved = os.umask(0o022)
+    try:
+        return _run(shell, runner, "--pwshpy-no-install-uv", env=env)
+    finally:
+        os.umask(saved)
+
+
+def _cache_root(path: Path, *, mode: int) -> Path:
+    path.mkdir(parents=True)
+    path.chmod(mode)
+    return path
+
+
+#: What a root run says when it refuses its pack cache ([98]).
+_CACHE_REFUSAL = "pwshpy pack: refusing the cache directory "
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o777, 0o775], ids=["private", "world-writable", "group-writable"])
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_a_pack_cache_another_account_can_modify_is_refused(
+    tmp_path: Path, shell_id: str, shell: list[str], mode: int
+) -> None:
+    """[98]: a root run judges the cache root before it writes anything there, and refuses with 127.
+
+    Mode 0755 is the liveness arm: the same run gets past the check and unpacks there.
+    """
+    root = _cache_root(tmp_path / "cache-root", mode=mode)
+    runner, marker, key = _cache_trust_runner(tmp_path)
+    result = _cache_trust_run(shell, tmp_path, runner, root)
+    cache = root / key
+    if mode == 0o755:
+        assert _CACHE_REFUSAL not in result.stderr, result.stderr
+        assert (cache / "mark.py").is_file(), result.stdout + result.stderr
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert f"{_CACHE_REFUSAL}{cache}: " in result.stderr, result.stderr
+    assert not cache.exists(), "the root run unpacked into a cache another account can modify"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_a_cached_file_another_account_can_modify_is_refused(
+    tmp_path: Path, shell_id: str, shell: list[str]
+) -> None:
+    """[98]: a file below the cache directory that another account can modify refuses a warm root run.
+
+    Its content still matches its recorded hash, so the per-file check alone would run it.
+    """
+    root = _cache_root(tmp_path / "cache-root", mode=0o755)
+    runner, marker, key = _cache_trust_runner(tmp_path)
+    cache = root / key
+    first = _cache_trust_run(shell, tmp_path, runner, root)
+    assert (cache / "mark.py").is_file(), first.stdout + first.stderr
+    (cache / "mark.py").chmod(0o666)
+    result = _cache_trust_run(shell, tmp_path, runner, root)
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert _CACHE_REFUSAL in result.stderr and "mark.py" in result.stderr, result.stderr
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_a_relative_pack_cache_is_judged_where_it_lies(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
+    """[98]: a relative PWSHPY_PACK_CACHE is judged against the caller's directory, not refused as relative."""
+    work = _cache_root(tmp_path / "work", mode=0o755)
+    runner, _, key = _cache_trust_runner(tmp_path)
+    env = {**_env(tmp_path), "PWSHPY_PACK_CACHE": "rel-cache", **managed_python_env(tmp_path, managed=None)}
+    saved = os.umask(0o022)
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argv from resolved shell + our own artefact
+            [*shell, str(runner), "--pwshpy-no-install-uv"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+            check=False,
+            env=env,
+            cwd=work,
+        )
+    finally:
+        os.umask(saved)
+    assert _CACHE_REFUSAL not in result.stderr, result.stderr
+    assert (work / "rel-cache" / key / "mark.py").is_file(), result.stdout + result.stderr

@@ -617,9 +617,15 @@ Details worth knowing:
 - **The cache is verified before every run** against per-file hashes embedded in the artefact, and
   re-extracted on any mismatch, so a file changed since an earlier run is replaced before uv starts.
   That check reads each file once; it does not stop an account that can write the cache directory
-  from changing a file between the check and uv reading it, and an elevated run does not judge who
-  can write the cache directory itself. For an elevated run, keep the cache (`PWSHPY_PACK_CACHE`, or
-  the default per-user cache directory) where only the elevated account can write. Both runners
+  from changing a file between the check and uv reading it. So an elevated run (an administrator
+  token, SYSTEM, or root) also judges the cache directory the way it judges uv's managed-Python
+  directory: the directory itself, every directory above it and every entry below it, before it
+  removes or writes anything there (before the first unpack, the nearest directory that exists), and
+  the tree again after an unpack. A cache another account can modify, wherever `PWSHPY_PACK_CACHE`,
+  `LOCALAPPDATA`, `XDG_CACHE_HOME` or `HOME` put it, stops the run with `pwshpy: refusing the cache
+  directory <dir>: <reason>` and exit code 127; a relative `PWSHPY_PACK_CACHE` is judged against
+  the caller's directory. A root run under umask 002 writes a group-writable tree, which the root
+  rule refuses (sudo's default umask is the caller's combined with 022, so a sudo run does not). Both runners
   serialize a cold-cache extraction with an atomic lock (`FileShare.None` on Windows, a lock file
   created under `noclobber` on POSIX), so two concurrent first runs never race.
 - **Packing is deterministic**: identical sources produce identical bytes (the `.sh` tar is built

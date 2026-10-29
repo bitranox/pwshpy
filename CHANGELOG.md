@@ -16,6 +16,16 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `get_net_tcp_connection` is documented as psutil's `inet` listing: it includes UDP sockets as
   well as TCP. Filter on `protocol` for TCP only. The behaviour is unchanged.
 
+### Fixed
+
+- Packed runners (`pwshpy pack`): an elevated run (`.ps1` with an administrator token or as
+  SYSTEM, either runner as root) now judges its pack cache before it removes or writes anything
+  there, and the unpacked tree again: the cache directory, every directory above it and every
+  entry below it must be unmodifiable by other accounts, or the run stops with
+  `pwshpy: refusing the cache directory <dir>: <reason>` and exit code 127. Before, a cache
+  another account could write (a `PWSHPY_PACK_CACHE`, `LOCALAPPDATA`, `XDG_CACHE_HOME` or `HOME`
+  the caller chose) was verified by hash and then run, leaving that account a window to swap a file.
+
 ## [1.11.0] 2026-10-29 00:00:55
 
 ### Added

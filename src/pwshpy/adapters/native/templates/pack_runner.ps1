@@ -68,7 +68,9 @@
     the internet only through a proxy, an elevated run can download nothing: the managed Python and
     every package the script needs must already be in the account's directories named above.
 
-    Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
+    Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir). An
+    elevated run unpacks and runs only from a cache directory that passes the same check as uv's
+    managed-Python directory (itself, every directory above it and everything below it), or exits 127.
 
     Home: https://github.com/bitranox/pwshpy
 #>
@@ -1059,6 +1061,34 @@ function Get-PwshPyPythonDirDistrust {
     return (Get-PwshPyPythonTreeDistrust -Path $Path)
 }
 
+function Get-PwshPyCacheDistrust {
+    param([string] $Path)
+
+    # Why an elevated run must not unpack into, or run the script from, the cache directory $Path (an
+    # absolute path), or '' ([98]). The tree is verified against its hashes and executed later, so an
+    # account that can write the directory, or rename one above it, could swap a file between the check
+    # and uv reading it; and an unpack removes and rewrites the directory with elevated rights. Its root
+    # is whatever PWSHPY_PACK_CACHE, LOCALAPPDATA or XDG_CACHE_HOME the caller set, so it is judged like
+    # uv's managed-Python directory: itself, every directory above it and every entry below it, or,
+    # before the first unpack, the nearest directory that exists.
+    return (Get-PwshPyPythonDirDistrust -Path $Path)
+}
+
+function Assert-PwshPyCacheTrusted {
+    param([string] $Path)
+
+    # Exits 127 when an elevated run may not use the cache directory $Path (Get-PwshPyCacheDistrust).
+    $why = Get-PwshPyCacheDistrust -Path $Path
+    if (-not $why) { return }
+    if ($PwshPyOnWindows) {
+        $remedy = 'set PWSHPY_PACK_CACHE to a directory only this account, SYSTEM and Administrators can modify, or take every other account''s write access off the path named above'
+    } else {
+        $remedy = 'set PWSHPY_PACK_CACHE to a directory only root can modify, or make the path named above root''s alone (chown root, chmod go-w)'
+    }
+    Write-PwshPyFailure "pwshpy: refusing the cache directory ${Path}: $why (an elevated run unpacks and runs the script only from a directory no other account can modify, nor anything below it): $remedy"
+    exit 127
+}
+
 function Resolve-PwshPyManagedPython {
     param([string] $Uv)
 
@@ -1507,11 +1537,20 @@ $PwshPyPrepare = {
 
     # --- unpack -----------------------------------------------------------------------------
 
+    # Elevated: the cache is judged before anything is removed or written in it, and the tree an unpack
+    # wrote is judged again, since a new directory inherits whatever the one above passes down ([98]).
+    # Absolute first: the walk refuses a relative path, and a relative PWSHPY_PACK_CACHE names the
+    # caller's directory.
+    if ($PwshPyElevatedRun) {
+        $PwshPyCacheDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PwshPyCacheDir)
+        Assert-PwshPyCacheTrusted -Path $PwshPyCacheDir
+    }
     if ($PwshPyClean -and (Test-Path -LiteralPath $PwshPyCacheDir)) {
         Remove-Item -LiteralPath $PwshPyCacheDir -Recurse -Force
     }
     if (-not (Test-PwshPyTree -Root $PwshPyCacheDir)) {
         Invoke-PwshPyUnpackLocked -CacheDir $PwshPyCacheDir
+        if ($PwshPyElevatedRun) { Assert-PwshPyCacheTrusted -Path $PwshPyCacheDir }
     }
 
     # --- uv ---------------------------------------------------------------------------------

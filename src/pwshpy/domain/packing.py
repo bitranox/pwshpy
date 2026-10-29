@@ -814,7 +814,7 @@ def render_runner(template: str, content: RunnerContent) -> str:
         >>> render_runner("|".join(_PLACEHOLDERS), content).split("|")  # doctest: +NORMALIZE_WHITESPACE
         ['Ym9keQ==', 'ab12', "'t.py'", "'--with','rich'", 'ff *t.py', '__pwshpy_pack_main__.py',
          'PWSHPY_PACK_ARGV', 'PWSHPY_PACK_CWD', "'',''", "''", 'PWSHPY_PACK_PATH', 'PWSHPY_PACK_UV_PATH',
-         '$false']
+         '$false', 'PWSHPY_PACK_CALLER']
     """
     missing = [token for token in _PLACEHOLDERS if token not in template]
     if missing:

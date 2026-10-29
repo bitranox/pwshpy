@@ -242,9 +242,22 @@ def test_render_posix_runner_substitutes_its_placeholders() -> None:
         ),
     )
     assert "@@PWSHPY" not in rendered
-    payload, sha, entry, uv_args, hashes, shim, argv_env, cwd_env, anchored, request, path_env, uv_path_env, git, caller = (
-        rendered.split("|")
-    )
+    (
+        payload,
+        sha,
+        entry,
+        uv_args,
+        hashes,
+        shim,
+        argv_env,
+        cwd_env,
+        anchored,
+        request,
+        path_env,
+        uv_path_env,
+        git,
+        caller,
+    ) = rendered.split("|")
     assert caller == "PWSHPY_PACK_CALLER"
     assert shlex.split(request) == [">=3.11"]
     assert git == "'0'"

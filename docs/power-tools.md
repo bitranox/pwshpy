@@ -388,7 +388,9 @@ Details worth knowing:
   `uv` or for a `PATH` directory: `\\server\share\...` in any separator, its `\\?\UNC\` and
   `\\.\UNC\` long forms and a link whose target is one are refused with `it is a network path, and
   an elevated run trusts only local paths`, whatever ACL the server reports, because whoever runs
-  the server decides what the share holds (a drive letter mapped to a share is not detected). Any
+  the server decides what the share holds. A drive letter is judged by its drive type: one mapped to
+  a share (`net use`, a logon script; `[IO.DriveInfo]` reports `Network`) is refused the same way,
+  and so is a drive whose type cannot be read. Any
   other device-namespace path (`\\.\...`, or `\\?\...` other than the long form of a drive path,
   `\\?\C:\...`) is refused with `it is a device path, and an elevated run trusts only local drive
   paths`: the object manager resolves such a name (`\\?\GLOBALROOT\Device\Mup\...` reaches the

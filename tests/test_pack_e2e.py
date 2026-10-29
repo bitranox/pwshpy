@@ -2100,6 +2100,58 @@ def test_an_elevated_run_leaves_a_link_to_a_network_path_off_uvs_path(tmp_path: 
     assert refused in result.stderr, result.stderr
 
 
+def _net_use(*args: str) -> subprocess.CompletedProcess[str]:
+    """``net use`` with ``args``, its output captured (the text is localised: callers read the exit code)."""
+    net = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / "net.exe"
+    return subprocess.run(  # noqa: S603 - fixed argv from the system directory
+        [str(net), "use", *args],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+
+
+@pytest.fixture
+def mapped_drive(tmp_path: Path) -> Iterator[tuple[str, Path]]:
+    """A free drive letter mapped (``net use``) to this host's administrative share, and a private local
+    directory, as ``("X:\\<rest of the directory>", directory)``: the same directory, spelled through
+    the mapped drive. Removed again afterwards; a skip when no letter is free or the share is refused."""
+    shared = _private_dir(tmp_path / "mapped-bin")
+    share = _admin_share(shared)
+    free = [letter for letter in "PQRSTUVWXYZ" if not Path(f"{letter}:\\").exists()]
+    if not free:
+        pytest.skip("no free drive letter to map")
+    letter = free[-1]
+    rest = os.path.splitdrive(str(shared))[1]
+    root = share[: len(share) - len(rest)]
+    mapped = _net_use(f"{letter}:", root)
+    if mapped.returncode != 0:
+        pytest.skip(f"net use {letter}: {root} failed (exit {mapped.returncode})")
+    try:
+        yield f"{letter}:{rest}", shared
+    finally:
+        _net_use(f"{letter}:", "/delete", "/y")
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+def test_an_elevated_run_leaves_a_mapped_network_drive_off_uvs_path(
+    tmp_path: Path, mapped_drive: tuple[str, Path]
+) -> None:
+    """[147]: a PATH directory on a drive letter mapped to a share is refused as a network path, whatever
+    ACL the server reports. The share is this host's own and the directory private, so the same
+    directory spelled locally passes the walk (the control): only the drive's type refuses it."""
+    entry, shared = mapped_drive
+    runner, uv_dirs = _path_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[entry, shared, *uv_dirs])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"pwshpy: leaving {entry} off uv's PATH: {_NETWORK_PATH} (" in result.stderr, result.stderr
+    assert f"pwshpy: leaving {shared} off" not in result.stderr, result.stderr
+
+
 @pytest.mark.local_only
 @pytest.mark.os_windows
 @_WINDOWS_ONLY

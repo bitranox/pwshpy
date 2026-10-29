@@ -37,6 +37,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - Packed `.ps1` runner, elevated under Windows PowerShell 5.1: a `PATH` directory spelled in its
   extended-length form (`\\?\C:\...`) is judged by its ACL like `C:\...` and kept on uv's `PATH`
   when it is private. Before, 5.1 could not walk that spelling and left every such directory off.
+- Packed `.ps1` runner, elevated on Windows: a drive letter mapped to a network share (`net use`, a
+  logon script) is now refused like a UNC path (`it is a network path, and an elevated run trusts
+  only local paths`), for a `uv`, a `PATH` directory and the directories the run judges; before, its
+  ACL, which the share's server reports, was trusted. A drive whose type cannot be read is refused.
 - Packed runners, `--pwshpy-elevate` / `-PwshPyElevate` on Linux and macOS: sudo is asked for the
   password once (`sudo -v`), then `sudo -n -v` confirms a credential was cached and the relaunch
   runs under `sudo -n`, so sudo never prompts a second time. A sudo that caches nothing

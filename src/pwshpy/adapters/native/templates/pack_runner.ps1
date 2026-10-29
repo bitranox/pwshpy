@@ -325,15 +325,31 @@ function Get-PwshPyNetworkDistrust {
     # namespace (\\?\, \\.\) only \\?\C:\..., the long spelling of a drive path, is left to the ACL
     # walk: any other name there (\\?\GLOBALROOT\Device\Mup\..., a volume GUID, a pipe) is resolved by
     # the object manager, can reach a network redirector, and is never where uv or a PATH directory
-    # lives. A drive letter mapped to a share passes here ([147]).
+    # lives. A drive letter is judged by its drive type ([147]): one mapped to a share (net use, a
+    # logon script) reads DRIVE_REMOTE, [IO.DriveInfo] 'Network', on pwsh 7.6 and Windows PowerShell
+    # 5.1 alike (measured on a Windows 11 test VM), while its ACL is again whatever the server reports.
     if (-not $PwshPyOnWindows) { return '' }
     $spelled = $Path.Replace('/', '\')
+    if ($spelled -match '^(\\\\\?\\)?([A-Za-z]):\\') { return (Get-PwshPyDriveDistrust -Letter $Matches[2]) }
     if (-not $spelled.StartsWith('\\')) { return '' }
-    if ($spelled -match '^\\\\\?\\[A-Za-z]:\\') { return '' }
     if ($spelled -match '^\\\\[?.]\\' -and $spelled -notmatch '^\\\\[?.]\\UNC(\\|$)') {
         return 'it is a device path, and an elevated run trusts only local drive paths'
     }
     return (Get-PwshPyNetworkReason)
+}
+
+function Get-PwshPyDriveDistrust {
+    param([string] $Letter)
+
+    # Windows: the network rule's reason when the drive $Letter is a network drive, else ''. A drive
+    # whose type cannot be read is refused too: the check fails closed.
+    try {
+        $type = (New-Object IO.DriveInfo $Letter).DriveType
+    } catch {
+        return "the type of drive ${Letter}: cannot be read ($($_.Exception.Message))"
+    }
+    if ($type -eq [IO.DriveType]::Network) { return (Get-PwshPyNetworkReason) }
+    return ''
 }
 
 function Get-PwshPyNetworkReason {

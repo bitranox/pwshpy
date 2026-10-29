@@ -2,8 +2,9 @@
 
 ``invoke_web_request`` prints the response body (or the whole ``WebResponse`` with
 ``--json``; piped, the body is written as UTF-8 bytes whatever the console code page);
-``invoke_rest_method`` sends/receives JSON.  A curl with typed output.  Both fail on a 4xx or
-5xx answer, as the cmdlets do, unless ``--skip-http-error-check`` is given.
+``invoke_rest_method`` sends/receives JSON.  A curl with typed output.  Both fail on any status
+urllib does not follow (a refused 3xx, 304, 4xx, 5xx), as the cmdlets do, unless
+``--skip-http-error-check`` is given.
 
 Contents:
     * the ``cli_*`` web commands, collected in ``WEB_COMMANDS``.
@@ -36,7 +37,10 @@ def _parse_headers(pairs: tuple[str, ...]) -> dict[str, str]:
     "--skip-http-error-check",
     is_flag=True,
     default=False,
-    help="Return a 4xx/5xx answer instead of failing on it (like -SkipHttpErrorCheck).",
+    help=(
+        "Return any answer that is not followed (a refused 3xx, 304, 4xx, 5xx) instead of failing on it "
+        "(like -SkipHttpErrorCheck)."
+    ),
 )
 @option("--json", "as_json", is_flag=True, default=False, help="Emit the full WebResponse record as JSON.")
 @click.pass_context
@@ -83,7 +87,10 @@ def cli_invoke_web_request(
     "--skip-http-error-check",
     is_flag=True,
     default=False,
-    help="Return a 4xx/5xx answer instead of failing on it (like -SkipHttpErrorCheck).",
+    help=(
+        "Return any answer that is not followed (a refused 3xx, 304, 4xx, 5xx) instead of failing on it "
+        "(like -SkipHttpErrorCheck)."
+    ),
 )
 @click.pass_context
 def cli_invoke_rest_method(

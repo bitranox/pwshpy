@@ -20,14 +20,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   call does; they let `LookupError`, `UnicodeDecodeError`, `UnicodeEncodeError` and `OSError`
   through raw before. The original error is the `__cause__`. A `ValueError` that is a usage error
   (a NUL in a path) is still raised as is.
-- `invoke_web_request` and `invoke_rest_method` raise `NativeCallError` on an HTTP status of 400 or
-  above, as `Invoke-WebRequest` and `Invoke-RestMethod` do; the message names the status and the
-  first 200 characters of the body on one line. They returned the answer (and `invoke_rest_method`
-  its parsed error body) before, so a caller that reads 4xx or 5xx bodies now passes the new keyword
-  `skip_http_error_check=True` (CLI `--skip-http-error-check`, pwsh's `-SkipHttpErrorCheck`) to get
-  the answer back. A redirect urllib refuses to follow (a redirect loop, a redirect to a scheme
-  such as `file:`) raises the same way with its 3xx status; it came back as a successful
-  `WebResponse` before.
+- `invoke_web_request` and `invoke_rest_method` raise `NativeCallError` on any HTTP status urllib
+  does not follow (a refused 3xx such as a redirect loop, 304, 4xx, 5xx), as `Invoke-WebRequest`
+  and `Invoke-RestMethod` do; the message names the status and the first 200 characters of the body
+  on one line. They returned the answer (and `invoke_rest_method` its parsed error body) before, so
+  a caller that reads such answers (an error body, a 304 to a conditional request) now passes the
+  new keyword `skip_http_error_check=True` (CLI `--skip-http-error-check`, pwsh's
+  `-SkipHttpErrorCheck`) to get the answer back.
 - Every public method of the `ps` facade documents each parameter (`Args:`) and its result
   (`Returns:`, or `Yields:` for a generator), and, where traced, the errors it raises (`Raises:`),
   so `help(ps.<method>)` says what a value means and what can fail. A test fails when a method

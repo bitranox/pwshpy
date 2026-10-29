@@ -92,8 +92,6 @@ def _transport_error(what: str, exc: BaseException, timeout: float) -> NativeCal
     return native_error(f"{what} failed: {exc}", exc)
 
 
-#: The lowest status the cmdlets treat as an error (Invoke-WebRequest raises on 4xx and 5xx).
-_HTTP_ERROR_FLOOR = 400
 #: How much of an error body is read for the message excerpt; the rest is never read.
 _EXCERPT_BYTES = 1024
 #: How many characters of that body the error message carries at most.
@@ -120,9 +118,10 @@ def _http_error_response(
 ) -> WebResponse:
     """Return the answer urllib raised as HTTPError, or raise it as the cmdlets do.
 
-    urllib raises ``HTTPError`` for a status of 400 or above and for a 3xx it refuses to follow
-    (a redirect loop, a redirect to a scheme it will not open): both raise unless
-    ``skip_http_error_check``, which returns the answer itself.
+    urllib raises ``HTTPError`` for any status it does not follow (a refused 3xx such as a
+    redirect loop, 304, 4xx, 5xx): each raises unless ``skip_http_error_check``, which returns
+    the answer itself. A redirect to a scheme other than http/https never gets here: it is
+    refused before it is followed, whatever ``skip_http_error_check`` says.
     """
     is_error = not skip_http_error_check
     try:
@@ -156,8 +155,9 @@ def invoke_web_request(  # noqa: PLR0913 - mirrors the WebRequester port: Invoke
 ) -> WebResponse:
     """Perform an HTTP request and return a typed :class:`WebResponse` (like Invoke-WebRequest).
 
-    A status of 400 or above raises :class:`~pwshpy.domain.errors.NativeCallError` naming the
-    status and a short excerpt of the body, as ``Invoke-WebRequest`` does; with
+    Any status urllib does not follow (a refused 3xx, 304, 4xx, 5xx) raises
+    :class:`~pwshpy.domain.errors.NativeCallError` naming the status and a short excerpt of the
+    body, as ``Invoke-WebRequest`` does; with
     ``skip_http_error_check=True`` (pwsh's ``-SkipHttpErrorCheck``) the answer is returned
     with its status and full body instead. A transport failure raises ``NativeCallError``, a
     timeout its subclass :class:`~pwshpy.domain.errors.OperationTimeoutError`.
@@ -200,7 +200,7 @@ def invoke_rest_method(  # noqa: PLR0913 - mirrors the RestInvoker port: Invoke-
     """Perform an HTTP request and return the parsed JSON body (like Invoke-RestMethod).
 
     ``json_body`` is serialized and sent with a ``Content-Type: application/json``
-    header.  A status of 400 or above raises
+    header.  Any status urllib does not follow (a refused 3xx, 304, 4xx, 5xx) raises
     :class:`~pwshpy.domain.errors.NativeCallError` unless ``skip_http_error_check`` is
     True, in which case the error body is parsed like any other.  Raises
     ``NativeCallError`` too if the response body is not valid JSON.
@@ -248,7 +248,8 @@ def download_file(url: str, dest: str | Path, *, chunk_size: int = 65536, timeou
 
     Unlike :func:`invoke_web_request` (which returns the body as data), this copies the
     response to a file in fixed-size chunks via :func:`shutil.copyfileobj`, so a multi-
-    gigabyte download stays flat in memory.  A 4xx/5xx or transport failure raises
+    gigabyte download stays flat in memory.  Any status urllib does not follow (a refused 3xx,
+    304, 4xx, 5xx) or a transport failure raises
     :class:`~pwshpy.domain.errors.NativeCallError`, a timeout its subclass
     :class:`~pwshpy.domain.errors.OperationTimeoutError` (no partial file is left as a "success").
     Only a file this call opened is removed on failure: one that fails before it opens ``dest``

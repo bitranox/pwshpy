@@ -24,6 +24,9 @@ from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
 if TYPE_CHECKING:
     from pwshpy.composition import AppServices
 
+#: The entity tag the /etag route answers; a request naming it in If-None-Match gets 304.
+_ETAG = '"v1"'
+
 #: A body far longer than any excerpt, so a test can see the message stays bounded.
 _LONG_BODY = b'{"error": "' + b"x" * 5000 + b'", "tail": "SECRET-TAIL"}'
 
@@ -33,6 +36,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self) -> None:
+        if self.path == "/etag" and self.headers.get("If-None-Match") == _ETAG:
+            self.send_response(304)  # Not Modified: no body
+            self.send_header("ETag", _ETAG)
+            self.end_headers()
+            return
         routes: dict[str, tuple[int, bytes]] = {
             "/notfound": (404, b'{"error": "no such thing"}'),
             "/teapot": (418, b"short and stout"),
@@ -176,3 +184,25 @@ def test_cli_skip_http_error_check_prints_the_error_body(
     )
     assert rest.exit_code == 0, rest.output
     assert json.loads(rest.output) == {"error": "no such thing"}
+
+
+@pytest.mark.os_agnostic
+def test_a_304_not_modified_raises_like_pwsh(base_url: str) -> None:
+    """304 is an HTTPError urllib does not follow; pwsh's Invoke-WebRequest fails on it too."""
+    with pytest.raises(NativeCallError, match="HTTP 304") as caught:
+        invoke_web_request(base_url + "/etag", headers={"If-None-Match": _ETAG})
+    assert not isinstance(caught.value, OperationTimeoutError)
+
+
+@pytest.mark.os_agnostic
+def test_a_304_is_returned_when_the_check_is_skipped(base_url: str) -> None:
+    """With skip_http_error_check the 304 answer itself comes back, empty body included."""
+    response = invoke_web_request(base_url + "/etag", headers={"If-None-Match": _ETAG}, skip_http_error_check=True)
+    assert (response.status_code, response.text) == (304, "")
+
+
+@pytest.mark.os_agnostic
+def test_a_conditional_request_that_does_not_match_gets_the_body(base_url: str) -> None:
+    """Control: an entity tag that does not match is answered 200 with the body."""
+    response = invoke_web_request(base_url + "/etag", headers={"If-None-Match": '"other"'})
+    assert response.status_code == 200

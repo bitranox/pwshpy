@@ -30,7 +30,8 @@ from ...domain.errors import NativeCallError, PlatformUnsupportedError
 from ...domain.records import CimInstance
 from .marshal import com_hresult, com_outer_hresult, is_com_error, native_error
 
-_CLASS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Matched with fullmatch: `$` alone would also accept a name followed by one trailing newline.
+_CLASS_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _DEFAULT_NAMESPACE = "root/cimv2"
 # wbemFlagReturnImmediately (0x10) | wbemFlagForwardOnly (0x20): a lazy, forward-only enumerator.
 _LAZY_FLAGS = 0x10 | 0x20
@@ -80,7 +81,7 @@ def iter_cim(
         >>> sys.platform != "win32" or isinstance(next(iter_cim("Win32_OperatingSystem")), CimInstance)
         True
     """
-    if not _CLASS_RE.match(class_name):
+    if not _CLASS_RE.fullmatch(class_name):
         raise NativeCallError(f"invalid WMI class name: {class_name!r}")
     service = _load_wbem_service(namespace)
     # Read-only WQL; class_name is validated above and `where` is a documented trust boundary.

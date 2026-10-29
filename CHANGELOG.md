@@ -16,6 +16,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `get_net_tcp_connection` is documented as psutil's `inet` listing: it includes UDP sockets as
   well as TCP. Filter on `protocol` for TCP only. The behaviour is unchanged.
 
+### Fixed
+
+- `get_cim_instance` refuses a class name followed by a line break (`"Win32_Process\n"`) with
+  `NativeCallError`, as it refuses any other name that is not letters, digits and underscores; the
+  check accepted one trailing newline before.
+
 ## [1.11.0] 2026-10-29 00:00:55
 
 ### Added

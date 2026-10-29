@@ -102,6 +102,17 @@ def test_iter_cim_rejects_bad_class_name(monkeypatch: pytest.MonkeyPatch) -> Non
         list(iter_cim("Win32_Thing; DROP"))
 
 
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("class_name", ["Win32_Process\n", "Win32_Process\r\n", "\nWin32_Process", ""])
+def test_iter_cim_rejects_a_class_name_with_a_line_break(monkeypatch: pytest.MonkeyPatch, class_name: str) -> None:
+    """The whole name must be an identifier: a trailing newline is not "letters, digits and underscores"."""
+    service = _FakeService([])
+    monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(service))
+    with pytest.raises(NativeCallError, match="invalid WMI class name"):
+        list(iter_cim(class_name))
+    assert service.last_wql is None
+
+
 class _Boom:
     """A WBEM service whose query raises ``failure``."""
 

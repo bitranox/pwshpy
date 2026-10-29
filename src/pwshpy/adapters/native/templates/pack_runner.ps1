@@ -1816,20 +1816,29 @@ function Invoke-PwshPyElevated {
             [Console]::Error.WriteLine('pwshpy: sudo not found; cannot elevate')
             exit 127
         }
-        # Ask for the password with `sudo -v` first: sudo exits 1 when it refuses, which is also
-        # an ordinary exit code of the script, so only asking separately tells the two apart.
-        & sudo -v
+        # A user sudo lets run this pwsh, the relaunch's own program, without a password (a NOPASSWD
+        # rule) is asked nothing ([280]): under sudo's default verifypw=all, -v wants a password unless
+        # EVERY rule of the user is NOPASSWD, so beside Ubuntu's %sudo rule it asked for one the
+        # command does not need, and without a terminal (or any password) the run was declined. The
+        # probe runs the same program as the relaunch, so a rule for some other program only cannot
+        # pass it; it prints nothing, and its refusal is not an error of this run.
+        $null = & sudo -n (Get-PwshPyHostPath) -NoProfile -NonInteractive -Command 'exit 0' 2>$null
         if ($LASTEXITCODE -ne 0) {
-            [Console]::Error.WriteLine('pwshpy: elevation declined (sudo did not grant root)')
-            exit 77
-        }
-        # Only the -v prompts ([136-sh]): the relaunch runs as sudo -n, which never asks, so a sudo
-        # that keeps no credential after -v (timestamp_timeout=0) would prompt a second time without
-        # -n. Such a setup is told by sudo -n -v failing, and declined like a refused prompt.
-        & sudo -n -v
-        if ($LASTEXITCODE -ne 0) {
-            [Console]::Error.WriteLine('pwshpy: elevation declined (sudo keeps no credential after the password prompt, so it would ask again (timestamp_timeout=0))')
-            exit 77
+            # Ask for the password with `sudo -v` first: sudo exits 1 when it refuses, which is also
+            # an ordinary exit code of the script, so only asking separately tells the two apart.
+            & sudo -v
+            if ($LASTEXITCODE -ne 0) {
+                [Console]::Error.WriteLine('pwshpy: elevation declined (sudo did not grant root)')
+                exit 77
+            }
+            # Only the -v prompts ([136-sh]): the relaunch runs as sudo -n, which never asks, so a
+            # sudo that keeps no credential after -v (timestamp_timeout=0) would prompt a second time
+            # without -n. Such a setup is told by sudo -n -v failing, and declined like a refused prompt.
+            & sudo -n -v
+            if ($LASTEXITCODE -ne 0) {
+                [Console]::Error.WriteLine('pwshpy: elevation declined (sudo keeps no credential after the password prompt, so it would ask again (timestamp_timeout=0))')
+                exit 77
+            }
         }
         # sudo keeps the console, so output and exit code flow back without a relay. A sudo that
         # grants -v but then refuses the command itself (sudoers allowing only -v) exits with that

@@ -87,6 +87,11 @@ def _exits_with(code: int) -> list[str]:
     return ["-c", f"import sys; sys.exit({code})"]
 
 
+#: The no-password probe ([280]) every relaunch of the current interpreter makes first, as the double
+#: logs it; with no NOPASSWD rule and no credential yet it fails, and the ``sudo -v`` flow follows.
+_PROBE = f"-n {sys.executable} -c pass"
+
+
 def _sudo_relaunch() -> Any:
     return elevation._sudo_relaunch  # pyright: ignore[reportPrivateUsage] - white-box test
 
@@ -102,6 +107,7 @@ def test_sudo_asks_for_the_password_before_it_runs_the_command(tmp_path: Path, m
 
     assert code == 7
     assert log.read_text(encoding="utf-8").splitlines() == [
+        _PROBE,
         "-v",
         "-n -v",
         f"-n {sys.executable} {' '.join(_exits_with(7))}",
@@ -123,7 +129,7 @@ def test_a_sudo_that_caches_no_credential_is_declined_before_the_command(
 
     with pytest.raises(ElevationDeclinedError, match="cached no credential"):
         _sudo_relaunch()(sys.executable, _exits_with(0), str(tmp_path), wait=True)
-    assert log.read_text(encoding="utf-8").splitlines() == ["-v", "-n -v"], "the command ran or prompted again"
+    assert log.read_text(encoding="utf-8").splitlines() == [_PROBE, "-v", "-n -v"], "ran or prompted again"
 
 
 @pytest.mark.os_posix
@@ -136,11 +142,11 @@ def test_the_command_never_prompts_a_second_time(tmp_path: Path, monkeypatch: py
     lines: list[str] = []
     for _ in range(50):  # the detached command logs itself as soon as the stand-in starts it
         lines = log.read_text(encoding="utf-8").splitlines()
-        if len(lines) == 3:
+        if len(lines) == 4:
             break
         time.sleep(0.05)
-    assert len(lines) == 3, lines
-    assert lines[2].startswith("-n "), lines
+    assert len(lines) == 4, lines
+    assert lines[3].startswith("-n "), lines
     assert second_prompts(log) == [], "the command was started without -n and prompted again"
 
 
@@ -155,7 +161,7 @@ def test_a_refused_sudo_password_is_declined_and_never_runs_the_command(
 
     with pytest.raises(ElevationDeclinedError, match="sudo"):
         _sudo_relaunch()(sys.executable, _exits_with(0), str(tmp_path), wait=True)
-    assert log.read_text(encoding="utf-8").splitlines() == ["-v"], "the command ran although sudo refused"
+    assert log.read_text(encoding="utf-8").splitlines() == [_PROBE, "-v"], "the command ran although sudo refused"
 
 
 @pytest.mark.os_posix
@@ -167,7 +173,7 @@ def test_ctrl_c_at_the_sudo_prompt_is_declined(tmp_path: Path, monkeypatch: pyte
 
     with pytest.raises(ElevationDeclinedError, match="interrupted"):
         _sudo_relaunch()(sys.executable, _exits_with(0), str(tmp_path), wait=True)
-    assert log.read_text(encoding="utf-8").splitlines() == ["-v"], "the command ran after the prompt was interrupted"
+    assert log.read_text(encoding="utf-8").splitlines() == [_PROBE, "-v"], "the command ran after the interrupt"
 
 
 @pytest.mark.os_posix
@@ -206,6 +212,38 @@ def test_no_sudo_on_path_is_a_failure_that_names_sudo(tmp_path: Path, monkeypatc
     with pytest.raises(NativeCallError, match="sudo") as raised:
         _sudo_relaunch()(sys.executable, _exits_with(0), str(tmp_path), wait=True)
     assert not isinstance(raised.value, ElevationDeclinedError)
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the sudo double is a POSIX sh script")
+@pytest.mark.parametrize(
+    "nopasswd", ["ALL", "relaunch", "/bin/true"], ids=["nopasswd-all", "nopasswd-the-relaunch", "nopasswd-another"]
+)
+def test_a_user_who_needs_no_password_is_not_asked_for_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nopasswd: str
+) -> None:
+    """[280]: a user with a NOPASSWD sudoers rule beside one that wants a password was asked for a
+    password by ``sudo -v`` (sudo's ``verifypw=all``), and refused without a terminal or a password.
+    ``sudo -n`` is now asked first to run the interpreter the relaunch runs: when that needs no
+    password, nothing is asked and the command runs under ``sudo -n``. A rule for another program only
+    passes no probe, so the old flow asks and declines."""
+    from pwshpy import ElevationDeclinedError
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "sudo-calls.txt"
+    program = sys.executable if nopasswd == "relaunch" else nopasswd
+    write_fake_sudo(bin_dir, grant=False, cached=False, calls=calls, nopasswd=program)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    if nopasswd == "/bin/true":
+        with pytest.raises(ElevationDeclinedError, match="sudo"):
+            _sudo_relaunch()(sys.executable, _exits_with(7), str(tmp_path), wait=True)
+        assert calls.read_text(encoding="utf-8").splitlines() == [_PROBE, "-v"]
+        return
+    assert _sudo_relaunch()(sys.executable, _exits_with(7), str(tmp_path), wait=True) == 7
+    logged = calls.read_text(encoding="utf-8").splitlines()
+    assert second_prompts(calls) == [], logged
+    assert logged == [_PROBE, f"-n {sys.executable} {' '.join(_exits_with(7))}"], logged
 
 
 @pytest.mark.os_agnostic

@@ -81,3 +81,18 @@ def test_per_parent_the_credential_belongs_to_the_process_that_prompted(tmp_path
         ["/bin/sh", "-c", f"'{sudo}' -v && exec '{sudo}' -n true"], capture_output=True, check=False
     )
     assert exec_away.returncode == 1, "an exec'd sudo -n has the shell's parent as its own"
+
+
+@_POSIX_ONLY
+@pytest.mark.os_posix
+@pytest.mark.parametrize("nopasswd", ["ALL", "/bin/true"], ids=["nopasswd-all", "nopasswd-one-program"])
+def test_a_nopasswd_rule_beside_a_password_rule_runs_only_n_commands_it_covers(tmp_path: Path, nopasswd: str) -> None:
+    """[280] ``nopasswd`` (sudo's ``verifypw=all`` with mixed rules): ``-n <program>`` runs without any
+    credential when the NOPASSWD rule covers the program, ``-v`` and ``-n -v`` still want the password
+    the user does not have, and a program the rule does not cover is refused like any ``-n``."""
+    sudo = write_fake_sudo(tmp_path, grant=False, cached=False, nopasswd=nopasswd)
+    assert _call(sudo, "-n", "/bin/true") == 0
+    assert _call(sudo, "-n", "/bin/sh", "-c", ":") == (0 if nopasswd == "ALL" else 1)
+    assert _call(sudo, "-n", "-v") == 1
+    assert _call(sudo, "-v") == 1
+    assert second_prompts(tmp_path / "sudo-calls.txt") == []

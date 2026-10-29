@@ -623,6 +623,44 @@ def test_elevate_switch_never_lets_sudo_prompt_twice(tmp_path: Path, cached: boo
 
 @pytest.mark.local_only
 @pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
+@pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+@pytest.mark.parametrize("nopasswd", ["ALL", "relaunch", "/bin/true"], ids=["nopasswd-all", "nopasswd-the-relaunch", "nopasswd-another"])
+def test_elevate_switch_asks_no_password_of_a_user_who_needs_none(tmp_path: Path, nopasswd: str) -> None:
+    """[280], as the .sh: a user with a NOPASSWD sudoers rule beside one that wants a password was asked
+    for a password by ``sudo -v`` (``verifypw=all``), and declined with 77 without a terminal or a
+    password. The POSIX relaunch now first asks ``sudo -n`` to run the pwsh it relaunches: when that
+    needs no password, nothing is asked and the script runs. A rule for another program only passes no
+    probe, so the old flow asks and declines, quietly."""
+    assert _PWSH is not None
+    entry = tmp_path / "who.py"
+    marker = tmp_path / "ran.marker"
+    entry.write_text(f'open({str(marker)!r}, "w").close()\n')
+    manifest = pack_script(entry)
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "sudo-calls.txt"
+    # The relaunch runs the pwsh this process is, by its resolved path ((Get-Process -Id $PID).Path).
+    program = str(Path(_PWSH).resolve()) if nopasswd == "relaunch" else nopasswd
+    write_fake_sudo(bin_dir, grant=False, cached=False, calls=calls, nopasswd=program)
+    environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
+    result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment)
+    logged = calls.read_text(encoding="utf-8").splitlines()
+    assert second_prompts(calls) == [], logged
+    assert "a password is required" not in result.stderr, result.stderr
+    if nopasswd == "/bin/true":
+        assert result.returncode == 77, result.stdout + result.stderr
+        assert "pwshpy: elevation declined" in result.stderr, result.stderr
+        assert "-v" in logged, logged
+        assert not marker.exists(), "the packed script ran although sudo wanted a password"
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.exists(), "the packed script never ran: " + result.stderr
+    assert [call for call in logged if call in ("-v", "-n -v")] == [], logged
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
 @pytest.mark.skipif(sys.platform == "win32", reason="hiding sudo needs a POSIX host")
 @pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
 def test_elevate_switch_without_sudo_exits_127_not_77(tmp_path: Path) -> None:

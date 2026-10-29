@@ -425,12 +425,17 @@ sys.exit(9)
 
 
 def _elevate_setup(
-    tmp_path: Path, *, grant: bool, cached: bool = True, per_parent: bool = False
+    tmp_path: Path,
+    *,
+    grant: bool,
+    cached: bool = True,
+    per_parent: bool = False,
+    nopasswd: str | None = None,
 ) -> tuple[Path, Path, dict[str, str]]:
     """A packed marker-writing script, a sudo double on PATH, and the marker the script writes.
 
-    The double logs every call to ``sudo-calls.txt`` in ``tmp_path``; ``cached`` and ``per_parent`` as
-    for :func:`elevation_doubles.write_fake_sudo`.
+    The double logs every call to ``sudo-calls.txt`` in ``tmp_path``; ``cached``, ``per_parent`` and
+    ``nopasswd`` as for :func:`elevation_doubles.write_fake_sudo`.
     """
     entry = tmp_path / "who.py"
     entry.write_text(_ELEVATE_ENTRY)
@@ -439,7 +444,8 @@ def _elevate_setup(
     runner.chmod(0o755)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_fake_sudo(bin_dir, grant=grant, cached=cached, per_parent=per_parent, calls=tmp_path / "sudo-calls.txt")
+    calls = tmp_path / "sudo-calls.txt"
+    write_fake_sudo(bin_dir, grant=grant, cached=cached, per_parent=per_parent, calls=calls, nopasswd=nopasswd)
     marker = tmp_path / "ran.marker"
     environment = _env(tmp_path)
     environment["PATH"] = os.pathsep.join([str(bin_dir), environment["PATH"]])
@@ -497,6 +503,33 @@ def test_elevate_never_lets_sudo_prompt_twice(tmp_path: Path, cached: bool) -> N
     assert result.returncode == 77, result.stdout + result.stderr
     assert "pwshpy: elevation declined" in result.stderr, result.stderr
     assert not marker.exists(), "the packed script ran although sudo kept no credential"
+
+
+@_needs_non_root
+@pytest.mark.parametrize(
+    "nopasswd", ["ALL", "/bin/sh", "/bin/true"], ids=["nopasswd-all", "nopasswd-the-relaunch", "nopasswd-another"]
+)
+def test_elevate_asks_no_password_of_a_user_who_needs_none(tmp_path: Path, nopasswd: str) -> None:
+    """[280]: a user with a NOPASSWD sudoers rule beside one that wants a password (Ubuntu's ``%sudo``)
+    was asked for a password by ``sudo -v``, which under sudo's default ``verifypw=all`` wants one unless
+    every rule is NOPASSWD: without a terminal, or without a password at all (a stock cloud-image
+    user), elevation was declined with 77. The runner now first asks ``sudo -n`` to run the program the
+    relaunch runs (/bin/sh): when that needs no password, nothing is asked and the script runs. A rule
+    for another program only (/bin/true) passes no probe, so the old flow asks and declines, quietly."""
+    runner, marker, environment = _elevate_setup(tmp_path, grant=False, cached=False, nopasswd=nopasswd)
+    result = _run(["sh"], runner, "--pwshpy-elevate", env=environment)
+    calls = (tmp_path / "sudo-calls.txt").read_text(encoding="utf-8").splitlines()
+    assert second_prompts(tmp_path / "sudo-calls.txt") == [], calls
+    assert "a password is required" not in result.stderr, result.stderr
+    if nopasswd == "/bin/true":
+        assert result.returncode == 77, result.stdout + result.stderr
+        assert "pwshpy: elevation declined" in result.stderr, result.stderr
+        assert "-v" in calls, calls
+        assert not marker.exists(), "the packed script ran although sudo wanted a password"
+        return
+    assert result.returncode == 9, result.stdout + result.stderr
+    assert marker.exists(), "the packed script never ran: " + result.stderr
+    assert [call for call in calls if call in ("-v", "-n -v")] == [], calls
 
 
 @_needs_non_root

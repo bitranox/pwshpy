@@ -1164,17 +1164,24 @@ if [ "$PWSHPY_WANT_ELEVATE" = "1" ] && [ "$PWSHPY_AS_ROOT" != "1" ]; then
         printf '%s\n' "pwshpy: sudo not found; cannot elevate" >&2
         exit 127
     fi
-    if ! sudo -v; then
-        printf '%s\n' "pwshpy: elevation declined (sudo did not grant root)" >&2
-        exit 77
-    fi
-    # Only the -v prompts ([136-sh]): the relaunch runs as sudo -n, which never asks, so a sudo that
-    # keeps no credential after -v (timestamp_timeout=0) would prompt a second time without -n. Such a
-    # setup is told by sudo -n -v failing, and declined like a refused prompt.
-    if ! sudo -n -v; then
-        _el_why="sudo keeps no credential after the password prompt, so it would ask again (timestamp_timeout=0)"
-        printf '%s\n' "pwshpy: elevation declined ($_el_why)" >&2
-        exit 77
+    # A user sudo lets run /bin/sh, the relaunch's own program, without a password (a NOPASSWD rule) is
+    # asked nothing ([280]): under sudo's default verifypw=all, -v wants a password unless EVERY rule of
+    # the user is NOPASSWD, so beside Ubuntu's %sudo rule it asked for one the command does not need,
+    # and without a terminal (or any password) the run was declined. The probe runs the same program
+    # as the relaunch, so a rule for some other program only cannot pass it; it prints nothing.
+    if ! sudo -n /bin/sh -c : </dev/null >/dev/null 2>&1; then
+        if ! sudo -v; then
+            printf '%s\n' "pwshpy: elevation declined (sudo did not grant root)" >&2
+            exit 77
+        fi
+        # Only the -v prompts ([136-sh]): the relaunch runs as sudo -n, which never asks, so a sudo that
+        # keeps no credential after -v (timestamp_timeout=0) would prompt a second time without -n.
+        # Such a setup is told by sudo -n -v failing, and declined like a refused prompt.
+        if ! sudo -n -v; then
+            _el_why="sudo keeps no credential after the password prompt, so it would ask again"
+            printf '%s\n' "pwshpy: elevation declined ($_el_why (timestamp_timeout=0))" >&2
+            exit 77
+        fi
     fi
     # A sudo that grants -v but then refuses the command itself (sudoers allowing only -v) exits with
     # that sudo's own code, which no wrapper can tell from the script's.

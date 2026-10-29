@@ -88,19 +88,23 @@ def write_fake_sudo(
     per_parent: bool = False,
     calls: Path | None = None,
     interrupt_prompt: bool = False,
+    nopasswd: str | None = None,
 ) -> Path:
     """Write a ``sudo`` double into ``bin_dir`` (put it first on PATH); its path.
 
     It models what the elevate paths rely on ([136]): ``sudo -v`` is the password prompt; ``-n`` never
-    prompts and succeeds only while a credential is cached (``-n -v`` asks, ``-n <cmd>`` runs the command
-    as the same user); a command without ``-n`` would prompt again and is logged ``PROMPT <command>``
+    prompts and succeeds only while a credential is cached, which a granted ``-v`` creates (``-n -v``
+    asks, ``-n <cmd>`` runs the command as the same user), so the no-password probe the elevate paths
+    make before any prompt ([280]) fails unless ``nopasswd`` covers it; a command without ``-n`` would
+    prompt again and is logged ``PROMPT <command>``
     (see :func:`second_prompts`), then run when ``grant``. Every call is logged first, one line of its
     arguments, so a test can prove sudo was never called.
 
     Args:
         bin_dir: Directory to write the double into.
         grant: Whether the prompt (``sudo -v``, or a command without ``-n``) succeeds.
-        cached: Whether ``-n`` finds a cached credential; False models ``timestamp_timeout=0``.
+        cached: Whether sudo keeps the credential a granted ``-v`` creates, for ``-n`` to find; False
+            models ``timestamp_timeout=0``.
         per_parent: Model ``timestamp_type=ppid``: the credential ``-v`` caches belongs to the parent
             process of that call, so ``-n`` finds it only when called from the same parent.
         calls: The call log (default ``<bin_dir>/sudo-calls.txt``).
@@ -109,6 +113,13 @@ def write_fake_sudo(
             ``per_parent`` ``-n`` afterwards fails). A terminal sends SIGINT to the whole foreground
             group, so the caller receives it as well as sudo (the measurement ``tests/test_elevation.py``
             records: real sudo 1.9.15p5 in a pty on Ubuntu 24.04).
+        nopasswd: Model a NOPASSWD sudoers rule for this program (``"ALL"``: every program) beside a
+            rule that wants a password, under sudo's default ``verifypw=all`` ([280], measured on
+            Ubuntu 26.04: ``%sudo ALL=(ALL:ALL) ALL`` plus ``user ALL=(ALL) NOPASSWD:ALL``):
+            ``-n <program>`` runs without any credential when the rule covers ``<program>``, while
+            ``-v`` and ``-n -v`` still follow ``grant`` and ``cached``, since ``-v`` wants a password
+            unless every rule of the user is NOPASSWD. A stock cloud-image user has no password at
+            all, so pair it with ``grant=False, cached=False``.
 
     Returns:
         The written double.
@@ -121,14 +132,19 @@ def write_fake_sudo(
     """
     log = calls if calls is not None else bin_dir / "sudo-calls.txt"
     owner = bin_dir / "sudo-credential-parent"
-    has_credential = f"[ {int(cached)} = 1 ]"
+    has_credential = f"[ {int(cached)} = 1 ] && [ -f '{owner}' ]"
     if per_parent:
         has_credential += f' && [ "$PPID" = "$(cat \'{owner}\' 2>/dev/null)" ]'
+    # The NOPASSWD rule covers "-n <program>" (never "-n -v"): every program under ALL, else that one.
+    covered = "false"
+    if nopasswd is not None:
+        covered = f"[ \"$1\" != -v ] && {{ [ '{nopasswd}' = ALL ] || [ \"$1\" = '{nopasswd}' ]; }}"
     lines = [
         "#!/bin/sh",
         f"printf '%s\\n' \"$*\" >> '{log}'",
         'if [ "$1" = "-n" ]; then',
         "    shift",
+        f'    if {covered}; then exec "$@"; fi',
         f"    if {has_credential}; then :; else echo 'sudo: a password is required' >&2; exit 1; fi",
         '    if [ "$1" = "-v" ]; then exit 0; fi',
         '    exec "$@"',

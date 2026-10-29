@@ -50,7 +50,11 @@ relaunched command's own failure. The packed runners below do the same for `--pw
 `-PwshPyElevate`, with the same single prompt: `sudo -v`, then `sudo -n -v`, then the relaunch
 under `sudo -n`, so a `timestamp_timeout=0` setup exits 77 rather than prompting twice (on a POSIX
 host without `sudo` they exit 127 instead, a missing tool rather than a refusal). A command that itself exits 77 still looks the same by exit code alone; the stderr line
-is what tells them apart.
+is what tells them apart. The `.sh` runner starts that relaunch as a child of its shell rather than
+replacing itself with it, so sudo's `timestamp_type=ppid` finds the credential the prompt cached; a
+signal sent to the runner's process alone therefore no longer reaches sudo and the relaunched
+script, while one sent to the whole process group (Ctrl-C in a terminal, `timeout`, a systemd stop)
+still does.
 
 ## Who am I: the token, not `USERNAME`
 

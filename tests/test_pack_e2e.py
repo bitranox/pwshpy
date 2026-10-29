@@ -61,7 +61,6 @@ from elevation_doubles import (
     with_account_cache_home,
     with_data_home,
     without_python_dir_check,
-    write_fake_sudo,
     write_git_source,
     write_local_wheel,
     write_planted_environment,
@@ -69,6 +68,7 @@ from elevation_doubles import (
     write_planted_venv,
     write_recording_uv,
 )
+from test_pack_sudo_double import second_prompts, write_sudo_double
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.packing import PackOptions
@@ -505,7 +505,7 @@ def test_elevate_switch_exits_77_when_sudo_refuses(tmp_path: Path) -> None:
     manifest = pack_script(entry)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_fake_sudo(bin_dir, grant=False)
+    write_sudo_double(bin_dir, grant=False)
     environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
     result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment)
     assert result.returncode == 77, result.stderr
@@ -523,7 +523,7 @@ def test_elevate_switch_forwards_the_clean_switch(tmp_path: Path) -> None:
     runner = Path(manifest.output_path)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_fake_sudo(bin_dir, grant=True)
+    write_sudo_double(bin_dir, grant=True)
     environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
     assert _run(runner, env=environment).returncode == 4
     # The .ps1 leaves its lock file beside the extraction; only the directory is the cached tree.
@@ -536,6 +536,35 @@ def test_elevate_switch_forwards_the_clean_switch(tmp_path: Path) -> None:
     assert result.returncode == 4, result.stderr
     assert "greeting:hello from the submodule" in result.stdout
     assert not stray.exists(), "-PwshPyClean was dropped by the elevated relaunch"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
+@pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+@pytest.mark.parametrize("cached", [True, False], ids=["credential-cached", "timestamp-timeout-0"])
+def test_elevate_switch_never_lets_sudo_prompt_twice(tmp_path: Path, cached: bool) -> None:
+    """[136-sh]: the .ps1 relaunch on POSIX asks once (``sudo -v``), checks with ``sudo -n -v`` that a
+    credential was cached and relaunches with ``sudo -n``: sudo never prompts again. Where it caches
+    nothing (``timestamp_timeout=0``) the run is declined (exit 77) and the script never runs."""
+    entry = tmp_path / "who.py"
+    marker = tmp_path / "ran.marker"
+    entry.write_text(f'open({str(marker)!r}, "w").close()\n')
+    manifest = pack_script(entry)
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "sudo-calls.txt"
+    write_sudo_double(bin_dir, grant=True, cached=cached, calls=calls)
+    environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
+    result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment)
+    assert second_prompts(calls) == [], calls.read_text(encoding="utf-8")
+    if cached:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert marker.exists()
+        return
+    assert result.returncode == 77, result.stdout + result.stderr
+    assert "pwshpy: elevation declined" in result.stderr, result.stderr
+    assert not marker.exists(), "the packed script ran although sudo kept no credential"
 
 
 @pytest.mark.local_only
@@ -2543,7 +2572,7 @@ def test_the_sudo_relaunch_forwards_wildcards_and_tildes_literally(tmp_path: Pat
     manifest = pack_script(_project(tmp_path))
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_fake_sudo(bin_dir, grant=True)
+    write_sudo_double(bin_dir, grant=True)
     arguments = ["*", "*.log", "~", "~/x", "[ab].log"]
     result = _run_with_path(
         tmp_path,

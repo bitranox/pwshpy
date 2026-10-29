@@ -37,6 +37,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - Packed `.ps1` runner, elevated under Windows PowerShell 5.1: a `PATH` directory spelled in its
   extended-length form (`\\?\C:\...`) is judged by its ACL like `C:\...` and kept on uv's `PATH`
   when it is private. Before, 5.1 could not walk that spelling and left every such directory off.
+- Packed runners, `--pwshpy-elevate` / `-PwshPyElevate` on Linux and macOS: sudo is asked for the
+  password once (`sudo -v`), then `sudo -n -v` confirms a credential was cached and the relaunch
+  runs under `sudo -n`, so sudo never prompts a second time. A sudo that caches nothing
+  (`timestamp_timeout=0`) is declined with exit code 77 instead of asking again.
 
 ## [1.11.0] 2026-10-29 00:00:55
 

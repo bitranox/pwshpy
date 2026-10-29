@@ -1037,8 +1037,16 @@ if [ "$PWSHPY_WANT_ELEVATE" = "1" ] && [ "$PWSHPY_AS_ROOT" != "1" ]; then
         printf '%s\n' "pwshpy: elevation declined (sudo did not grant root)" >&2
         exit 77
     fi
-    # A sudo that grants -v but then refuses the command itself (timestamp_timeout=0, sudoers
-    # allowing only -v) exits with that sudo's own code, which no wrapper can tell from the script's.
+    # Only the -v prompts ([136-sh]): the relaunch runs as sudo -n, which never asks, so a sudo that
+    # keeps no credential after -v (timestamp_timeout=0) would prompt a second time without -n. Such a
+    # setup is told by sudo -n -v failing, and declined like a refused prompt.
+    if ! sudo -n -v; then
+        _el_why="sudo keeps no credential after the password prompt, so it would ask again (timestamp_timeout=0)"
+        printf '%s\n' "pwshpy: elevation declined ($_el_why)" >&2
+        exit 77
+    fi
+    # A sudo that grants -v but then refuses the command itself (sudoers allowing only -v) exits with
+    # that sudo's own code, which no wrapper can tell from the script's.
     # The pin goes in front of the script's arguments as two quoted words, so a path with a space
     # survives; the value-less switches carry no values, so splitting their unquoted list is
     # exactly what is wanted.
@@ -1048,7 +1056,7 @@ if [ "$PWSHPY_WANT_ELEVATE" = "1" ] && [ "$PWSHPY_AS_ROOT" != "1" ]; then
         set -- -- "$@"
     fi
     # shellcheck disable=SC2086
-    exec sudo /bin/sh "$0" $PWSHPY_FWD "$@"
+    exec sudo -n /bin/sh "$0" $PWSHPY_FWD "$@"
 fi
 
 # --- unpack -----------------------------------------------------------------------------

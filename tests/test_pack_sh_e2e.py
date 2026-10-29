@@ -50,7 +50,6 @@ from elevation_doubles import (
     with_account_cache_home,
     with_data_home,
     without_python_dir_check,
-    write_fake_sudo,
     write_git_source,
     write_local_wheel,
     write_planted_environment,
@@ -58,6 +57,7 @@ from elevation_doubles import (
     write_planted_venv,
     write_recording_uv,
 )
+from test_pack_sudo_double import second_prompts, write_sudo_double
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.enums import RunnerFormat
@@ -415,7 +415,7 @@ sys.exit(9)
 """
 
 
-def _elevate_setup(tmp_path: Path, *, grant: bool) -> tuple[Path, Path, dict[str, str]]:
+def _elevate_setup(tmp_path: Path, *, grant: bool, cached: bool = True) -> tuple[Path, Path, dict[str, str]]:
     """A packed marker-writing script, a sudo double on PATH, and the marker the script writes.
 
     The double logs every call to ``sudo-calls.txt`` in ``tmp_path``.
@@ -427,7 +427,7 @@ def _elevate_setup(tmp_path: Path, *, grant: bool) -> tuple[Path, Path, dict[str
     runner.chmod(0o755)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_fake_sudo(bin_dir, grant=grant, calls=tmp_path / "sudo-calls.txt")
+    write_sudo_double(bin_dir, grant=grant, cached=cached, calls=tmp_path / "sudo-calls.txt")
     marker = tmp_path / "ran.marker"
     environment = _env(tmp_path)
     environment["PATH"] = os.pathsep.join([str(bin_dir), environment["PATH"]])
@@ -466,6 +466,25 @@ def test_elevate_refused_exits_77_and_never_runs_the_script(tmp_path: Path) -> N
     assert result.returncode == 77, result.stderr
     assert "pwshpy: elevation declined" in result.stderr
     assert not marker.exists(), "the packed script ran although sudo refused"
+
+
+@_needs_non_root
+@pytest.mark.parametrize("cached", [True, False], ids=["credential-cached", "timestamp-timeout-0"])
+def test_elevate_never_lets_sudo_prompt_twice(tmp_path: Path, cached: bool) -> None:
+    """[136-sh]: after the one prompt (``sudo -v``) the runner checks with ``sudo -n -v`` that a
+    credential was cached and relaunches with ``sudo -n``, so sudo never prompts again. Where sudo
+    caches nothing (``timestamp_timeout=0``) the run is declined (exit 77) and the script never runs;
+    with a cached credential it runs elevated, as before."""
+    runner, marker, environment = _elevate_setup(tmp_path, grant=True, cached=cached)
+    result = _run(["sh"], runner, "--pwshpy-elevate", env=environment)
+    assert second_prompts(tmp_path / "sudo-calls.txt") == [], (tmp_path / "sudo-calls.txt").read_text()
+    if cached:
+        assert result.returncode == 9, result.stderr
+        assert marker.exists()
+        return
+    assert result.returncode == 77, result.stdout + result.stderr
+    assert "pwshpy: elevation declined" in result.stderr, result.stderr
+    assert not marker.exists(), "the packed script ran although sudo kept no credential"
 
 
 @_needs_non_root
@@ -794,7 +813,7 @@ def test_elevate_forwards_the_pinned_uv(tmp_path: Path) -> None:
     runner = _trust_runner(tmp_path, hide_system_uv=True)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_fake_sudo(bin_dir, grant=True, calls=tmp_path / "sudo-calls.txt")
+    write_sudo_double(bin_dir, grant=True, calls=tmp_path / "sudo-calls.txt")
     environment = _trust_env(tmp_path, bin_dir, Path(_UV or "uv").parent)
     result = _run(["sh"], runner, "--pwshpy-elevate", "--pwshpy-uv", str(planted), "--", "a b", env=environment)
     assert result.returncode == 0, result.stdout + result.stderr

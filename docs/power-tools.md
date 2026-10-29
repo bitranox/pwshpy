@@ -17,9 +17,12 @@ ps.require_elevation()  # raises ElevationRequiredError if not admin (an honest 
 ps.elevate()  # relaunch THIS process elevated (UAC / sudo), preserving cwd + argv
 ```
 
-On Linux and macOS the password is asked by `sudo -v` first, and only then is the command run under
-`sudo`. sudo exits 1 when it refuses, which is also an ordinary exit code, so asking separately is what
-lets a refusal be told apart from the command's own result.
+On Linux and macOS the password is asked by `sudo -v` first, and only then is the command run, as
+`sudo -n <command>`. sudo exits 1 when it refuses, which is also an ordinary exit code, so asking
+separately is what lets a refusal be told apart from the command's own result. The `-n` means sudo is
+never asked to prompt a second time: after the prompt, `sudo -n -v` checks that sudo cached the
+credential, and a setup that caches nothing (`timestamp_timeout=0` in sudoers) is declined like a
+refused prompt (`ElevationDeclinedError`, exit 77 from `pwshpy --elevate`) instead of asking again.
 
 A refused prompt raises `ElevationDeclinedError`, a `NativeCallError` subclass, so a caller can carry on
 unelevated after a refusal and still treat any other failure as one. On Windows that is a declined UAC
@@ -44,8 +47,9 @@ pwshpy --elevate clear_event_log Application                  # relaunch elevate
 When the prompt is refused, `pwshpy --elevate` exits 77 (`EX_NOPERM` from `sysexits.h`) and writes a
 line starting `pwshpy: elevation declined` to stderr, so a caller can tell a refusal from the
 relaunched command's own failure. The packed runners below do the same for `--pwshpy-elevate` and
-`-PwshPyElevate` (on a POSIX host without `sudo` they exit 127 instead, a missing tool rather than
-a refusal). A command that itself exits 77 still looks the same by exit code alone; the stderr line
+`-PwshPyElevate`, with the same single prompt: `sudo -v`, then `sudo -n -v`, then the relaunch
+under `sudo -n`, so a `timestamp_timeout=0` setup exits 77 rather than prompting twice (on a POSIX
+host without `sudo` they exit 127 instead, a missing tool rather than a refusal). A command that itself exits 77 still looks the same by exit code alone; the stderr line
 is what tells them apart.
 
 ## Who am I: the token, not `USERNAME`

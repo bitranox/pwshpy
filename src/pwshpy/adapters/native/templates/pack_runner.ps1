@@ -1409,12 +1409,20 @@ function Invoke-PwshPyElevated {
             [Console]::Error.WriteLine('pwshpy: elevation declined (sudo did not grant root)')
             exit 77
         }
+        # Only the -v prompts ([136-sh]): the relaunch runs as sudo -n, which never asks, so a sudo
+        # that keeps no credential after -v (timestamp_timeout=0) would prompt a second time without
+        # -n. Such a setup is told by sudo -n -v failing, and declined like a refused prompt.
+        & sudo -n -v
+        if ($LASTEXITCODE -ne 0) {
+            [Console]::Error.WriteLine('pwshpy: elevation declined (sudo keeps no credential after the password prompt, so it would ask again (timestamp_timeout=0))')
+            exit 77
+        }
         # sudo keeps the console, so output and exit code flow back without a relay. A sudo that
-        # grants -v but then refuses the command itself (timestamp_timeout=0, sudoers allowing
-        # only -v) exits with that sudo's own code, which no wrapper can tell from the script's.
+        # grants -v but then refuses the command itself (sudoers allowing only -v) exits with that
+        # sudo's own code, which no wrapper can tell from the script's.
         # Every word literal (ConvertTo-PwshPyNativeCall): the caller's '*' or '~' reaches the
         # script as typed, and a runner path holding '?' names this file, not a sibling it matches.
-        $sudoArgs = @((Get-PwshPyHostPath), '-NoProfile', '-File', $self)
+        $sudoArgs = @('-n', (Get-PwshPyHostPath), '-NoProfile', '-File', $self)
         if ($null -ne $ForwardArgs) { $sudoArgs += $ForwardArgs }
         . (ConvertTo-PwshPyNativeCall -FilePath 'sudo' -ArgumentList $sudoArgs)
         exit $LASTEXITCODE

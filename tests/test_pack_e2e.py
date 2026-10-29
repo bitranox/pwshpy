@@ -48,6 +48,7 @@ from elevation_doubles import (
     NOT_A_GCM_VARIABLE,
     NOT_A_GIT_VARIABLE,
     OTHER_UID,
+    PS1_INSTALLER_DOWNLOADERS,
     REAL_ACCOUNT_CACHE_GROUP,
     RUNNING_AS_ROOT,
     UV_SOURCE_VARIABLES,
@@ -4567,6 +4568,11 @@ def _with_posix_download_doubles(tmp_path: Path, runner: Path, *, curl: Path, wg
     """``runner`` (POSIX) with its installer downloaders replaced by ``curl`` and ``wget`` and no
     system-wide uv to find, each one counted substitution; the rest of the installation is shipped code."""
     with_download_doubles(runner, curl=curl, wget=wget, powershell=True)
+    _without_system_wide_uv(tmp_path, runner)
+
+
+def _without_system_wide_uv(tmp_path: Path, runner: Path) -> None:
+    """``runner`` (POSIX) with no system-wide uv to find, one counted substitution."""
     text = runner.read_text(encoding="utf-8")
     old = f"'{_SYSTEM_WIDE_UV}'"
     assert text.count(old) == 1, old
@@ -4746,6 +4752,41 @@ def test_a_missing_posix_tmpdir_is_refused_for_the_installer_never_created(tmp_p
     assert f"{_NO_INSTALLER_TEMP}{missing / 'tmp'}" in result.stderr, result.stderr
     assert not log.exists(), "a download ran"
     assert not record.exists(), "uv ran"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_a_posix_run_finds_its_installer_downloaders_by_name_on_path(tmp_path: Path) -> None:
+    """[R3] round 5: every other installer test replaces the downloaders with doubles named by absolute
+    path, so only the rooted branch of the lookup ran, never the Get-Command one a real run takes. Here
+    the shipped list ('curl -LsSf -o', 'wget -q -O') stays and doubles named curl and wget lead PATH:
+    both are found by name and called with the shipped flags, curl failing and wget delivering."""
+    runner, uv, record = _recording_runner(tmp_path, elevated="$false")
+    assert runner.read_text(encoding="utf-8").count(PS1_INSTALLER_DOWNLOADERS) == 1
+    installer = tmp_path / "local-uv-install.sh"
+    installer.write_text(f'mkdir -p "$HOME/.local/bin"\ncp -p "{uv.parent}"/* "$HOME/.local/bin/"\n')
+    doubles = tmp_path / "download-bin"
+    doubles.mkdir()
+    log = tmp_path / "downloads.txt"
+    write_download_double(doubles, "curl", log=log, serve=None, exit_code=6)
+    write_download_double(doubles, "wget", log=log, serve=installer)
+    _without_system_wide_uv(tmp_path, runner)
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    result = _run_with_path(
+        tmp_path,
+        runner,
+        path_first=[str(doubles), "/usr/bin", "/bin"],
+        env={"HOME": str(caller_home)},
+        cwd=_clean_cwd(tmp_path),
+        inherit_path=False,
+        install_uv=True,
+    )
+    url = "https://astral.sh/uv/install.sh"
+    assert log.read_text(encoding="utf-8").splitlines() == [f"curl {url}", f"wget {url}"], result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert record.is_file(), result.stderr
 
 
 # --- [156] elevated .ps1 runs of a script with a git source refuse a git older than 2.32 ----------------

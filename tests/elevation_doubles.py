@@ -173,8 +173,9 @@ PS1_INSTALLER_DOWNLOADERS = "foreach ($downloader in @('curl -LsSf -o', 'wget -q
 def write_download_double(directory: Path, name: str, *, log: Path, serve: Path | None, exit_code: int = 0) -> Path:
     """Write an executable ``name`` into ``directory`` standing in for curl or wget; its path.
 
-    Called as the runners call a downloader, ``<double> <target file> <url>``: it appends ``name`` and
-    the URL to ``log``, copies ``serve`` to the target when given, and exits ``exit_code``.
+    Called as the runners call a downloader, with the downloader's flags (found by name on ``PATH``) or
+    without them (named by path), the target file and the URL always last: it appends ``name`` and the
+    URL to ``log``, copies ``serve`` to the target when given, and exits ``exit_code``.
 
     Args:
         directory: Directory to write the double into.
@@ -192,9 +193,11 @@ def write_download_double(directory: Path, name: str, *, log: Path, serve: Path 
         ...     write_download_double(Path(d), "curl", log=Path(d) / "log", serve=None, exit_code=6).name
         'curl'
     """
-    lines = ["#!/bin/sh", f"printf '%s %s\\n' '{name}' \"$2\" >> '{log}'"]
+    # The last two arguments, whatever flags come before them: the target file, then the URL.
+    lines = ["#!/bin/sh", "url=", 'for argument in "$@"; do target=$url; url=$argument; done']
+    lines.append(f"printf '%s %s\\n' '{name}' \"$url\" >> '{log}'")
     if serve is not None:
-        lines.append(f"cp '{serve}' \"$1\"")
+        lines.append(f"cp '{serve}' \"$target\"")
     lines.append(f"exit {exit_code}")
     double = directory / name
     double.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")

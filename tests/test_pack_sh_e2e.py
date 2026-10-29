@@ -39,6 +39,7 @@ from elevation_doubles import (
     OTHER_UID,
     REAL_ACCOUNT_CACHE_GROUP,
     RUNNING_AS_ROOT,
+    SH_INSTALLER_DOWNLOADERS,
     UV_SOURCE_VARIABLES,
     data_home,
     default_uv_cache_dir,
@@ -1800,6 +1801,30 @@ def test_a_failed_installer_download_is_named_and_wget_is_tried(
     assert ("install uv for root beforehand" in failure) is as_root, failure
     assert "after installation" not in result.stderr and "chmod go-w" not in result.stderr, result.stderr
     assert not record.exists(), "uv ran"
+
+
+def test_a_run_finds_its_installer_downloaders_by_name_on_path(tmp_path: Path) -> None:
+    """[R3] round 5, the twin of the .ps1's: every other installer test replaces the downloaders with
+    doubles named by absolute path, so the lookup a real run makes on PATH never ran. Here the shipped
+    list ('curl -LsSf -o', 'wget -q -O') stays and doubles named curl and wget lead PATH: both are found
+    by name and called with the shipped flags, curl failing and wget delivering."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=False)
+    assert runner.read_text(encoding="utf-8").count(SH_INSTALLER_DOWNLOADERS) == 1
+    installer = tmp_path / "local-uv-install.sh"
+    installer.write_text(f'mkdir -p "$HOME/.local/bin"\ncp -p "{uv.parent}"/* "$HOME/.local/bin/"\n')
+    doubles = tmp_path / "download-bin"
+    doubles.mkdir()
+    log = tmp_path / "downloads.txt"
+    write_download_double(doubles, "curl", log=log, serve=None, exit_code=6)
+    write_download_double(doubles, "wget", log=log, serve=installer)
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    environment = {**_trust_env(tmp_path, doubles), "HOME": str(caller_home)}
+    result = _run_in(["sh"], runner, env=environment, cwd=_work_dir(tmp_path))
+    url = "https://astral.sh/uv/install.sh"
+    assert log.read_text(encoding="utf-8").splitlines() == [f"curl {url}", f"wget {url}"], result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert record.is_file(), result.stderr
 
 
 #: The start of the refusal a run that is not root prints when its TMPDIR cannot take uv's installer.

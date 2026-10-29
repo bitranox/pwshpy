@@ -1761,6 +1761,13 @@ $PwshPyPrepare = {
     $script:PwshPyCallerPath = $env:PATH
     $PwshPyRootPath = $PwshPyElevatedRun -and -not $PwshPyOnWindows
     if ($PwshPyRootPath) { $env:PATH = $PwshPyFixedPath }
+    # As root the pack cache's default is below the running account's own cache directory (from the
+    # passwd database, as uv's cache below), never XDG_CACHE_HOME or HOME: sudo -E or env_keep hand those
+    # over from the caller, whose directory the cache check would then refuse ([R3]), and the caller would
+    # choose where root unpacks. PWSHPY_PACK_CACHE stays the caller's to set, and is judged like any other.
+    if ($PwshPyRootPath -and -not $env:PWSHPY_PACK_CACHE) {
+        $PwshPyCacheDir = Join-Path (Join-Path (Get-PwshPyAccountCacheHome) 'pwshpy-pack') $PwshPySha.Substring(0, 16)
+    }
 
     # --- unpack -----------------------------------------------------------------------------
 

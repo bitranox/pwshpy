@@ -174,9 +174,15 @@ fi
 
 # --- cache location ---------------------------------------------------------------------
 
+# As root the default is below the running account's own cache directory (PWSHPY_CACHE_HOME, from the
+# passwd database), never XDG_CACHE_HOME or HOME: sudo's env_keep or sudo -E hand those over from the
+# caller, whose directory the cache check would then refuse ([R3]), and the caller would choose where
+# root unpacks. PWSHPY_PACK_CACHE stays the caller's to set, and is judged like any other.
 pwshpy_cache_root() {
     if [ -n "${PWSHPY_PACK_CACHE:-}" ]; then
         printf '%s' "$PWSHPY_PACK_CACHE"
+    elif [ "$PWSHPY_AS_ROOT" = "1" ]; then
+        printf '%s' "$PWSHPY_CACHE_HOME/pwshpy-pack"
     elif [ -n "${XDG_CACHE_HOME:-}" ]; then
         printf '%s' "$XDG_CACHE_HOME/pwshpy-pack"
     else
@@ -1024,6 +1030,12 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# The account's cache directory, as root: the pack cache's default (pwshpy_cache_root) and uv's cache
+# (UV_CACHE_DIR below) are below it. Asked while the helpers come from the fixed PATH.
+if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+    PWSHPY_CACHE_HOME=$(pwshpy_account_cache_home) \
+        || pwshpy_die "cannot read the home directory of uid $(pwshpy_euid) from the passwd database" 70
+fi
 PWSHPY_CACHE="$(pwshpy_cache_root)/$(printf '%s' "$PWSHPY_SHA" | cut -c1-16)"
 
 # Before the elevate block: the manifest needs no root, so --pwshpy-info never prompts for sudo.
@@ -1158,8 +1170,6 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # directory (a --with path, a relative PWSHPY_PACK_CACHE) is made absolute first.
     # Asked while the helpers still come from the fixed PATH.
     PWSHPY_DATA_HOME=$(pwshpy_account_data_home) \
-        || pwshpy_die "cannot read the home directory of uid $(pwshpy_euid) from the passwd database" 70
-    PWSHPY_CACHE_HOME=$(pwshpy_account_cache_home) \
         || pwshpy_die "cannot read the home directory of uid $(pwshpy_euid) from the passwd database" 70
     pwshpy_caller_cwd
     PWSHPY_CALLER_PREFIX=${PWSHPY_CALLER_CWD%/}/

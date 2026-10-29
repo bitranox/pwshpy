@@ -2641,6 +2641,28 @@ def test_as_root_the_runner_decides_the_modes_of_its_unpack(
     assert writable == [], writable
 
 
+@pytest.mark.parametrize("variable", ["XDG_CACHE_HOME", "HOME"])
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_the_default_pack_cache_is_the_accounts_own_never_the_callers(
+    tmp_path: Path, shell_id: str, shell: list[str], variable: str
+) -> None:
+    """[R3]: with PWSHPY_PACK_CACHE unset a root run took its pack cache from XDG_CACHE_HOME or HOME,
+    which sudo's env_keep or sudo -E hand over from the caller, so the [98] check refused the run's own
+    default with 127 (and the caller chose where root unpacks). The default now comes from the
+    account's passwd home, as uv's cache does: no refusal, the tree there, nothing in the caller's."""
+    caller = _cache_root(tmp_path / "caller-home", mode=0o777)
+    runner, _, key = _cache_trust_runner(tmp_path)
+    env = {**_env(tmp_path), **managed_python_env(tmp_path, managed=None), variable: str(caller)}
+    del env["PWSHPY_PACK_CACHE"]
+    if variable == "HOME":
+        env.pop("XDG_CACHE_HOME", None)
+    result = _run(shell, runner, "--pwshpy-no-install-uv", env=env)
+    assert _CACHE_REFUSAL not in result.stderr, result.stderr
+    own = tmp_path / "default-cache" / "pwshpy-pack" / key
+    assert (own / "mark.py").is_file(), result.stdout + result.stderr
+    assert [path.name for path in caller.rglob("pwshpy-pack")] == []
+
+
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
 def test_as_root_a_relative_pack_cache_is_judged_where_it_lies(tmp_path: Path, shell_id: str, shell: list[str]) -> None:
     """[98]: a relative PWSHPY_PACK_CACHE is judged against the caller's directory, not refused as relative."""

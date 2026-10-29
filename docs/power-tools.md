@@ -637,10 +637,13 @@ Details worth knowing:
   token, SYSTEM, or root) also judges the cache directory the way it judges uv's managed-Python
   directory: the directory itself, every directory above it and every entry below it, before it
   removes or writes anything there (before the first unpack, the nearest directory that exists), and
-  the tree again after an unpack. A cache another account can modify, wherever `PWSHPY_PACK_CACHE`,
-  `LOCALAPPDATA`, `XDG_CACHE_HOME` or `HOME` put it, stops the run with `pwshpy: refusing the cache
-  directory <dir>: <reason>` and exit code 127; a relative `PWSHPY_PACK_CACHE` is judged against
-  the caller's directory. A root run decides the modes of what it unpacks itself (directories 0755,
+  the tree again after an unpack. A cache another account can modify, wherever `PWSHPY_PACK_CACHE`
+  or `LOCALAPPDATA` put it, stops the run with `pwshpy: refusing the cache directory <dir>: <reason>`
+  and exit code 127; a relative `PWSHPY_PACK_CACHE` is judged against the caller's directory. With
+  `PWSHPY_PACK_CACHE` unset, a root run on Linux or macOS (the `.sh` as root, the `.ps1` elevated)
+  unpacks below the running account's own cache directory, `<home>/.cache/pwshpy-pack` with the home
+  the passwd database records, never below `XDG_CACHE_HOME` or `HOME`, which `sudo -E` or `env_keep`
+  can hand over from the caller. A root run decides the modes of what it unpacks itself (directories 0755,
   nothing group- or world-writable), so a caller's umask 002 no longer gets its own unpack refused.
   Both runners serialize a cold-cache extraction with an atomic lock (`FileShare.None` on Windows, a lock file
   created under `noclobber` on POSIX), so two concurrent first runs never race.

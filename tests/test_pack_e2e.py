@@ -4239,6 +4239,27 @@ def test_an_elevated_posix_run_decides_the_modes_of_its_unpack(tmp_path: Path, u
     assert writable == [], writable
 
 
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("variable", ["XDG_CACHE_HOME", "HOME"])
+def test_an_elevated_posix_run_takes_its_default_pack_cache_from_the_account(tmp_path: Path, variable: str) -> None:
+    """[R3]: as the .sh root run, an elevated .ps1 run on POSIX with PWSHPY_PACK_CACHE unset took its
+    pack cache from XDG_CACHE_HOME or HOME, which sudo -E or env_keep hand over from the caller, so the
+    [98] check refused the run's own default with 127. The default now comes from the account's passwd
+    home (Get-PwshPyAccountCacheHome), as uv's cache does: no refusal, the tree there, none in the
+    caller's directory. An empty PWSHPY_PACK_CACHE counts as unset (pwsh keeps an empty variable)."""
+    caller = _cache_root(tmp_path / "caller-home", others_can_modify=True)
+    runner, _, key = _cache_trust_runner(tmp_path)
+    env = {"PWSHPY_PACK_CACHE": "", variable: str(caller), **managed_python_env(tmp_path, managed=None)}
+    if variable == "HOME":
+        env["XDG_CACHE_HOME"] = ""
+    result = _run_with_path(tmp_path, runner, path_first=[_UvLocation.directory], env=env)
+    assert _CACHE_REFUSAL not in result.stderr, result.stderr
+    own = tmp_path / "default-cache" / "pwshpy-pack" / key
+    assert (own / "mark.py").is_file(), result.stdout + result.stderr
+    assert [path.name for path in caller.rglob("pwshpy-pack")] == []
+
+
 # --- [156] elevated .ps1 runs of a script with a git source refuse a git older than 2.32 ----------------
 
 #: The start of the refusal an elevated run prints for a git that may ignore GIT_CONFIG_GLOBAL.

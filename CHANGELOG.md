@@ -53,6 +53,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   sets the modes of what it unpacks (directories 0755, nothing group- or world-writable). Before, a
   caller's umask 002 made the unpacked tree group-writable, and the run then refused its own cache
   with exit code 127, on that run and every later one.
+- Packed runners, root run on Linux and macOS with `PWSHPY_PACK_CACHE` unset: the pack cache is
+  `<home>/.cache/pwshpy-pack` of the running account, the home read from the passwd database, as
+  uv's cache already was. Before, it followed `XDG_CACHE_HOME` or `HOME`, which `sudo -E` or
+  `env_keep` hand over from the caller, so the run unpacked where the caller chose, or refused its
+  own default cache with exit code 127.
 - Packed `.sh` runner, `--pwshpy-elevate`: the sudo relaunch runs as a child of the runner's shell
   and exits with its status. Before, it replaced the shell (`exec`), so under sudo's
   `timestamp_type=ppid` the relaunch found no cached credential and exited 1.

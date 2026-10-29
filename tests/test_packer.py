@@ -586,6 +586,47 @@ def test_the_shim_gives_the_entry_the_home_variables_a_root_run_hands_over(tmp_p
     ], result.stdout
 
 
+def test_the_shim_restores_only_the_home_variables_whatever_the_name_list_says(tmp_path: Path) -> None:
+    """[159]: the name list arrives in the environment, which a caller can preset (an elevated Windows
+    run hands nothing over); a name in it outside the fixed home variables is neither set nor removed,
+    and its hand-over variable is consumed all the same."""
+    (tmp_path / "entry.py").write_text(
+        "import os\n"
+        "for name in ('PWSHPY_PROBE_SET', 'PWSHPY_PROBE_KEPT', 'HOME'):\n"
+        "    print(name + '=' + os.environ.get(name, '<unset>'))\n"
+        f"print('leaks=' + repr(sorted(n for n in os.environ if n.startswith({CALLER_ENV_VAR!r}))))\n"
+    )
+    shim = tmp_path / SHIM_MODULE
+    shim.write_text(render_shim(entry="entry.py", metadata=""), encoding="utf-8")
+    child = {k: v for k, v in os.environ.items() if not k.startswith(CALLER_ENV_VAR)}
+    child.update(
+        {
+            "HOME": str(tmp_path / "account"),
+            "PWSHPY_PROBE_KEPT": "kept",
+            CALLER_ENV_VAR: "PWSHPY_PROBE_SET PWSHPY_PROBE_KEPT HOME",
+            f"{CALLER_ENV_VAR}_PWSHPY_PROBE_SET": "planted",
+            f"{CALLER_ENV_VAR}_HOME": str(tmp_path / "caller"),
+        }
+    )
+    result = subprocess.run(  # noqa: S603 - the running interpreter and a file this test wrote
+        [sys.executable, str(shim)],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+        env=child,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "PWSHPY_PROBE_SET=<unset>",
+        "PWSHPY_PROBE_KEPT=kept",
+        f"HOME={tmp_path / 'caller'}",
+        "leaks=[]",
+    ], result.stdout
+
+
 def _shim_path(result: subprocess.CompletedProcess[str]) -> str:
     assert result.returncode == 0, result.stderr
     assert "leak:False" in result.stdout and "uv-leak:False" in result.stdout, result.stdout

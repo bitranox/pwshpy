@@ -727,16 +727,19 @@ function Get-PwshPyTrustedPath {
     return ($kept -join [IO.Path]::PathSeparator)
 }
 
-function Get-PwshPyGitOn {
+function Get-PwshPyGitCandidate {
     param([string] $Path)
 
-    # The git the PATH $Path finds, the file uv would run, or ''. Looked up by name in each directory
-    # and never run; Get-Command would also answer with an alias or function of this session, and read
-    # '[', '*' and '?' in an entry as wildcards. POSIX: an executable 'git', its mode read with the
-    # fixed-PATH ls. Windows: the names uv tries (Get-PwshPyWindowsGitName), in each directory in turn.
+    # Every git file in the first directory on the PATH $Path that holds one, in the order uv tries
+    # them, or none. Looked up by name and never run; Get-Command would also answer with an alias or
+    # function of this session, and read '[', '*' and '?' in an entry as wildcards. POSIX: an
+    # executable 'git', its mode read with the fixed-PATH ls. Windows: the names uv tries
+    # (Get-PwshPyWindowsGitName). uv takes one of them, which one depends on what each file is (a bare
+    # name only when it is a program), so an elevated run judges them all ([R2]).
     $names = if ($PwshPyOnWindows) { Get-PwshPyWindowsGitName } else { @('git') }
     foreach ($directory in ($Path -split [IO.Path]::PathSeparator)) {
         if (-not $directory) { continue }
+        $found = New-Object System.Collections.Generic.List[string]
         foreach ($name in $names) {
             $candidate = $directory + [IO.Path]::DirectorySeparatorChar + $name
             try {
@@ -745,10 +748,25 @@ function Get-PwshPyGitOn {
                 continue
             }
             if (-not $PwshPyOnWindows -and -not (Test-PwshPyExecutable -Path $candidate)) { continue }
-            if ($PwshPyOnWindows) { return (Get-PwshPyOnDiskSpelling -Path $candidate) }
-            return $candidate
+            if ($PwshPyOnWindows) { $candidate = Get-PwshPyOnDiskSpelling -Path $candidate }
+            # A PATHEXT entry written twice in different case names the same file once.
+            $known = $false
+            foreach ($seen in $found) {
+                if ([string]::Equals($seen, $candidate, [StringComparison]::OrdinalIgnoreCase)) { $known = $true }
+            }
+            if (-not $known) { $found.Add($candidate) }
         }
+        if ($found.Count -gt 0) { return $found.ToArray() }
     }
+    return @()
+}
+
+function Get-PwshPyGitOn {
+    param([string] $Path)
+
+    # The first git file Get-PwshPyGitCandidate finds on the PATH $Path, or ''.
+    $candidates = @(Get-PwshPyGitCandidate -Path $Path)
+    if ($candidates.Count -gt 0) { return $candidates[0] }
     return ''
 }
 
@@ -774,16 +792,17 @@ function Get-PwshPyOnDiskSpelling {
 }
 
 function Get-PwshPyWindowsGitName {
-    # The file names, in order, under which uv finds git in one PATH directory on Windows (measured with
-    # uv 0.13.6, [R2]): 'git' with each PATHEXT entry appended as written, in PATHEXT order (an entry
-    # without its dot names a file nobody has), then the bare 'git'. With PATHEXT unset or empty only
-    # the bare name. So a git.cmd ahead of git.exe in PATHEXT, or in an earlier directory, is the git uv
-    # runs, and the one judged here.
+    # The file names, in order, under which uv finds git in one PATH directory on Windows ([R2]; uv
+    # finds it with the which crate, 8.0.0: PathsIter in src/finder.rs): the bare 'git' first, taken
+    # only when it is a program (GetBinaryType), then 'git' with each PATHEXT entry appended as
+    # written, in PATHEXT order (an entry without its dot names a file nobody has). With PATHEXT unset
+    # or empty only the bare name. So a git.cmd ahead of git.exe in PATHEXT, or in an earlier
+    # directory, is the git uv runs.
     $names = New-Object System.Collections.Generic.List[string]
+    $names.Add('git')
     foreach ($extension in ([string]$env:PATHEXT).Split(';')) {
         if ($extension) { $names.Add('git' + $extension) }
     }
-    $names.Add('git')
     return $names.ToArray()
 }
 
@@ -793,13 +812,14 @@ function Get-PwshPyGitKindDistrust {
     # Why the git file $Git is not one an elevated run may ask for its version, or ''. Windows: only a
     # program or a batch file (.exe, .com, .cmd, .bat) is run for its version; anything else PATHEXT
     # makes uv find (a bare file, a .js or .vbs a script host would open) is refused, which fails closed
-    # ([R2]). POSIX: any executable file.
+    # ([R2]): uv takes a bare file only when it is a program, which this does not tell apart. POSIX: any
+    # executable file.
     if (-not $PwshPyOnWindows) { return '' }
     $extension = [IO.Path]::GetExtension($Git)
     foreach ($known in @('.exe', '.com', '.cmd', '.bat')) {
         if ([string]::Equals($extension, $known, [StringComparison]::OrdinalIgnoreCase)) { return '' }
     }
-    return 'it is not a program an elevated run asks for its version (a .exe, .com, .cmd or .bat), and uv would run it for a git source: install git as a program, or run the script without elevation'
+    return 'it is not a program an elevated run asks for its version (a .exe, .com, .cmd or .bat), and uv may run it for a git source: remove it, install git as a program, or run the script without elevation'
 }
 
 function Initialize-PwshPyStderrFile {
@@ -856,6 +876,15 @@ function Get-PwshPyGitVersionDistrust {
     return "git $version ignores GIT_CONFIG_GLOBAL, so $why"
 }
 
+function Get-PwshPyUvHome {
+    # POSIX: the home below which the installer puts uv and the uv search looks, no trailing slash ('' for
+    # /): $HOME, or in a root run the running account's passwd home, the directory its cache directory is
+    # in (Get-PwshPyAccountCacheHome, as the [159] hand-over takes it), since sudo -E or env_keep hand the
+    # caller's HOME over.
+    if ($PwshPyRootPath) { return (Split-Path -Parent (Get-PwshPyAccountCacheHome)).TrimEnd('/') }
+    return ([string]$HOME).TrimEnd('/')
+}
+
 function Get-PwshPyUvLocation {
     # The fixed places the installer puts uv, for a uv that is not on PATH. An unset variable
     # contributes nothing (Join-Path would fail on it).
@@ -868,9 +897,13 @@ function Get-PwshPyUvLocation {
         if ($env:XDG_BIN_HOME) { $locations += (Join-Path $env:XDG_BIN_HOME 'uv.exe') }
         return $locations
     }
-    $locations += (Join-Path $HOME '.local/bin/uv')
-    $locations += (Join-Path $HOME '.cargo/bin/uv')
+    $uvHome = Get-PwshPyUvHome
+    $locations += "$uvHome/.local/bin/uv"
+    $locations += "$uvHome/.cargo/bin/uv"
     $locations += '/usr/local/bin/uv'
+    # As root neither variable below is asked: sudo -E or env_keep hand the caller's over, and the
+    # installer runs without them (Install-PwshPyUv).
+    if ($PwshPyRootPath) { return $locations }
     # The installer honours XDG_BIN_HOME / CARGO_HOME, so a machine that sets either installs
     # uv there rather than under ~/.local/bin - check them too before giving up.
     if ($env:XDG_BIN_HOME) { $locations += (Join-Path $env:XDG_BIN_HOME 'uv') }
@@ -933,11 +966,26 @@ function Install-PwshPyUv {
         $script:PwshPyCallerPath = (Join-Path $env:USERPROFILE '.local\bin') + [IO.Path]::PathSeparator + $script:PwshPyCallerPath
         $env:PATH = $script:PwshPyCallerPath
     } else {
-        & /bin/sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh || wget -qO- https://astral.sh/uv/install.sh | sh'
+        $installCommand = 'curl -LsSf https://astral.sh/uv/install.sh | sh || wget -qO- https://astral.sh/uv/install.sh | sh'
+        $uvHome = Get-PwshPyUvHome
+        if ($PwshPyRootPath) {
+            # As root the installer and the download run with nothing of the caller's environment, which
+            # sudo -E or env_keep hand over: under the caller's HOME it put a root-owned uv in the caller's
+            # ~/.local/bin and edited the caller's shell files, and it honours UV_INSTALL_DIR, XDG_BIN_HOME,
+            # CARGO_HOME and its own download-URL variables, curl and wget their proxy and certificate
+            # variables and their rc files below HOME, so the caller would choose what lands in a
+            # directory root then runs uv from. Only the account's own HOME and the fixed helper PATH go
+            # in, under umask 022 as for the unpack ([R6]), or a caller's 002 would leave the new
+            # directories group-writable and the search would refuse the uv it just installed. As the .sh.
+            $homeValue = if ($uvHome) { $uvHome } else { '/' }
+            & env -i "HOME=$homeValue" "PATH=$env:PATH" /bin/sh -c "umask 022 && { $installCommand; }"
+        } else {
+            & /bin/sh -c $installCommand
+        }
         if ($LASTEXITCODE -ne 0) { throw "the uv installer failed with exit code $LASTEXITCODE" }
         # A root run keeps its fixed PATH for helpers; the new uv's directory joins the caller's PATH,
         # which the uv search walks and the packed script gets back.
-        $script:PwshPyCallerPath = (Join-Path $HOME '.local/bin') + [IO.Path]::PathSeparator + $script:PwshPyCallerPath
+        $script:PwshPyCallerPath = "$uvHome/.local/bin" + [IO.Path]::PathSeparator + $script:PwshPyCallerPath
         if (-not $PwshPyRootPath) { $env:PATH = $script:PwshPyCallerPath }
     }
 }
@@ -1853,6 +1901,15 @@ $PwshPyPrepare = {
     if ($PwshPyHelp) { Write-PwshPyHelp; exit 0 }
 
     $PwshPyCacheDir = Join-Path (Get-PwshPyCacheRoot) $PwshPySha.Substring(0, 16)
+    # As root the pack cache's default is below the running account's own cache directory (from the
+    # passwd database, as uv's cache below), never XDG_CACHE_HOME or HOME: sudo -E or env_keep hand those
+    # over from the caller, whose directory the cache check would then refuse ([R3]), and the caller would
+    # choose where root unpacks. PWSHPY_PACK_CACHE stays the caller's to set, and is judged like any other.
+    # Before -PwshPyInfo, which names the directory this run uses; a run that relaunches itself under sudo
+    # gets here again as root.
+    if (-not $PwshPyOnWindows -and -not $env:PWSHPY_PACK_CACHE -and (Test-PwshPyElevated)) {
+        $PwshPyCacheDir = Join-Path (Join-Path (Get-PwshPyAccountCacheHome) 'pwshpy-pack') $PwshPySha.Substring(0, 16)
+    }
 
     if ($PwshPyInfo) { Write-PwshPyManifest -CacheDir $PwshPyCacheDir; exit 0 }
 
@@ -1872,13 +1929,6 @@ $PwshPyPrepare = {
     $script:PwshPyCallerPath = $env:PATH
     $PwshPyRootPath = $PwshPyElevatedRun -and -not $PwshPyOnWindows
     if ($PwshPyRootPath) { $env:PATH = $PwshPyFixedPath }
-    # As root the pack cache's default is below the running account's own cache directory (from the
-    # passwd database, as uv's cache below), never XDG_CACHE_HOME or HOME: sudo -E or env_keep hand those
-    # over from the caller, whose directory the cache check would then refuse ([R3]), and the caller would
-    # choose where root unpacks. PWSHPY_PACK_CACHE stays the caller's to set, and is judged like any other.
-    if ($PwshPyRootPath -and -not $env:PWSHPY_PACK_CACHE) {
-        $PwshPyCacheDir = Join-Path (Join-Path (Get-PwshPyAccountCacheHome) 'pwshpy-pack') $PwshPySha.Substring(0, 16)
-    }
 
     # --- unpack -----------------------------------------------------------------------------
 
@@ -2003,7 +2053,7 @@ $PwshPyPrepare = {
         # is not covered: an elevated token keeps the caller's own profile there.
         if (-not $PwshPyOnWindows) {
             $PwshPyCallerNames = New-Object System.Collections.Generic.List[string]
-            foreach ($name in @('HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'NETRC', 'UV_CREDENTIALS_DIR')) {
+            foreach ($name in @('HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'NETRC', 'UV_CREDENTIALS_DIR', 'TMPDIR', 'TMP', 'TEMP')) {
                 $handOver = "Env:${PwshPyCallerEnv}_$name"
                 if (Test-Path -LiteralPath "Env:$name") {
                     Set-Item -LiteralPath $handOver -Value ([Environment]::GetEnvironmentVariable($name))
@@ -2024,6 +2074,26 @@ $PwshPyPrepare = {
             Set-Item -LiteralPath 'Env:XDG_CACHE_HOME' -Value $PwshPyAccountCache
             Set-Item -LiteralPath 'Env:XDG_DATA_HOME' -Value $PwshPyDataHome
             Write-PwshPyNotice "pwshpy: setting HOME=${PwshPyAccountHome}: an elevated run lets uv and git use the running account's own home"
+            # The temporary directory too (handed over above), as the .sh root run: uv, git and the build
+            # backends uv runs create files and directories below TMPDIR (Python's tempfile also reads
+            # TEMP and TMP), the caller's under sudo -E or env_keep, where the caller could swap a
+            # directory root made for a link to anywhere. All three name the directory below the account's
+            # own cache directory that only root can enter (the one Initialize-PwshPyStderrFile uses),
+            # judged like the pack cache (Get-PwshPyCacheDistrust): before it is created (the nearest
+            # directory that exists), and after.
+            $PwshPyTemp = Join-Path $PwshPyAccountCache 'pwshpy-tmp'
+            $PwshPyTempWhy = Get-PwshPyCacheDistrust -Path $PwshPyTemp
+            if (-not $PwshPyTempWhy) {
+                Initialize-PwshPyDirectory -Path $PwshPyTemp -Private $true
+                Invoke-PwshPyChmod -Arguments @('700', '--', $PwshPyTemp)
+                $PwshPyTempWhy = Get-PwshPyCacheDistrust -Path $PwshPyTemp
+            }
+            if ($PwshPyTempWhy) {
+                Write-PwshPyFailure "pwshpy: refusing the temporary directory ${PwshPyTemp}: $PwshPyTempWhy (an elevated run lets uv and git keep temporary files only in a directory no other account can modify): make the path named above root's alone (chown -R root, chmod -R go-w on it)"
+                exit 127
+            }
+            foreach ($name in @('TMPDIR', 'TMP', 'TEMP')) { Set-Item -LiteralPath "Env:$name" -Value $PwshPyTemp }
+            Write-PwshPyNotice "pwshpy: setting TMPDIR=${PwshPyTemp}: an elevated run lets uv and git keep temporary files in the account's own directory"
         }
         # The directory before uv searches it: uv runs every Python it finds there.
         $PwshPyPythonDirWhy = Get-PwshPyPythonDirDistrust -Path $env:UV_PYTHON_INSTALL_DIR
@@ -2039,11 +2109,12 @@ $PwshPyPrepare = {
         # Before uv is asked for a managed Python, which it may download: a run refused here calls no uv
         # ([156], as the .sh root run).
         if ($PwshPyGitSource) {
-            $PwshPyUvGit = Get-PwshPyGitOn -Path $script:PwshPyTrustedUvPath
-            if ($PwshPyUvGit) {
-                # The directories on uv's PATH were judged, the git file found there was not: one another
-                # account can modify, or a link to one, runs elevated when uv fetches a git source ([157],
-                # user decision: judge the git file). Judged like uv, and before it is run for its version.
+            # The directories on uv's PATH were judged, the git files found there were not: one another
+            # account can modify, or a link to one, runs elevated when uv fetches a git source ([157],
+            # user decision: judge the git file). Judged like uv, and before it is run for its version.
+            # Every git file in the directory uv takes git from, since which one uv runs depends on what
+            # each file is ([R2]); one that fails stops the run.
+            foreach ($PwshPyUvGit in @(Get-PwshPyGitCandidate -Path $script:PwshPyTrustedUvPath)) {
                 $PwshPyGitWhy = Get-PwshPyUvDistrust -Path $PwshPyUvGit
                 if ($PwshPyGitWhy) {
                     $PwshPyGitRemedy = if ($PwshPyOnWindows) { 'take every other account''s write access off the path named above (only the running account, SYSTEM and Administrators may change it), or run the script without elevation' } else { 'make the path named above root''s alone (chown root, then chmod go-w on it), or run the script without elevation' }
@@ -2084,6 +2155,11 @@ $PwshPyPrepareRun = {
     }
     $env:PwshPyArgvPlaceholder = $null
     Set-Item -Path ('Env:' + $PwshPyArgvEnv) -Value ($PwshPyEncoded -join '|')
+    # Only a POSIX root run hands the caller's home variables over to the shim ([159]); in any other run
+    # a hand-over marker came with the caller's environment, and the shim would act on it.
+    if (-not ($PwshPyElevatedRun -and -not $PwshPyOnWindows)) {
+        Remove-Item -LiteralPath "Env:$PwshPyCallerEnv" -ErrorAction SilentlyContinue
+    }
 
     $PwshPyTarget = Join-Path $PwshPyCacheDir $PwshPyShim
     # Elevated (Windows or POSIX root), uv sees only the caller's PATH directories no other account can

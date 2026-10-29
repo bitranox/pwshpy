@@ -500,6 +500,17 @@ pwshpy_uv_acceptable() {
     return 1
 }
 
+# Prints the home below which the installer puts uv and the uv search looks: HOME, or as root the
+# running account's passwd home (the directory its cache directory, asked up front, is in), since
+# sudo -E or env_keep hand the caller's HOME over. "" for a home of /.
+pwshpy_uv_home() {
+    if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+        printf '%s' "${PWSHPY_CACHE_HOME%/*}"
+    else
+        printf '%s' "${HOME%/}"
+    fi
+}
+
 # Prints the uv to run. Not root: the first uv on PATH, then the fixed install locations. As root:
 # EVERY uv on PATH in order, then the fixed locations, the first that passes pwshpy_uv_acceptable -
 # a planted uv early on PATH must not hide a trusted one later on it.
@@ -528,9 +539,17 @@ pwshpy_find_uv() {
         set +f
     fi
     # The installer honours XDG_BIN_HOME / CARGO_HOME; each is a candidate only when it is set, or
-    # an unset one would probe /uv and /bin/uv.
-    for _c in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" /usr/local/bin/uv \
-        "${XDG_BIN_HOME:+$XDG_BIN_HOME/uv}" "${CARGO_HOME:+$CARGO_HOME/bin/uv}"; do
+    # an unset one would probe /uv and /bin/uv. As root the home is the running account's own and
+    # neither variable is asked: sudo -E or env_keep hand the caller's over, and the installer runs
+    # without them (pwshpy_install_uv).
+    _fu_home=$(pwshpy_uv_home)
+    _fu_xdg=
+    _fu_cargo=
+    if [ "$PWSHPY_AS_ROOT" != "1" ]; then
+        _fu_xdg=${XDG_BIN_HOME:+$XDG_BIN_HOME/uv}
+        _fu_cargo=${CARGO_HOME:+$CARGO_HOME/bin/uv}
+    fi
+    for _c in "$_fu_home/.local/bin/uv" "$_fu_home/.cargo/bin/uv" /usr/local/bin/uv "$_fu_xdg" "$_fu_cargo"; do
         if pwshpy_uv_acceptable "$_c"; then
             printf '%s' "$_c"
             return 0
@@ -933,18 +952,29 @@ pwshpy_caller_cwd() {
 pwshpy_install_uv() {
     printf '%s\n' "uv was not found; installing it for the current user from https://astral.sh/uv ..." >&2
     if command -v curl >/dev/null 2>&1; then
-        curl -LsSf https://astral.sh/uv/install.sh | sh
+        _iu_fetch='curl -LsSf https://astral.sh/uv/install.sh'
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO- https://astral.sh/uv/install.sh | sh
+        _iu_fetch='wget -qO- https://astral.sh/uv/install.sh'
     else
         pwshpy_die "need curl or wget to install uv" 127
     fi
-    # As root the helpers keep their fixed PATH; the new uv's directory joins the caller's PATH,
-    # which the uv search walks and the packed script gets back.
+    _iu_home=$(pwshpy_uv_home)
     if [ "$PWSHPY_AS_ROOT" = "1" ]; then
-        PWSHPY_CALLER_PATH="$HOME/.local/bin:$PWSHPY_CALLER_PATH"
+        # As root the installer and the download run with nothing of the caller's environment, which
+        # sudo -E or env_keep hand over: under the caller's HOME it put a root-owned uv in the caller's
+        # ~/.local/bin and edited the caller's shell files, and it honours UV_INSTALL_DIR, XDG_BIN_HOME,
+        # CARGO_HOME and its own download-URL variables, curl and wget their proxy and certificate
+        # variables and their rc files below HOME, so the caller would choose what lands in a directory
+        # root then runs uv from. Only the account's own HOME and the fixed helper PATH go in, under
+        # umask 022 as for the unpack ([R6]): a caller's 002 would leave the new directories
+        # group-writable, and the search below would refuse the uv it just installed.
+        (umask 022 && env -i HOME="${_iu_home:-/}" PATH="$PATH" /bin/sh -c "$_iu_fetch | sh")
+        # The helpers keep their fixed PATH; the new uv's directory joins the caller's PATH, which the
+        # uv search walks and the packed script gets back.
+        PWSHPY_CALLER_PATH="$_iu_home/.local/bin:$PWSHPY_CALLER_PATH"
     else
-        PATH="$HOME/.local/bin:$PATH"
+        /bin/sh -c "$_iu_fetch | sh"
+        PATH="$_iu_home/.local/bin:$PATH"
         export PATH
     fi
 }
@@ -1212,7 +1242,8 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # directory, the netrc and uv's credentials. The packed script gets the caller's back from the shim
     # (@@PWSHPY_CALLER_ENV@@ names what was replaced), as it gets the caller's PATH ([107]).
     PWSHPY_CALLER_NAMES=
-    for _ce in HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME NETRC UV_CREDENTIALS_DIR; do
+    for _ce in HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME NETRC UV_CREDENTIALS_DIR \
+        TMPDIR TMP TEMP; do
         if eval "[ -n \"\${$_ce+set}\" ]"; then
             eval "@@PWSHPY_CALLER_ENV@@_$_ce=\$$_ce"
             export "@@PWSHPY_CALLER_ENV@@_$_ce"
@@ -1231,6 +1262,31 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     XDG_DATA_HOME=$PWSHPY_DATA_HOME
     export HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME
     printf '%s\n' "pwshpy: setting HOME=$HOME: as root uv and git use the running account's own home" >&2
+    # The temporary directory too (handed over above): uv, git and the build backends uv runs create
+    # files and directories below TMPDIR (Python's tempfile also reads TEMP and TMP), the caller's under
+    # sudo -E or env_keep, where the caller could swap a directory root made for a link to anywhere. All
+    # three name a directory below the account's own cache directory that only root can enter, judged
+    # like the pack cache (pwshpy_cache_distrust): before it is created (the nearest directory that
+    # exists), and after.
+    PWSHPY_TMP=$PWSHPY_CACHE_HOME/pwshpy-tmp
+    PWSHPY_TMP_WHY=$(pwshpy_cache_distrust "$PWSHPY_TMP")
+    if [ -z "$PWSHPY_TMP_WHY" ]; then
+        (umask 077 && mkdir -p "$PWSHPY_TMP") || pwshpy_die "cannot create the directory $PWSHPY_TMP" 70
+        chmod 700 "$PWSHPY_TMP" || pwshpy_die "cannot make $PWSHPY_TMP private (chmod 700)" 70
+        PWSHPY_TMP_WHY=$(pwshpy_cache_distrust "$PWSHPY_TMP")
+    fi
+    if [ -n "$PWSHPY_TMP_WHY" ]; then
+        PWSHPY_TMP_WHY="$PWSHPY_TMP_WHY (as root uv and git keep temporary files only in a directory no other"
+        PWSHPY_TMP_WHY="$PWSHPY_TMP_WHY account can modify): make the path named above root's alone (chown -R root,"
+        PWSHPY_TMP_WHY="$PWSHPY_TMP_WHY chmod -R go-w on it)"
+        pwshpy_die "refusing the temporary directory $PWSHPY_TMP: $PWSHPY_TMP_WHY" 127
+    fi
+    TMPDIR=$PWSHPY_TMP
+    TMP=$PWSHPY_TMP
+    TEMP=$PWSHPY_TMP
+    export TMPDIR TMP TEMP
+    PWSHPY_TMP_WHY="as root uv and git keep temporary files in the account's own directory"
+    printf '%s\n' "pwshpy: setting TMPDIR=$TMPDIR: $PWSHPY_TMP_WHY" >&2
     # While the helpers still come from the fixed PATH: the checks of the directory and of the Python's
     # path run ls. The directory first: uv runs every Python it finds there.
     PWSHPY_PYTHON_DIR_WHY=$(pwshpy_python_dir_distrust "$UV_PYTHON_INSTALL_DIR")

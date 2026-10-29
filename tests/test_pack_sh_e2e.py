@@ -37,6 +37,7 @@ from elevation_doubles import (
     NOT_A_GCM_VARIABLE,
     NOT_A_GIT_VARIABLE,
     OTHER_UID,
+    REAL_ACCOUNT_CACHE_GROUP,
     RUNNING_AS_ROOT,
     UV_SOURCE_VARIABLES,
     data_home,
@@ -48,6 +49,7 @@ from elevation_doubles import (
     owned_by_another_account,
     plant_library_path,
     planted_managed_python,
+    removing_a_new_account_temp_dir,
     second_prompts,
     session_uv_cache,
     trusted_managed_python,
@@ -1227,10 +1229,11 @@ def _python_runner(
     with_packages: Sequence[str] = (),
     real_data_home: bool = False,
     entry_name: str = "which_python.py",
+    judge_cache: bool = False,
 ) -> tuple[Path, Path]:
     """A which-python .sh runner (root probe forced when ``as_root``) and a uv it trusts, in a tree this
     test owns that counts as root's. ``source`` replaces the packed script, ``entry_name`` names it;
-    ``real_data_home`` as for :func:`_force_probe`."""
+    ``real_data_home`` and ``judge_cache`` as for :func:`_force_probe`."""
     entry = tmp_path / entry_name
     entry.write_text(source)
     runner = _pack_sh(
@@ -1239,6 +1242,7 @@ def _python_runner(
         as_root=as_root,
         with_packages=list(with_packages),
         real_data_home=real_data_home,
+        judge_cache=judge_cache,
     )
     text = runner.read_text(encoding="utf-8")
     assert text.count(str(_SYSTEM_WIDE_UV)) == 1
@@ -1423,12 +1427,19 @@ def test_as_root_the_variables_that_steer_the_managed_python_are_dropped(
 
 
 def _recording_python_runner(
-    tmp_path: Path, *, as_root: bool, real_data_home: bool = False, with_packages: Sequence[str] = ()
+    tmp_path: Path,
+    *,
+    as_root: bool,
+    real_data_home: bool = False,
+    with_packages: Sequence[str] = (),
+    judge_cache: bool = False,
 ) -> tuple[Path, Path, Path]:
     """A which-python runner whose uv is a recording double in a tree counted as root's: the runner,
-    the double, and the file it records the ``uv run`` call into. ``with_packages`` as for
-    :func:`_python_runner`."""
-    runner, _ = _python_runner(tmp_path, as_root=as_root, real_data_home=real_data_home, with_packages=with_packages)
+    the double, and the file it records the ``uv run`` call into. ``with_packages`` and ``judge_cache``
+    as for :func:`_python_runner`."""
+    runner, _ = _python_runner(
+        tmp_path, as_root=as_root, real_data_home=real_data_home, with_packages=with_packages, judge_cache=judge_cache
+    )
     leaf = tmp_path / "rec" / "bin"
     leaf.mkdir(parents=True)
     record = tmp_path / "argv.txt"
@@ -1445,6 +1456,14 @@ def _caller_home_env(tmp_path: Path) -> dict[str, str]:
     return {name: str(tmp_path / ("caller-" + name.lower())) for name in names}
 
 
+def _caller_temp_env(tmp_path: Path) -> dict[str, str]:
+    """[159] round 3: the caller's own TMPDIR, TMP and TEMP, each an existing directory of its own."""
+    temp = {name: tmp_path / ("caller-" + name.lower()) for name in ("TMPDIR", "TMP", "TEMP")}
+    for directory in temp.values():
+        directory.mkdir()
+    return {name: str(directory) for name, directory in temp.items()}
+
+
 def _recorded_variables(record: Path) -> dict[str, str]:
     lines = record.read_text(encoding="utf-8").splitlines()
     return dict(line[4:].split("=", 1) for line in lines if line.startswith("env:"))
@@ -1457,6 +1476,7 @@ def _passwd_data_home() -> Path:
     return Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".local" / "share"
 
 
+@pytest.mark.xdist_group(REAL_ACCOUNT_CACHE_GROUP)
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
 def test_as_root_the_managed_python_dir_is_the_accounts_own(
@@ -1471,7 +1491,8 @@ def test_as_root_the_managed_python_dir_is_the_accounts_own(
     elsewhere = str(tmp_path / "elsewhere")
     environment = {**_trust_env(tmp_path), **library, "XDG_DATA_HOME": elsewhere, "XDG_CACHE_HOME": elsewhere}
     environment.pop("UV_PYTHON_INSTALL_DIR")
-    result = _run_in(shell, runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    with removing_a_new_account_temp_dir():
+        result = _run_in(shell, runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     recorded = _recorded_variables(record)
     # [X22 C1] the cache as well, named from the same passwd home (the recording uv writes nothing there).
@@ -1600,25 +1621,119 @@ def test_as_root_uv_and_git_run_with_the_accounts_own_home(tmp_path: Path, as_ro
 
 
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_uv_and_git_get_a_private_temporary_directory(tmp_path: Path, as_root: bool) -> None:
+    """[159] round 3: as root uv, git and the build backends uv runs made their temporary files below the
+    caller's TMPDIR (or TMP, TEMP), which sudo -E or env_keep hand over: a directory root creates there
+    the caller can swap for a link. All three now name <account cache>/pwshpy-tmp, mode 0700, and each
+    caller value travels to the shim; the control keeps the caller's."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root)
+    caller = _caller_temp_env(tmp_path)
+    environment = {**_trust_env(tmp_path, uv.parent), **caller}
+    result = _run_in(["sh"], runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = _recorded_variables(record)
+    if not as_root:
+        assert {name: recorded.get(name) for name in caller} == caller, recorded
+        return
+    private = default_uv_cache_dir(tmp_path).parent / "pwshpy-tmp"
+    assert {name: recorded.get(name) for name in caller} == dict.fromkeys(caller, str(private)), recorded
+    assert private.stat().st_mode & 0o777 == 0o700
+    assert {name: recorded.get(f"{CALLER_ENV_VAR}_{name}") for name in caller} == caller, recorded
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
 def test_as_root_the_script_gets_the_callers_home_back(tmp_path: Path, as_root: bool) -> None:
     """[159]: the packed script itself, started by a real uv through the shim, sees the caller's HOME
     and XDG directories again, and no XDG_STATE_HOME the caller did not have, as it gets the caller's
-    PATH back ([107])."""
+    PATH back ([107]). The same for TMPDIR, TMP and TEMP (round 3). A caller value that is the empty
+    string comes back empty, not unset (XDG_CONFIG_HOME and TMP here)."""
     _needs_managed_python()
-    source = (
-        "import os\n"
-        "for name in ('HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'NETRC', 'XDG_STATE_HOME'):\n"
-        "    print('home:' + name + '=' + os.environ.get(name, '<unset>'))\n"
-    )
+    names = ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "NETRC", "XDG_STATE_HOME")
+    names += ("TMPDIR", "TMP", "TEMP")
+    source = f"import os\nfor name in {names!r}:\n    print('home:' + name + '=' + os.environ.get(name, '<unset>'))\n"
     runner, uv = _python_runner(tmp_path, as_root=as_root, source=source)
-    caller = _caller_home_env(tmp_path)
+    caller = {**_caller_home_env(tmp_path), **_caller_temp_env(tmp_path), "XDG_CONFIG_HOME": "", "TMP": ""}
+    del caller["TEMP"]
     environment = {**_trust_env(tmp_path, uv.parent), **caller}
     environment.pop("XDG_STATE_HOME", None)
+    environment.pop("TEMP", None)
     result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     seen = dict(line[5:].split("=", 1) for line in result.stdout.splitlines() if line.startswith("home:"))
-    expected = {name: caller[name] for name in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "NETRC")}
-    assert seen == {**expected, "XDG_STATE_HOME": "<unset>"}, result.stdout
+    expected = {name: caller.get(name, "<unset>") for name in names}
+    assert seen == expected, result.stdout
+
+
+#: The runner's two ways of fetching uv's installer; a test of the installation replaces both (counted).
+_UV_INSTALLER_FETCHES = (
+    "_iu_fetch='curl -LsSf https://astral.sh/uv/install.sh'",
+    "_iu_fetch='wget -qO- https://astral.sh/uv/install.sh'",
+)
+#: What uv's installer reads besides HOME (its install directory and download-URL variables), and what
+#: curl and wget read (proxies, certificate roots, rc files), each a choice the caller would make for root.
+_INSTALLER_STEERING = (
+    "UV_INSTALL_DIR",
+    "XDG_BIN_HOME",
+    "CARGO_HOME",
+    "UV_INSTALLER_GITHUB_BASE_URL",
+    "UV_INSTALLER_GHE_BASE_URL",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "SSL_CERT_FILE",
+    "CURL_CA_BUNDLE",
+    "CURL_HOME",
+    "WGETRC",
+    "TMPDIR",
+)
+
+
+def _with_local_uv_installer(runner: Path, installer: Path) -> None:
+    """``runner`` with the installer download replaced by printing ``installer``; the ``| sh`` that runs
+    it, the environment it runs with and the search after it stay the shipped code."""
+    text = runner.read_text(encoding="utf-8")
+    for fetch in _UV_INSTALLER_FETCHES:
+        assert text.count(fetch) == 1, fetch
+        text = text.replace(fetch, f"_iu_fetch='cat {installer}'")
+    runner.write_text(text, encoding="utf-8", newline="\n")
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_the_uv_installer_installs_into_the_accounts_own_home(tmp_path: Path, as_root: bool) -> None:
+    """[159]/[R3] round 3: as root the installer ran with the caller's HOME and the caller's installer,
+    proxy and certificate variables, which sudo -E or env_keep hand over, so it put a root-owned uv in
+    the caller's ~/.local/bin (and the caller chose where it came from and where it landed), and the
+    uv search looked in the caller's home, not root's. Here no uv is anywhere, the caller's HOME is a
+    0777 directory and every steering variable is set; a local installer stands in for astral.sh's,
+    records the environment it got and installs the recording uv below its HOME. As root it gets the
+    account's own home (answered inside tmp_path) and none of the variables, the uv lands there and
+    runs, and nothing is created in the caller's home; the control installs into the caller's."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root)
+    source_bin = uv.parent
+    installer_env = tmp_path / "installer-env.txt"
+    installer = tmp_path / "local-uv-install.sh"
+    installer.write_text(
+        f'env > "{installer_env}"\nmkdir -p "$HOME/.local/bin"\ncp -p "{source_bin}"/* "$HOME/.local/bin/"\n',
+        encoding="utf-8",
+    )
+    _with_local_uv_installer(runner, installer)
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    caller_home.chmod(0o777)
+    steering = {name: str(tmp_path / ("steer-" + name.lower())) for name in _INSTALLER_STEERING}
+    environment = {**_trust_env(tmp_path), **steering, "HOME": str(caller_home)}
+    environment["PATH"] = "/usr/bin:/bin"
+    result = _run_in(["sh"], runner, env=environment, cwd=_work_dir(tmp_path))
+    got = dict(line.split("=", 1) for line in installer_env.read_text(encoding="utf-8").splitlines() if "=" in line)
+    if not as_root:
+        assert got["HOME"] == str(caller_home), got
+        assert (caller_home / ".local" / "bin" / "uv").is_file(), result.stderr
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert got["HOME"] == str(tmp_path), got
+    assert [name for name in _INSTALLER_STEERING if name in got] == [], got
+    assert record.is_file(), result.stderr
+    assert (tmp_path / ".local" / "bin" / "uv").is_file(), result.stderr
+    assert list(caller_home.iterdir()) == [], result.stderr
 
 
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
@@ -2684,6 +2799,30 @@ def _cache_root(path: Path, *, mode: int) -> Path:
 
 #: What a root run says when it refuses its pack cache ([98]).
 _CACHE_REFUSAL = "pwshpy pack: refusing the cache directory "
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o775], ids=["private-control", "group-writable"])
+def test_as_root_a_temporary_directory_another_account_can_modify_is_refused(tmp_path: Path, mode: int) -> None:
+    """[159] round 3: the private temporary directory (<account cache>/pwshpy-tmp) is judged like the pack
+    cache before it is created and after: below an account cache directory another account can write,
+    the run stops with 127 before uv runs and creates no pwshpy-tmp; the control passes the check."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=True, judge_cache=True)
+    account_cache = _cache_root(tmp_path / "default-cache", mode=mode)
+    environment = {**_trust_env(tmp_path, uv.parent), "PWSHPY_PACK_CACHE": str(tmp_path / "pack")}
+    saved = os.umask(0o022)
+    try:
+        result = _run_in(["sh"], runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    finally:
+        os.umask(saved)
+    refused = f"pwshpy pack: refusing the temporary directory {account_cache / 'pwshpy-tmp'}: "
+    if mode == 0o755:
+        assert result.returncode == 0 and refused not in result.stderr, result.stdout + result.stderr
+        assert (account_cache / "pwshpy-tmp").stat().st_mode & 0o777 == 0o700
+        return
+    assert result.returncode == 127 and refused in result.stderr, result.stdout + result.stderr
+    assert "is writable by group" in result.stderr, result.stderr
+    assert not (account_cache / "pwshpy-tmp").exists()
+    assert not record.exists(), "uv ran"
 
 
 @pytest.mark.parametrize("mode", [0o755, 0o777, 0o775], ids=["private", "world-writable", "group-writable"])

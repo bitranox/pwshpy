@@ -147,10 +147,26 @@ UV_PATH_ENV_VAR = "PWSHPY_PACK_UV_PATH"
 
 #: The variable a root run (the ``.sh`` as root, the ``.ps1`` elevated on POSIX) sets to the names, one
 #: space between each, of the home variables it replaced for uv and git with the running account's own
-#: ([159]): HOME, the XDG directories, NETRC and uv's credentials directory. Each one the caller had set
+#: ([159]): HOME, the XDG directories, NETRC, uv's credentials directory and TMPDIR, TMP and TEMP (a
+#: private directory of the account). Each one the caller had set
 #: travels in ``<this name>_<NAME>``; the shim gives the script those values back, and removes a name
 #: the caller had not set, so the script sees the caller's environment as PATH is given back ([107]).
 CALLER_ENV_VAR = "PWSHPY_PACK_CALLER"
+
+#: The variables the shim gives back from a root run's hand-over (:data:`CALLER_ENV_VAR`), and the only
+#: ones, whatever the hand-over lists: both runners hand over exactly these.
+CALLER_ENV_NAMES = (
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "NETRC",
+    "UV_CREDENTIALS_DIR",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+)
 
 #: Exit code of a shim that cannot change back to the caller's directory (``EX_SOFTWARE``, the
 #: code the runner uses when the script never started).
@@ -294,21 +310,27 @@ def _entries_uv_added(current, given):
 
 
 def _restore_the_callers_home():
-    """Give the script the HOME, XDG directories and netrc its caller had ([159]).
+    """Give the script the HOME, XDG directories, netrc and temporary directories its caller had ([159]).
 
     A root run ran uv and git with the running account's own, so neither read nor wrote the caller's
-    files; the names it replaced arrive in one variable, each value the caller had in a variable of
-    its own, and a name the caller had not set is removed again.
+    files; it marks the hand-over with one variable and passes each value the caller had in a variable
+    of its own, and a name the caller had not set is removed again. Only the fixed names below are
+    restored, whatever the marker lists: the environment is the caller's to preset (a run that hands
+    nothing over leaves it as it came), so a listed name could otherwise set any variable. Every
+    hand-over variable is consumed.
     """
-    names = os.environ.pop({caller_env!r}, None)
-    if names is None:
+    handed_over = os.environ.pop({caller_env!r}, None) is not None
+    prefix = {caller_env!r} + "_"
+    values = {{}}
+    for variable in [name for name in os.environ if name.startswith(prefix)]:
+        values[variable[len(prefix) :]] = os.environ.pop(variable)
+    if not handed_over:
         return
-    for name in names.split():
-        value = os.environ.pop({caller_env!r} + "_" + name, None)
-        if value is None:
-            os.environ.pop(name, None)
+    for name in {caller_names!r}:
+        if name in values:
+            os.environ[name] = values[name]
         else:
-            os.environ[name] = value
+            os.environ.pop(name, None)
 
 
 def _argv_from_environment():
@@ -764,6 +786,7 @@ def render_shim(*, entry: str, metadata: str) -> str:
         path_env=PATH_ENV_VAR,
         uv_path_env=UV_PATH_ENV_VAR,
         caller_env=CALLER_ENV_VAR,
+        caller_names=CALLER_ENV_NAMES,
     )
 
 
@@ -1090,6 +1113,7 @@ def _posix_anchored_args(values: Sequence[str]) -> str:
 __all__ = [
     "ARGV_ENCODING_TAG",
     "ARGV_ENV_VAR",
+    "CALLER_ENV_NAMES",
     "CALLER_ENV_VAR",
     "CWD_ENV_VAR",
     "DEFAULT_PACK_OPTIONS",

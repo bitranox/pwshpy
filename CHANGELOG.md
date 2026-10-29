@@ -165,10 +165,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   judged as a file, like `uv` (owner, write access, every directory and link on the way), and one
   another account can modify stops the run with `refusing git at <path>` and exit code 127 before
   it runs. Before, only the directories on uv's `PATH` were judged, so such a git ran as root.
-- Packed `.ps1` runner, elevated on Windows: the git that is judged is the one uv runs, found in each
-  `PATH` directory by the `PATHEXT` extensions in order and then the bare name, so a `git.cmd` in an
-  earlier directory is no longer passed over for a `git.exe` further down. A git that is not a
-  `.exe`, `.com`, `.cmd` or `.bat` is refused with exit code 127.
+- Packed `.ps1` runner, elevated on Windows: the gits that are judged are the ones uv chooses from.
+  In the first `PATH` directory holding a git, every git file uv tries there is judged (the bare
+  name, then each `PATHEXT` extension in order), and one that fails stops the run. So a `git.cmd`
+  in an earlier directory is no longer passed over for a `git.exe` further down, and a bare `git`
+  beside a `git.exe` is judged too. A git that is not a `.exe`, `.com`, `.cmd` or `.bat` is refused
+  with exit code 127.
 - Packed `.ps1` runner, elevated on Windows: a symlink or junction whose target is rooted on the
   current drive (`\Users\...`), a volume GUID name or a `GLOBALROOT` device path is refused (exit
   code 127, `points to <target>, which names no drive or share path`) in uv's managed-Python
@@ -179,7 +181,20 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `XDG_DATA_HOME`, with `XDG_STATE_HOME`, `NETRC` and `UV_CREDENTIALS_DIR` unset. Before, they used
   the caller's, which `sudo -E` or `env_keep` hand over, so uv read the caller's netrc and
   credentials and created root-owned directories in the caller's home. The packed script still sees
-  the caller's values.
+  the caller's values; the shim gives back only these variables, whatever the hand-over names, and a
+  run that hands nothing over removes a hand-over the caller's environment preset.
+- Packed runners, root run on Linux and macOS (the `.sh` as root, the `.ps1` elevated): uv, git and
+  the build backends uv runs keep their temporary files in `<home>/.cache/pwshpy-tmp` of the running
+  account (mode 0700; `TMPDIR`, `TMP` and `TEMP` all name it, and the packed script gets the
+  caller's values back). Before, they used the caller's `TMPDIR`, which `sudo -E` hands over, where
+  the caller could swap a directory root created for a link.
+- Packed runners, root run on Linux and macOS (the `.sh` as root, the `.ps1` elevated): with no uv
+  found, uv's installer runs with only the running account's own `HOME` and the fixed helper `PATH`
+  (umask 022), and the uv search looks below that home, not in the caller's `XDG_BIN_HOME` or
+  `CARGO_HOME`. Before, the installer ran with the caller's `HOME` and the caller's `UV_INSTALL_DIR`,
+  `XDG_BIN_HOME`, `CARGO_HOME`, download-URL, proxy and certificate variables, so it put a
+  root-owned uv in the caller's `~/.local/bin` and edited the caller's shell files, then the run
+  refused that uv with exit code 127.
 - Packed `.sh` runner, `--pwshpy-elevate`: the sudo relaunch runs as a child of the runner's shell
   and exits with its status. Before, it replaced the shell (`exec`), so under sudo's
   `timestamp_type=ppid` the relaunch found no cached credential and exited 1.

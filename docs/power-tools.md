@@ -50,7 +50,11 @@ relaunched command's own failure. The packed runners below do the same for `--pw
 `-PwshPyElevate`, with the same single prompt: `sudo -v`, then `sudo -n -v`, then the relaunch
 under `sudo -n`, so a `timestamp_timeout=0` setup exits 77 rather than prompting twice (on a POSIX
 host without `sudo` they exit 127 instead, a missing tool rather than a refusal). A command that itself exits 77 still looks the same by exit code alone; the stderr line
-is what tells them apart.
+is what tells them apart. The `.sh` runner starts that relaunch as a child of its shell rather than
+replacing itself with it, so sudo's `timestamp_type=ppid` finds the credential the prompt cached; a
+signal sent to the runner's process alone therefore no longer reaches sudo and the relaunched
+script, while one sent to the whole process group (Ctrl-C in a terminal, `timeout`, a systemd stop)
+still does.
 
 ## Who am I: the token, not `USERNAME`
 
@@ -402,7 +406,12 @@ Details worth knowing:
   euid of an `id` in those same directories, never one on `PATH`; when none answers with a uid, the
   run is treated as root (it fails closed: such a system's non-root caller loses only the per-user
   `uv` lookup, a root run never loses the rule). The caller's `PATH` is still searched for `uv`
-  (each hit judged) and handed back to the packed script. A refused `uv` is skipped with a `pwshpy:
+  (each hit judged) and handed back to the packed script; after it a root run looks in the running
+  account's own `~/.local/bin`, `~/.cargo/bin` and `/usr/local/bin` (the home from the passwd
+  database, never the caller's `HOME`, `XDG_BIN_HOME` or `CARGO_HOME`), and when it finds no uv it
+  runs uv's installer with only that home and the fixed `PATH` above in its environment, under umask
+  022, so the caller's installer, proxy and certificate variables choose neither what is downloaded
+  nor where it lands. A refused `uv` is skipped with a `pwshpy:
   skipping uv at <path>: <reason>` line on stderr and the next one is tried; an elevated `.ps1`
   child relays those lines to the parent. A `-PwshPyUv` / `--pwshpy-uv` path is used as given when
   not elevated; elevated it must pass the same check or the run stops with `pwshpy: refusing the uv
@@ -610,21 +619,30 @@ Details worth knowing:
   of them that another account owns or can write, or a link to one in a directory it can write,
   would run as root when uv fetches the source. Such a git stops the run with `pwshpy pack: refusing
   git at <path>: <reason> ...` (`.sh`) or `pwshpy: refusing git at <path>: <reason> ...` (`.ps1`)
-  and exit code 127, before it runs. On Windows the git judged is the one uv runs: uv looks in each
-  `PATH` directory in turn for `git` with each `PATHEXT` extension appended, in `PATHEXT` order,
-  then for a bare `git` (measured with uv 0.13.6), so a `git.cmd` in an earlier directory is the git
-  it runs, not a `git.exe` further down. A git found that way that is not a `.exe`, `.com`, `.cmd`
-  or `.bat` is refused (`it is not a program an elevated run asks for its version`). A root run (the
+  and exit code 127, before it runs. On Windows the gits judged are the ones uv chooses from: uv
+  (through the `which` crate) looks in each `PATH` directory in turn for a bare `git`, taken only
+  when it is a program, then for `git` with each `PATHEXT` extension appended, in `PATHEXT` order.
+  So a `git.cmd` in an earlier directory is the git it runs, not a `git.exe` further down. Which file
+  in a directory uv takes depends on what each file is, so the runner judges every one it finds in
+  the first directory holding a git, and one that fails stops the run. A git found that way that is
+  not a `.exe`, `.com`, `.cmd` or `.bat` is refused (`it is not a program an elevated run asks for
+  its version`), a bare `git` included. A root run (the
   `.sh` as root, the `.ps1` elevated on Linux or macOS) also hands uv and the git it runs the running
   account's own home, never the caller's: `HOME` is the home the passwd database records,
   `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME` are below it, and `XDG_STATE_HOME`,
   `NETRC` and `UV_CREDENTIALS_DIR` are unset so their defaults follow that home (`pwshpy: setting
-  HOME=<home>` on stderr). Before, uv and git used the ones `sudo -E` or `env_keep` handed over:
+  HOME=<home>` on stderr), and `TMPDIR`, `TMP` and `TEMP` all name `<home>/.cache/pwshpy-tmp`, a
+  directory only that account can enter, judged like the pack cache before and after
+  it is created (`pwshpy: setting TMPDIR=<dir>` on stderr; a directory another account can modify
+  stops the run with `refusing the temporary directory` and exit code 127), so no temporary file or
+  directory uv, git or a build backend makes as root sits where the caller could swap it for a link.
+  Before, uv and git used the ones `sudo -E` or `env_keep` handed over:
   uv read the caller's netrc and credentials file and created root-owned directories below the
   caller's home, and a credential helper the administrators configured read and rewrote the
   caller's `~/.git-credentials` as root (measured). The packed script gets the caller's values back
   from the shim, and a variable the caller had not set is unset again, as it gets the caller's
-  `PATH` back. An elevated `.ps1` run on Windows keeps the caller's profile variables. The
+  `PATH` back. The shim gives back these variables and no others, whatever the hand-over
+  (`PWSHPY_PACK_CALLER`) names, and every other run removes a hand-over the caller preset. An elevated `.ps1` run on Windows keeps the caller's profile variables. The
   system file (`/etc/gitconfig`, or the one below Git
   for Windows' install directory) is the administrators' and still applies. The runner cannot tell
   who set a variable, so an elevated run in a network that reaches the internet only through a proxy

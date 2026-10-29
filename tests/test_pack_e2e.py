@@ -48,6 +48,7 @@ from elevation_doubles import (
     NOT_A_GCM_VARIABLE,
     NOT_A_GIT_VARIABLE,
     OTHER_UID,
+    REAL_ACCOUNT_CACHE_GROUP,
     RUNNING_AS_ROOT,
     UV_SOURCE_VARIABLES,
     data_home,
@@ -60,6 +61,7 @@ from elevation_doubles import (
     owned_by_another_account,
     plant_library_path,
     planted_managed_python,
+    removing_a_new_account_temp_dir,
     second_prompts,
     session_uv_cache,
     trusted_managed_python,
@@ -1373,6 +1375,14 @@ def _run_with_path(
         runner = own_cache
     child_env = {k: v for k, v in os.environ.items() if k not in (*INTERPRETER_VARIABLES, *LIBRARY_VARIABLES)}
     child_env.update({**_isolated_cache(tmp_path), "PYTHONIOENCODING": "utf-8", "UV_PYTHON_DOWNLOADS": "never"})
+    # The directory stands in for the account's own cache directory of an elevated POSIX run, which only
+    # its account can write (an elevated run judges it, [159] round 3); made before pwsh starts, which
+    # puts its own cache below XDG_CACHE_HOME under the suite's umask (002 on a per-user-group host). One
+    # a test made itself keeps its mode.
+    account_cache = tmp_path / "default-cache"
+    if sys.platform != "win32" and not account_cache.exists():
+        account_cache.mkdir()
+        account_cache.chmod(0o755)
     if f"{_STAND_IN_PROBE}$true" in runner.read_text(encoding="utf-8") and "UV_PYTHON_INSTALL_DIR" not in (env or {}):
         child_env.update(managed_python_env(tmp_path, managed=_needs_managed_python()))
     child_env.update(env or {})
@@ -1622,6 +1632,44 @@ def test_an_elevated_run_follows_a_symlinked_uv_to_its_target(tmp_path: Path) ->
     assert result.returncode == 0, result.stdout + result.stderr
     assert _same(_reported_uv(result), trusted), result.stdout + result.stderr
     assert _skip_line(result, link), result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows symbolic links, junctions and ACLs")
+@pytest.mark.parametrize("where", ["rooted-file", "volume-guid-file", "volume-guid-junction", "drive-path-control"])
+def test_an_elevated_run_skips_a_uv_reached_through_a_link_it_cannot_place(tmp_path: Path, where: str) -> None:
+    """[R1] on uv's own path (Get-PwshPyUvDistrust): a link on the way to a uv.exe whose target is rooted
+    on the current drive (\\Users\\...) or spelled through the volume's GUID name (a file symlink, and a
+    directory junction) is skipped with "names no drive or share path", though it leads to a uv the run
+    would trust, and the next uv on PATH runs. The control, the same link with a drive-path target, is
+    followed and its uv runs."""
+    trusted = _trusted_uv(tmp_path)
+    if trusted is None:
+        pytest.skip(_needs_a_trusted_uv)
+    fallback = _copy_uv(_private_dir(tmp_path / "fallback-bin"))
+    links = _private_dir(tmp_path / "links-bin")
+    if where == "volume-guid-junction":
+        _junction(links / "via", _volume_guid_path(trusted.parent))
+        found = links / "via" / trusted.name
+    else:
+        found = links / "uv.exe"
+        found.symlink_to(
+            {
+                "rooted-file": str(trusted)[len(trusted.drive) :],
+                "volume-guid-file": _volume_guid_path(trusted),
+            }.get(where, str(trusted))
+        )
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[found.parent, fallback.parent])
+    assert result.returncode == 0, result.stdout + result.stderr
+    if where == "drive-path-control":
+        assert _same(_reported_uv(result), trusted), result.stdout + result.stderr
+        assert not _skip_line(result, found), result.stderr
+        return
+    assert _same(_reported_uv(result), fallback), result.stdout + result.stderr
+    skipped = _skip_line(result, found)
+    assert "which names no drive or share path" in skipped, result.stderr
 
 
 @pytest.mark.local_only
@@ -2646,12 +2694,17 @@ _GLOB_BAIT = ("a.log", "b.log", "pkga")
 
 
 def _recording_runner(
-    tmp_path: Path, *, elevated: str, with_packages: Sequence[str] = (), real_data_home: bool = False
+    tmp_path: Path,
+    *,
+    elevated: str,
+    with_packages: Sequence[str] = (),
+    real_data_home: bool = False,
+    judge_cache: bool = False,
 ) -> tuple[Path, Path, Path]:
     """A runner whose uv is a recording double pinned with -PwshPyUv (POSIX), in a tree counted as root's.
 
-    Returns the runner, the double, and the file it records into. ``real_data_home`` as for
-    :func:`_elevation_stand_in`.
+    Returns the runner, the double, and the file it records into. ``real_data_home`` and ``judge_cache``
+    as for :func:`_elevation_stand_in`.
     """
     entry = tmp_path / "app.py"
     entry.write_text("print('never run: uv is a recording double')\n")
@@ -2661,6 +2714,7 @@ def _recording_runner(
         elevated=elevated,
         trust_my_uid=True,
         real_data_home=real_data_home,
+        judge_cache=judge_cache,
     )
     leaf = tmp_path / "rec" / "bin"
     leaf.mkdir(parents=True)
@@ -3093,6 +3147,7 @@ def test_an_elevated_run_drops_the_variables_that_steer_the_managed_python(tmp_p
 @pytest.mark.local_only
 @pytest.mark.os_posix
 @_POSIX_ONLY
+@pytest.mark.xdist_group(REAL_ACCOUNT_CACHE_GROUP)
 @pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
 def test_an_elevated_posix_run_takes_the_managed_python_dir_from_the_account(tmp_path: Path, elevated: str) -> None:
     """[93]: elevated, uv's managed-Python directory is the passwd home's whatever HOME and XDG_DATA_HOME
@@ -3100,20 +3155,21 @@ def test_an_elevated_posix_run_takes_the_managed_python_dir_from_the_account(tmp
     passes both on. [X22 C1]: the cache directory likewise, whatever XDG_CACHE_HOME says."""
     runner, uv, record = _recording_runner(tmp_path, elevated=elevated, real_data_home=True)
     library = {"PYTHONHOME": str(tmp_path / "planted-home"), "PYTHONPATH": str(tmp_path / "planted-path")}
-    result = _run_with_path(
-        tmp_path,
-        runner,
-        "-PwshPyUv",
-        str(uv),
-        path_first=[],
-        env={
-            **library,
-            "XDG_DATA_HOME": str(tmp_path / "elsewhere"),
-            "XDG_CACHE_HOME": str(tmp_path / "elsewhere"),
-            "HOME": str(tmp_path / "elsewhere"),
-        },
-        cwd=_clean_cwd(tmp_path),
-    )
+    with removing_a_new_account_temp_dir():
+        result = _run_with_path(
+            tmp_path,
+            runner,
+            "-PwshPyUv",
+            str(uv),
+            path_first=[],
+            env={
+                **library,
+                "XDG_DATA_HOME": str(tmp_path / "elsewhere"),
+                "XDG_CACHE_HOME": str(tmp_path / "elsewhere"),
+                "HOME": str(tmp_path / "elsewhere"),
+            },
+            cwd=_clean_cwd(tmp_path),
+        )
     assert result.returncode == 0, result.stdout + result.stderr
     recorded = _recorded_variables(record)
     if elevated == "$true":
@@ -4321,6 +4377,20 @@ def test_an_elevated_posix_run_takes_its_default_pack_cache_from_the_account(tmp
     assert [path.name for path in caller.rglob("pwshpy-pack")] == []
 
 
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_pwshpy_info_names_the_cache_an_elevated_posix_run_uses(tmp_path: Path) -> None:
+    """[R3]: -PwshPyInfo printed the cache directory before the root run's default was applied, so an
+    elevated POSIX run showed the caller's XDG_CACHE_HOME while it used the account's own."""
+    caller = tmp_path / "caller-cache"
+    runner, _, key = _cache_trust_runner(tmp_path)
+    env = {"PWSHPY_PACK_CACHE": "", "XDG_CACHE_HOME": str(caller), **managed_python_env(tmp_path, managed=None)}
+    result = _run_with_path(tmp_path, runner, "-PwshPyInfo", path_first=[_UvLocation.directory], env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    own = tmp_path / "default-cache" / "pwshpy-pack" / key
+    assert f"cache dir  : {own}" in result.stdout, result.stdout
+
+
 @pytest.mark.local_only
 @pytest.mark.os_posix
 @_POSIX_ONLY
@@ -4385,11 +4455,20 @@ def _caller_home_env(tmp_path: Path) -> dict[str, str]:
 def test_an_elevated_posix_run_gives_uv_and_git_the_accounts_own_home(tmp_path: Path, elevated: str) -> None:
     """[159], as the .sh root run: an elevated POSIX run hands uv the account's own HOME (its passwd home,
     answered inside tmp_path here), XDG directories and the netrc and credentials defaults below it, and
-    each caller value to the shim under PWSHPY_PACK_CALLER_<NAME>. The control hands uv the caller's."""
+    each caller value to the shim under PWSHPY_PACK_CALLER_<NAME>. The control hands uv the caller's, and
+    not the hand-over marker the caller preset, which the shim would act on. The caller's NETRC is the
+    empty string, which is handed over as such (pwsh 7 keeps an empty variable), not as unset."""
     runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
-    caller = _caller_home_env(tmp_path)
+    caller = {**_caller_home_env(tmp_path), "NETRC": ""}
+    preset = {CALLER_ENV_VAR: "HOME"}
     result = _run_with_path(
-        tmp_path, runner, "-PwshPyUv", str(uv), path_first=[uv.parent], env=caller, cwd=_clean_cwd(tmp_path)
+        tmp_path,
+        runner,
+        "-PwshPyUv",
+        str(uv),
+        path_first=[uv.parent],
+        env={**caller, **preset},
+        cwd=_clean_cwd(tmp_path),
     )
     assert result.returncode == 0, result.stdout + result.stderr
     lines = record.read_text(encoding="utf-8").splitlines()
@@ -4406,9 +4485,156 @@ def test_an_elevated_posix_run_gives_uv_and_git_the_accounts_own_home(tmp_path: 
     assert [name for name in ("XDG_STATE_HOME", "NETRC", "UV_CREDENTIALS_DIR") if name in recorded] == []
     assert recorded[CALLER_ENV_VAR] == " ".join(HOME_VARIABLES), recorded
     handed = {name: recorded.get(f"{CALLER_ENV_VAR}_{name}") for name in HOME_VARIABLES}
-    caller_state = os.environ.get("XDG_STATE_HOME")
-    assert handed == {**dict.fromkeys(HOME_VARIABLES), "XDG_STATE_HOME": caller_state, **caller}, handed
+    inherited = {name: os.environ.get(name) for name in ("XDG_STATE_HOME", "TMPDIR", "TMP", "TEMP")}
+    assert handed == {**dict.fromkeys(HOME_VARIABLES), **inherited, **caller}, handed
     assert f"pwshpy: setting HOME={home}: " in result.stderr, result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_posix_run_gives_uv_and_git_a_private_temporary_directory(tmp_path: Path, elevated: str) -> None:
+    """[159] round 3, as the .sh root run: an elevated POSIX run let uv, git and the build backends uv runs
+    make their temporary files below the caller's TMPDIR (or TMP, TEMP), which sudo -E hands over: a
+    directory root creates there the caller can swap for a link. All three now name <account
+    cache>/pwshpy-tmp, mode 0700, and each caller value travels to the shim; the control keeps the
+    caller's."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
+    caller = {name: tmp_path / ("caller-" + name.lower()) for name in ("TMPDIR", "TMP", "TEMP")}
+    for directory in caller.values():
+        directory.mkdir()
+    env = {name: str(directory) for name, directory in caller.items()}
+    result = _run_with_path(
+        tmp_path, runner, "-PwshPyUv", str(uv), path_first=[uv.parent], env=env, cwd=_clean_cwd(tmp_path)
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = record.read_text(encoding="utf-8").splitlines()
+    recorded = dict(line[4:].split("=", 1) for line in lines if line.startswith("env:"))
+    if elevated == "$false":
+        assert {name: recorded.get(name) for name in env} == env, recorded
+        return
+    private = default_uv_cache_dir(tmp_path).parent / "pwshpy-tmp"
+    assert {name: recorded.get(name) for name in env} == dict.fromkeys(env, str(private)), recorded
+    assert private.stat().st_mode & 0o777 == 0o700
+    assert {name: recorded.get(f"{CALLER_ENV_VAR}_{name}") for name in env} == env, recorded
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("mode", [0o755, 0o775], ids=["private-control", "group-writable"])
+def test_an_elevated_posix_run_refuses_a_temporary_directory_another_account_can_modify(
+    tmp_path: Path, mode: int
+) -> None:
+    """[159] round 3, as the .sh root run: the private temporary directory is judged like the pack cache
+    before it is created and after: below an account cache directory another account can write, the run
+    stops with 127 before uv runs and creates no pwshpy-tmp; the control passes the check."""
+    runner, uv, record = _recording_runner(tmp_path, elevated="$true", judge_cache=True)
+    account_cache = tmp_path / "default-cache"
+    account_cache.mkdir()
+    account_cache.chmod(mode)
+    pack = tmp_path / "pack"
+    pack.mkdir()
+    pack.chmod(0o755)
+    saved = os.umask(0o022)
+    try:
+        result = _run_with_path(
+            tmp_path,
+            runner,
+            "-PwshPyUv",
+            str(uv),
+            path_first=[uv.parent],
+            env={"PWSHPY_PACK_CACHE": str(pack)},
+            cwd=_clean_cwd(tmp_path),
+        )
+    finally:
+        os.umask(saved)
+    refused = f"pwshpy: refusing the temporary directory {account_cache / 'pwshpy-tmp'}: "
+    if mode == 0o755:
+        assert result.returncode == 0 and refused not in result.stderr, result.stdout + result.stderr
+        assert (account_cache / "pwshpy-tmp").stat().st_mode & 0o777 == 0o700
+        return
+    assert result.returncode == 127 and refused in result.stderr, result.stdout + result.stderr
+    assert "is writable by group" in result.stderr, result.stderr
+    assert not (account_cache / "pwshpy-tmp").exists()
+    assert not record.exists(), "uv ran"
+
+
+#: The POSIX installer command of the .ps1 runner, the one string a test of the installation replaces.
+_POSIX_UV_INSTALL_COMMAND = (
+    "$installCommand = 'curl -LsSf https://astral.sh/uv/install.sh | sh"
+    " || wget -qO- https://astral.sh/uv/install.sh | sh'"
+)
+#: What uv's installer reads besides HOME, and what curl and wget read: each the caller's choice for root.
+_INSTALLER_STEERING = (
+    "UV_INSTALL_DIR",
+    "XDG_BIN_HOME",
+    "CARGO_HOME",
+    "UV_INSTALLER_GITHUB_BASE_URL",
+    "UV_INSTALLER_GHE_BASE_URL",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "SSL_CERT_FILE",
+    "CURL_CA_BUNDLE",
+    "CURL_HOME",
+    "WGETRC",
+    "TMPDIR",
+)
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_posix_run_installs_uv_into_the_accounts_own_home(tmp_path: Path, elevated: str) -> None:
+    """[159]/[R3] round 3, as the .sh root run: an elevated POSIX run ran uv's installer with the caller's
+    HOME and installer, proxy and certificate variables, so a root-owned uv landed in the caller's
+    ~/.local/bin (from where and to where the caller chose), and the uv search looked in the caller's
+    home. No uv is anywhere here, the caller's HOME is a 0777 directory and every steering variable is
+    set; a local installer records its environment and installs the recording uv below its HOME. Elevated
+    it gets the account's own home (answered inside tmp_path) and none of the variables, the uv lands
+    there and runs, and nothing is created in the caller's home; the control installs into the caller's."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
+    installer_env = tmp_path / "installer-env.txt"
+    installer = tmp_path / "local-uv-install.sh"
+    installer.write_text(
+        f'env > "{installer_env}"\nmkdir -p "$HOME/.local/bin"\ncp -p "{uv.parent}"/* "$HOME/.local/bin/"\n',
+        encoding="utf-8",
+    )
+    text = runner.read_text(encoding="utf-8")
+    for old, new in (
+        (_POSIX_UV_INSTALL_COMMAND, f"$installCommand = 'cat {installer} | sh'"),
+        (f"'{_SYSTEM_WIDE_UV}'", f"'{tmp_path / 'no-system-uv'}'"),
+    ):
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    runner.write_text(text, encoding="utf-8")
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    caller_home.chmod(0o777)
+    env = {name: str(tmp_path / ("steer-" + name.lower())) for name in _INSTALLER_STEERING}
+    env["HOME"] = str(caller_home)
+    result = _run_with_path(
+        tmp_path,
+        runner,
+        path_first=["/usr/bin", "/bin"],
+        env=env,
+        cwd=_clean_cwd(tmp_path),
+        inherit_path=False,
+        install_uv=True,
+    )
+    got = dict(line.split("=", 1) for line in installer_env.read_text(encoding="utf-8").splitlines() if "=" in line)
+    if elevated == "$false":
+        assert got["HOME"] == str(caller_home), got
+        assert (caller_home / ".local" / "bin" / "uv").is_file(), result.stderr
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert got["HOME"] == str(tmp_path), got
+    assert [name for name in _INSTALLER_STEERING if name in got] == [], got
+    assert record.is_file(), result.stderr
+    assert (tmp_path / ".local" / "bin" / "uv").is_file(), result.stderr
+    assert list(caller_home.iterdir()) == [], result.stderr
 
 
 # --- [156] elevated .ps1 runs of a script with a git source refuse a git older than 2.32 ----------------
@@ -4651,12 +4877,13 @@ def test_an_elevated_windows_run_of_a_git_source_runs_only_a_git_no_other_accoun
 def test_an_elevated_windows_run_judges_the_git_uv_would_run_not_the_first_git_exe(
     tmp_path: Path, earlier: str
 ) -> None:
-    """[R2]: uv finds git as Windows does (each PATH directory in turn, there each PATHEXT extension in
-    order, then the bare name; measured with uv 0.13.6), so a git.cmd in an earlier directory is the git
-    it runs, while the runner looked for git.exe only and judged the good one behind it. The runner now
-    resolves git the same way and judges that file: an old git.cmd or git.bat is refused for its version,
-    a bare extensionless git, which is no program the runner asks for a version, is refused as such; the
-    good git.exe further down is never asked."""
+    """[R2]: uv finds git as Windows does (each PATH directory in turn, there the bare name when it is a
+    program, then each PATHEXT extension in order; which 8.0.0), so a git.cmd in an earlier directory is
+    the git it runs, while the runner looked for git.exe only and judged the good one behind it. The
+    runner now resolves git the same way and judges that file: an old git.cmd or git.bat is refused for
+    its version; a bare extensionless git, which is no program the runner asks for a version, is
+    refused as such (uv would skip this one, a batch text, and take the git.exe behind it: the runner
+    fails closed); the good git.exe further down is never asked."""
     managed = _needs_managed_python()
     runner, head = _python_runner(tmp_path, elevated="$true", with_packages=[_GIT_SOURCE_PACKAGE])
     first, second = _private_dir(tmp_path / "first-bin"), _private_dir(tmp_path / "second-bin")
@@ -4680,6 +4907,55 @@ def test_an_elevated_windows_run_judges_the_git_uv_would_run_not_the_first_git_e
         assert "is not a program" in refusals[0], refusals
     else:
         assert planted_marker.exists(), "the runner never asked the planted git for its version"
+        assert ": git 2.31.1.windows.1 ignores GIT_CONFIG_GLOBAL" in refusals[0], refusals
+    assert "python:" not in result.stdout, result.stdout
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.skipif(not _CSC.is_file(), reason="needs the .NET Framework C# compiler to build a git.exe double")
+@pytest.mark.parametrize("beside", ["git", "git.cmd", None], ids=["bare-program", "old-git-cmd", "exe-only-control"])
+def test_an_elevated_windows_run_judges_every_git_in_the_directory_uv_takes_it_from(
+    tmp_path: Path, beside: str | None
+) -> None:
+    """[R2] round 3: in one PATH directory uv's which (8.0.0, PathsIter) tries the bare name first, then
+    each PATHEXT extension, and takes a bare file when it is a program. The runner judged only the first
+    name it looked for (bare last), so a bare program beside a good git.exe was never judged. It now
+    judges every git file in that directory and refuses if one fails: a bare program as no program it
+    asks for a version (never run), an old git.cmd for its version even with .EXE ahead of it in
+    PATHEXT (fails closed). The control, git.exe alone, passes the check."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated="$true", with_packages=[_GIT_SOURCE_PACKAGE])
+    directory = _private_dir(tmp_path / "git-bin")
+    good_marker, beside_marker = tmp_path / "good-git-ran.txt", tmp_path / "beside-git-ran.txt"
+    _windows_git_double(directory, good_marker, version_output="git version 2.45.0.windows.1")
+    if beside == "git":
+        build = _windows_git_double(
+            _private_dir(tmp_path / "build"), beside_marker, version_output="git version 2.45.0.windows.1"
+        )
+        shutil.copyfile(build, directory / beside)
+    elif beside is not None:
+        (directory / beside).write_bytes(
+            f'@echo off\r\necho ran>>"{beside_marker}"\r\necho git version 2.31.1.windows.1\r\n'.encode("ascii")
+        )
+    environment = {**interpreter_probe_env(tmp_path, managed=managed), "PATHEXT": ".COM;.EXE;.BAT;.CMD"}
+    result = _run_with_path(tmp_path, runner, path_first=[directory, *head], env=environment, cwd=_clean_cwd(tmp_path))
+    refusals = [line for line in result.stderr.splitlines() if line.startswith(_OLD_GIT_REFUSED)]
+    if beside is None:
+        assert good_marker.exists(), "the runner never asked git.exe for its version: " + result.stderr
+        assert refusals == [], result.stderr
+        assert result.returncode != 127, result.stdout + result.stderr
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert len(refusals) == 1, result.stderr
+    assert refusals[0].startswith(f"{_OLD_GIT_REFUSED}{directory / beside}: "), refusals
+    if beside == "git":
+        assert not beside_marker.exists(), "the runner ran a file it refuses as no program"
+        assert not good_marker.exists(), "the runner asked git.exe before judging the bare git uv takes first"
+        assert "is not a program" in refusals[0], refusals
+    else:
+        assert beside_marker.exists(), "the runner never asked git.cmd for its version"
         assert ": git 2.31.1.windows.1 ignores GIT_CONFIG_GLOBAL" in refusals[0], refusals
     assert "python:" not in result.stdout, result.stdout
 

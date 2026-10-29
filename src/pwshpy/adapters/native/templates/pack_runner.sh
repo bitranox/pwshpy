@@ -954,17 +954,17 @@ pwshpy_caller_cwd() {
 # (pwshpy_cache_distrust): before it is created (the nearest directory that exists), and after.
 pwshpy_private_tmp() {
     PWSHPY_TMP=$PWSHPY_CACHE_HOME/pwshpy-tmp
-    _pt_why=$(pwshpy_cache_distrust "$PWSHPY_TMP")
-    if [ -z "$_pt_why" ]; then
+    _ptmp_why=$(pwshpy_cache_distrust "$PWSHPY_TMP")
+    if [ -z "$_ptmp_why" ]; then
         (umask 077 && mkdir -p "$PWSHPY_TMP") || pwshpy_die "cannot create the directory $PWSHPY_TMP" 70
         chmod 700 "$PWSHPY_TMP" || pwshpy_die "cannot make $PWSHPY_TMP private (chmod 700)" 70
-        _pt_why=$(pwshpy_cache_distrust "$PWSHPY_TMP")
+        _ptmp_why=$(pwshpy_cache_distrust "$PWSHPY_TMP")
     fi
-    if [ -n "$_pt_why" ]; then
-        _pt_why="$_pt_why (as root uv and git keep temporary files only in a directory no other"
-        _pt_why="$_pt_why account can modify): make the path named above root's alone (chown -R root,"
-        _pt_why="$_pt_why chmod -R go-w on it)"
-        pwshpy_die "refusing the temporary directory $PWSHPY_TMP: $_pt_why" 127
+    if [ -n "$_ptmp_why" ]; then
+        _ptmp_why="$_ptmp_why (as root uv and git keep temporary files only in a directory no other"
+        _ptmp_why="$_ptmp_why account can modify): make the path named above root's alone (chown -R root,"
+        _ptmp_why="$_ptmp_why chmod -R go-w on it)"
+        pwshpy_die "refusing the temporary directory $PWSHPY_TMP: $_ptmp_why" 127
     fi
 }
 

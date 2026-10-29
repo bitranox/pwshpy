@@ -739,8 +739,11 @@ def iter_timers(
     task: a stopped ListUnits entry whose LoadState is not-found or masked
     (:func:`~.systemd_dbus.is_unlisted_unit`; a running one is listed), and a masked file, an alias,
     a template or a file ``LoadUnit`` reads as not-found. A skipped entry does not hide its file:
-    a name systemd cached as not-found before its file was written is listed from the file
-    (systemd >= 246; an older one needs a daemon-reload first). Lazy: the unit-file listing,
+    the unit-file pass still reads the name through ``LoadUnit`` and lists it when systemd now
+    loads the file. A name systemd cached as not-found before its file was written is therefore
+    listed whenever systemd re-loads it on that call, which per the systemd source (unmeasured) a
+    systemd >= 246 does; an older one answers not-found until a daemon-reload, and the name is
+    skipped. Lazy: the unit-file listing,
     ``GetUnitFileState`` and the run-info reads run only for consumed timers. Reading an unloaded
     timer loads it transiently; systemd unloads it again when nothing references it.
 
@@ -792,13 +795,14 @@ def iter_timers(
             if not name.endswith(".timer"):
                 continue
             if _dbus.is_unlisted_unit(unit.load_state, unit.active_state):
-                # Not marked seen: a cached not-found name whose file appeared since (no
-                # daemon-reload) is still listed by the unit-file pass, whose LoadUnit retries the
-                # load from disk on systemd >= 246: manager_load_unit_prepare (src/core/manager.c)
-                # re-loads a not-found unit when the unit-file cache is stale or was refreshed
-                # after its failed load (commits d904afc7 and 7233e91a, both first in v246-rc1;
-                # not in NEWS). An older systemd answers not-found until a daemon-reload, so
-                # there the unit-file pass skips the name as well.
+                # Not marked seen: the name is left to the unit-file pass, which lists it when its
+                # LoadUnit now finds the file (a name cached as not-found whose file appeared since,
+                # with no daemon-reload) and skips it when LoadUnit still answers not-found. Which
+                # answer systemd gives is its own: per the systemd source (unmeasured),
+                # manager_load_unit_prepare (src/core/manager.c) re-loads a not-found unit when the
+                # unit-file cache is stale or was refreshed after its failed load (commits d904afc7
+                # and 7233e91a, both first in v246-rc1; not in NEWS), and an older systemd answers
+                # not-found until a daemon-reload. Nothing here depends on the version.
                 continue
             seen.add(name)
             state = _dbus.unit_file_state(bus, name) or UnitFileState.EMPTY

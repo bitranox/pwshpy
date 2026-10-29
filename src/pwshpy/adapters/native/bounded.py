@@ -112,6 +112,13 @@ def _refuse_in_daemonic_process(name: str) -> None:
     3.15), so without this check the caller gets an AssertionError that is no PwshPyError, and
     under ``python -O`` the assert is stripped and the child starts after all.  Checking the same
     flag up front gives one typed answer on every version and in every optimisation mode.
+
+    Args:
+        name: The target's ``__name__`` (``"call"`` when it has none), named in the error message.
+
+    Raises:
+        NativeCallError: The calling process is a daemonic multiprocessing process (a
+            ``multiprocessing.Pool`` worker is one).
     """
     if multiprocessing.current_process().daemon:
         raise NativeCallError(

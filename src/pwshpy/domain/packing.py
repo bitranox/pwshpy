@@ -475,6 +475,16 @@ def _scan_toml_line(line: str, open_string: str = "") -> tuple[int, str]:
     it; the second value is the delimiter left open by this line, or ``""``. A single-line string
     never spans lines (TOML forbids it), so only a multi-line one carries over.
 
+    Args:
+        line: One line of the TOML text, without its line end.
+        open_string: The delimiter of the multi-line string the line starts inside, or ``""``
+            (default) when it starts outside every string.
+
+    Returns:
+        ``(change, open_string)``: the count of ``[`` minus the count of ``]`` outside strings and
+        before any comment, and the multi-line string delimiter still open at the line's end, or
+        ``""``.
+
     Example:
         >>> _scan_toml_line('dependencies = [  # "]" in a comment')
         (1, '')
@@ -542,10 +552,19 @@ def _scan_toml_characters(line: str, open_string: str = "") -> _TomlLineScan:
 def _string_end(line: str, start: int, quote: str) -> tuple[int, str]:
     """Where the ``quote``-delimited string that ``line[start:]`` is inside ends, and the quote still open.
 
-    Returns ``(index past its closing delimiter, "")``, or ``(len(line), quote)`` when it runs past
-    the line. Only a basic string (``"``) has backslash escapes; a literal one (``'``) ends at its next
+    Only a basic string (``"``) has backslash escapes; a literal one (``'``) ends at its next
     delimiter. A multi-line string's run of three to five quotes closes it: TOML lets up to two quote
     characters of content sit right before the delimiter (``\"\"\"a\"\"\"\"`` is ``a"``).
+
+    Args:
+        line: The TOML line being scanned.
+        start: The index to scan from; it lies inside the string, past its opening delimiter.
+        quote: The string's delimiter: ``"`` or ``'`` for a single-line string, three of either
+            for a multi-line one.
+
+    Returns:
+        ``(index past its closing delimiter, "")``, or ``(len(line), quote)`` when it runs past the
+        line.
     """
     mark = quote[0]
     index = start
@@ -606,6 +625,13 @@ def extract_requires_python(metadata: str) -> str:
 
 def _requires_python_value(line: str) -> str:
     """The specifier set a ``requires-python`` line (stripped) assigns.
+
+    Args:
+        line: The ``requires-python = ...`` line, its comment prefix and surrounding whitespace
+            already removed.
+
+    Returns:
+        The quoted value with its surrounding whitespace stripped (``">=3.11,<3.14"``).
 
     Raises:
         PackError: When the value is not one quoted string of specifier characters.

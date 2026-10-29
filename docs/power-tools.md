@@ -640,9 +640,9 @@ Details worth knowing:
   the tree again after an unpack. A cache another account can modify, wherever `PWSHPY_PACK_CACHE`,
   `LOCALAPPDATA`, `XDG_CACHE_HOME` or `HOME` put it, stops the run with `pwshpy: refusing the cache
   directory <dir>: <reason>` and exit code 127; a relative `PWSHPY_PACK_CACHE` is judged against
-  the caller's directory. A root run under umask 002 writes a group-writable tree, which the root
-  rule refuses (sudo's default umask is the caller's combined with 022, so a sudo run does not). Both runners
-  serialize a cold-cache extraction with an atomic lock (`FileShare.None` on Windows, a lock file
+  the caller's directory. A root run decides the modes of what it unpacks itself (directories 0755,
+  nothing group- or world-writable), so a caller's umask 002 no longer gets its own unpack refused.
+  Both runners serialize a cold-cache extraction with an atomic lock (`FileShare.None` on Windows, a lock file
   created under `noclobber` on POSIX), so two concurrent first runs never race.
 - **Packing is deterministic**: identical sources produce identical bytes (the `.sh` tar is built
   with fixed mtime/mode/order), so the payload hash is a stable cache key and two builds are

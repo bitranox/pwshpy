@@ -139,11 +139,51 @@ function Get-PwshPyPayload {
     return $bytes
 }
 
+function Set-PwshPyMode {
+    param([string[]] $Arguments)
+
+    # POSIX root run: chmod from the fixed helper PATH, failing loudly (a mode left as the umask made
+    # it would be refused by the trust check later, with a reason that hides this one).
+    & chmod @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "chmod $($Arguments -join ' ') exited $LASTEXITCODE" }
+}
+
+function New-PwshPyDirectory {
+    param([string] $Path, [bool] $Private = $false)
+
+    # Creates the directory $Path and any missing parent. An elevated POSIX run decides the modes of
+    # what it creates ([R6]): 0755 each, 0700 for $Path when $Private, whatever the caller's umask (002
+    # on a host with per-user groups would make them group-writable, which the trust check then refuses,
+    # on this run and every later one). Created with that mode where .NET can (7 and later), so no
+    # moment exists in which another account could add an entry; otherwise set right after creation.
+    if (-not $PwshPyRootPath) {
+        New-Item -ItemType Directory -Force -Path $Path | Out-Null
+        return
+    }
+    $missing = New-Object System.Collections.Generic.List[string]
+    $probe = $Path
+    while ($probe -and -not (Test-Path -LiteralPath $probe)) {
+        $missing.Insert(0, $probe)
+        $probe = Split-Path -Parent $probe
+    }
+    $modeType = 'System.IO.UnixFileMode' -as [type]
+    foreach ($directory in $missing) {
+        $octal = if ($Private -and $directory -eq $Path) { '700' } else { '755' }
+        if ($modeType) {
+            [void][IO.Directory]::CreateDirectory($directory, [Convert]::ToInt32($octal, 8) -as $modeType)
+        } else {
+            [void][IO.Directory]::CreateDirectory($directory)
+        }
+        Set-PwshPyMode -Arguments @($octal, '--', $directory)
+    }
+}
+
 function Expand-PwshPyPayload {
     param([string] $Destination)
 
     if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force }
-    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    # Private while it is written: no other account can reach a file in it before its mode is set.
+    New-PwshPyDirectory -Path $Destination -Private $true
 
     $archive = Join-Path $Destination '.payload.zip'
     [IO.File]::WriteAllBytes($archive, (Get-PwshPyPayload))
@@ -151,6 +191,11 @@ function Expand-PwshPyPayload {
     try { $null = [System.IO.Compression.ZipFile] } catch { Add-Type -AssemblyName System.IO.Compression.FileSystem }
     [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $Destination)
     Remove-Item -LiteralPath $archive -Force
+    if ($PwshPyRootPath) {
+        # What the extraction created took the caller's umask ([R6]); no group or other write anywhere.
+        Set-PwshPyMode -Arguments @('-R', 'go-w', '--', $Destination)
+        Set-PwshPyMode -Arguments @('755', '--', $Destination)
+    }
 }
 
 function Invoke-PwshPyUnpackLocked {
@@ -161,7 +206,7 @@ function Invoke-PwshPyUnpackLocked {
     # process's Remove-Item + re-extract can yank the directory another is already running from.
     # The warm path (a verified tree) never reaches here, so a normal run pays no lock cost.
     $parent = Split-Path -Parent $CacheDir
-    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    New-PwshPyDirectory -Path $parent
     # New-Item -Force does not complain when a FILE sits at that path, and opening the lock under
     # it then raises the same IOException as a held lock, so the loop below would wait out its
     # 60 s and blame another process. Say what is actually wrong instead.
@@ -178,6 +223,8 @@ function Invoke-PwshPyUnpackLocked {
             continue
         }
         try {
+            # The lock file, too, took the caller's umask ([R6]).
+            if ($PwshPyRootPath) { Set-PwshPyMode -Arguments @('go-w', '--', $lockPath) }
             # Double-checked: another process may have finished extracting while we waited.
             if (Test-PwshPyTree -Root $CacheDir) { return }
             Expand-PwshPyPayload -Destination $CacheDir
@@ -1236,7 +1283,7 @@ function Assert-PwshPyCacheTrusted {
     if ($PwshPyOnWindows) {
         $remedy = 'set PWSHPY_PACK_CACHE to a directory only this account, SYSTEM and Administrators can modify, or take every other account''s write access off the path named above'
     } else {
-        $remedy = 'set PWSHPY_PACK_CACHE to a directory only root can modify, or make the path named above root''s alone (chown root, chmod go-w)'
+        $remedy = 'set PWSHPY_PACK_CACHE to a directory only root can modify, or make the path named above root''s alone (chown -R root, chmod -R go-w on it)'
     }
     Write-PwshPyFailure "pwshpy: refusing the cache directory ${Path}: $why (an elevated run unpacks and runs the script only from a directory no other account can modify, nor anything below it): $remedy"
     exit 127

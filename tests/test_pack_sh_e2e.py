@@ -2552,15 +2552,17 @@ def _cache_trust_runner(tmp_path: Path) -> tuple[Path, Path, str]:
     return runner, marker, key.split("'")[1][:16]
 
 
-def _cache_trust_run(shell: list[str], tmp_path: Path, runner: Path, root: Path) -> subprocess.CompletedProcess[str]:
+def _cache_trust_run(
+    shell: list[str], tmp_path: Path, runner: Path, root: Path, *, umask: int = 0o022
+) -> subprocess.CompletedProcess[str]:
     """Run the runner from :func:`_cache_trust_runner` with its pack cache below ``root``.
 
     No managed Python is offered, so a run that gets past the cache check stops later: these tests are
-    about whether the cache was judged. Under umask 022, as sudo runs root (its default umask is the
-    union of the caller's and 022): a host's 002 would make the unpacked tree group-writable.
+    about whether the cache was judged. Under ``umask``: 022 by default, as sudo runs root (its default
+    umask is the union of the caller's and 022); 002 for the test of the runner's own modes ([R6]).
     """
     env = {**_env(tmp_path), "PWSHPY_PACK_CACHE": str(root), **managed_python_env(tmp_path, managed=None)}
-    saved = os.umask(0o022)
+    saved = os.umask(umask)
     try:
         return _run(shell, runner, "--pwshpy-no-install-uv", env=env)
     finally:
@@ -2618,6 +2620,25 @@ def test_as_root_a_cached_file_another_account_can_modify_is_refused(
     assert result.returncode == 127, result.stdout + result.stderr
     assert _CACHE_REFUSAL in result.stderr and "mark.py" in result.stderr, result.stderr
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("umask", [0o002, 0o022], ids=["umask-002", "umask-022-control"])
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_the_runner_decides_the_modes_of_its_unpack(
+    tmp_path: Path, shell_id: str, shell: list[str], umask: int
+) -> None:
+    """[R6]: a root run under the caller's umask 002 (a host with per-user groups, a root login shell)
+    created a group-writable cache directory and tree, which its own check then refused, on that run
+    and on every later one. The runner unpacks under umask 022 itself: no refusal, nothing below the
+    cache root group- or world-writable, and the warm run that follows passes too."""
+    root = _cache_root(tmp_path / "cache-root", mode=0o755)
+    runner, _, key = _cache_trust_runner(tmp_path)
+    for _ in range(2):
+        result = _cache_trust_run(shell, tmp_path, runner, root, umask=umask)
+        assert _CACHE_REFUSAL not in result.stderr, result.stderr
+        assert (root / key / "mark.py").is_file(), result.stdout + result.stderr
+    writable = [path for path in root.rglob("*") if path.lstat().st_mode & 0o022 and not path.is_symlink()]
+    assert writable == [], writable
 
 
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])

@@ -882,7 +882,7 @@ pwshpy_require_trusted_cache() {
     [ -n "$_rc_why" ] || return 0
     _rc_why="$_rc_why (as root the script is unpacked and run only from a directory no other account can"
     _rc_why="$_rc_why modify, nor anything below it): set PWSHPY_PACK_CACHE to a directory only root can"
-    _rc_why="$_rc_why modify, or make the path named above root's alone (chown root, chmod go-w)"
+    _rc_why="$_rc_why modify, or make the path named above root's alone (chown -R root, chmod -R go-w on it)"
     pwshpy_die "refusing the cache directory $PWSHPY_CACHE: $_rc_why" 127
 }
 
@@ -1092,8 +1092,17 @@ if [ "$PWSHPY_CLEAN" = "1" ]; then
     rm -rf "$PWSHPY_CACHE"
 fi
 if ! pwshpy_verify_tree; then
+    # As root the runner decides the modes of what it creates ([R6]): under the caller's umask (002 on a
+    # host with per-user groups) the directories mkdir and tar create would be group-writable, and the
+    # check below would refuse the runner's own unpack, on every later run too. The caller's umask is
+    # back before uv and the script run.
+    if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+        PWSHPY_CALLER_UMASK=$(umask)
+        umask 022
+    fi
     pwshpy_unpack_locked
     if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+        umask "$PWSHPY_CALLER_UMASK"
         pwshpy_require_trusted_cache
     fi
 fi

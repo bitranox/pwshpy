@@ -49,6 +49,15 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   password once (`sudo -v`), then `sudo -n -v` confirms a credential was cached and the relaunch
   runs under `sudo -n`, so sudo never prompts a second time. A sudo that caches nothing
   (`timestamp_timeout=0`) is declined with exit code 77 instead of asking again.
+- Packed runners, root run on Linux and macOS (the `.sh` as root, the `.ps1` elevated): the runner
+  sets the modes of what it unpacks (directories 0755, nothing group- or world-writable). Before, a
+  caller's umask 002 made the unpacked tree group-writable, and the run then refused its own cache
+  with exit code 127, on that run and every later one.
+- Packed `.sh` runner, `--pwshpy-elevate`: the sudo relaunch runs as a child of the runner's shell
+  and exits with its status. Before, it replaced the shell (`exec`), so under sudo's
+  `timestamp_type=ppid` the relaunch found no cached credential and exited 1.
+- Packed `.sh` runner, as root: a relative managed-Python directory is refused (`is not an absolute
+  path`, exit code 127) instead of looping forever while the runner walks up its parents.
 
 ## [1.11.0] 2026-10-29 00:00:55
 

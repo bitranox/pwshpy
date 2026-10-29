@@ -4156,16 +4156,18 @@ def _cache_trust_runner(tmp_path: Path) -> tuple[Path, Path, str]:
     return runner, marker, manifest.payload_sha256[:16]
 
 
-def _cache_trust_run(tmp_path: Path, runner: Path, root: Path) -> subprocess.CompletedProcess[str]:
+def _cache_trust_run(
+    tmp_path: Path, runner: Path, root: Path, *, umask: int = 0o022
+) -> subprocess.CompletedProcess[str]:
     """Run the stand-in from :func:`_cache_trust_runner` with its pack cache below ``root``.
 
     No managed Python is offered, so a run that gets past the cache check stops later: these tests are
-    about whether the cache was judged, not about the run that follows. Under umask 022, as sudo runs
-    root (its default umask is the union of the caller's and 022): a host's 002 would make the unpacked
-    tree group-writable, which the root rule refuses.
+    about whether the cache was judged, not about the run that follows. POSIX: under ``umask``, 022 by
+    default, as sudo runs root (its default umask is the union of the caller's and 022); 002 for the
+    test of the runner's own modes ([R6]).
     """
     env = {"PWSHPY_PACK_CACHE": str(root), **managed_python_env(tmp_path, managed=None)}
-    saved = os.umask(0o022)
+    saved = os.umask(umask)
     try:
         return _run_with_path(tmp_path, runner, path_first=[_UvLocation.directory], env=env)
     finally:
@@ -4213,6 +4215,28 @@ def test_an_elevated_run_refuses_a_cached_file_another_account_can_modify(tmp_pa
     assert result.returncode == 127, result.stdout + result.stderr
     assert _CACHE_REFUSAL in result.stderr and "mark.py" in result.stderr, result.stderr
     assert not marker.exists()
+
+
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("umask", [0o002, 0o022], ids=["umask-002", "umask-022-control"])
+def test_an_elevated_posix_run_decides_the_modes_of_its_unpack(tmp_path: Path, umask: int) -> None:
+    """[R6]: as the .sh root run, an elevated .ps1 run on POSIX under the caller's umask 002 created a
+    group-writable cache root and tree, which its own check then refused, on that run and every later
+    one. The runner sets the modes of what it creates: no refusal, nothing at or below the pack cache
+    root group- or world-writable (the root itself is created by the run), and the warm run passes."""
+    base = tmp_path / "cache-base"
+    base.mkdir()
+    base.chmod(0o755)
+    root = base / "pack-cache"
+    runner, _, key = _cache_trust_runner(tmp_path)
+    for _ in range(2):
+        result = _cache_trust_run(tmp_path, runner, root, umask=umask)
+        assert _CACHE_REFUSAL not in result.stderr, result.stderr
+        assert (root / key / "mark.py").is_file(), result.stdout + result.stderr
+    entries = [root, *root.rglob("*")]
+    writable = [path for path in entries if path.lstat().st_mode & 0o022 and not path.is_symlink()]
+    assert writable == [], writable
 
 
 # --- [156] elevated .ps1 runs of a script with a git source refuse a git older than 2.32 ----------------

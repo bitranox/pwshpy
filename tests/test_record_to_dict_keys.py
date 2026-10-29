@@ -137,7 +137,7 @@ class _Shapes(PSRecord):
 class _Node(PSRecord):
     """A self-referencing record: the walk must terminate and still look inside."""
 
-    children: list[_Node] = Field(default_factory=list)
+    children: tuple[_Node, ...] = ()
     data: dict[str, int] = Field(default_factory=dict)
 
 
@@ -150,7 +150,7 @@ class _Node(PSRecord):
         (_Shapes(maybe={"k" + _BAD: 1}), "maybe"),
         (_Shapes(tagged={"k" + _BAD: 1}), "tagged"),
         (_Shapes(inners=(_Inner(bag={}), _Inner(bag={"k" + _BAD: 1}))), "inners"),
-        (_Node(children=[_Node(children=[_Node(data={"k" + _BAD: 1})])]), "children"),
+        (_Node(children=(_Node(children=(_Node(data={"k" + _BAD: 1}),)),)), "children"),
     ],
     ids=["nested-model", "list-of-any", "optional-dict", "annotated-dict", "tuple-of-models", "recursive"],
 )

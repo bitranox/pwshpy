@@ -23,9 +23,9 @@ line naming a path; :func:`emit_lines`: a file's lines) is written the same way 
 is not a terminal, because a character outside cp1252 raised ``UnicodeEncodeError`` there after
 the work was done; at a terminal it goes through the text layer as before.  A missing stream
 (``None``, as under pythonw or a detached service) drops the output, as ``click.echo`` does.
-Everything else (the human table, status and error lines, ``config``) goes through the text
-layer, which :func:`use_utf8_when_piped` switches to UTF-8 with LF line ends for a piped stream
-when the process starts.
+Everything else (the human table, status and error lines, ``config``'s human view) goes through
+the text layer, which :func:`use_utf8_when_piped` switches to UTF-8 with LF line ends for a piped
+stream when the process starts.
 
 The human table fits a terminal's width. Piped or redirected it is sized to its content up to
 ``_MAX_PIPED_WIDTH`` columns, so no cell is cut: every value is whole, a value without line
@@ -402,21 +402,26 @@ def _render_table(records: Iterable[PSRecord]) -> None:
         )
 
 
-def emit_json(data: object) -> None:
+def emit_json(data: object, *, indent: bool = False) -> None:
     """Render arbitrary (non-record) data as one JSON value, broken-pipe safe.
 
     For .NET / web output that is not a typed :class:`PSRecord` (marshaled PowerShell
-    objects, parsed REST JSON). ``default=str`` keeps it total - a ``SecretStr`` renders
-    masked, a ``datetime`` as ISO text - so it never raises on an exotic value. Text holding a
-    byte that is not valid UTF-8 is written with U+FFFD for that byte, and one ``warning: output``
-    line on stderr names where (never the value).
+    objects, parsed REST JSON) and the merged configuration (``config --format json``).
+    ``default=str`` keeps it total - a ``SecretStr`` renders masked, a ``datetime`` as ISO
+    text - so it never raises on an exotic value. Text holding a byte that is not valid UTF-8
+    is written with U+FFFD for that byte, and one ``warning: output`` line on stderr names
+    where (never the value).
+
+    Args:
+        data: The value to write.
+        indent: Indent by two spaces (``config --format json``); compact otherwise.
 
     Example:
         >>> emit_json({"ok": True, "n": 1})
         {"ok":true,"n":1}
     """
     with _clean_broken_pipe():
-        result = json_bytes(data, default=str)
+        result = json_bytes(data, default=str, indent=indent)
         if result.replaced:
             emit_text(f"warning: {describe_output_replacements(result.replaced)}\n", err=True)
         out = _Utf8Writer(sys.stdout)

@@ -31,6 +31,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - The human table shows a list of records or mappings, such as `get_windows_update`'s
   `category_details`, as `key=value, key=value` of each item's set fields, items joined by `; `,
   instead of a wide Python list-of-dicts repr. `--json` / `--jsonl` are unchanged.
+- `config --format json` writes a byte that is not valid UTF-8 (a POSIX `--set` argument or
+  environment override) as U+FFFD, with one `warning: output field <path>: ...` line on stderr,
+  like every other JSON output. It exited 22 with `TypeError: str is not valid UTF-8: surrogates
+  not allowed`. Its JSON is now written as UTF-8 bytes with LF line ends whatever the console code
+  page, as `--json` is; clean output is otherwise unchanged (the same redacted, two-space indented
+  JSON).
 
 ## [1.11.0] 2026-10-29 00:00:55
 

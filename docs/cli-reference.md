@@ -21,7 +21,7 @@ parseable.
 `--json` and `--jsonl` write UTF-8 bytes with LF line ends on every OS, whatever the console
 code page, `PYTHONIOENCODING` or `PYTHONUTF8` say (JSON is UTF-8 by spec), so a consumer reading
 the pipe decodes it as UTF-8 even from a cp1252 Windows console. The JSON that `run`, `cmdlet`,
-`get_command` and `invoke_rest_method` print is written the same way. So is the text that `exec`
+`get_command`, `invoke_rest_method` and `config --format json` print is written the same way. So is the text that `exec`
 (the program's stdout and stderr), `invoke_web_request` (the response body), `get_content` (the
 file's lines) and `download_file` (its `downloaded URL -> DEST` line) write when piped or redirected:
 a character the console code page cannot hold no longer fails the command after the work was done.
@@ -39,15 +39,16 @@ UTF-8 as well. The JSON
 that `get_known_folder --json`, `run`, `cmdlet`, its wrappers (`get_ad_user`, `get_ad_group`,
 `get_ad_computer`, `get_mailbox`, `get_az_vm`, `get_az_resource_group`) and `invoke_rest_method`
 print follows the same rule, with one `warning: output field <path>: ...` line
-(`warning: output: ...` for a bare string, such as `get_known_folder`'s path). `config --format
-json` does not follow it yet and still fails on such a value. A mapping key
+(`warning: output: ...` for a bare string, such as `get_known_folder`'s path), and so does
+`config --format json` (`warning: output field lib_log_rich.service: ...` for such a `--set` value
+or environment override). A mapping key
 that collides with another once repaired is kept as `<key>~2` (`~3`, ...), and the field paths in a
 warning show each non-ASCII key character as `?`. The original bytes cannot be recovered from the
 JSON; for a single undecodable byte this is what pwsh 7 shows.
 
 Every other line the CLI writes to a piped or redirected stdout or stderr is UTF-8 with LF line ends
 too, on every OS: the human table, the status lines (`wrote`, `created`, `copied`, `moved`,
-`removed`, `registered`, ...), `config` and `config --format json`, and error messages. A value the
+`removed`, `registered`, ...), `config`, and error messages. A value the
 console code page cannot hold (`pwshpy env | more` with a CJK value on German Windows) used to fail
 the command with exit 22 (87 on Windows) after the work was done. A reader that decodes the pipe in
 a legacy code page sees non-ASCII characters as mojibake rather than as an error. At a terminal

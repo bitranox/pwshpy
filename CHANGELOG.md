@@ -34,6 +34,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   as the `.sh` root run already did. Such a git ignores `GIT_CONFIG_GLOBAL` and read the caller's
   global git configuration, whose `core.fsmonitor` or `credential.helper` ran a command elevated.
   `-PwshPyInfo` shows whether the pack recorded a git source.
+- Packed `.ps1` runner, elevated under Windows PowerShell 5.1: a `PATH` directory spelled in its
+  extended-length form (`\\?\C:\...`) is judged by its ACL like `C:\...` and kept on uv's `PATH`
+  when it is private. Before, 5.1 could not walk that spelling and left every such directory off.
 
 ## [1.11.0] 2026-10-29 00:00:55
 

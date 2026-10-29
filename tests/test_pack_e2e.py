@@ -2020,19 +2020,28 @@ def test_an_elevated_run_leaves_a_link_to_a_network_path_off_uvs_path(tmp_path: 
 @_WINDOWS_ONLY
 def test_an_elevated_run_keeps_an_extended_length_local_path_on_uvs_path(tmp_path: Path) -> None:
     """[146] control: ``\\\\?\\C:\\...`` is the long spelling of a local path, so the network rule leaves
-    it to the ACL walk, which keeps a private directory under pwsh 7. Windows PowerShell 5.1 cannot
-    walk that spelling at all (its Join-Path finds no drive in it) and leaves it off for that reason,
-    which fails safe; there the test pins only that the network rule is not what refused it."""
+    it to the ACL walk, which keeps a private directory. [148]: on Windows PowerShell 5.1 too, whose
+    Join-Path finds no drive in that spelling: the walk judges it as ``C:\\...``."""
     entry = "\\\\?\\" + str(_private_dir(tmp_path / "long-bin"))
     runner, uv_dirs = _path_runner(tmp_path, elevated="$true")
     result = _run_with_path(tmp_path, runner, path_first=[entry, *uv_dirs])
     assert result.returncode == 0, result.stdout + result.stderr
+    assert f"pwshpy: leaving {entry} off uv's PATH: " not in result.stderr, result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+def test_an_elevated_run_judges_an_extended_length_path_by_its_acl(tmp_path: Path) -> None:
+    """[148] negative arm: ``\\\\?\\C:\\...`` naming a directory Users may modify is still left off, for its
+    ACL (the reason names the Users grant), on pwsh 7 and Windows PowerShell 5.1 alike."""
+    entry = "\\\\?\\" + str(_user_writable_dir(tmp_path / "long-open-bin"))
+    runner, uv_dirs = _path_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[entry, *uv_dirs])
+    assert result.returncode == 0, result.stdout + result.stderr
     leaving = f"pwshpy: leaving {entry} off uv's PATH: "
-    if Path(str(_PWSH)).stem.lower() == "powershell":
-        refusal = next(line for line in result.stderr.splitlines() if line.startswith(leaving))
-        assert "cannot be judged" in refusal and _NETWORK_PATH not in refusal and _DEVICE_PATH not in refusal, refusal
-        return
-    assert leaving not in result.stderr, result.stderr
+    refusal = next(line for line in result.stderr.splitlines() if line.startswith(leaving))
+    assert f" lets {_SID_USERS[1:]} change it " in refusal, refusal
 
 
 @pytest.mark.local_only

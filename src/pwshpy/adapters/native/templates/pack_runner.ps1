@@ -490,6 +490,17 @@ function Test-PwshPyExecutable {
     return (([string]$mode[3] -cin @('x', 's')) -or ([string]$mode[6] -cin @('x', 's')) -or ([string]$mode[9] -cin @('x', 't')))
 }
 
+function ConvertFrom-PwshPyDriveLongPath {
+    param([string] $Path)
+
+    # Windows: $Path (backslashes) with the extended-length prefix of a drive path dropped, \\?\C:\x as
+    # C:\x, the same file ([148]). Windows PowerShell 5.1 finds no drive in the long spelling, so its
+    # Join-Path fails on every component and a trusted directory would be left off; pwsh 7 reads both.
+    # Only the drive form: any other \\?\ or \\.\ name is refused by Get-PwshPyNetworkDistrust first.
+    if ($Path -match '^\\\\\?\\[A-Za-z]:\\') { return $Path.Substring(4) }
+    return $Path
+}
+
 function Split-PwshPyPath {
     param([string] $Path)
 
@@ -513,7 +524,7 @@ function Get-PwshPyUvDistrust {
     # a link target, judged below.
     $network = Get-PwshPyNetworkDistrust -Path $Path
     if ($network) { return $network }
-    if ($PwshPyOnWindows) { $Path = $Path.Replace('/', '\') }
+    if ($PwshPyOnWindows) { $Path = ConvertFrom-PwshPyDriveLongPath -Path $Path.Replace('/', '\') }
     $current = [IO.Path]::GetPathRoot($Path)
     $rest = New-Object System.Collections.Generic.List[string]
     $rest.AddRange([string[]](Split-PwshPyPath -Path $Path))
@@ -548,7 +559,7 @@ function Get-PwshPyUvDistrust {
             if (Test-PwshPyAbsolutePath -Path $target) {
                 $network = Get-PwshPyNetworkDistrust -Path $target
                 if ($network) { return "the link $next points to ${target}: $network" }
-                if ($PwshPyOnWindows) { $target = $target.Replace('/', '\') }
+                if ($PwshPyOnWindows) { $target = ConvertFrom-PwshPyDriveLongPath -Path $target.Replace('/', '\') }
                 $root = [IO.Path]::GetPathRoot($target)
                 if ($root -ne [IO.Path]::GetPathRoot($current) -and -not $ancestor) { $ancestor = Get-PwshPyAncestorDistrust -Path $root }
                 $current = $root

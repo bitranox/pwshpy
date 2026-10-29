@@ -83,8 +83,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `XDG_DATA_HOME`, with `XDG_STATE_HOME`, `NETRC` and `UV_CREDENTIALS_DIR` unset. Before, they used
   the caller's, which `sudo -E` or `env_keep` hand over, so uv read the caller's netrc and
   credentials and created root-owned directories in the caller's home. The packed script still sees
-  the caller's values; the shim gives back only these variables, whatever the hand-over names, and a
-  run that hands nothing over removes a hand-over the caller's environment preset.
+  the caller's values; the shim gives back only these variables, whatever the hand-over names. A
+  `.ps1` run that hands nothing over removes a hand-over marker the caller's environment preset (its
+  shim runs every time); the `.sh` starts the shim only as root, so a preset marker reaches none.
 - Packed runners, root run on Linux and macOS (the `.sh` as root, the `.ps1` elevated): uv, git and
   the build backends uv runs keep their temporary files in `<home>/.cache/pwshpy-tmp` of the running
   account (mode 0700; `TMPDIR`, `TMP` and `TEMP` all name it, and the packed script gets the

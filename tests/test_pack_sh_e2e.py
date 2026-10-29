@@ -1664,6 +1664,25 @@ def test_as_root_the_script_gets_the_callers_home_back(tmp_path: Path, as_root: 
     assert seen == expected, result.stdout
 
 
+def test_not_root_a_preset_hand_over_marker_takes_nothing_from_the_script(tmp_path: Path) -> None:
+    """[159] round 4, the .sh twin of the .ps1's preset-marker control: a run that is not root hands
+    nothing over, so a hand-over marker the caller's environment carries must not reach a shim, which
+    would remove every name it can restore from the script's environment (no HOME, XDG directories or
+    TMPDIR). The .sh starts the shim only as root (the .ps1 removes the marker instead, its shim runs
+    every time), so the script sees the caller's values. Live: a runner that starts the shim here too
+    fails it."""
+    _needs_managed_python()
+    names = ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "NETRC", "TMPDIR")
+    source = f"import os\nfor name in {names!r}:\n    print('home:' + name + '=' + os.environ.get(name, '<unset>'))\n"
+    runner, uv = _python_runner(tmp_path, as_root=False, source=source)
+    caller = {**_caller_home_env(tmp_path), "TMPDIR": _caller_temp_env(tmp_path)["TMPDIR"]}
+    environment = {**_trust_env(tmp_path, uv.parent), **caller, CALLER_ENV_VAR: "x"}
+    result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    seen = dict(line[5:].split("=", 1) for line in result.stdout.splitlines() if line.startswith("home:"))
+    assert seen == {name: caller[name] for name in names}, result.stdout
+
+
 #: The runner's two ways of fetching uv's installer; a test of the installation replaces both (counted).
 _UV_INSTALLER_FETCHES = (
     "_iu_fetch='curl -LsSf https://astral.sh/uv/install.sh'",

@@ -642,7 +642,10 @@ Details worth knowing:
   caller's `~/.git-credentials` as root (measured). The packed script gets the caller's values back
   from the shim, and a variable the caller had not set is unset again, as it gets the caller's
   `PATH` back. The shim gives back these variables and no others, whatever the hand-over
-  (`PWSHPY_PACK_CALLER`) names, and every other run removes a hand-over the caller preset. An elevated `.ps1` run on Windows keeps the caller's profile variables. The
+  (`PWSHPY_PACK_CALLER`) names. A `.ps1` run that hands nothing over removes a hand-over marker the
+  caller preset, since its shim runs every time; the `.sh` starts the shim only as root, so a
+  marker preset for any other run reaches no shim and changes nothing. An elevated `.ps1` run on
+  Windows keeps the caller's profile variables. The
   system file (`/etc/gitconfig`, or the one below Git
   for Windows' install directory) is the administrators' and still applies. The runner cannot tell
   who set a variable, so an elevated run in a network that reaches the internet only through a proxy

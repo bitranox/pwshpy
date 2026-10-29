@@ -76,9 +76,6 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `get_cim_instance` refuses a class name followed by a line break (`"Win32_Process\n"`) with
   `NativeCallError`, as it refuses any other name that is not letters, digits and underscores; the
   check accepted one trailing newline before.
-
-### Fixed
-
 - A mapping key holding a byte that is not valid UTF-8 (in an open property bag such as
   `CimInstance.properties`, `PSObjectRecord.properties` or `PSInvocationResult.output`) is written
   like such a value: one U+FFFD per undecodable byte, with the `warning:` line naming the record and
@@ -104,9 +101,6 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `config` prints the configuration even when draining the queued log lines first fails: a drain
   that timed out (`TimeoutError`) or ran inside an event loop (`RuntimeError`) ended the command
   with that error instead. Every caller now drains through one guarded helper.
-
-### Fixed
-
 - The `pwshpy` CLI prints a command's error after the log lines the command already wrote, each
   on its own line. Before, an error printed while a log line was still queued could run into it
   on one line (seen on Windows, e.g. `pwshpy get_scheduled_task --task-name 'a\b'`).

@@ -1274,20 +1274,34 @@ function Get-PwshPyEmptyFileDistrust {
     param([string] $Path)
 
     # Why $Path cannot serve an elevated run as an empty file no other account can change, or ''. Makes
-    # the directory and the file when they are missing; the directory is judged before anything is
-    # written in it, so a file is only ever created where no other account can swap it, and an existing
-    # entry is never truncated or deleted (a link there could point at any file the elevated account
-    # may write). A link, a directory or a file with content in its place is refused: only an account
-    # trusted with the directory can have put it there, and removing it is left to that account.
+    # the directory and the file when they are missing. Each directory is judged before anything is
+    # created in it: the one above (the account's data directory), so the directory is only ever created
+    # where no other account can add, swap or redirect an entry ([131]: a link on the way would have it
+    # created at the link's target first), then the directory itself before the file. An existing entry
+    # is never truncated or deleted (a link there could point at any file the elevated account may
+    # write). A link, a directory or a file with content in its place is refused: only an account
+    # trusted with the directory can have put it there, and removing it is left to that account. A
+    # create that fails (a file where the directory belongs, an entry Get-Item does not see) is a
+    # reason too, so the caller refuses with its remedy rather than stopping on the exception.
     $directory = [IO.Path]::GetDirectoryName($Path)
-    $null = [IO.Directory]::CreateDirectory($directory)
+    $why = Get-PwshPyUvDistrust -Path ([IO.Path]::GetDirectoryName($directory)) -Directory $true
+    if ($why) { return $why }
+    try {
+        $null = [IO.Directory]::CreateDirectory($directory)
+    } catch {
+        return "$directory cannot be created ($($_.Exception.Message))"
+    }
     $why = Get-PwshPyUvDistrust -Path $directory -Directory $true
     if ($why) { return $why }
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if (-not $item) {
-        # CreateNew: fails rather than open whatever appeared at the path since it was looked at.
-        [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write).Dispose()
-        $item = Get-Item -LiteralPath $Path -Force
+        try {
+            # CreateNew: fails rather than open whatever appeared at the path since it was looked at.
+            [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write).Dispose()
+            $item = Get-Item -LiteralPath $Path -Force
+        } catch {
+            return "$Path cannot be created ($($_.Exception.Message))"
+        }
     }
     if ($item.LinkType -or $item.PSIsContainer) { return "$Path is not a plain file" }
     if ($item.Length -ne 0) { return "$Path is not empty" }

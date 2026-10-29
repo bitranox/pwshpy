@@ -25,6 +25,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `pwshpy: refusing the cache directory <dir>: <reason>` and exit code 127. Before, a cache
   another account could write (a `PWSHPY_PACK_CACHE`, `LOCALAPPDATA`, `XDG_CACHE_HOME` or `HOME`
   the caller chose) was verified by hash and then run, leaving that account a window to swap a file.
+- Packed `.ps1` runner, elevated on Windows: the account's data directory is judged before the
+  runner creates `pwshpy\empty.gitconfig` below it, so a link on the way no longer gets a directory
+  created at its target, and a create that fails (a file named `pwshpy` in the way) is refused with
+  exit code 127 and the usual remedy instead of stopping with exit code 1 (70 in an elevated child).
 
 ## [1.11.0] 2026-10-29 00:00:55
 

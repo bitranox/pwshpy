@@ -3756,6 +3756,8 @@ def test_an_elevated_run_on_windows_points_git_config_global_at_an_empty_file_of
     planted = _global_git_listing(profile, None)
     assert "pwshpy.probe=planted" in planted.stdout, planted.stdout + planted.stderr
     listing = _global_git_listing(profile, empty)
+    # The exit code too ([131]): a git that cannot read the file prints nothing either, and exits 128.
+    assert listing.returncode == 0, listing.stdout + listing.stderr
     assert listing.stdout == "", listing.stdout + listing.stderr
 
 
@@ -3788,6 +3790,54 @@ def test_an_elevated_run_on_windows_refuses_a_git_config_file_it_cannot_trust(tm
     assert result.returncode == 127, result.stdout + result.stderr
     assert _GIT_GLOBAL_REFUSED in result.stderr and str(empty) in result.stderr, result.stderr
     assert _reported_git_global(result) is None, result.stdout
+
+
+def _junction(link: Path, target: Path) -> None:
+    """Make ``link`` a directory junction to ``target`` (no privilege needed, unlike a symlink)."""
+    result = subprocess.run(  # noqa: S603 - fixed argv; cmd is a system tool
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],  # noqa: S607 - resolved from System32
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.parametrize("where", ["pwshpy-is-a-file", "data-home-linked-to-an-open-directory", "dangling-link"])
+def test_an_elevated_run_on_windows_creates_nothing_where_its_git_config_file_cannot_be_trusted(
+    tmp_path: Path, where: str
+) -> None:
+    """[131]: the data directory is judged before the runner creates its ``pwshpy`` directory there, and
+    a create that fails is refused like any other untrusted git configuration file: exit 127 naming the
+    file, never the bare exception's 1 (or 70 in an elevated child). A data directory that is a junction
+    to a directory Users may modify gets nothing created at the junction's target. A dangling link in
+    the file's place, which Get-Item may not see, is refused as well."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated="$true", source=_ENTRY_REPORTING_GIT_GLOBAL)
+    environment = interpreter_probe_env(tmp_path, managed=managed)
+    home = data_home(tmp_path)
+    home.mkdir(parents=True, exist_ok=True)
+    empty = _empty_git_config(tmp_path)
+    opened = tmp_path / "open-data-home"
+    if where == "pwshpy-is-a-file":
+        empty.parent.write_text("", encoding="utf-8")
+    elif where == "dangling-link":
+        empty.parent.mkdir()
+        os.symlink(tmp_path / "no-such-file", empty)
+    else:
+        shutil.move(str(home), str(opened))
+        _icacls(opened, "/grant", f"{_SID_USERS}:(OI)(CI)M")
+        _junction(home, opened)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=environment, cwd=_clean_cwd(tmp_path))
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert _GIT_GLOBAL_REFUSED in result.stderr and str(empty) in result.stderr, result.stderr
+    assert _reported_git_global(result) is None, result.stdout
+    assert not (opened / "pwshpy").exists(), "the runner created its directory at the junction's target"
 
 
 def _cache_root(path: Path, *, others_can_modify: bool) -> Path:

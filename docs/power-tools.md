@@ -472,7 +472,11 @@ Details worth knowing:
   and a regular file named `.lock` is exempt from the write check (uv creates its lock file mode
   0666 and only ever locks it). On Windows no entry may let an account other than the trusted ones
   change it, with the rights of its kind; a link (symlink or junction) is judged as the link and
-  never followed. One another account can modify stops the run with `refusing uv's managed-Python
+  never followed, so its target must lie inside the directory, where it is judged in turn: a link
+  whose target leaves the directory (as spelled, or where the directory really lies when it is
+  reached through a link), or is a network path, is refused whatever the target's ACL, with `the
+  link <link> points to <target>, outside <dir>`. uv's own minor-version junctions point inside.
+  One another account can modify stops the run with `refusing uv's managed-Python
   directory <dir>: <reason>` (the reason names the entry) and exit code 127, and uv never runs.
   Measured, read only: on a Linux host its two listings took about 0.8 s for 85,640 entries (15
   installs); on a Windows host about 2 to 2.5 s per install under PowerShell 7 and 3 to 3.5 s under

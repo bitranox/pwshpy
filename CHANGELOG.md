@@ -41,6 +41,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   logon script) is now refused like a UNC path (`it is a network path, and an elevated run trusts
   only local paths`), for a `uv`, a `PATH` directory and the directories the run judges; before, its
   ACL, which the share's server reports, was trusted. A drive whose type cannot be read is refused.
+- Packed `.ps1` runner, elevated on Windows: a symlink or junction below uv's managed-Python
+  directory (or the pack cache) whose target leaves that directory, or is a network path, now stops
+  the run with exit code 127 (`the link <link> points to <target>, outside <dir>`). Before, a link
+  was judged only as the link object, so a `.pth` there linking to a file nobody judged ran elevated.
 - Packed runners, `--pwshpy-elevate` / `-PwshPyElevate` on Linux and macOS: sudo is asked for the
   password once (`sudo -v`), then `sudo -n -v` confirms a credential was cached and the relaunch
   runs under `sudo -n`, so sudo never prompts a second time. A sudo that caches nothing

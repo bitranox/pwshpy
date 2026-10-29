@@ -3484,6 +3484,67 @@ def test_an_elevated_run_still_judges_the_found_python_after_the_directory_check
     assert _reported_python(result) is None, result.stdout
 
 
+#: Where a link below the managed-Python directory points ([149]): out of the tree to a directory Users
+#: may modify, out of it to a private one, to this host's own administrative share, and the control, a
+#: sibling inside the tree.
+_TREE_LINK_TARGETS = ("outside-open-file", "outside-private-file", "outside-directory", "share-file", "inside-control")
+
+
+def _link_out_of_tree(tmp_path: Path, planted: Path, where: str) -> Path:
+    """Replace the planted .pth below ``planted`` by a link to a copy of it at ``where``; the link."""
+    (site_packages,) = planted.glob("*/Lib/site-packages")
+    plant = site_packages / "pwshpy_planted.pth"
+    text = plant.read_bytes()
+    plant.unlink()
+    if where == "inside-control":
+        (site_packages / "pwshpy_planted.real").write_bytes(text)
+        plant.symlink_to("pwshpy_planted.real")
+        return plant
+    if where == "outside-directory":
+        outside = _user_writable_dir(tmp_path / "outside-dir")
+        (outside / "pwshpy_planted.pth").write_bytes(text)
+        link = site_packages / "pwshpy_outside"
+        link.symlink_to(outside, target_is_directory=True)
+        return link
+    opened = where == "outside-open-file"
+    holder = _user_writable_dir(tmp_path / "outside") if opened else _private_dir(tmp_path / "outside")
+    (holder / "pwshpy_planted.pth").write_bytes(text)
+    reached = _admin_share(holder) if where == "share-file" else str(holder)
+    plant.symlink_to(reached + "\\pwshpy_planted.pth")
+    return plant
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.parametrize("where", _TREE_LINK_TARGETS)
+def test_an_elevated_run_refuses_a_link_below_the_managed_python_dir_leading_out_of_it(
+    tmp_path: Path, where: str
+) -> None:
+    """[149]: a link below the managed-Python directory is judged as the link object it is, and was never
+    followed, so a .pth there linking out of the tree (to a file another account may modify, or on a
+    share) ran elevated. A link whose target leaves the tree, or is a network path, is now refused before
+    uv runs any Python (exit 127, naming the link), whatever the target's ACL. The control, a link to a
+    sibling inside the tree, runs the plant and the script."""
+    runner, head = _python_runner(tmp_path, elevated="$true")
+    marker = tmp_path / "planted-pth-ran.txt"
+    probe, planted = _planted_python_probe(tmp_path, marker)
+    link = _link_out_of_tree(tmp_path, planted, where)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))
+    if where == "inside-control":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert marker.is_file(), "the control never ran the planted .pth: " + result.stderr
+        return
+    assert not marker.exists(), "uv ran a Python through a link out of the tree elevated: " + marker.read_text()
+    assert result.returncode == 127, result.stdout + result.stderr
+    # The run reaches the tree through the data home's link to it, so the link is named by its place
+    # below the tree.
+    named = f"{os.sep}{link.relative_to(planted)} points to "
+    assert _PYTHON_DIR_REFUSED in result.stderr and named in result.stderr, result.stderr
+    if where == "share-file":
+        assert _NETWORK_PATH in result.stderr, result.stderr
+
+
 @pytest.mark.local_only
 @pytest.mark.os_posix
 @_POSIX_ONLY

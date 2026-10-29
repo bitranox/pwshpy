@@ -1032,19 +1032,104 @@ function ConvertFrom-PwshPyLongPath {
     return $Path
 }
 
+function Resolve-PwshPyLinkedPath {
+    param([string] $Path)
+
+    # Windows: the path the absolute $Path names once every symlink and junction on the way is
+    # followed (up to 40), component by component as Get-PwshPyUvDistrust follows them, or '' when a
+    # link cannot be read. A managed-Python directory reached through a link (a redirected profile, or
+    # the directory itself a link) holds uv's links spelled against where it really lies.
+    $Path = ConvertFrom-PwshPyDriveLongPath -Path $Path.Replace('/', '\')
+    $current = [IO.Path]::GetPathRoot($Path)
+    $rest = New-Object System.Collections.Generic.List[string]
+    $rest.AddRange([string[]](Split-PwshPyPath -Path $Path))
+    $hops = 0
+    while ($rest.Count -gt 0) {
+        $component = $rest[0]
+        $rest.RemoveAt(0)
+        if ($component -eq '.') { continue }
+        if ($component -eq '..') {
+            $parent = [IO.Path]::GetDirectoryName($current)
+            if ($parent) { $current = $parent }
+            continue
+        }
+        $next = Join-Path $current $component
+        $item = Get-Item -LiteralPath $next -Force -ErrorAction SilentlyContinue
+        $linkType = if ($item) { [string]$item.LinkType } else { '' }
+        if ($linkType -ne 'SymbolicLink' -and $linkType -ne 'Junction') {
+            $current = $next
+            continue
+        }
+        $hops++
+        if ($hops -gt 40) { return '' }
+        $target = ([string](@($item.Target)[0])) -replace '^\\\?\?\\', ''
+        if ($PSVersionTable.PSEdition -ne 'Core') { $target = $target -replace '^UNC\\', '\\' }
+        if (-not $target) { return '' }
+        if (Test-PwshPyAbsolutePath -Path $target) {
+            $target = ConvertFrom-PwshPyDriveLongPath -Path $target.Replace('/', '\')
+            $current = [IO.Path]::GetPathRoot($target)
+        }
+        $rest.InsertRange(0, [string[]](Split-PwshPyPath -Path $target))
+    }
+    return $current
+}
+
+function Get-PwshPyTreeLinkDistrust {
+    param([IO.FileSystemInfo] $Link, [string] $Shown, [string] $Tree, [string[]] $Roots)
+
+    # Windows: why the link $Link (a reparse point below the directory $Tree, $Shown in the usual
+    # spelling) must not be passed, or '' ([149]). The tree walk judges a link as the object it is and
+    # never follows it, which is sound only while its target lies inside the tree and is judged there:
+    # a .pth linking out of the tree, to a file nobody judged or to a share, ran elevated (measured on a
+    # Windows 11 test VM). So a link whose target leaves the tree, or is a network path, is refused
+    # whatever the target's ACL. $Roots are the tree's spellings: $Tree itself and the path it names
+    # with every link on the way followed (Resolve-PwshPyLinkedPath). uv's own links stay inside: its
+    # minor-version junctions (cpython-3.12-... to cpython-3.12.13-... beside it) carry an absolute
+    # target in the directory itself (measured on the same VM). Only symlinks and junctions redirect;
+    # any other reparse point (a deduplicated or cloud file) is the file itself and keeps the walk's
+    # ACL verdict.
+    $linkType = [string]$Link.LinkType
+    if ($linkType -ne 'SymbolicLink' -and $linkType -ne 'Junction') { return '' }
+    # As Get-PwshPyUvDistrust reads a target: 5.1 spells one on a share UNC\server\share.
+    $target = ([string](@($Link.Target)[0])) -replace '^\\\?\?\\', ''
+    if ($PSVersionTable.PSEdition -ne 'Core') { $target = $target -replace '^UNC\\', '\\' }
+    if (-not $target) { return "the link $Shown cannot be read" }
+    if (Test-PwshPyAbsolutePath -Path $target) {
+        $network = Get-PwshPyNetworkDistrust -Path $target
+        if ($network) { return "the link $Shown points to ${target}: $network" }
+        $resolved = $target
+    } else {
+        $resolved = Join-Path ([IO.Path]::GetDirectoryName($Shown)) $target
+    }
+    $outside = "the link $Shown points to $target, outside $Tree (an elevated run follows no link out of the directory it judged)"
+    try {
+        $full = [IO.Path]::GetFullPath((ConvertFrom-PwshPyDriveLongPath -Path $resolved.Replace('/', '\'))).TrimEnd('\')
+    } catch {
+        return $outside
+    }
+    foreach ($root in $Roots) {
+        if (-not $root) { continue }
+        $root = $root.TrimEnd('\')
+        if ($full -eq $root -or $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { return '' }
+    }
+    return $outside
+}
+
 function Get-PwshPyWindowsTreeDistrust {
     param([string] $Path)
 
     # Windows half of Get-PwshPyPythonTreeDistrust: every entry below $Path judged with the rights of
     # its kind, as Get-PwshPyLeafDistrust judges one, a link (symlink or junction) as the link object it
     # is (Get-PwshPyLinkDistrust) and never followed: its target inside the directory is judged where
-    # it lies. uv's lock file inherits the directory's ACL here (measured with uv 0.13), so unlike POSIX
+    # it lies, and one outside it, or on a share, is refused (Get-PwshPyTreeLinkDistrust). uv's lock file inherits the directory's ACL here (measured with uv 0.13), so unlike POSIX
     # no entry is exempt. The trusted SIDs are asked for once, and a verdict is kept per distinct owner
     # and DACL (their SDDL) and kind: the entries of an install share a few, so most are judged by a
     # lookup (measured on a Windows 11 test VM, five installs: see Get-PwshPyPythonTreeDistrust).
     $trusted = Get-PwshPyTrustedSid
     $sections = [Security.AccessControl.AccessControlSections]'Access, Owner'
     $verdicts = @{}
+    # Where a link below may point: inside the tree, as spelled or as it really lies.
+    $roots = @([IO.Path]::GetFullPath($Path), (Resolve-PwshPyLinkedPath -Path ([IO.Path]::GetFullPath($Path))))
     # Walked in the extended-length form, so a path past MAX_PATH reads on 5.1 too.
     $stack = New-Object System.Collections.Generic.Stack[IO.DirectoryInfo]
     $stack.Push((New-Object IO.DirectoryInfo (ConvertTo-PwshPyLongPath -Path $Path)))
@@ -1065,6 +1150,7 @@ function Get-PwshPyWindowsTreeDistrust {
                     return "the ACL of $shown cannot be read ($($_.Exception.Message))"
                 }
                 $why = Get-PwshPyAclDistrust -Path $shown -Rights $PwshPyAncestorWriteRights -Security $security -Trusted $trusted
+                if (-not $why) { $why = Get-PwshPyTreeLinkDistrust -Link $child -Shown $shown -Tree $Path -Roots $roots }
             } else {
                 $isDirectory = $child -is [IO.DirectoryInfo]
                 try {

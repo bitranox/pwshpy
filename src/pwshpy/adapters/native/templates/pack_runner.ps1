@@ -142,7 +142,7 @@ function Get-PwshPyPayload {
     return $bytes
 }
 
-function Set-PwshPyMode {
+function Invoke-PwshPyChmod {
     param([string[]] $Arguments)
 
     # POSIX root run: chmod from the fixed helper PATH, failing loudly (a mode left as the umask made
@@ -151,7 +151,7 @@ function Set-PwshPyMode {
     if ($LASTEXITCODE -ne 0) { throw "chmod $($Arguments -join ' ') exited $LASTEXITCODE" }
 }
 
-function New-PwshPyDirectory {
+function Initialize-PwshPyDirectory {
     param([string] $Path, [bool] $Private = $false)
 
     # Creates the directory $Path and any missing parent. An elevated POSIX run decides the modes of
@@ -177,7 +177,7 @@ function New-PwshPyDirectory {
         } else {
             [void][IO.Directory]::CreateDirectory($directory)
         }
-        Set-PwshPyMode -Arguments @($octal, '--', $directory)
+        Invoke-PwshPyChmod -Arguments @($octal, '--', $directory)
     }
 }
 
@@ -186,7 +186,7 @@ function Expand-PwshPyPayload {
 
     if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force }
     # Private while it is written: no other account can reach a file in it before its mode is set.
-    New-PwshPyDirectory -Path $Destination -Private $true
+    Initialize-PwshPyDirectory -Path $Destination -Private $true
 
     $archive = Join-Path $Destination '.payload.zip'
     [IO.File]::WriteAllBytes($archive, (Get-PwshPyPayload))
@@ -196,8 +196,8 @@ function Expand-PwshPyPayload {
     Remove-Item -LiteralPath $archive -Force
     if ($PwshPyRootPath) {
         # What the extraction created took the caller's umask ([R6]); no group or other write anywhere.
-        Set-PwshPyMode -Arguments @('-R', 'go-w', '--', $Destination)
-        Set-PwshPyMode -Arguments @('755', '--', $Destination)
+        Invoke-PwshPyChmod -Arguments @('-R', 'go-w', '--', $Destination)
+        Invoke-PwshPyChmod -Arguments @('755', '--', $Destination)
     }
 }
 
@@ -209,7 +209,7 @@ function Invoke-PwshPyUnpackLocked {
     # process's Remove-Item + re-extract can yank the directory another is already running from.
     # The warm path (a verified tree) never reaches here, so a normal run pays no lock cost.
     $parent = Split-Path -Parent $CacheDir
-    New-PwshPyDirectory -Path $parent
+    Initialize-PwshPyDirectory -Path $parent
     # New-Item -Force does not complain when a FILE sits at that path, and opening the lock under
     # it then raises the same IOException as a held lock, so the loop below would wait out its
     # 60 s and blame another process. Say what is actually wrong instead.
@@ -227,7 +227,7 @@ function Invoke-PwshPyUnpackLocked {
         }
         try {
             # The lock file, too, took the caller's umask ([R6]).
-            if ($PwshPyRootPath) { Set-PwshPyMode -Arguments @('go-w', '--', $lockPath) }
+            if ($PwshPyRootPath) { Invoke-PwshPyChmod -Arguments @('go-w', '--', $lockPath) }
             # Double-checked: another process may have finished extracting while we waited.
             if (Test-PwshPyTree -Root $CacheDir) { return }
             Expand-PwshPyPayload -Destination $CacheDir
@@ -802,7 +802,7 @@ function Get-PwshPyGitKindDistrust {
     return 'it is not a program an elevated run asks for its version (a .exe, .com, .cmd or .bat), and uv would run it for a git source: install git as a program, or run the script without elevation'
 }
 
-function New-PwshPyStderrFile {
+function Initialize-PwshPyStderrFile {
     # A new empty file for a native program's stderr, its path returned. [IO.Path]::GetTempFileName()
     # places it in TMPDIR, which an elevated POSIX run got from the caller (sudo -E, env_keep): in a
     # directory the caller can write, an entry the caller swaps in at that name (a link) would have root
@@ -812,9 +812,9 @@ function New-PwshPyStderrFile {
     # own, and an elevated Windows run's TEMP is the elevated token's profile.
     if (-not $PwshPyRootPath) { return [IO.Path]::GetTempFileName() }
     $directory = Join-Path (Get-PwshPyAccountCacheHome) 'pwshpy-tmp'
-    New-PwshPyDirectory -Path $directory -Private $true
+    Initialize-PwshPyDirectory -Path $directory -Private $true
     # An existing one too: whatever made it, from here only root can enter it.
-    Set-PwshPyMode -Arguments @('700', '--', $directory)
+    Invoke-PwshPyChmod -Arguments @('700', '--', $directory)
     $path = Join-Path $directory ([Guid]::NewGuid().ToString('N'))
     [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None).Dispose()
     return $path
@@ -831,7 +831,7 @@ function Get-PwshPyGitVersionDistrust {
     # as the .sh: a git printing a warning before its "git version" line names no version here.
     # 'Continue' for the call: with 'Stop', Windows PowerShell 5.1 stops at the first line a native
     # program writes to a redirected stderr.
-    $stderr = New-PwshPyStderrFile
+    $stderr = Initialize-PwshPyStderrFile
     $saved = $ErrorActionPreference
     $first = ''
     try {
@@ -1076,7 +1076,7 @@ function Invoke-PwshPyUvPython {
     # redirected stderr, so the call runs under 'Continue'.
     $words = @('python') + $Arguments + @('--no-config', '--directory', (Get-PwshPyAnchorDirectory))
     if ($PwshPyPythonRequest) { $words += $PwshPyPythonRequest }
-    $stderr = New-PwshPyStderrFile
+    $stderr = Initialize-PwshPyStderrFile
     $saved = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'

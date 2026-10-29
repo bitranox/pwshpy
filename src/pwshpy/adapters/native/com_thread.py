@@ -50,6 +50,12 @@ def run_in_com_thread(work: Callable[[], _T], *, load: Callable[[str], Any] | No
     The caller blocks until the worker ends. Nothing COM-related runs on the caller's thread
     beyond loading ``pythoncom``.
 
+    The wait has no timeout, by design: a timeout could only abandon the worker, not stop it, and
+    an abandoned worker would still hold the COM objects and the apartment the work is using. The
+    work passed here is bounded (one shortcut save or read, no network or user prompt), so a hang
+    is a hung COM call, which a timeout would hide rather than end. The worker is a daemon
+    thread, so it never keeps the process alive at exit.
+
     Args:
         work: A callable taking no arguments. Every COM object it makes must stay local to it;
             its return value must not be a COM object (it outlives the apartment).

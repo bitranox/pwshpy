@@ -81,7 +81,13 @@ def owned_by_another_account(path: Path) -> int:
 
 
 def write_fake_sudo(
-    bin_dir: Path, *, grant: bool, cached: bool = True, per_parent: bool = False, calls: Path | None = None
+    bin_dir: Path,
+    *,
+    grant: bool,
+    cached: bool = True,
+    per_parent: bool = False,
+    calls: Path | None = None,
+    interrupt_prompt: bool = False,
 ) -> Path:
     """Write a ``sudo`` double into ``bin_dir`` (put it first on PATH); its path.
 
@@ -98,6 +104,11 @@ def write_fake_sudo(
         per_parent: Model ``timestamp_type=ppid``: the credential ``-v`` caches belongs to the parent
             process of that call, so ``-n`` finds it only when called from the same parent.
         calls: The call log (default ``<bin_dir>/sudo-calls.txt``).
+        interrupt_prompt: Play a Ctrl+C at the ``sudo -v`` prompt: send SIGINT to the calling process,
+            wait two seconds, exit 1 without granting (no credential owner is recorded, so a
+            ``per_parent`` ``-n`` afterwards fails). A terminal sends SIGINT to the whole foreground
+            group, so the caller receives it as well as sudo (the measurement ``tests/test_elevation.py``
+            records: real sudo 1.9.15p5 in a pty on Ubuntu 24.04).
 
     Returns:
         The written double.
@@ -123,6 +134,7 @@ def write_fake_sudo(
         '    exec "$@"',
         "fi",
         'if [ "$1" = "-v" ]; then',
+        f'    if [ {int(interrupt_prompt)} = 1 ]; then kill -INT "$PPID"; sleep 2; exit 1; fi',
         f"    if [ {int(grant)} != 1 ]; then exit 1; fi",
         f"    printf '%s' \"$PPID\" > '{owner}'",
         "    exit 0",

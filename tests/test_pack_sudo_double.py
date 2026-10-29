@@ -49,6 +49,25 @@ def test_the_double_refuses_the_prompt_when_not_granted(tmp_path: Path) -> None:
 
 @_POSIX_ONLY
 @pytest.mark.os_posix
+@pytest.mark.parametrize("interrupt", [True, False], ids=["interrupted", "not-interrupted-control"])
+def test_an_interrupted_prompt_signals_the_caller_and_grants_nothing(tmp_path: Path, interrupt: bool) -> None:
+    """``interrupt_prompt``: ``-v`` sends SIGINT to its caller and exits 1 without recording a credential,
+    so a ``per_parent`` ``-n`` from the same shell fails; the control grants and signals nothing."""
+    sudo = write_fake_sudo(tmp_path, grant=True, per_parent=True, interrupt_prompt=interrupt)
+    script = f"trap 'echo INT; exit 7' INT; '{sudo}' -v; echo \"v=$?\"; '{sudo}' -n true; echo \"n=$?\""
+    result = subprocess.run(  # noqa: S603 - fixed argv, the double
+        ["/bin/sh", "-c", script], capture_output=True, text=True, check=False, timeout=30
+    )
+    if interrupt:
+        assert (result.returncode, result.stdout) == (7, "INT\n"), result.stderr
+        assert (tmp_path / "sudo-calls.txt").read_text(encoding="utf-8").splitlines() == ["-v"]
+        assert not (tmp_path / "sudo-credential-parent").exists()
+    else:
+        assert (result.returncode, result.stdout) == (0, "v=0\nn=0\n"), result.stderr
+
+
+@_POSIX_ONLY
+@pytest.mark.os_posix
 def test_per_parent_the_credential_belongs_to_the_process_that_prompted(tmp_path: Path) -> None:
     """``timestamp_type=ppid``: ``-n`` from the shell that ran ``-v`` finds the credential, ``-n`` from a
     different parent (this test process, or a shell exec'd into sudo) does not."""

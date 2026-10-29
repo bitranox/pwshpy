@@ -2826,8 +2826,13 @@ def _one_install(managed: Path | None) -> Path | None:
     :func:`trusted_managed_python` answers on Windows, holds every install the developer has: five on
     the dev VM, paid by each elevated test. The run uses one, so a session copy holds just that one,
     its files hard links to the host's (read only; their ACLs are the host's, which the walk trusts)
-    and its directories new below this account's temp directory. Elsewhere ``managed`` already is
-    such a copy (one install, made once per session) and is returned as it is.
+    and its directories new below this account's temp directory. uv's own links to that install, the
+    minor-version junctions beside it (cpython-3.12-... to cpython-3.12.13-...), are made again in the
+    copy, spelled as uv spells them (an absolute target in the directory itself), so the walk meets
+    every link kind it meets on the host ([R4]); the directories' ACLs are the temp directory's, which
+    :func:`test_an_elevated_run_accepts_the_hosts_own_managed_python_directory_as_it_is` covers by
+    walking the host's directory unmodified. Elsewhere ``managed`` already is such a copy (one
+    install, made once per session) and is returned as it is.
     """
     if managed is None or sys.platform != "win32":
         return managed
@@ -2838,7 +2843,27 @@ def _one_install(managed: Path | None) -> Path | None:
     atexit.register(shutil.rmtree, root.parent, ignore_errors=True)
     root.mkdir()
     shutil.copytree(picked, root / picked.name, symlinks=True, copy_function=_hard_link_or_copy)
+    for name in _junctions_to(managed, picked):
+        _junction(root / name, root / picked.name)
     return root
+
+
+def _junctions_to(managed: Path, install: Path) -> list[str]:
+    """The names of the entries of ``managed`` that are directory junctions to ``install``.
+
+    A junction is no symlink to pathlib, but Path.readlink reads its target (as ``\\\\?\\C:\\...``).
+    """
+    wanted = os.path.normcase(str(install.resolve()))
+    return [entry.name for entry in managed.iterdir() if not entry.is_symlink() and _junction_target(entry) == wanted]
+
+
+def _junction_target(entry: Path) -> str | None:
+    """The normcased, resolved target of the junction ``entry``, or None when it is no link."""
+    try:
+        target = str(entry.readlink())
+    except OSError:
+        return None
+    return os.path.normcase(str(Path(target.removeprefix("\\\\?\\")).resolve()))
 
 
 def _picked_install(managed: Path) -> Path | None:
@@ -4326,6 +4351,24 @@ def test_an_elevated_posix_run_writes_no_stderr_file_in_the_callers_tmpdir(tmp_p
     if own.is_dir():
         assert own.stat().st_mode & 0o777 == 0o700
         assert list(own.iterdir()) == [], "a stderr file was left behind"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+def test_an_elevated_run_accepts_the_hosts_own_managed_python_directory_as_it_is(tmp_path: Path) -> None:
+    """[R4]: every other elevated test runs on a one-install copy (:func:`_one_install`), whose
+    directories carry the temp directory's ACLs. This one hands the run the host's own directory
+    unmodified, every install, uv's minor-version junctions and the ACLs uv left, so a walk rule that
+    refuses what uv itself writes cannot stay green on the copy alone."""
+    managed = trusted_managed_python()
+    if managed is None:
+        pytest.skip("this host has no uv-managed Python (and the test must not download one)")
+    runner, head = _python_runner(tmp_path, elevated="$true")
+    environment = interpreter_probe_env(tmp_path, managed=managed)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=environment, cwd=_clean_cwd(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _reported_python(result) is not None, result.stdout
 
 
 def _caller_home_env(tmp_path: Path) -> dict[str, str]:

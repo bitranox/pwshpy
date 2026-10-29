@@ -25,6 +25,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `UnicodeEncodeError`, and a key of the bag itself was silently rewritten into three U+FFFD, so two
   keys differing only in their bad bytes collapsed into one entry. `PSRecord.to_dict()` now keeps such
   a key as it is, exactly as it keeps such a value; a record without one dumps as before.
+- The human table writes a byte that is not valid UTF-8 as U+FFFD, like `--json` / `--jsonl`, with
+  the same `warning: <Record> record N, field <path>: ...` line on stderr. `pwshpy env > file` with
+  such a value wrote the raw byte, so the file was not valid UTF-8 and disagreed with the JSON.
+- The human table shows a list of records or mappings, such as `get_windows_update`'s
+  `category_details`, as `key=value, key=value` of each item's set fields, items joined by `; `,
+  instead of a wide Python list-of-dicts repr. `--json` / `--jsonl` are unchanged.
 
 ## [1.11.0] 2026-10-29 00:00:55
 

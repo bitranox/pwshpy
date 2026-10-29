@@ -24,6 +24,7 @@ Contents:
     * :class:`JsonBytes` - the JSON bytes plus the replaced paths.
     * :func:`json_bytes` - dump a plain value, repairing lone surrogates.
     * :func:`record_json_bytes` - dump one record, repairing lone surrogates.
+    * :class:`Repaired` / :func:`repair_surrogates` - the same repair for output that is not JSON.
     * :func:`describe_replacements` / :func:`describe_output_replacements` - the warning text.
 """
 
@@ -97,6 +98,47 @@ def json_bytes(value: object, *, default: Default | None = None) -> JsonBytes:
             raise
     # dict.fromkeys: a key and its value can both be replaced and would name one path twice.
     return JsonBytes(orjson.dumps(repaired, default=default), tuple(dict.fromkeys(repairer.paths)))
+
+
+class Repaired(NamedTuple):
+    """A value with its lone surrogates written as U+FFFD, and the dotted paths that held one.
+
+    Example:
+        >>> Repaired("x", ()).replaced
+        ()
+    """
+
+    value: object
+    replaced: tuple[str, ...]
+
+
+def repair_surrogates(value: object) -> Repaired:
+    """``value`` with each lone surrogate written as U+FFFD, for output that is not JSON (the human table).
+
+    The same rule and the same paths as :func:`json_bytes`: strings and mapping keys at any depth,
+    one U+FFFD per undecodable byte, a colliding repaired key kept as ``<key>~2``. A tuple comes
+    back as a list, as in JSON. When nothing held a surrogate, ``value`` itself is returned.
+
+    Args:
+        value: Plain data: dicts, lists, tuples, strings and scalars (``PSRecord.to_dict()``).
+
+    Returns:
+        The repaired value and the replaced ASCII paths, each once, in order; ``value`` and ``()``
+        when nothing was replaced.
+
+    Example:
+        >>> result = repair_surrogates({"value": "a" + chr(0xDCFF)})
+        >>> result.value == {"value": "a" + chr(0xFFFD)}, result.replaced
+        (True, ('value',))
+        >>> clean = {"value": "a"}
+        >>> repair_surrogates(clean).value is clean
+        True
+    """
+    repairer = _Repairer(None)
+    repaired = repairer.value(value, "")
+    if not repairer.paths:
+        return Repaired(value, ())
+    return Repaired(repaired, tuple(dict.fromkeys(repairer.paths)))
 
 
 def record_json_bytes(record: PSRecord) -> JsonBytes:
@@ -235,8 +277,10 @@ def _join(path: str, segment: str) -> str:
 
 __all__ = [
     "JsonBytes",
+    "Repaired",
     "describe_output_replacements",
     "describe_replacements",
     "json_bytes",
     "record_json_bytes",
+    "repair_surrogates",
 ]

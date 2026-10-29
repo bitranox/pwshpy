@@ -33,7 +33,9 @@ A record field holding a byte that is not valid UTF-8 (a POSIX environment varia
 or account name) is written with U+FFFD for each such byte, so `--json` / `--jsonl` stay valid UTF-8
 JSON and the stream goes on, exit 0; one line per affected record on stderr names the record type,
 its position and the field, never the value (`warning: EnvVar record 7, field value: not valid
-UTF-8; each undecodable byte written as U+FFFD`; `fields name, value` when several are). The JSON
+UTF-8; each undecodable byte written as U+FFFD`; `fields name, value` when several are). The human
+table writes such a byte as U+FFFD too, with the same warning line, so `pwshpy env > file` is valid
+UTF-8 as well. The JSON
 that `get_known_folder --json`, `run`, `cmdlet`, its wrappers (`get_ad_user`, `get_ad_group`,
 `get_ad_computer`, `get_mailbox`, `get_az_vm`, `get_az_resource_group`) and `invoke_rest_method`
 print follows the same rule, with one `warning: output field <path>: ...` line
@@ -59,7 +61,10 @@ characters, breaking a value that holds spaces at a space. The table is for read
 when a script needs a value's exact bytes. An explicit `COLUMNS` in
 the environment still sets the width in both cases. Piped or redirected, the table's frame is ASCII
 (`+`, `-`, `|`) on every OS, so a reader that decodes the pipe in a legacy code page never garbles
-it; at a terminal the table keeps its box-drawing frame.
+it; at a terminal the table keeps its box-drawing frame. A nested record (`get_scheduled_task`'s
+`settings`) reads as `key=value, key=value` of its set fields, and a list of records or mappings
+(`get_windows_update`'s `category_details`) as one such group per item, joined by `; `; any other
+list or mapping prints as it is.
 
 **Everywhere** - one binding on Windows, macOS and Linux:
 

@@ -14,7 +14,7 @@ dependencies = [
     "lib_log_rich>=8.1.2",
     # Imported directly (adapters/logging/setup.py reads the LOG_* lines of a .env itself).
     "python-dotenv>=1.2.4",
-    "lib_layered_config>=7.3.0",
+    "lib_layered_config>=7.4.0",
     "pydantic>=2.14.1",
     "orjson>=3.13.0",
     "psutil>=7.2.2",

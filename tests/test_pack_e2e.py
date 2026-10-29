@@ -20,13 +20,16 @@ and the uv-absent test (it blanks ``PATH``/``HOME``, which can break process cre
 
 from __future__ import annotations
 
+import atexit
 import ctypes
+import functools
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
@@ -2749,10 +2752,72 @@ def _clean_cwd(tmp_path: Path) -> Path:
 
 
 def _needs_managed_python() -> Path:
-    managed = trusted_managed_python()
+    managed = _one_install(trusted_managed_python())
     if managed is None:
         pytest.skip("this host has no uv-managed Python (and the test must not download one)")
     return managed
+
+
+@functools.lru_cache(maxsize=1)
+def _one_install(managed: Path | None) -> Path | None:
+    """On Windows, a managed-Python directory holding only the install uv picks from ``managed``.
+
+    [114]: an elevated run walks every entry below the managed-Python directory before uv starts,
+    about 2 to 3.5 s per install (docs/power-tools.md), and the host's own directory, which
+    :func:`trusted_managed_python` answers on Windows, holds every install the developer has: five on
+    the dev VM, paid by each elevated test. The run uses one, so a session copy holds just that one,
+    its files hard links to the host's (read only; their ACLs are the host's, which the walk trusts)
+    and its directories new below this account's temp directory. Elsewhere ``managed`` already is
+    such a copy (one install, made once per session) and is returned as it is.
+    """
+    if managed is None or sys.platform != "win32":
+        return managed
+    picked = _picked_install(managed)
+    if picked is None:
+        return managed
+    root = Path(tempfile.mkdtemp(prefix="pwshpy-one-install-")) / "managed"
+    atexit.register(shutil.rmtree, root.parent, ignore_errors=True)
+    root.mkdir()
+    shutil.copytree(picked, root / picked.name, symlinks=True, copy_function=_hard_link_or_copy)
+    return root
+
+
+def _picked_install(managed: Path) -> Path | None:
+    """The install below ``managed`` that uv picks for an elevated run (only-managed), or None.
+
+    Asked with downloads off, in a cache of its own that is deleted again, as the doubles ask uv.
+    """
+    if _UV is None:
+        return None
+    with tempfile.TemporaryDirectory(prefix="pwshpy-uv-ask-", ignore_cleanup_errors=True) as cache:
+        environment = {k: v for k, v in os.environ.items() if k not in INTERPRETER_VARIABLES}
+        environment.update(
+            {"UV_PYTHON_INSTALL_DIR": str(managed), "UV_PYTHON_DOWNLOADS": "never", "UV_CACHE_DIR": cache}
+        )
+        found = subprocess.run(  # noqa: S603 - fixed argv from a resolved uv
+            [_UV, "python", "find", "--system", "--no-project", "--python-preference", "only-managed"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+            env=environment,
+            cwd=Path(_UV).parent,
+        )
+    if found.returncode != 0:
+        return None
+    root = managed.resolve()
+    executable = Path(found.stdout.strip()).resolve()
+    return next((parent for parent in executable.parents if parent.parent == root), None)
+
+
+def _hard_link_or_copy(source: str, destination: str) -> str:
+    """Hard-link ``source`` to ``destination`` (no second copy of an install), else copy it."""
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+    return destination
 
 
 @pytest.mark.local_only

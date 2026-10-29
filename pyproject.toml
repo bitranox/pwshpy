@@ -329,6 +329,24 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+# The library side never reaches into the CLI: `import pwshpy` must not load the command modules
+# (composition -> display_config -> ...), and a config -> cli import closed a cycle back into config.
+name = "The library side never imports the CLI adapter"
+type = "forbidden"
+source_modules = [
+  "pwshpy.composition",
+  "pwshpy.adapters.config",
+  "pwshpy.adapters.logging",
+  "pwshpy.adapters.memory",
+  "pwshpy.adapters.native",
+  "pwshpy.adapters.powershell",
+  "pwshpy.adapters.stdio",
+]
+forbidden_modules = [
+  "pwshpy.adapters.cli",
+]
+
+[[tool.importlinter.contracts]]
 name = "Clean Architecture layers"
 type = "layers"
 layers = [

@@ -36,24 +36,22 @@ value literally: a value that looks like rich markup or an emoji code is shown a
 Contents:
     * :class:`RecordFormat` - human / json / jsonl selector.
     * :func:`emit` - render an iterable of records in the chosen format.
-    * :func:`emit_text` - pass a text body through, UTF-8 when piped.
+    * :func:`emit_text` / :func:`emit_json` - re-exported from :mod:`pwshpy.adapters.stdio`, which
+      holds the writers the configuration adapter shares without importing this package.
     * :func:`emit_lines` - stream text lines, UTF-8 when piped.
     * :func:`use_utf8_when_piped` - switch a piped stdout/stderr to UTF-8 with LF, at process start.
 """
 
 from __future__ import annotations
 
-import contextlib
 import enum
-import errno
 import io
 import itertools
 import os
 import sys
-from collections.abc import Generator, Iterable, Mapping
-from typing import Any, BinaryIO, TextIO, cast
+from collections.abc import Iterable, Mapping
+from typing import Any, TextIO, cast
 
-import rich_click as click
 from pydantic import BaseModel
 from rich import box
 from rich.console import Console
@@ -62,18 +60,8 @@ from rich.table import Table
 from rich.text import Text
 
 from ...domain.records import PSRecord
-from ..native.record_json import (
-    describe_output_replacements,
-    describe_replacements,
-    json_bytes,
-    record_json_bytes,
-    repair_record,
-)
-
-#: Windows error codes for a downstream reader closing the pipe: ERROR_BROKEN_PIPE (109)
-#: and ERROR_NO_DATA (232, "the pipe is being closed"). On Windows these surface as a
-#: plain ``OSError``, not ``BrokenPipeError``.
-_WINDOWS_PIPE_CLOSED = frozenset({109, 232})
+from ..native.record_json import describe_replacements, record_json_bytes, repair_record
+from ..stdio import Utf8Writer, clean_broken_pipe, emit_json, emit_text, is_pipe_closed, is_terminal
 
 #: Soft cap on rows rendered by the human table (which cannot stream). Beyond this,
 #: the table is truncated and the user is pointed at --jsonl / --limit. Streaming
@@ -99,91 +87,6 @@ class RecordFormat(enum.Enum):
     JSONL = "jsonl"
 
 
-def is_pipe_closed(exc: OSError) -> bool:
-    """Whether ``exc`` means a downstream reader closed the pipe (POSIX or Windows).
-
-    POSIX raises ``BrokenPipeError`` (errno ``EPIPE``); Windows raises a plain
-    ``OSError`` carrying ``winerror`` 109/232. Anything else (e.g. ``ENOSPC``) is a
-    genuine write failure and must NOT be swallowed.
-
-    Example:
-        >>> is_pipe_closed(BrokenPipeError())
-        True
-        >>> is_pipe_closed(OSError(errno.ENOSPC, "no space"))
-        False
-    """
-    if isinstance(exc, BrokenPipeError):
-        return True
-    if getattr(exc, "winerror", None) in _WINDOWS_PIPE_CLOSED:
-        return True
-    return exc.errno == errno.EPIPE
-
-
-def _redirect_stdout_to_devnull() -> None:
-    """Point the real stdout fd at the null device so the shutdown flush is silent."""
-    devnull = os.open(os.devnull, os.O_WRONLY)
-    os.dup2(devnull, sys.stdout.fileno())
-
-
-@contextlib.contextmanager
-def _clean_broken_pipe() -> Generator[None, None, None]:
-    """Exit cleanly when a downstream reader closes the pipe (e.g. ``| head``).
-
-    On a pipe-closed error (POSIX ``BrokenPipeError`` OR the Windows ``OSError``
-    variant), redirect the real stdout fd to the null device so the interpreter's
-    shutdown flush does not re-raise, then return normally (exit 0). Genuine write
-    errors (disk full, etc.) propagate unchanged.
-    """
-    try:
-        yield
-    except OSError as exc:
-        if not is_pipe_closed(exc):
-            raise
-        _redirect_stdout_to_devnull()
-
-
-class _Utf8Writer:
-    """UTF-8 byte writer for a text stream that bypasses the stream's encoding.
-
-    Writes go to the stream's ``buffer`` so the bytes are UTF-8 whatever encoding the
-    text layer was opened with. Whatever the text layer still holds is flushed first,
-    so earlier text output stays ahead of the bytes. A stream with no ``buffer`` (a
-    ``StringIO`` stand-in, doctest's capture) has no encoding step to bypass, so the
-    UTF-8 is decoded and written as text there. A ``None`` stream (``sys.stderr`` or
-    ``sys.stdout`` under pythonw or a detached service) drops every write, as
-    ``click.echo`` does; the stream is required rather than defaulted so a missing
-    stderr can never fall back to stdout and mix a child's errors into its output.
-
-    Args:
-        stream: The text stream to write below, or ``None`` when there is none.
-
-    Example:
-        >>> out = _Utf8Writer(sys.stdout)
-        >>> out.write(b"ok\\n"); out.flush()
-        ok
-    """
-
-    def __init__(self, stream: TextIO | None) -> None:
-        self._text = stream
-        self._binary: BinaryIO | None = None if stream is None else getattr(stream, "buffer", None)
-        if stream is not None and self._binary is not None:
-            stream.flush()
-
-    def write(self, data: bytes) -> None:
-        """Write UTF-8 ``data`` to the stream (nothing when there is no stream)."""
-        if self._binary is not None:
-            self._binary.write(data)
-        elif self._text is not None:
-            self._text.write(data.decode("utf-8"))
-
-    def flush(self) -> None:
-        """Flush the stream the bytes went to (nothing when there is no stream)."""
-        if self._binary is not None:
-            self._binary.flush()
-        elif self._text is not None:
-            self._text.flush()
-
-
 def _dumps(record: PSRecord, position: int) -> bytes:
     # record_json_bytes, not record.model_dump_json(): its bytes match for every ordinary record,
     # but it writes an integer outside orjson's 64-bit range where this raises, and refuses a lone
@@ -196,7 +99,7 @@ def _dumps(record: PSRecord, position: int) -> bytes:
 
 
 def _write_jsonl(records: Iterable[PSRecord]) -> None:
-    out = _Utf8Writer(sys.stdout)
+    out = Utf8Writer(sys.stdout)
     for position, record in enumerate(records, start=1):
         out.write(_dumps(record, position) + b"\n")
         out.flush()
@@ -210,7 +113,7 @@ def _write_json_array(records: Iterable[PSRecord]) -> None:
     # whole stream to avoid that would end --json's lazy, memory-bounded streaming.
     iterator = iter(records)
     first = next(iterator, None)
-    out = _Utf8Writer(sys.stdout)
+    out = Utf8Writer(sys.stdout)
     if first is None:
         out.write(b"[]\n")
         out.flush()
@@ -304,30 +207,6 @@ def _pairs(mapping: Mapping[object, object]) -> str:
     return ", ".join(f"{key}={value}" for key, value in mapping.items() if value is not None)
 
 
-def is_terminal(stream: TextIO | None) -> bool:
-    """Whether ``stream`` is a real terminal (a closed, missing or odd stream counts as not one).
-
-    Asks the stream itself rather than ``Console.is_terminal``: rich reports a terminal whenever
-    FORCE_COLOR is set, even into a pipe, and still has no terminal width to read there.
-
-    Args:
-        stream: The stream to ask, usually ``sys.stdout`` or ``sys.stderr``; ``None`` is no terminal.
-
-    Returns:
-        True only when the stream answers ``isatty()`` with a true value.
-
-    Example:
-        >>> is_terminal(sys.stdout)  # doctest captures stdout, so it is no terminal here
-        False
-    """
-    if stream is None:
-        return False
-    try:
-        return bool(stream.isatty())
-    except (AttributeError, ValueError, OSError):
-        return False
-
-
 def _columns_is_explicit() -> bool:
     """Whether COLUMNS names a width rich will use (the same digits-only test rich applies).
 
@@ -402,33 +281,6 @@ def _render_table(records: Iterable[PSRecord]) -> None:
         )
 
 
-def emit_json(data: object, *, indent: bool = False) -> None:
-    """Render arbitrary (non-record) data as one JSON value, broken-pipe safe.
-
-    For .NET / web output that is not a typed :class:`PSRecord` (marshaled PowerShell
-    objects, parsed REST JSON) and the merged configuration (``config --format json``).
-    ``default=str`` keeps it total - a ``SecretStr`` renders masked, a ``datetime`` as ISO
-    text - so it never raises on an exotic value. Text holding a byte that is not valid UTF-8
-    is written with U+FFFD for that byte, and one ``warning: output`` line on stderr names
-    where (never the value).
-
-    Args:
-        data: The value to write.
-        indent: Indent by two spaces (``config --format json``); compact otherwise.
-
-    Example:
-        >>> emit_json({"ok": True, "n": 1})
-        {"ok":true,"n":1}
-    """
-    with _clean_broken_pipe():
-        result = json_bytes(data, default=str, indent=indent)
-        if result.replaced:
-            emit_text(f"warning: {describe_output_replacements(result.replaced)}\n", err=True)
-        out = _Utf8Writer(sys.stdout)
-        out.write(result.data + b"\n")
-        out.flush()
-
-
 def emit_lines(lines: Iterable[str]) -> None:
     """Stream raw text lines to stdout, broken-pipe safe and memory-bounded.
 
@@ -446,12 +298,12 @@ def emit_lines(lines: Iterable[str]) -> None:
         a
         b
     """
-    with _clean_broken_pipe():
+    with clean_broken_pipe():
         stream = sys.stdout
         if is_terminal(stream):
             _write_lines_as_text(lines, stream)
         else:
-            _write_lines_as_utf8(lines, _Utf8Writer(stream))
+            _write_lines_as_utf8(lines, Utf8Writer(stream))
 
 
 def _write_lines_as_text(lines: Iterable[str], stream: TextIO) -> None:
@@ -460,51 +312,9 @@ def _write_lines_as_text(lines: Iterable[str], stream: TextIO) -> None:
     stream.flush()
 
 
-def _write_lines_as_utf8(lines: Iterable[str], out: _Utf8Writer) -> None:
+def _write_lines_as_utf8(lines: Iterable[str], out: Utf8Writer) -> None:
     for line in lines:
         out.write(line.encode("utf-8"))
-    out.flush()
-
-
-def emit_text(text: str, *, err: bool = False) -> None:
-    """Pass a text body through to stdout (or stderr): UTF-8 bytes when the stream is piped.
-
-    For text that came from elsewhere - an external program's output, an HTTP response body.
-    Piped or redirected, the body is written as UTF-8 bytes below the text layer, like JSON:
-    on a cp1252 stdout (German Windows) a character outside cp1252 raised ``UnicodeEncodeError``
-    after the child had already run, and stderr turned it into backslash escapes. The bytes are
-    exactly the text's own, so line ends are not translated and no ANSI sequence is stripped. At a
-    terminal the body goes through ``click.echo`` as before, which a Windows console already
-    renders as Unicode. Stdout is broken-pipe safe (``| head`` exits cleanly); stderr is written
-    without that guard, because the guard redirects stdout. A missing (``None``) stream drops
-    the body; a missing stderr is never replaced by stdout.
-
-    Args:
-        text: The body to write, verbatim (no newline is added).
-        err: Write to stderr instead of stdout.
-
-    Example:
-        >>> emit_text("a\\nb\\n")
-        a
-        b
-    """
-    stream = sys.stderr if err else sys.stdout
-    if err:
-        _write_text_body(text, stream, err=True)
-        return
-    with _clean_broken_pipe():
-        _write_text_body(text, stream, err=False)
-
-
-def _write_text_body(text: str, stream: TextIO | None, *, err: bool) -> None:
-    """Write ``text`` to ``stream``: via ``click.echo`` at a terminal, as UTF-8 bytes otherwise."""
-    # click.echo is kept at a terminal so a person sees exactly what they saw before (on Windows
-    # click routes console output through its own wrapper); only the piped path changes.
-    if is_terminal(stream):
-        click.echo(text, nl=False, err=err)
-        return
-    out = _Utf8Writer(stream)
-    out.write(text.encode("utf-8"))
     out.flush()
 
 
@@ -546,7 +356,7 @@ def emit(records: Iterable[PSRecord], fmt: RecordFormat) -> None:
         >>> emit([ProcessInfo(pid=1, name="init")], RecordFormat.JSONL)
         {"pid":1,"ppid":null,"name":"init","status":"unknown","username":null,"memory_rss":null,"create_time":null}
     """
-    with _clean_broken_pipe():
+    with clean_broken_pipe():
         if fmt is RecordFormat.JSONL:
             _write_jsonl(records)
         elif fmt is RecordFormat.JSON:

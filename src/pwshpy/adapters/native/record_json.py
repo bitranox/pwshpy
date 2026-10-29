@@ -18,7 +18,7 @@ A repaired mapping key that now equals another key keeps its entry under ``<key>
 suffix. Reported paths are ASCII, each non-ASCII character of a key shown as ``?``, because the
 warning is printed on consoles (cp1252) that cannot hold U+FFFD.
 
-Lives in ``adapters`` because every caller does (``adapters.cli.output`` and
+Lives in ``adapters`` because every caller does (``adapters.cli.output``, ``adapters.stdio`` and
 ``adapters.native.fileio``) and the domain stays free of serialisation; ``native`` because the
 library-side serialiser ``fileio`` is here and the CLI already imports sibling adapters.
 

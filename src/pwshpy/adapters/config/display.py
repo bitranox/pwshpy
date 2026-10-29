@@ -17,8 +17,8 @@ from rich.console import Console
 
 from pwshpy.domain.enums import OutputFormat
 
-from ..cli.output import emit_json
 from ..logging.setup import drain_log_queue
+from ..stdio import emit_json
 
 #: What ``Config.get`` returns for a missing section, distinct from a section whose value is None.
 _ABSENT: Final = object()
@@ -65,7 +65,7 @@ def display_config(
 def _display_json(config: Config, section: str | None) -> None:
     """Print the redacted configuration (or one section of it) as two-space indented JSON.
 
-    Written through :func:`~pwshpy.adapters.cli.output.emit_json`, the serialiser behind every other
+    Written through :func:`~pwshpy.adapters.stdio.emit_json`, the serialiser behind every other
     JSON output, rather than lib_layered_config's own: a value holding a byte that is not valid
     UTF-8 (a POSIX ``--set`` argument or environment variable, decoded with ``surrogateescape``) made
     that one raise ``TypeError``, where this writes U+FFFD for each such byte and one

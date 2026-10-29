@@ -48,6 +48,7 @@ from elevation_doubles import (
     NOT_A_GCM_VARIABLE,
     NOT_A_GIT_VARIABLE,
     OTHER_UID,
+    REAL_ACCOUNT_CACHE_GROUP,
     RUNNING_AS_ROOT,
     UV_SOURCE_VARIABLES,
     data_home,
@@ -60,6 +61,7 @@ from elevation_doubles import (
     owned_by_another_account,
     plant_library_path,
     planted_managed_python,
+    removing_a_new_account_temp_dir,
     second_prompts,
     session_uv_cache,
     trusted_managed_python,
@@ -1373,6 +1375,14 @@ def _run_with_path(
         runner = own_cache
     child_env = {k: v for k, v in os.environ.items() if k not in (*INTERPRETER_VARIABLES, *LIBRARY_VARIABLES)}
     child_env.update({**_isolated_cache(tmp_path), "PYTHONIOENCODING": "utf-8", "UV_PYTHON_DOWNLOADS": "never"})
+    # The directory stands in for the account's own cache directory of an elevated POSIX run, which only
+    # its account can write (an elevated run judges it, [159] round 3); made before pwsh starts, which
+    # puts its own cache below XDG_CACHE_HOME under the suite's umask (002 on a per-user-group host). One
+    # a test made itself keeps its mode.
+    account_cache = tmp_path / "default-cache"
+    if sys.platform != "win32" and not account_cache.exists():
+        account_cache.mkdir()
+        account_cache.chmod(0o755)
     if f"{_STAND_IN_PROBE}$true" in runner.read_text(encoding="utf-8") and "UV_PYTHON_INSTALL_DIR" not in (env or {}):
         child_env.update(managed_python_env(tmp_path, managed=_needs_managed_python()))
     child_env.update(env or {})
@@ -2646,12 +2656,17 @@ _GLOB_BAIT = ("a.log", "b.log", "pkga")
 
 
 def _recording_runner(
-    tmp_path: Path, *, elevated: str, with_packages: Sequence[str] = (), real_data_home: bool = False
+    tmp_path: Path,
+    *,
+    elevated: str,
+    with_packages: Sequence[str] = (),
+    real_data_home: bool = False,
+    judge_cache: bool = False,
 ) -> tuple[Path, Path, Path]:
     """A runner whose uv is a recording double pinned with -PwshPyUv (POSIX), in a tree counted as root's.
 
-    Returns the runner, the double, and the file it records into. ``real_data_home`` as for
-    :func:`_elevation_stand_in`.
+    Returns the runner, the double, and the file it records into. ``real_data_home`` and ``judge_cache``
+    as for :func:`_elevation_stand_in`.
     """
     entry = tmp_path / "app.py"
     entry.write_text("print('never run: uv is a recording double')\n")
@@ -2661,6 +2676,7 @@ def _recording_runner(
         elevated=elevated,
         trust_my_uid=True,
         real_data_home=real_data_home,
+        judge_cache=judge_cache,
     )
     leaf = tmp_path / "rec" / "bin"
     leaf.mkdir(parents=True)
@@ -3093,6 +3109,7 @@ def test_an_elevated_run_drops_the_variables_that_steer_the_managed_python(tmp_p
 @pytest.mark.local_only
 @pytest.mark.os_posix
 @_POSIX_ONLY
+@pytest.mark.xdist_group(REAL_ACCOUNT_CACHE_GROUP)
 @pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
 def test_an_elevated_posix_run_takes_the_managed_python_dir_from_the_account(tmp_path: Path, elevated: str) -> None:
     """[93]: elevated, uv's managed-Python directory is the passwd home's whatever HOME and XDG_DATA_HOME
@@ -3100,20 +3117,21 @@ def test_an_elevated_posix_run_takes_the_managed_python_dir_from_the_account(tmp
     passes both on. [X22 C1]: the cache directory likewise, whatever XDG_CACHE_HOME says."""
     runner, uv, record = _recording_runner(tmp_path, elevated=elevated, real_data_home=True)
     library = {"PYTHONHOME": str(tmp_path / "planted-home"), "PYTHONPATH": str(tmp_path / "planted-path")}
-    result = _run_with_path(
-        tmp_path,
-        runner,
-        "-PwshPyUv",
-        str(uv),
-        path_first=[],
-        env={
-            **library,
-            "XDG_DATA_HOME": str(tmp_path / "elsewhere"),
-            "XDG_CACHE_HOME": str(tmp_path / "elsewhere"),
-            "HOME": str(tmp_path / "elsewhere"),
-        },
-        cwd=_clean_cwd(tmp_path),
-    )
+    with removing_a_new_account_temp_dir():
+        result = _run_with_path(
+            tmp_path,
+            runner,
+            "-PwshPyUv",
+            str(uv),
+            path_first=[],
+            env={
+                **library,
+                "XDG_DATA_HOME": str(tmp_path / "elsewhere"),
+                "XDG_CACHE_HOME": str(tmp_path / "elsewhere"),
+                "HOME": str(tmp_path / "elsewhere"),
+            },
+            cwd=_clean_cwd(tmp_path),
+        )
     assert result.returncode == 0, result.stdout + result.stderr
     recorded = _recorded_variables(record)
     if elevated == "$true":
@@ -4400,9 +4418,10 @@ def test_an_elevated_posix_run_gives_uv_and_git_the_accounts_own_home(tmp_path: 
     """[159], as the .sh root run: an elevated POSIX run hands uv the account's own HOME (its passwd home,
     answered inside tmp_path here), XDG directories and the netrc and credentials defaults below it, and
     each caller value to the shim under PWSHPY_PACK_CALLER_<NAME>. The control hands uv the caller's, and
-    not the hand-over marker the caller preset, which the shim would act on."""
+    not the hand-over marker the caller preset, which the shim would act on. The caller's NETRC is the
+    empty string, which is handed over as such (pwsh 7 keeps an empty variable), not as unset."""
     runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
-    caller = _caller_home_env(tmp_path)
+    caller = {**_caller_home_env(tmp_path), "NETRC": ""}
     preset = {CALLER_ENV_VAR: "HOME"}
     result = _run_with_path(
         tmp_path,
@@ -4428,9 +4447,80 @@ def test_an_elevated_posix_run_gives_uv_and_git_the_accounts_own_home(tmp_path: 
     assert [name for name in ("XDG_STATE_HOME", "NETRC", "UV_CREDENTIALS_DIR") if name in recorded] == []
     assert recorded[CALLER_ENV_VAR] == " ".join(HOME_VARIABLES), recorded
     handed = {name: recorded.get(f"{CALLER_ENV_VAR}_{name}") for name in HOME_VARIABLES}
-    caller_state = os.environ.get("XDG_STATE_HOME")
-    assert handed == {**dict.fromkeys(HOME_VARIABLES), "XDG_STATE_HOME": caller_state, **caller}, handed
+    inherited = {name: os.environ.get(name) for name in ("XDG_STATE_HOME", "TMPDIR", "TMP", "TEMP")}
+    assert handed == {**dict.fromkeys(HOME_VARIABLES), **inherited, **caller}, handed
     assert f"pwshpy: setting HOME={home}: " in result.stderr, result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_posix_run_gives_uv_and_git_a_private_temporary_directory(tmp_path: Path, elevated: str) -> None:
+    """[159] round 3, as the .sh root run: an elevated POSIX run let uv, git and the build backends uv runs
+    make their temporary files below the caller's TMPDIR (or TMP, TEMP), which sudo -E hands over: a
+    directory root creates there the caller can swap for a link. All three now name <account
+    cache>/pwshpy-tmp, mode 0700, and each caller value travels to the shim; the control keeps the
+    caller's."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
+    caller = {name: tmp_path / ("caller-" + name.lower()) for name in ("TMPDIR", "TMP", "TEMP")}
+    for directory in caller.values():
+        directory.mkdir()
+    env = {name: str(directory) for name, directory in caller.items()}
+    result = _run_with_path(
+        tmp_path, runner, "-PwshPyUv", str(uv), path_first=[uv.parent], env=env, cwd=_clean_cwd(tmp_path)
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = record.read_text(encoding="utf-8").splitlines()
+    recorded = dict(line[4:].split("=", 1) for line in lines if line.startswith("env:"))
+    if elevated == "$false":
+        assert {name: recorded.get(name) for name in env} == env, recorded
+        return
+    private = default_uv_cache_dir(tmp_path).parent / "pwshpy-tmp"
+    assert {name: recorded.get(name) for name in env} == dict.fromkeys(env, str(private)), recorded
+    assert private.stat().st_mode & 0o777 == 0o700
+    assert {name: recorded.get(f"{CALLER_ENV_VAR}_{name}") for name in env} == env, recorded
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("mode", [0o755, 0o775], ids=["private-control", "group-writable"])
+def test_an_elevated_posix_run_refuses_a_temporary_directory_another_account_can_modify(
+    tmp_path: Path, mode: int
+) -> None:
+    """[159] round 3, as the .sh root run: the private temporary directory is judged like the pack cache
+    before it is created and after: below an account cache directory another account can write, the run
+    stops with 127 before uv runs and creates no pwshpy-tmp; the control passes the check."""
+    runner, uv, record = _recording_runner(tmp_path, elevated="$true", judge_cache=True)
+    account_cache = tmp_path / "default-cache"
+    account_cache.mkdir()
+    account_cache.chmod(mode)
+    pack = tmp_path / "pack"
+    pack.mkdir()
+    pack.chmod(0o755)
+    saved = os.umask(0o022)
+    try:
+        result = _run_with_path(
+            tmp_path,
+            runner,
+            "-PwshPyUv",
+            str(uv),
+            path_first=[uv.parent],
+            env={"PWSHPY_PACK_CACHE": str(pack)},
+            cwd=_clean_cwd(tmp_path),
+        )
+    finally:
+        os.umask(saved)
+    refused = f"pwshpy: refusing the temporary directory {account_cache / 'pwshpy-tmp'}: "
+    if mode == 0o755:
+        assert result.returncode == 0 and refused not in result.stderr, result.stdout + result.stderr
+        assert (account_cache / "pwshpy-tmp").stat().st_mode & 0o777 == 0o700
+        return
+    assert result.returncode == 127 and refused in result.stderr, result.stdout + result.stderr
+    assert "is writable by group" in result.stderr, result.stderr
+    assert not (account_cache / "pwshpy-tmp").exists()
+    assert not record.exists(), "uv ran"
 
 
 #: The POSIX installer command of the .ps1 runner, the one string a test of the installation replaces.

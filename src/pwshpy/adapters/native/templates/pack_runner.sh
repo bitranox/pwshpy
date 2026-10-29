@@ -1242,7 +1242,8 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # directory, the netrc and uv's credentials. The packed script gets the caller's back from the shim
     # (@@PWSHPY_CALLER_ENV@@ names what was replaced), as it gets the caller's PATH ([107]).
     PWSHPY_CALLER_NAMES=
-    for _ce in HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME NETRC UV_CREDENTIALS_DIR; do
+    for _ce in HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME NETRC UV_CREDENTIALS_DIR \
+        TMPDIR TMP TEMP; do
         if eval "[ -n \"\${$_ce+set}\" ]"; then
             eval "@@PWSHPY_CALLER_ENV@@_$_ce=\$$_ce"
             export "@@PWSHPY_CALLER_ENV@@_$_ce"
@@ -1261,6 +1262,31 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     XDG_DATA_HOME=$PWSHPY_DATA_HOME
     export HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME
     printf '%s\n' "pwshpy: setting HOME=$HOME: as root uv and git use the running account's own home" >&2
+    # The temporary directory too (handed over above): uv, git and the build backends uv runs create
+    # files and directories below TMPDIR (Python's tempfile also reads TEMP and TMP), the caller's under
+    # sudo -E or env_keep, where the caller could swap a directory root made for a link to anywhere. All
+    # three name a directory below the account's own cache directory that only root can enter, judged
+    # like the pack cache (pwshpy_cache_distrust): before it is created (the nearest directory that
+    # exists), and after.
+    PWSHPY_TMP=$PWSHPY_CACHE_HOME/pwshpy-tmp
+    PWSHPY_TMP_WHY=$(pwshpy_cache_distrust "$PWSHPY_TMP")
+    if [ -z "$PWSHPY_TMP_WHY" ]; then
+        (umask 077 && mkdir -p "$PWSHPY_TMP") || pwshpy_die "cannot create the directory $PWSHPY_TMP" 70
+        chmod 700 "$PWSHPY_TMP" || pwshpy_die "cannot make $PWSHPY_TMP private (chmod 700)" 70
+        PWSHPY_TMP_WHY=$(pwshpy_cache_distrust "$PWSHPY_TMP")
+    fi
+    if [ -n "$PWSHPY_TMP_WHY" ]; then
+        PWSHPY_TMP_WHY="$PWSHPY_TMP_WHY (as root uv and git keep temporary files only in a directory no other"
+        PWSHPY_TMP_WHY="$PWSHPY_TMP_WHY account can modify): make the path named above root's alone (chown -R root,"
+        PWSHPY_TMP_WHY="$PWSHPY_TMP_WHY chmod -R go-w on it)"
+        pwshpy_die "refusing the temporary directory $PWSHPY_TMP: $PWSHPY_TMP_WHY" 127
+    fi
+    TMPDIR=$PWSHPY_TMP
+    TMP=$PWSHPY_TMP
+    TEMP=$PWSHPY_TMP
+    export TMPDIR TMP TEMP
+    PWSHPY_TMP_WHY="as root uv and git keep temporary files in the account's own directory"
+    printf '%s\n' "pwshpy: setting TMPDIR=$TMPDIR: $PWSHPY_TMP_WHY" >&2
     # While the helpers still come from the fixed PATH: the checks of the directory and of the Python's
     # path run ls. The directory first: uv runs every Python it finds there.
     PWSHPY_PYTHON_DIR_WHY=$(pwshpy_python_dir_distrust "$UV_PYTHON_INSTALL_DIR")

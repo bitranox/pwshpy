@@ -2033,7 +2033,7 @@ $PwshPyPrepare = {
         # is not covered: an elevated token keeps the caller's own profile there.
         if (-not $PwshPyOnWindows) {
             $PwshPyCallerNames = New-Object System.Collections.Generic.List[string]
-            foreach ($name in @('HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'NETRC', 'UV_CREDENTIALS_DIR')) {
+            foreach ($name in @('HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'NETRC', 'UV_CREDENTIALS_DIR', 'TMPDIR', 'TMP', 'TEMP')) {
                 $handOver = "Env:${PwshPyCallerEnv}_$name"
                 if (Test-Path -LiteralPath "Env:$name") {
                     Set-Item -LiteralPath $handOver -Value ([Environment]::GetEnvironmentVariable($name))
@@ -2054,6 +2054,26 @@ $PwshPyPrepare = {
             Set-Item -LiteralPath 'Env:XDG_CACHE_HOME' -Value $PwshPyAccountCache
             Set-Item -LiteralPath 'Env:XDG_DATA_HOME' -Value $PwshPyDataHome
             Write-PwshPyNotice "pwshpy: setting HOME=${PwshPyAccountHome}: an elevated run lets uv and git use the running account's own home"
+            # The temporary directory too (handed over above), as the .sh root run: uv, git and the build
+            # backends uv runs create files and directories below TMPDIR (Python's tempfile also reads
+            # TEMP and TMP), the caller's under sudo -E or env_keep, where the caller could swap a
+            # directory root made for a link to anywhere. All three name the directory below the account's
+            # own cache directory that only root can enter (the one Initialize-PwshPyStderrFile uses),
+            # judged like the pack cache (Get-PwshPyCacheDistrust): before it is created (the nearest
+            # directory that exists), and after.
+            $PwshPyTemp = Join-Path $PwshPyAccountCache 'pwshpy-tmp'
+            $PwshPyTempWhy = Get-PwshPyCacheDistrust -Path $PwshPyTemp
+            if (-not $PwshPyTempWhy) {
+                Initialize-PwshPyDirectory -Path $PwshPyTemp -Private $true
+                Invoke-PwshPyChmod -Arguments @('700', '--', $PwshPyTemp)
+                $PwshPyTempWhy = Get-PwshPyCacheDistrust -Path $PwshPyTemp
+            }
+            if ($PwshPyTempWhy) {
+                Write-PwshPyFailure "pwshpy: refusing the temporary directory ${PwshPyTemp}: $PwshPyTempWhy (an elevated run lets uv and git keep temporary files only in a directory no other account can modify): make the path named above root's alone (chown -R root, chmod -R go-w on it)"
+                exit 127
+            }
+            foreach ($name in @('TMPDIR', 'TMP', 'TEMP')) { Set-Item -LiteralPath "Env:$name" -Value $PwshPyTemp }
+            Write-PwshPyNotice "pwshpy: setting TMPDIR=${PwshPyTemp}: an elevated run lets uv and git keep temporary files in the account's own directory"
         }
         # The directory before uv searches it: uv runs every Python it finds there.
         $PwshPyPythonDirWhy = Get-PwshPyPythonDirDistrust -Path $env:UV_PYTHON_INSTALL_DIR

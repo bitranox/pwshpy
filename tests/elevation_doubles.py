@@ -37,6 +37,7 @@ Contents:
 from __future__ import annotations
 
 import atexit
+import contextlib
 import functools
 import os
 import shutil
@@ -45,7 +46,11 @@ import sys
 import sysconfig
 import tempfile
 import zipfile
+from collections.abc import Generator
 from pathlib import Path
+
+if sys.platform != "win32":
+    import pwd
 
 #: The runners only elevate for a non-root uid, so as root no test reaches the sudo branch.
 #: Guarded by ``sys.platform`` because ``os.geteuid`` does not exist on Windows.
@@ -241,7 +246,8 @@ NETWORK_VARIABLES = (
 )
 
 #: [159] The home variables a root run replaces for uv and git with the running account's own, in the
-#: runners' order; the shim gives the script the caller's back.
+#: runners' order, then the temporary-directory ones it points at a private directory of that account
+#: (round 3); the shim gives the script the caller's back.
 HOME_VARIABLES = (
     "HOME",
     "XDG_CONFIG_HOME",
@@ -250,6 +256,9 @@ HOME_VARIABLES = (
     "XDG_STATE_HOME",
     "NETRC",
     "UV_CREDENTIALS_DIR",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
 )
 
 #: [X23 G1] Variables git reads, which an elevated run drops because their name starts with GIT_ (one
@@ -915,6 +924,37 @@ SH_PYTHON_DIR_CHECK = 'PWSHPY_PYTHON_DIR_WHY=$(pwshpy_python_dir_distrust "$UV_P
 PS1_PYTHON_DIR_CHECK = "$PwshPyPythonDirWhy = Get-PwshPyPythonDirDistrust -Path $env:UV_PYTHON_INSTALL_DIR"
 
 
+#: The xdist group of every test whose root run keeps the REAL account cache home: they share the one
+#: temporary directory below it (:func:`removing_a_new_account_temp_dir`), so they run one at a time.
+REAL_ACCOUNT_CACHE_GROUP = "real-account-cache-home"
+
+
+@contextlib.contextmanager
+def removing_a_new_account_temp_dir() -> Generator[None, None, None]:
+    """Remove ``<passwd home>/.cache/pwshpy-tmp`` after the block when it was not there before it (POSIX).
+
+    A root run makes its private temporary directory below the account's cache home ([159] round 3), and
+    a test that keeps the real passwd lookup (``real_data_home``) cannot answer it inside the test, so
+    the run creates it in the real user's cache. Only an empty directory the block created is removed;
+    mark such a test with :data:`REAL_ACCOUNT_CACHE_GROUP`, or one test could remove it under another.
+
+    Example:
+        >>> with removing_a_new_account_temp_dir():
+        ...     pass
+    """
+    if sys.platform == "win32":
+        yield
+        return
+    temp = Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".cache" / "pwshpy-tmp"
+    existed = temp.exists()
+    try:
+        yield
+    finally:
+        if not existed:
+            with contextlib.suppress(OSError):
+                temp.rmdir()
+
+
 def without_python_dir_check(text: str, *, powershell: bool) -> str:
     """``text`` (a rendered runner) with the check of uv's managed-Python directory answering "trusted".
 
@@ -950,6 +990,7 @@ __all__ = [
     "PS1_CACHE_HOME_LOOKUP",
     "PS1_DATA_HOME_LOOKUP",
     "PS1_PYTHON_DIR_CHECK",
+    "REAL_ACCOUNT_CACHE_GROUP",
     "RUNNING_AS_ROOT",
     "UV_SOURCE_VARIABLES",
     "SH_CACHE_HOME_LOOKUP",
@@ -969,6 +1010,7 @@ __all__ = [
     "session_uv_cache",
     "plant_library_path",
     "planted_managed_python",
+    "removing_a_new_account_temp_dir",
     "with_account_cache_home",
     "with_data_home",
     "without_python_dir_check",

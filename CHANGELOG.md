@@ -83,6 +83,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   credentials and created root-owned directories in the caller's home. The packed script still sees
   the caller's values; the shim gives back only these variables, whatever the hand-over names, and a
   run that hands nothing over removes a hand-over the caller's environment preset.
+- Packed runners, root run on Linux and macOS (the `.sh` as root, the `.ps1` elevated): uv, git and
+  the build backends uv runs keep their temporary files in `<home>/.cache/pwshpy-tmp` of the running
+  account (mode 0700; `TMPDIR`, `TMP` and `TEMP` all name it, and the packed script gets the
+  caller's values back). Before, they used the caller's `TMPDIR`, which `sudo -E` hands over, where
+  the caller could swap a directory root created for a link.
 - Packed runners, root run on Linux and macOS (the `.sh` as root, the `.ps1` elevated): with no uv
   found, uv's installer runs with only the running account's own `HOME` and the fixed helper `PATH`
   (umask 022), and the uv search looks below that home, not in the caller's `XDG_BIN_HOME` or

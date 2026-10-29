@@ -628,7 +628,12 @@ Details worth knowing:
   account's own home, never the caller's: `HOME` is the home the passwd database records,
   `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME` are below it, and `XDG_STATE_HOME`,
   `NETRC` and `UV_CREDENTIALS_DIR` are unset so their defaults follow that home (`pwshpy: setting
-  HOME=<home>` on stderr). Before, uv and git used the ones `sudo -E` or `env_keep` handed over:
+  HOME=<home>` on stderr), and `TMPDIR`, `TMP` and `TEMP` all name `<home>/.cache/pwshpy-tmp`, a
+  directory only that account can enter, judged like the pack cache before and after
+  it is created (`pwshpy: setting TMPDIR=<dir>` on stderr; a directory another account can modify
+  stops the run with `refusing the temporary directory` and exit code 127), so no temporary file or
+  directory uv, git or a build backend makes as root sits where the caller could swap it for a link.
+  Before, uv and git used the ones `sudo -E` or `env_keep` handed over:
   uv read the caller's netrc and credentials file and created root-owned directories below the
   caller's home, and a credential helper the administrators configured read and rewrote the
   caller's `~/.git-credentials` as root (measured). The packed script gets the caller's values back

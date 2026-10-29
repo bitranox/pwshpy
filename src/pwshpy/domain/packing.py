@@ -147,7 +147,8 @@ UV_PATH_ENV_VAR = "PWSHPY_PACK_UV_PATH"
 
 #: The variable a root run (the ``.sh`` as root, the ``.ps1`` elevated on POSIX) sets to the names, one
 #: space between each, of the home variables it replaced for uv and git with the running account's own
-#: ([159]): HOME, the XDG directories, NETRC and uv's credentials directory. Each one the caller had set
+#: ([159]): HOME, the XDG directories, NETRC, uv's credentials directory and TMPDIR, TMP and TEMP (a
+#: private directory of the account). Each one the caller had set
 #: travels in ``<this name>_<NAME>``; the shim gives the script those values back, and removes a name
 #: the caller had not set, so the script sees the caller's environment as PATH is given back ([107]).
 CALLER_ENV_VAR = "PWSHPY_PACK_CALLER"
@@ -162,6 +163,9 @@ CALLER_ENV_NAMES = (
     "XDG_STATE_HOME",
     "NETRC",
     "UV_CREDENTIALS_DIR",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
 )
 
 #: Exit code of a shim that cannot change back to the caller's directory (``EX_SOFTWARE``, the
@@ -306,7 +310,7 @@ def _entries_uv_added(current, given):
 
 
 def _restore_the_callers_home():
-    """Give the script the HOME, XDG directories and netrc its caller had ([159]).
+    """Give the script the HOME, XDG directories, netrc and temporary directories its caller had ([159]).
 
     A root run ran uv and git with the running account's own, so neither read nor wrote the caller's
     files; it marks the hand-over with one variable and passes each value the caller had in a variable

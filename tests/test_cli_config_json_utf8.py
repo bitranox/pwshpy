@@ -15,9 +15,9 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
-import orjson
 import pytest
 from click.testing import CliRunner
+from lib_layered_config import Config
 
 from pwshpy.adapters import cli as cli_mod
 
@@ -72,12 +72,12 @@ def test_config_json_section_writes_fffd_for_a_bad_byte_and_warns(
 def test_clean_config_json_is_indented_as_before_with_no_warning(
     config_cli_context: Callable[[dict[str, Any]], Callable[[], Any]],
 ) -> None:
-    """A clean configuration prints a blank line then two-space indented JSON, redacted, no warning."""
-    factory = config_cli_context({"section": {"key": "v", "token": "s3cret", "n": [1, 2]}})
-    result = CliRunner().invoke(cli_mod.cli, ["config", "--format", "json"], obj=factory)
+    """A clean configuration prints a blank line then exactly what lib_layered_config printed, no warning."""
+    config_data: dict[str, Any] = {"section": {"key": "v", "token": "s3cret", "n": [1, 2], "u": "\u00e4"}}
+    result = CliRunner().invoke(cli_mod.cli, ["config", "--format", "json"], obj=config_cli_context(config_data))
     assert result.exit_code == 0, result.output
+    assert result.stdout == "\n" + Config(config_data, {}).to_json(indent=2, redact=True) + "\n"
     data = json.loads(result.stdout)
-    assert result.stdout == "\n" + orjson.dumps(data, option=orjson.OPT_INDENT_2).decode() + "\n"
     assert data["section"]["key"] == "v"
     assert data["section"]["token"] != "s3cret"
     assert _warnings(result.stderr) == []

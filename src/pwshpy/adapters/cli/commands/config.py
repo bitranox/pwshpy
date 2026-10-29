@@ -35,7 +35,6 @@ from ..config_load import load_config, report_load_failure, require_config
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import CLIContext, get_cli_context
 from ..exit_codes import ExitCode
-from ..output import emit_json
 from ..typed_click import get_current_context, option
 from ._common import CaseInsensitiveChoice
 
@@ -93,48 +92,12 @@ def cli_config(ctx: click.Context, output_format: str, section: str | None, prof
         )
         click.echo()
         try:
-            if fmt is OutputFormat.JSON:
-                _display_json(effective_config, section)
-            else:
-                cli_ctx.services.display_config(
-                    effective_config, output_format=fmt, section=section, profile=effective_profile
-                )
+            cli_ctx.services.display_config(
+                effective_config, output_format=fmt, section=section, profile=effective_profile
+            )
         except ValueError as exc:
             click.echo(f"\nError: {exc}", err=True)
             ctx.exit(ExitCode.INVALID_ARGUMENT)
-
-
-#: What ``Config.get`` returns for a missing section, distinct from a section whose value is None.
-_ABSENT: Final = object()
-
-
-def _display_json(config: Config, section: str | None) -> None:
-    """Print the redacted configuration (or one section of it) as two-space indented JSON.
-
-    Written through :func:`~pwshpy.adapters.cli.output.emit_json`, the serialiser behind every other
-    JSON output, rather than lib_layered_config's own: a value holding a byte that is not valid
-    UTF-8 (a POSIX ``--set`` argument or environment variable, decoded with ``surrogateescape``) made
-    that one raise ``TypeError`` (exit 22), where this writes U+FFFD for each such byte and one
-    ``warning: output field <path>`` line on stderr. Clean output is what the library printed: the
-    same redacted data, the same indentation, ``{section: value}`` for ``--section``.
-
-    Args:
-        config: The merged configuration.
-        section: A dotted section to show alone, or None for everything.
-
-    Raises:
-        ValueError: ``section`` names nothing in the configuration.
-    """
-    if lib_log_rich.runtime.is_initialised():
-        # Pending log lines first, so none lands in the middle of the JSON.
-        lib_log_rich.runtime.flush()
-    if section:
-        if config.get(section, default=_ABSENT) is _ABSENT:
-            raise ValueError(f"Section '{section}' not found")
-        data: object = {section: config.get_redacted(section)}
-    else:
-        data = config.as_dict(redact=True)
-    emit_json(data, indent=True)
 
 
 def _get_effective_profile(cli_ctx: CLIContext, profile_override: str | None) -> str | None:

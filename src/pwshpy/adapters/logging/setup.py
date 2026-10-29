@@ -7,6 +7,7 @@ eliminating duplication between module entry (__main__.py) and console script
 Contents:
     * :func:`init_logging` - idempotent logging initialization from the ``[lib_log_rich]``
       section and the ``LOG_*`` variables (the environment, plus the ``LOG_*`` lines of a ``.env``).
+    * :func:`drain_log_queue` - render the queued log lines before printing, never raising.
     * :class:`InvalidLoggingConfigError` - the ``[lib_log_rich]`` section or a ``LOG_*`` variable
       cannot configure logging.
     * :func:`_build_runtime_config` - constructs RuntimeConfig from layered sources.
@@ -286,6 +287,32 @@ def init_logging(config: Config, *, dotenv_path: str | None = None) -> None:
     lib_log_rich.runtime.attach_std_logging()
 
 
+#: Upper bound on waiting for queued log lines; what must print next prints anyway after it.
+LOG_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+def drain_log_queue() -> None:
+    """Render every log line still queued before the caller prints its own output or error.
+
+    lib_log_rich renders console lines on a queue worker thread, while the caller prints on this
+    one. Printed with a line still queued, both threads write at once: two stderr lines interleave
+    into one (measured on Windows), or a log line lands inside the JSON on stdout. Draining first
+    keeps each line whole and in the order it was logged. A drain that times out (``TimeoutError``)
+    or cannot run (``RuntimeError`` inside a running event loop) is skipped without a word: the
+    caller's own output is what the user needs, and it still prints. Every caller drains through
+    here, so no caller can forget that guard.
+
+    Example:
+        >>> drain_log_queue()  # no runtime, or nothing queued: returns at once
+    """
+    if not lib_log_rich.runtime.is_initialised():
+        return
+    try:
+        lib_log_rich.runtime.flush(timeout=LOG_DRAIN_TIMEOUT_SECONDS)
+    except (TimeoutError, RuntimeError):
+        return
+
+
 def run_logdemo(theme: ConsoleTheme) -> LogDemoResult:
     """Run lib_log_rich's demo; a ``LOG_*`` variable it refuses is refused as :func:`init_logging` refuses it.
 
@@ -313,8 +340,10 @@ def run_logdemo(theme: ConsoleTheme) -> LogDemoResult:
 
 
 __all__ = [
+    "LOG_DRAIN_TIMEOUT_SECONDS",
     "InvalidLoggingConfigError",
     "LoggingConfigModel",
+    "drain_log_queue",
     "init_logging",
     "run_logdemo",
 ]

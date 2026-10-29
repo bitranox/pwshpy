@@ -88,7 +88,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   like every other JSON output. It exited 22 with `TypeError: str is not valid UTF-8: surrogates
   not allowed`. Its JSON is now written as UTF-8 bytes with LF line ends whatever the console code
   page, as `--json` is; clean output is otherwise unchanged (the same redacted, two-space indented
-  JSON).
+  JSON). The `display_config` service itself writes it this way, and the command calls that
+  service for both formats.
+- `config` prints the configuration even when draining the queued log lines first fails: a drain
+  that timed out (`TimeoutError`) or ran inside an event loop (`RuntimeError`) ended the command
+  with that error instead. Every caller now drains through one guarded helper.
 
 ### Fixed
 

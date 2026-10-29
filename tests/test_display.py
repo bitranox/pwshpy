@@ -1,6 +1,6 @@
 """Integration tests for config display wrapper.
 
-Tests the thin wrapper that delegates to lib_layered_config's display_config.
+Tests the wrapper that delegates the human view to lib_layered_config's display_config
 The wrapper adds log flushing before display. Core display behavior is tested
 in lib_layered_config's test suite.
 """
@@ -56,7 +56,7 @@ def test_display_human_renders_output(capsys: pytest.CaptureFixture[str]) -> Non
 
 @pytest.mark.os_agnostic
 def test_display_json_renders_output(capsys: pytest.CaptureFixture[str]) -> None:
-    """Wrapper must produce JSON output via lib_layered_config."""
+    """Wrapper must produce JSON output (written through record_json, as every other JSON output)."""
     config = Config({"section": {"key": "value"}}, {})
     display_config(config, output_format=OutputFormat.JSON)
     output = capsys.readouterr().out

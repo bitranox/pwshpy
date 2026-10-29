@@ -55,7 +55,9 @@ from elevation_doubles import (
     trusted_managed_python,
     with_account_cache_home,
     with_data_home,
+    with_download_doubles,
     without_python_dir_check,
+    write_download_double,
     write_fake_sudo,
     write_git_source,
     write_local_wheel,
@@ -1664,11 +1666,25 @@ def test_as_root_the_script_gets_the_callers_home_back(tmp_path: Path, as_root: 
     assert seen == expected, result.stdout
 
 
-#: The runner's two ways of fetching uv's installer; a test of the installation replaces both (counted).
-_UV_INSTALLER_FETCHES = (
-    "_iu_fetch='curl -LsSf https://astral.sh/uv/install.sh'",
-    "_iu_fetch='wget -qO- https://astral.sh/uv/install.sh'",
-)
+def test_not_root_a_preset_hand_over_marker_takes_nothing_from_the_script(tmp_path: Path) -> None:
+    """[159] round 4, the .sh twin of the .ps1's preset-marker control: a run that is not root hands
+    nothing over, so a hand-over marker the caller's environment carries must not reach a shim, which
+    would remove every name it can restore from the script's environment (no HOME, XDG directories or
+    TMPDIR). The .sh starts the shim only as root (the .ps1 removes the marker instead, its shim runs
+    every time), so the script sees the caller's values. Live: a runner that starts the shim here too
+    fails it."""
+    _needs_managed_python()
+    names = ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "NETRC", "TMPDIR")
+    source = f"import os\nfor name in {names!r}:\n    print('home:' + name + '=' + os.environ.get(name, '<unset>'))\n"
+    runner, uv = _python_runner(tmp_path, as_root=False, source=source)
+    caller = {**_caller_home_env(tmp_path), "TMPDIR": _caller_temp_env(tmp_path)["TMPDIR"]}
+    environment = {**_trust_env(tmp_path, uv.parent), **caller, CALLER_ENV_VAR: "x"}
+    result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    seen = dict(line[5:].split("=", 1) for line in result.stdout.splitlines() if line.startswith("home:"))
+    assert seen == {name: caller[name] for name in names}, result.stdout
+
+
 #: What uv's installer reads besides HOME (its install directory and download-URL variables), and what
 #: curl and wget read (proxies, certificate roots, rc files), each a choice the caller would make for root.
 _INSTALLER_STEERING = (
@@ -1687,14 +1703,16 @@ _INSTALLER_STEERING = (
 )
 
 
-def _with_local_uv_installer(runner: Path, installer: Path) -> None:
-    """``runner`` with the installer download replaced by printing ``installer``; the ``| sh`` that runs
-    it, the environment it runs with and the search after it stay the shipped code."""
-    text = runner.read_text(encoding="utf-8")
-    for fetch in _UV_INSTALLER_FETCHES:
-        assert text.count(fetch) == 1, fetch
-        text = text.replace(fetch, f"_iu_fetch='cat {installer}'")
-    runner.write_text(text, encoding="utf-8", newline="\n")
+def _with_local_uv_installer(runner: Path, installer: Path) -> Path:
+    """``runner`` with a curl double that downloads ``installer`` (and a wget double never reached); the
+    download's handling, the installer step and the search after it stay the shipped code. The log."""
+    doubles = runner.parent / "download-bin"
+    doubles.mkdir()
+    log = runner.parent / "downloads.txt"
+    curl = write_download_double(doubles, "curl", log=log, serve=installer)
+    wget = write_download_double(doubles, "wget", log=log, serve=None, exit_code=4)
+    with_download_doubles(runner, curl=curl, wget=wget, powershell=False)
+    return log
 
 
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
@@ -1720,6 +1738,8 @@ def test_as_root_the_uv_installer_installs_into_the_accounts_own_home(tmp_path: 
     caller_home.mkdir()
     caller_home.chmod(0o777)
     steering = {name: str(tmp_path / ("steer-" + name.lower())) for name in _INSTALLER_STEERING}
+    # The caller's TMPDIR exists, as a real one does: a run that is not root downloads the installer there.
+    Path(steering["TMPDIR"]).mkdir()
     environment = {**_trust_env(tmp_path), **steering, "HOME": str(caller_home)}
     environment["PATH"] = "/usr/bin:/bin"
     result = _run_in(["sh"], runner, env=environment, cwd=_work_dir(tmp_path))
@@ -1727,6 +1747,7 @@ def test_as_root_the_uv_installer_installs_into_the_accounts_own_home(tmp_path: 
     if not as_root:
         assert got["HOME"] == str(caller_home), got
         assert (caller_home / ".local" / "bin" / "uv").is_file(), result.stderr
+        assert list(Path(steering["TMPDIR"]).iterdir()) == [], "the downloaded installer was left behind"
         return
     assert result.returncode == 0, result.stdout + result.stderr
     assert got["HOME"] == str(tmp_path), got
@@ -1734,6 +1755,51 @@ def test_as_root_the_uv_installer_installs_into_the_accounts_own_home(tmp_path: 
     assert record.is_file(), result.stderr
     assert (tmp_path / ".local" / "bin" / "uv").is_file(), result.stderr
     assert list(caller_home.iterdir()) == [], result.stderr
+
+
+#: The start of the failure a run prints when neither downloader delivered uv's installer.
+_INSTALLER_NOT_DOWNLOADED = "could not download uv's installer from https://astral.sh/uv/install.sh ("
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root"])
+@pytest.mark.parametrize("wget_serves", [False, True], ids=["both-fail", "wget-fallback-serves"])
+def test_a_failed_installer_download_is_named_and_wget_is_tried(
+    tmp_path: Path, as_root: bool, wget_serves: bool
+) -> None:
+    """[R3] round 4: the installer was piped into sh ("curl | sh"), whose status is sh's, 0 for the
+    empty input a failed download leaves, so a run that could not download it (as root behind a
+    proxy the caller's environment named, which a root run drops) ended in the uv trust remedy, and
+    wget was never tried. The download now goes to a file first: curl failing (exit 6) falls back to
+    wget, and when wget fails too (exit 4) the run stops with 127 naming the download, each exit
+    status and, as root, how to give root a proxy or a uv; when wget delivers, the installation runs."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root)
+    installer = tmp_path / "local-uv-install.sh"
+    installer.write_text(f'mkdir -p "$HOME/.local/bin"\ncp -p "{uv.parent}"/* "$HOME/.local/bin/"\n')
+    doubles = tmp_path / "download-bin"
+    doubles.mkdir()
+    log = tmp_path / "downloads.txt"
+    curl = write_download_double(doubles, "curl", log=log, serve=None, exit_code=6)
+    wget = write_download_double(
+        doubles, "wget", log=log, serve=installer if wget_serves else None, exit_code=0 if wget_serves else 4
+    )
+    with_download_doubles(runner, curl=curl, wget=wget, powershell=False)
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    environment = {**_trust_env(tmp_path), "HOME": str(caller_home), "PATH": "/usr/bin:/bin"}
+    result = _run_in(["sh"], runner, env=environment, cwd=_work_dir(tmp_path))
+    url = "https://astral.sh/uv/install.sh"
+    assert log.read_text(encoding="utf-8").splitlines() == [f"curl {url}", f"wget {url}"], result.stderr
+    if wget_serves:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert record.is_file(), result.stderr
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    failure = next((line for line in result.stderr.splitlines() if _INSTALLER_NOT_DOWNLOADED in line), "")
+    # The runner names each downloader as it ran it, here the doubles' paths.
+    assert f"{_INSTALLER_NOT_DOWNLOADED}{curl} exited 6, {wget} exited 4)" in failure, result.stderr
+    assert ("install uv for root beforehand" in failure) is as_root, failure
+    assert "after installation" not in result.stderr and "chmod go-w" not in result.stderr, result.stderr
+    assert not record.exists(), "uv ran"
 
 
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])

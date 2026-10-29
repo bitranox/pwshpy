@@ -411,7 +411,14 @@ Details worth knowing:
   database, never the caller's `HOME`, `XDG_BIN_HOME` or `CARGO_HOME`), and when it finds no uv it
   runs uv's installer with only that home and the fixed `PATH` above in its environment, under umask
   022, so the caller's installer, proxy and certificate variables choose neither what is downloaded
-  nor where it lands. A refused `uv` is skipped with a `pwshpy:
+  nor where it lands. Every run downloads the installer to a file first (with `curl`, then `wget`
+  when `curl` fails; as root into the account's private temporary directory) and runs it only when
+  the download succeeded: when neither downloads it, the run stops with exit code 127 and `could not
+  download uv's installer from https://astral.sh/uv/install.sh (<each downloader> exited <code>)`.
+  Behind a proxy, a root run therefore needs uv installed for root beforehand, or the proxy set in
+  root's own `~/.curlrc` (curl) or `/etc/wgetrc` or `~/.wgetrc` (wget); the caller's
+  `https_proxy`, `SSL_CERT_FILE`, `SSL_CERT_DIR` and `CURL_CA_BUNDLE` do not apply, the system's CA
+  store does. A refused `uv` is skipped with a `pwshpy:
   skipping uv at <path>: <reason>` line on stderr and the next one is tried; an elevated `.ps1`
   child relays those lines to the parent. A `-PwshPyUv` / `--pwshpy-uv` path is used as given when
   not elevated; elevated it must pass the same check or the run stops with `pwshpy: refusing the uv
@@ -642,13 +649,18 @@ Details worth knowing:
   caller's `~/.git-credentials` as root (measured). The packed script gets the caller's values back
   from the shim, and a variable the caller had not set is unset again, as it gets the caller's
   `PATH` back. The shim gives back these variables and no others, whatever the hand-over
-  (`PWSHPY_PACK_CALLER`) names, and every other run removes a hand-over the caller preset. An elevated `.ps1` run on Windows keeps the caller's profile variables. The
+  (`PWSHPY_PACK_CALLER`) names. A `.ps1` run that hands nothing over removes a hand-over marker the
+  caller preset, since its shim runs every time; the `.sh` starts the shim only as root, so a
+  marker preset for any other run reaches no shim and changes nothing. An elevated `.ps1` run on
+  Windows keeps the caller's profile variables. The
   system file (`/etc/gitconfig`, or the one below Git
   for Windows' install directory) is the administrators' and still applies. The runner cannot tell
   who set a variable, so an elevated run in a network that reaches the internet only through a proxy
   downloads nothing: the proxy can be named neither in the environment (root's own included) nor in
   a `uv.toml` (none is read), and the certificate of a TLS-inspecting proxy is not trusted. What
-  still works there: a script with no dependencies (no PEP 723 `dependencies`, no `--with`) on a
+  still works there: with uv installed for that account beforehand (or the proxy set in its own
+  `~/.curlrc` or `wgetrc` for uv's installer, see above), a script with no dependencies (no PEP 723
+  `dependencies`, no `--with`) on a
   managed Python already in the account's managed-Python directory, installed beforehand as that
   account with the proxy set (`uv python install` with `UV_PYTHON_INSTALL_DIR` naming that
   directory); an unelevated run, which keeps every variable; and, by the same reasoning (not

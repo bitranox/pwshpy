@@ -163,6 +163,58 @@ def second_prompts(calls: Path) -> list[str]:
     return [line for line in calls.read_text(encoding="utf-8").splitlines() if line.startswith("PROMPT ")]
 
 
+#: How the packed runners name their two downloaders of uv's installer, each the command a download
+#: runs with the target file and the URL appended (.sh, then .ps1); a test of the installation
+#: replaces the pair with :func:`write_download_double` doubles (one counted substitution).
+SH_INSTALLER_DOWNLOADERS = "for _iu_get in 'curl -LsSf -o' 'wget -q -O'; do"
+PS1_INSTALLER_DOWNLOADERS = "foreach ($downloader in @('curl -LsSf -o', 'wget -q -O')) {"
+
+
+def write_download_double(directory: Path, name: str, *, log: Path, serve: Path | None, exit_code: int = 0) -> Path:
+    """Write an executable ``name`` into ``directory`` standing in for curl or wget; its path.
+
+    Called as the runners call a downloader, ``<double> <target file> <url>``: it appends ``name`` and
+    the URL to ``log``, copies ``serve`` to the target when given, and exits ``exit_code``.
+
+    Args:
+        directory: Directory to write the double into.
+        name: The file name, also the line it logs.
+        log: The call log, one ``<name> <url>`` line per call.
+        serve: The file a successful download delivers, or None for one that delivers nothing.
+        exit_code: The double's exit status (curl exits 6 when it cannot resolve the host).
+
+    Returns:
+        The written double.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as d:
+        ...     write_download_double(Path(d), "curl", log=Path(d) / "log", serve=None, exit_code=6).name
+        'curl'
+    """
+    lines = ["#!/bin/sh", f"printf '%s %s\\n' '{name}' \"$2\" >> '{log}'"]
+    if serve is not None:
+        lines.append(f"cp '{serve}' \"$1\"")
+    lines.append(f"exit {exit_code}")
+    double = directory / name
+    double.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    double.chmod(0o755)
+    return double
+
+
+def with_download_doubles(runner: Path, *, curl: Path, wget: Path, powershell: bool) -> None:
+    """``runner`` with its two installer downloaders replaced by ``curl`` and ``wget`` (absolute paths,
+    one counted substitution); how the download is run and checked, and the installer step after it,
+    stay the shipped code."""
+    text = runner.read_text(encoding="utf-8")
+    old = PS1_INSTALLER_DOWNLOADERS if powershell else SH_INSTALLER_DOWNLOADERS
+    new = (
+        f"foreach ($downloader in @('{curl}', '{wget}')) {{" if powershell else f"for _iu_get in '{curl}' '{wget}'; do"
+    )
+    assert text.count(old) == 1, old
+    runner.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
+
+
 def link_tools(bin_dir: Path, names: tuple[str, ...]) -> Path:
     """Fill ``bin_dir`` with symlinks to the named tools found on ``PATH``; missing ones are skipped.
 
@@ -1006,6 +1058,8 @@ __all__ = [
     "RUNNING_AS_ROOT",
     "UV_SOURCE_VARIABLES",
     "SH_CACHE_HOME_LOOKUP",
+    "SH_INSTALLER_DOWNLOADERS",
+    "PS1_INSTALLER_DOWNLOADERS",
     "SH_DATA_HOME_LOOKUP",
     "SH_PYTHON_DIR_CHECK",
     "data_home",
@@ -1024,6 +1078,8 @@ __all__ = [
     "planted_managed_python",
     "removing_a_new_account_temp_dir",
     "with_account_cache_home",
+    "with_download_doubles",
+    "write_download_double",
     "with_data_home",
     "without_python_dir_check",
     "write_fake_sudo",

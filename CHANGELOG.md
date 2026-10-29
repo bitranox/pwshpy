@@ -181,8 +181,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `XDG_DATA_HOME`, with `XDG_STATE_HOME`, `NETRC` and `UV_CREDENTIALS_DIR` unset. Before, they used
   the caller's, which `sudo -E` or `env_keep` hand over, so uv read the caller's netrc and
   credentials and created root-owned directories in the caller's home. The packed script still sees
-  the caller's values; the shim gives back only these variables, whatever the hand-over names, and a
-  run that hands nothing over removes a hand-over the caller's environment preset.
+  the caller's values; the shim gives back only these variables, whatever the hand-over names. A
+  `.ps1` run that hands nothing over removes a hand-over marker the caller's environment preset (its
+  shim runs every time); the `.sh` starts the shim only as root, so a preset marker reaches none.
 - Packed runners, root run on Linux and macOS (the `.sh` as root, the `.ps1` elevated): uv, git and
   the build backends uv runs keep their temporary files in `<home>/.cache/pwshpy-tmp` of the running
   account (mode 0700; `TMPDIR`, `TMP` and `TEMP` all name it, and the packed script gets the
@@ -194,7 +195,14 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `CARGO_HOME`. Before, the installer ran with the caller's `HOME` and the caller's `UV_INSTALL_DIR`,
   `XDG_BIN_HOME`, `CARGO_HOME`, download-URL, proxy and certificate variables, so it put a
   root-owned uv in the caller's `~/.local/bin` and edited the caller's shell files, then the run
-  refused that uv with exit code 127.
+  refused that uv with exit code 127. Behind a proxy a root run therefore needs uv installed for
+  root beforehand, or the proxy in root's own `~/.curlrc`, `/etc/wgetrc` or `~/.wgetrc`.
+- Packed runners on Linux and macOS: uv's installer is downloaded to a file before it runs (as root
+  into the account's private temporary directory), with `curl` and then `wget` when `curl` fails, and
+  a failed download stops the run with exit code 127 and `could not download uv's installer from
+  ... (<downloader> exited <code>, ...)`; a failed installer stops it with its own exit code named.
+  Before, the installer was piped into `sh`, whose status for the empty input of a failed download
+  is 0, so `wget` was never tried and the run ended in the uv trust remedy.
 - Packed `.sh` runner, `--pwshpy-elevate`: the sudo relaunch runs as a child of the runner's shell
   and exits with its status. Before, it replaced the shell (`exec`), so under sudo's
   `timestamp_type=ppid` the relaunch found no cached credential and exited 1.

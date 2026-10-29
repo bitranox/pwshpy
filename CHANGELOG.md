@@ -16,6 +16,16 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `get_net_tcp_connection` is documented as psutil's `inet` listing: it includes UDP sockets as
   well as TCP. Filter on `protocol` for TCP only. The behaviour is unchanged.
 
+### Fixed
+
+- A mapping key holding a byte that is not valid UTF-8 (in an open property bag such as
+  `CimInstance.properties`, `PSObjectRecord.properties` or `PSInvocationResult.output`) is written
+  like such a value: one U+FFFD per undecodable byte, with the `warning:` line naming the record and
+  field. A key nested inside the bag made `--json` / `--jsonl` and `ps.write_records` fail with
+  `UnicodeEncodeError`, and a key of the bag itself was silently rewritten into three U+FFFD, so two
+  keys differing only in their bad bytes collapsed into one entry. `PSRecord.to_dict()` now keeps such
+  a key as it is, exactly as it keeps such a value; a record without one dumps as before.
+
 ## [1.11.0] 2026-10-29 00:00:55
 
 ### Added

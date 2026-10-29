@@ -10,6 +10,7 @@ valid UTF-8 reaches Python as a lone surrogate (``os`` decodes with ``surrogatee
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -23,7 +24,8 @@ from pwshpy.adapters.native.record_json import (
     json_bytes,
     record_json_bytes,
 )
-from pwshpy.domain.records import CimInstance, EnvVar, PSRecord
+from pwshpy.domain.enums import ProcessStatus
+from pwshpy.domain.records import CimInstance, EnvVar, PSInvocationResult, PSObjectRecord, PSRecord
 
 #: The code point os.environ / os.fsdecode hold for the undecodable byte 0xFF.
 _BAD = chr(0xDCFF)
@@ -123,23 +125,74 @@ def test_a_clean_key_keeps_its_name_and_the_repaired_key_takes_the_suffix() -> N
 
 
 @pytest.mark.os_agnostic
-def test_pydantic_rewrites_a_top_level_key_before_the_helper_sees_it() -> None:
-    """Pins pydantic-core: to_dict turns a surrogate in a dict field's own key into three U+FFFD.
+def test_a_surrogate_in_a_dict_fields_own_key_is_one_fffd_per_byte_and_named() -> None:
+    """A dict field's own key: one U+FFFD per byte and a warning path, never three U+FFFD silently.
 
-    The helper never sees that key, so it is not reported. If pydantic starts passing the key
-    through, this fails and the helper's key repair takes over.
+    pydantic-core alone rewrites such a key into three U+FFFD (the surrogate's UTF-8 bytes) and
+    reports nothing; to_dict keeps the key as it is, like a value, so the repair here names it.
     """
     record = CimInstance(class_name="c", properties={"k" + _BAD: "v"})
-    assert record.to_dict()["properties"] == {"k" + _FFFD * 3: "v"}
-    assert record_json_bytes(record).replaced == ()
+    assert record.to_dict()["properties"] == {"k" + _BAD: "v"}
+    result = record_json_bytes(record)
+    assert json.loads(result.data)["properties"] == {"k" + _FFFD: "v"}
+    assert result.replaced == ("properties.k?",)
 
 
 @pytest.mark.os_agnostic
-def test_pydantic_refuses_a_nested_key_in_to_dict() -> None:
-    """Pins pydantic-core: a surrogate in a NESTED key of an open bag fails in to_dict itself."""
+def test_a_surrogate_in_a_nested_key_is_repaired_instead_of_raising() -> None:
+    """A NESTED key of an open bag made pydantic-core raise UnicodeEncodeError in to_dict itself."""
     record = CimInstance(class_name="c", properties={"o": {"k" + _BAD: 1}})
-    with pytest.raises(UnicodeEncodeError):
-        record_json_bytes(record)
+    result = record_json_bytes(record)
+    assert json.loads(result.data)["properties"] == {"o": {"k" + _FFFD: 1}}
+    assert result.replaced == ("properties.o.k?",)
+
+
+@pytest.mark.os_agnostic
+def test_a_surrogate_key_in_a_list_and_in_a_nested_record_is_repaired() -> None:
+    """A dict inside ``list[Any]``, and a record inside it whose own dict field has the key."""
+    record = PSInvocationResult(
+        output=[{"k" + _BAD: 1}, PSObjectRecord(type_name="T", properties={"p" + _BAD: {"q" + _BAD: 2}})]
+    )
+    result = record_json_bytes(record)
+    assert json.loads(result.data)["output"] == [
+        {"k" + _FFFD: 1},
+        {"type_name": "T", "properties": {"p" + _FFFD: {"q" + _FFFD: 2}}},
+    ]
+    assert result.replaced == ("output.0.k?", "output.1.properties.p?", "output.1.properties.p?.q?")
+
+
+@pytest.mark.os_agnostic
+def test_two_dict_field_keys_differing_only_in_bad_bytes_both_survive() -> None:
+    """pydantic-core turned both into the same three U+FFFD, so one entry was lost silently."""
+    record = CimInstance(class_name="c", properties={"a" + chr(0xDCFF): 1, "a" + chr(0xDCFE): 2})
+    assert json.loads(record_json_bytes(record).data)["properties"] == {"a" + _FFFD: 1, "a" + _FFFD + "~2": 2}
+
+
+@pytest.mark.os_agnostic
+def test_to_dict_keeps_the_json_form_of_values_beside_a_surrogate_key() -> None:
+    """The slow path still dumps in JSON mode: a datetime is ISO text, an enum its value."""
+    when = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
+    record = CimInstance(class_name="c", properties={"k" + _BAD: {"t": when, "s": ProcessStatus.RUNNING}, "x": when})
+    clean = CimInstance(class_name="c", properties={"k": {"t": when, "s": ProcessStatus.RUNNING}, "x": when})
+    dumped = clean.to_dict()["properties"]
+    assert dumped == {"k": {"t": "2026-10-29T12:00:00Z", "s": "running"}, "x": "2026-10-29T12:00:00Z"}
+    assert record.to_dict()["properties"] == {"k" + _BAD: dumped["k"], "x": dumped["x"]}
+
+
+@pytest.mark.os_agnostic
+def test_a_real_key_that_looks_like_an_internal_placeholder_is_kept() -> None:
+    """Whatever stands in for a surrogate key while pydantic dumps must never capture a real key."""
+    bag = {chr(0) + str(n): n for n in range(4)} | {"k" + _BAD: "v"}
+    record = CimInstance(class_name="c", properties=bag)
+    assert record.to_dict()["properties"] == bag
+
+
+@pytest.mark.os_agnostic
+def test_a_clean_record_with_open_bags_dumps_exactly_as_pydantic_does() -> None:
+    """The fast path is model_dump(mode='json') itself."""
+    when = datetime(2026, 10, 29, tzinfo=timezone.utc)
+    record = PSInvocationResult(output=[{"a": when}, PSObjectRecord(type_name="T", properties={"b": [1]})])
+    assert record.to_dict() == record.model_dump(mode="json")
 
 
 @pytest.mark.os_agnostic

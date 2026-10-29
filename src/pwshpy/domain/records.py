@@ -16,8 +16,10 @@ Contents:
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterator, Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -63,13 +65,114 @@ class PSRecord(BaseModel):
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable mapping of this record's fields.
 
+        A mapping key holding a lone surrogate (a byte that was not valid UTF-8, decoded with
+        ``surrogateescape``) is kept as it is, exactly like such a value, so the output layer can
+        write each such byte as U+FFFD and name the field. pydantic-core alone does neither: it
+        rewrote a dict field's own key into three U+FFFD without a word (two keys differing only
+        in their bad bytes then collapsed into one entry), and raised ``UnicodeEncodeError`` for a
+        key deeper in an open bag. Such keys stand in as placeholders while pydantic dumps and are
+        put back afterwards; a record without one is ``model_dump(mode="json")`` unchanged.
+
+        Returns:
+            The record's fields in their JSON form (``datetime`` -> ISO text, enum -> its value).
+
         Example:
             >>> class Tag(PSRecord):
             ...     name: str
             >>> Tag(name="a").to_dict()
             {'name': 'a'}
+            >>> class Bag(PSRecord):
+            ...     data: dict[str, Any]
+            >>> Bag(data={"k" + chr(0xDCFF): 1}).to_dict() == {"data": {"k" + chr(0xDCFF): 1}}
+            True
         """
-        return self.model_dump(mode="json")
+        if not _holds_surrogate_key(self):
+            return self.model_dump(mode="json")
+        mask = _KeyMask(self)
+        masked = cast("PSRecord", mask.mask(self))
+        return cast("dict[str, Any]", mask.unmask(masked.model_dump(mode="json")))
+
+
+#: Every UTF-16 surrogate code point; as a lone code point in a ``str`` it is an undecodable byte.
+_SURROGATE = re.compile("[" + chr(0xD800) + "-" + chr(0xDFFF) + "]")
+
+
+def _has_surrogate(key: object) -> bool:
+    """Whether ``key`` is a string holding a lone surrogate (an ASCII key never does)."""
+    return isinstance(key, str) and not key.isascii() and _SURROGATE.search(key) is not None
+
+
+def _children(value: object) -> Iterator[tuple[object, object]]:
+    """``(key, item)`` for each member of a record, mapping, list or tuple (key None for a non-mapping)."""
+    if isinstance(value, BaseModel):
+        for name in type(value).model_fields:
+            yield None, getattr(value, name)
+    elif isinstance(value, Mapping):
+        yield from cast("Mapping[object, object]", value).items()
+    elif isinstance(value, (list, tuple)):
+        for item in cast("list[object] | tuple[object, ...]", value):
+            yield None, item
+
+
+def _holds_surrogate_key(value: object) -> bool:
+    """Whether a mapping anywhere in ``value`` (nested records included) has a surrogate key."""
+    return any(_has_surrogate(key) or _holds_surrogate_key(item) for key, item in _children(value))
+
+
+def _string_keys(value: object) -> Iterator[str]:
+    """Every string mapping key anywhere in ``value``."""
+    for key, item in _children(value):
+        if isinstance(key, str):
+            yield key
+        yield from _string_keys(item)
+
+
+class _KeyMask:
+    """Swaps each surrogate key for a placeholder pydantic can dump, and back again afterwards.
+
+    A placeholder is a NUL plus a number, chosen so it equals no key anywhere in the record: a real
+    key that happens to look like one is never mistaken for a stand-in.
+    """
+
+    def __init__(self, record: PSRecord) -> None:
+        self._taken = set(_string_keys(record))
+        self._originals: dict[str, str] = {}
+
+    def mask(self, value: object) -> object:
+        """``value`` with every surrogate key replaced by a placeholder, records copied as needed."""
+        if isinstance(value, BaseModel):
+            update = {name: self.mask(getattr(value, name)) for name in type(value).model_fields}
+            return value.model_copy(update=update)
+        if isinstance(value, Mapping):
+            mapping = cast("Mapping[object, object]", value)
+            return {self._stand_in(key): self.mask(item) for key, item in mapping.items()}
+        if isinstance(value, list):
+            return [self.mask(item) for item in cast("list[object]", value)]
+        if isinstance(value, tuple):
+            return tuple(self.mask(item) for item in cast("tuple[object, ...]", value))
+        return value
+
+    def unmask(self, value: object) -> object:
+        """The dumped ``value`` with each placeholder key turned back into its original key."""
+        if isinstance(value, dict):
+            mapping = cast("dict[object, object]", value)
+            return {self._original(key): self.unmask(item) for key, item in mapping.items()}
+        if isinstance(value, list):
+            return [self.unmask(item) for item in cast("list[object]", value)]
+        return value
+
+    def _stand_in(self, key: object) -> object:
+        if not _has_surrogate(key):
+            return key
+        number = len(self._originals)
+        while (placeholder := f"{chr(0)}{number}") in self._taken:
+            number += 1
+        self._taken.add(placeholder)
+        self._originals[placeholder] = cast("str", key)
+        return placeholder
+
+    def _original(self, key: object) -> object:
+        return self._originals.get(key, key) if isinstance(key, str) else key
 
 
 class ProcessInfo(PSRecord):

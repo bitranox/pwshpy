@@ -142,6 +142,25 @@ def _process_scoped_execution_policy() -> Iterator[None]:
 
 
 @pytest.fixture(scope="module", autouse=True)
+def _pwsh_cache_in_a_scratch_directory(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """On POSIX, point XDG_CACHE_HOME at a scratch directory for every process this module starts ([123]).
+
+    pwsh writes its own cache (StartupProfileData-NonInteractive, ModuleAnalysisCache) below
+    $XDG_CACHE_HOME/powershell, else ~/.cache/powershell: the real account's, root's on a root run of
+    the suite, as uv's cache was before [111]. The variable also keeps a runner given no
+    PWSHPY_PACK_CACHE out of the real ~/.cache. A test that sets XDG_CACHE_HOME itself still wins.
+    Windows is left as it is: pwsh caches below LOCALAPPDATA there, which only the tests given
+    :func:`_isolated_cache` point elsewhere, and moving it for every test would move uv's defaults too.
+    """
+    if sys.platform == "win32":
+        yield
+        return
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("xdg-cache")))
+        yield
+
+
+@pytest.fixture(scope="module", autouse=True)
 def _uv_the_runner_trusts(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
     """Give an elevated Windows run a uv it trusts; elsewhere the found uv is used as it is."""
     if not _windows_elevated():
@@ -238,6 +257,26 @@ def _project(root: Path, *, exit_code: int = 0) -> Path:
     entry = root / "app.py"
     entry.write_text(_ENTRY_WITH_SUBMODULE)
     return entry
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="pwsh caches below XDG_CACHE_HOME only on POSIX")
+def test_pwsh_keeps_its_cache_in_the_modules_scratch_directory(tmp_path: Path) -> None:
+    """[123]: the pwsh a test starts is handed the module's scratch XDG_CACHE_HOME (the fixture above),
+    so it keeps its own cache (StartupProfileData-NonInteractive, ModuleAnalysisCache) there and never
+    in the real account's ~/.cache/powershell. Asked of the child itself: pwsh writes that cache only
+    when its startup profile changed, so the file's presence cannot be the check."""
+    assert _PWSH is not None
+    seen = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.Write($env:XDG_CACHE_HOME)"],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert seen.returncode == 0, seen.stderr
+    assert Path(seen.stdout).is_relative_to(tmp_path.parent), f"pwsh caches below {seen.stdout!r}"
 
 
 def _isolated_cache(tmp_path: Path) -> dict[str, str]:

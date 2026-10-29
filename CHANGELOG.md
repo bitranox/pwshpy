@@ -18,6 +18,14 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- `ps.elevate`, `pwshpy --elevate`, `--pwshpy-elevate` and `-PwshPyElevate` on Linux and macOS: a
+  user who needs no password for the relaunch (a `NOPASSWD` sudoers rule) is no longer asked for one
+  or refused. Before, `sudo -v` ran first, and under sudo's default `verifypw=all` it wants a password
+  unless every sudoers rule of the user is `NOPASSWD`: beside Ubuntu's `%sudo` rule the user was
+  asked for a password the command does not need, and without a terminal (or without any password,
+  as on stock cloud images) elevation was declined with exit code 77. `sudo -n` is now first asked,
+  silently, to run the program the relaunch runs (the current Python, `/bin/sh`, or the running
+  `pwsh`); when it may, the relaunch runs under `sudo -n` without a prompt.
 - Packed runners (`pwshpy pack`): an elevated run (`.ps1` with an administrator token or as
   SYSTEM, either runner as root) now judges its pack cache before it removes or writes anything
   there, and the unpacked tree again: the cache directory, every directory above it and every

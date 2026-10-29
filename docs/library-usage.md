@@ -628,7 +628,10 @@ Every failure across both backends raises a subclass of `PwshPyError`, all expor
   - `ElevationDeclinedError` - the UAC prompt or sudo's password was refused by `ps.elevate()`,
     or sudo granted root but cached no credential for the command (sudoers `timestamp_timeout=0`):
     on POSIX `ps.elevate()` asks once with `sudo -v`, checks with `sudo -n -v` and runs the command
-    under `sudo -n`, so sudo never prompts a second time.
+    under `sudo -n`, so sudo never prompts a second time. A user sudo lets run the current Python
+    without a password (a `NOPASSWD` rule) is asked nothing: `ps.elevate()` first asks `sudo -n` to
+    run that interpreter and, when it may, runs the command under `sudo -n` straight away (an
+    explicit `executable=` other than the current interpreter is not probed).
 - `ElevationRequiredError` - `ps.require_elevation()` in a process that is not elevated.
 - `PowerShellError` - a .NET error record.
 - `FeatureUnavailableError` - a .NET call without the `[full]` extra.

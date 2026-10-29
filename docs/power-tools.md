@@ -17,7 +17,14 @@ ps.require_elevation()  # raises ElevationRequiredError if not admin (an honest 
 ps.elevate()  # relaunch THIS process elevated (UAC / sudo), preserving cwd + argv
 ```
 
-On Linux and macOS the password is asked by `sudo -v` first, and only then is the command run, as
+On Linux and macOS a user sudo lets run the relaunch's own program without a password (a
+`NOPASSWD` sudoers rule) is asked nothing: `sudo -n` is first asked to run that program (the current
+Python for `ps.elevate()`, `/bin/sh` for a `.sh` runner, the running `pwsh` for a `.ps1`), silently,
+and when it may, the command runs as `sudo -n <command>` at once. Probing the very program keeps a
+rule for some other program only from passing the check and then refusing the command. sudo's default
+`verifypw=all` is why the check comes first: `sudo -v` wants a password unless every sudoers rule of
+the user is `NOPASSWD`, so beside Ubuntu's `%sudo` rule it asked for one the command does not need.
+Otherwise the password is asked by `sudo -v` first, and only then is the command run, as
 `sudo -n <command>`. sudo exits 1 when it refuses, which is also an ordinary exit code, so asking
 separately is what lets a refusal be told apart from the command's own result. The `-n` means sudo is
 never asked to prompt a second time: after the prompt, `sudo -n -v` checks that sudo cached the
@@ -47,8 +54,8 @@ pwshpy --elevate clear_event_log Application                  # relaunch elevate
 When the prompt is refused, `pwshpy --elevate` exits 77 (`EX_NOPERM` from `sysexits.h`) and writes a
 line starting `pwshpy: elevation declined` to stderr, so a caller can tell a refusal from the
 relaunched command's own failure. The packed runners below do the same for `--pwshpy-elevate` and
-`-PwshPyElevate`, with the same single prompt: `sudo -v`, then `sudo -n -v`, then the relaunch
-under `sudo -n`, so a `timestamp_timeout=0` setup exits 77 rather than prompting twice (on a POSIX
+`-PwshPyElevate`, with the same no-password check and the same single prompt: `sudo -v`, then
+`sudo -n -v`, then the relaunch under `sudo -n`, so a `timestamp_timeout=0` setup exits 77 rather than prompting twice (on a POSIX
 host without `sudo` they exit 127 instead, a missing tool rather than a refusal). A command that itself exits 77 still looks the same by exit code alone; the stderr line
 is what tells them apart. The `.sh` runner starts that relaunch as a child of its shell rather than
 replacing itself with it, so sudo's `timestamp_type=ppid` finds the credential the prompt cached; a

@@ -70,7 +70,7 @@ box (like the Windows mutating tests need a throwaway Windows VM).
 - **Log-name arg:** a Windows channel ("System") maps to a unit/identifier match or the whole journal;
   define the convention (e.g. `get_win_event("sshd")` -> `add_match(_SYSTEMD_UNIT="sshd.service")`).
 - **Dep:** `systemd-python` (or read the journal via `jeepney` is not viable - use python-systemd).
-  Linux-only. **Privilege:** reading the system journal needs the `systemd-journal` group or root.
+  Linux-only. **Privilege:** the whole system journal is readable by root and members of `systemd-journal`, `adm` or `wheel` (per journalctl(1)); anyone else reads only their own journal files.
 
 ## 2. Local users/groups -> pwd/grp + shadow-utils  `get_local_user` / `get_local_group` + verbs  [DONE]
 

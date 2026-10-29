@@ -1,4 +1,4 @@
-"""native script packer - turn a Python script into a self-extracting ``.ps1``.
+"""native script packer - turn a Python script into a self-extracting ``.ps1`` or ``.sh``.
 
 Handing a Python tool to someone normally means "install Python, clone this, make a venv,
 pip install, then run it".  :func:`pack_script` collapses that to one file: the entry script
@@ -18,8 +18,8 @@ Portable (stdlib + the domain's pure packing logic); works on every OS, and the 
 produces runs on Windows PowerShell 5.1 as well as pwsh 7 on any OS.
 
 Contents:
-    * :func:`pack_script` - pack an entry script and its local modules into a ``.ps1``.
-    * :func:`unpack_script` - restore the sources a packed ``.ps1`` carries.
+    * :func:`pack_script` - pack an entry script and its local modules into a ``.ps1`` or ``.sh``.
+    * :func:`unpack_script` - restore the sources a packed ``.ps1`` or ``.sh`` carries.
 """
 
 from __future__ import annotations
@@ -92,7 +92,8 @@ def pack_script(
 
     Args:
         entry: The Python script to pack.
-        dest: Output path; defaults to the entry's name with a ``.ps1`` suffix.
+        dest: Output path; defaults to the entry's name with a ``.ps1`` suffix, or ``.sh``
+            when the format resolves to :attr:`RunnerFormat.SH`.
         options: How to pack - includes, extra ``--with`` distributions, the import root, and
             whether to overwrite the destination (see :class:`~pwshpy.domain.packing.PackOptions`).
 

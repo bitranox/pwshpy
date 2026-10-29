@@ -77,20 +77,46 @@ def _missing_sections(method: Callable[..., Any]) -> list[str]:
 _MIN_PUBLIC_METHODS = 91
 
 
-def _public_members() -> dict[str, object]:
-    return {name: member for name, member in vars(Ps).items() if not name.startswith("_")}
+def _public_members(cls: type = Ps) -> dict[str, object]:
+    return {name: member for name, member in vars(cls).items() if not name.startswith("_")}
 
 
 def _public_methods() -> list[tuple[str, Callable[..., Any]]]:
     return [(name, member) for name, member in _public_members().items() if inspect.isfunction(member)]
 
 
+def _unreadable_members(cls: type) -> list[str]:
+    """Name the public members the walk skips: a staticmethod, classmethod or property is no plain function."""
+    return sorted(name for name, member in _public_members(cls).items() if not inspect.isfunction(member))
+
+
 @pytest.mark.os_agnostic
 def test_the_walk_sees_every_public_facade_member() -> None:
-    # A staticmethod, property or wrapper is not a plain function and would be skipped silently.
-    others = sorted(name for name, member in _public_members().items() if not inspect.isfunction(member))
+    others = _unreadable_members(Ps)
     assert others == [], f"public Ps members the docstring check cannot read: {others}"
     assert len(_public_methods()) >= _MIN_PUBLIC_METHODS
+
+
+@pytest.mark.os_agnostic
+def test_the_walk_names_members_that_are_not_plain_functions() -> None:
+    class Mixed:
+        def plain(self) -> None:
+            """A plain method."""
+
+        @staticmethod
+        def static() -> None:
+            """A staticmethod."""
+
+        @classmethod
+        def klass(cls) -> None:
+            """A classmethod."""
+
+        @property
+        def prop(self) -> int:
+            """A property."""
+            return 0
+
+    assert _unreadable_members(Mixed) == ["klass", "prop", "static"]
 
 
 @pytest.mark.os_agnostic

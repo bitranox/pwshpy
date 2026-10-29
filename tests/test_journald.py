@@ -2,7 +2,8 @@
 
 The PRIORITY->level and entry->record marshaling are pure functions with no systemd
 dependency, so they run on every OS (including the Windows dev box). The live journal
-read needs the systemd-journal group or root, so it is local_only + Linux-only.
+read needs root or the systemd-journal, adm or wheel group to see the system journal,
+so it is local_only + Linux-only.
 """
 
 from __future__ import annotations
@@ -74,12 +75,12 @@ def test_marshal_entry_missing_fields_are_safe() -> None:
 @pytest.mark.local_only
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="journald is Linux-only")
 def test_live_read_streams_entries() -> None:
-    """Reading the real journal yields EventLogEntry records (needs root / systemd-journal group)."""
+    """Reading the real journal yields EventLogEntry records (needs root / systemd-journal, adm or wheel)."""
     try:
         first = next(iter(iter_event_log("System")))
     except (PlatformUnsupportedError, NativeCallError) as exc:
         # a local resource this box may lack: the [journald] extra (systemd-python) is not
-        # installed, or the journal is not readable by this user (root / systemd-journal group).
+        # installed, or the journal is not readable by this user (root / systemd-journal, adm or wheel).
         pytest.skip(f"live journald read unavailable here ({exc})")
     assert isinstance(first, EventLogEntry)
     assert first.time_created is not None

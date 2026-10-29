@@ -127,8 +127,9 @@ after it, typically `StopPending`, without waiting - for a service that sits in 
 
 `get_win_event` is **portable**: win32evtlog on Windows, **journald** on Linux. It streams
 newest-first (memory-bounded). `L` is a Windows channel (`"System"`) or, on Linux, a systemd unit
-(`"sshd"`, or `""`/`"System"` for the whole journal); reading the system journal needs root or the
-`systemd-journal` group. Clearing the log is Windows-only.
+(`"sshd"`, or `""`/`"System"`/`"*"` for the whole journal); the whole system journal is readable by
+root and members of `systemd-journal`, `adm` or `wheel` (per journalctl(1)), anyone else reads only
+their own journal files. Clearing the log is Windows-only.
 
 | PowerShell                                    | pwshpy - Python (API)                       | pwshpy - CLI                          |
 |-----------------------------------------------|---------------------------------------------|---------------------------------------|

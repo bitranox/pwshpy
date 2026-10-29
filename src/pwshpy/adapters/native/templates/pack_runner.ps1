@@ -856,6 +856,15 @@ function Get-PwshPyGitVersionDistrust {
     return "git $version ignores GIT_CONFIG_GLOBAL, so $why"
 }
 
+function Get-PwshPyUvHome {
+    # POSIX: the home below which the installer puts uv and the uv search looks, no trailing slash ('' for
+    # /): $HOME, or in a root run the running account's passwd home, the directory its cache directory is
+    # in (Get-PwshPyAccountCacheHome, as the [159] hand-over takes it), since sudo -E or env_keep hand the
+    # caller's HOME over.
+    if ($PwshPyRootPath) { return (Split-Path -Parent (Get-PwshPyAccountCacheHome)).TrimEnd('/') }
+    return ([string]$HOME).TrimEnd('/')
+}
+
 function Get-PwshPyUvLocation {
     # The fixed places the installer puts uv, for a uv that is not on PATH. An unset variable
     # contributes nothing (Join-Path would fail on it).
@@ -868,9 +877,13 @@ function Get-PwshPyUvLocation {
         if ($env:XDG_BIN_HOME) { $locations += (Join-Path $env:XDG_BIN_HOME 'uv.exe') }
         return $locations
     }
-    $locations += (Join-Path $HOME '.local/bin/uv')
-    $locations += (Join-Path $HOME '.cargo/bin/uv')
+    $uvHome = Get-PwshPyUvHome
+    $locations += "$uvHome/.local/bin/uv"
+    $locations += "$uvHome/.cargo/bin/uv"
     $locations += '/usr/local/bin/uv'
+    # As root neither variable below is asked: sudo -E or env_keep hand the caller's over, and the
+    # installer runs without them (Install-PwshPyUv).
+    if ($PwshPyRootPath) { return $locations }
     # The installer honours XDG_BIN_HOME / CARGO_HOME, so a machine that sets either installs
     # uv there rather than under ~/.local/bin - check them too before giving up.
     if ($env:XDG_BIN_HOME) { $locations += (Join-Path $env:XDG_BIN_HOME 'uv') }
@@ -933,11 +946,26 @@ function Install-PwshPyUv {
         $script:PwshPyCallerPath = (Join-Path $env:USERPROFILE '.local\bin') + [IO.Path]::PathSeparator + $script:PwshPyCallerPath
         $env:PATH = $script:PwshPyCallerPath
     } else {
-        & /bin/sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh || wget -qO- https://astral.sh/uv/install.sh | sh'
+        $installCommand = 'curl -LsSf https://astral.sh/uv/install.sh | sh || wget -qO- https://astral.sh/uv/install.sh | sh'
+        $uvHome = Get-PwshPyUvHome
+        if ($PwshPyRootPath) {
+            # As root the installer and the download run with nothing of the caller's environment, which
+            # sudo -E or env_keep hand over: under the caller's HOME it put a root-owned uv in the caller's
+            # ~/.local/bin and edited the caller's shell files, and it honours UV_INSTALL_DIR, XDG_BIN_HOME,
+            # CARGO_HOME and its own download-URL variables, curl and wget their proxy and certificate
+            # variables and their rc files below HOME, so the caller would choose what lands in a
+            # directory root then runs uv from. Only the account's own HOME and the fixed helper PATH go
+            # in, under umask 022 as for the unpack ([R6]), or a caller's 002 would leave the new
+            # directories group-writable and the search would refuse the uv it just installed. As the .sh.
+            $homeValue = if ($uvHome) { $uvHome } else { '/' }
+            & env -i "HOME=$homeValue" "PATH=$env:PATH" /bin/sh -c "umask 022 && { $installCommand; }"
+        } else {
+            & /bin/sh -c $installCommand
+        }
         if ($LASTEXITCODE -ne 0) { throw "the uv installer failed with exit code $LASTEXITCODE" }
         # A root run keeps its fixed PATH for helpers; the new uv's directory joins the caller's PATH,
         # which the uv search walks and the packed script gets back.
-        $script:PwshPyCallerPath = (Join-Path $HOME '.local/bin') + [IO.Path]::PathSeparator + $script:PwshPyCallerPath
+        $script:PwshPyCallerPath = "$uvHome/.local/bin" + [IO.Path]::PathSeparator + $script:PwshPyCallerPath
         if (-not $PwshPyRootPath) { $env:PATH = $script:PwshPyCallerPath }
     }
 }

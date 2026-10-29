@@ -4433,6 +4433,82 @@ def test_an_elevated_posix_run_gives_uv_and_git_the_accounts_own_home(tmp_path: 
     assert f"pwshpy: setting HOME={home}: " in result.stderr, result.stderr
 
 
+#: The POSIX installer command of the .ps1 runner, the one string a test of the installation replaces.
+_POSIX_UV_INSTALL_COMMAND = (
+    "$installCommand = 'curl -LsSf https://astral.sh/uv/install.sh | sh"
+    " || wget -qO- https://astral.sh/uv/install.sh | sh'"
+)
+#: What uv's installer reads besides HOME, and what curl and wget read: each the caller's choice for root.
+_INSTALLER_STEERING = (
+    "UV_INSTALL_DIR",
+    "XDG_BIN_HOME",
+    "CARGO_HOME",
+    "UV_INSTALLER_GITHUB_BASE_URL",
+    "UV_INSTALLER_GHE_BASE_URL",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "SSL_CERT_FILE",
+    "CURL_CA_BUNDLE",
+    "CURL_HOME",
+    "WGETRC",
+    "TMPDIR",
+)
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_posix_run_installs_uv_into_the_accounts_own_home(tmp_path: Path, elevated: str) -> None:
+    """[159]/[R3] round 3, as the .sh root run: an elevated POSIX run ran uv's installer with the caller's
+    HOME and installer, proxy and certificate variables, so a root-owned uv landed in the caller's
+    ~/.local/bin (from where and to where the caller chose), and the uv search looked in the caller's
+    home. No uv is anywhere here, the caller's HOME is a 0777 directory and every steering variable is
+    set; a local installer records its environment and installs the recording uv below its HOME. Elevated
+    it gets the account's own home (answered inside tmp_path) and none of the variables, the uv lands
+    there and runs, and nothing is created in the caller's home; the control installs into the caller's."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
+    installer_env = tmp_path / "installer-env.txt"
+    installer = tmp_path / "local-uv-install.sh"
+    installer.write_text(
+        f'env > "{installer_env}"\nmkdir -p "$HOME/.local/bin"\ncp -p "{uv.parent}"/* "$HOME/.local/bin/"\n',
+        encoding="utf-8",
+    )
+    text = runner.read_text(encoding="utf-8")
+    for old, new in (
+        (_POSIX_UV_INSTALL_COMMAND, f"$installCommand = 'cat {installer} | sh'"),
+        (f"'{_SYSTEM_WIDE_UV}'", f"'{tmp_path / 'no-system-uv'}'"),
+    ):
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    runner.write_text(text, encoding="utf-8")
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    caller_home.chmod(0o777)
+    env = {name: str(tmp_path / ("steer-" + name.lower())) for name in _INSTALLER_STEERING}
+    env["HOME"] = str(caller_home)
+    result = _run_with_path(
+        tmp_path,
+        runner,
+        path_first=["/usr/bin", "/bin"],
+        env=env,
+        cwd=_clean_cwd(tmp_path),
+        inherit_path=False,
+        install_uv=True,
+    )
+    got = dict(line.split("=", 1) for line in installer_env.read_text(encoding="utf-8").splitlines() if "=" in line)
+    if elevated == "$false":
+        assert got["HOME"] == str(caller_home), got
+        assert (caller_home / ".local" / "bin" / "uv").is_file(), result.stderr
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert got["HOME"] == str(tmp_path), got
+    assert [name for name in _INSTALLER_STEERING if name in got] == [], got
+    assert record.is_file(), result.stderr
+    assert (tmp_path / ".local" / "bin" / "uv").is_file(), result.stderr
+    assert list(caller_home.iterdir()) == [], result.stderr
+
+
 # --- [156] elevated .ps1 runs of a script with a git source refuse a git older than 2.32 ----------------
 
 #: The start of the refusal an elevated run prints for a git that may ignore GIT_CONFIG_GLOBAL.

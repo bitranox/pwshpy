@@ -406,7 +406,12 @@ Details worth knowing:
   euid of an `id` in those same directories, never one on `PATH`; when none answers with a uid, the
   run is treated as root (it fails closed: such a system's non-root caller loses only the per-user
   `uv` lookup, a root run never loses the rule). The caller's `PATH` is still searched for `uv`
-  (each hit judged) and handed back to the packed script. A refused `uv` is skipped with a `pwshpy:
+  (each hit judged) and handed back to the packed script; after it a root run looks in the running
+  account's own `~/.local/bin`, `~/.cargo/bin` and `/usr/local/bin` (the home from the passwd
+  database, never the caller's `HOME`, `XDG_BIN_HOME` or `CARGO_HOME`), and when it finds no uv it
+  runs uv's installer with only that home and the fixed `PATH` above in its environment, under umask
+  022, so the caller's installer, proxy and certificate variables choose neither what is downloaded
+  nor where it lands. A refused `uv` is skipped with a `pwshpy:
   skipping uv at <path>: <reason>` line on stderr and the next one is tried; an elevated `.ps1`
   child relays those lines to the parent. A `-PwshPyUv` / `--pwshpy-uv` path is used as given when
   not elevated; elevated it must pass the same check or the run stops with `pwshpy: refusing the uv

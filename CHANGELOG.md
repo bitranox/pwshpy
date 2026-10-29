@@ -83,6 +83,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   credentials and created root-owned directories in the caller's home. The packed script still sees
   the caller's values; the shim gives back only these variables, whatever the hand-over names, and a
   run that hands nothing over removes a hand-over the caller's environment preset.
+- Packed runners, root run on Linux and macOS (the `.sh` as root, the `.ps1` elevated): with no uv
+  found, uv's installer runs with only the running account's own `HOME` and the fixed helper `PATH`
+  (umask 022), and the uv search looks below that home, not in the caller's `XDG_BIN_HOME` or
+  `CARGO_HOME`. Before, the installer ran with the caller's `HOME` and the caller's `UV_INSTALL_DIR`,
+  `XDG_BIN_HOME`, `CARGO_HOME`, download-URL, proxy and certificate variables, so it put a
+  root-owned uv in the caller's `~/.local/bin` and edited the caller's shell files, then the run
+  refused that uv with exit code 127.
 - Packed `.sh` runner, `--pwshpy-elevate`: the sudo relaunch runs as a child of the runner's shell
   and exits with its status. Before, it replaced the shell (`exec`), so under sudo's
   `timestamp_type=ppid` the relaunch found no cached credential and exited 1.

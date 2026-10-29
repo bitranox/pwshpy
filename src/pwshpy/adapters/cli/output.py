@@ -15,16 +15,17 @@ JSON output (``--json``, ``--jsonl``, :func:`emit_json`) is written as UTF-8 byt
 the text layer, whatever the console code page, ``PYTHONIOENCODING`` or ``PYTHONUTF8``
 say: JSON is UTF-8 by spec, and a cp1252 stdout (German Windows) turned every non-ASCII
 field into mojibake for a consumer reading the pipe.  Lines end in LF on every OS.  A record
-field or JSON value holding a byte that is not valid UTF-8 is written with U+FFFD for that byte,
-and one ``warning:`` line on stderr names the record and field; the stream goes on.  Text
+field (in JSON or in a human-table cell) or JSON value holding a byte that is not valid UTF-8 is
+written with U+FFFD for that byte, and one ``warning:`` line on stderr names the record and field;
+the stream goes on.  Text
 passed through from elsewhere (:func:`emit_text`: a child's output, a web response, a status
 line naming a path; :func:`emit_lines`: a file's lines) is written the same way when its stream
 is not a terminal, because a character outside cp1252 raised ``UnicodeEncodeError`` there after
 the work was done; at a terminal it goes through the text layer as before.  A missing stream
 (``None``, as under pythonw or a detached service) drops the output, as ``click.echo`` does.
-Everything else (the human table, status and error lines, ``config``) goes through the text
-layer, which :func:`use_utf8_when_piped` switches to UTF-8 with LF line ends for a piped stream
-when the process starts.
+Everything else (the human table, status and error lines, ``config``'s human view) goes through
+the text layer, which :func:`use_utf8_when_piped` switches to UTF-8 with LF line ends for a piped
+stream when the process starts.
 
 The human table fits a terminal's width. Piped or redirected it is sized to its content up to
 ``_MAX_PIPED_WIDTH`` columns, so no cell is cut: every value is whole, a value without line
@@ -49,8 +50,8 @@ import io
 import itertools
 import os
 import sys
-from collections.abc import Generator, Iterable
-from typing import Any, BinaryIO, TextIO
+from collections.abc import Generator, Iterable, Mapping
+from typing import Any, BinaryIO, TextIO, cast
 
 import rich_click as click
 from pydantic import BaseModel
@@ -66,6 +67,7 @@ from ..native.record_json import (
     describe_replacements,
     json_bytes,
     record_json_bytes,
+    repair_surrogates,
 )
 
 #: Windows error codes for a downstream reader closing the pipe: ERROR_BROKEN_PIPE (109)
@@ -239,14 +241,27 @@ def _cell(value: object) -> Text:
     return Text("" if value is None else str(value))
 
 
-def _table_row(record: PSRecord) -> dict[str, Any]:
-    """The record's JSON-mode fields, with a nested model compacted to ``field=value`` pairs.
+def _table_row(record: PSRecord, position: int) -> dict[str, Any]:
+    """The record's JSON-mode fields as table cells, repaired and with nested records compacted.
+
+    Text holding a byte that is not valid UTF-8 (a lone surrogate) is written with U+FFFD for each
+    such byte and one ``warning:`` line on stderr names the record and field, never the value: the
+    same rule and line as ``--json`` (the raw byte reached a redirected table through stdout's
+    ``surrogateescape`` handler, so the file was not valid UTF-8).
 
     A nested model (``ScheduledTaskInfo.settings``) would otherwise print as a dict repr, braces,
     quotes and every unset ``None`` included, in one wide cell. Only its set fields are kept, in
-    their JSON form, so the cell reads like the ``--json`` object it stands for.  ``--json`` and
-    ``--jsonl`` dump the record themselves and are unaffected.  Only fields holding a model are
-    touched: a plain mapping (``CimInstance.properties``) keeps its rendering.
+    their JSON form, so the cell reads like the ``--json`` object it stands for. A list of models or
+    mappings (``WindowsUpdate.category_details``) gets the same pairs per item, items joined by
+    ``"; "``. ``--json`` and ``--jsonl`` dump the record themselves and are unaffected. A plain
+    mapping field (``CimInstance.properties``) and any other list keep their rendering.
+
+    Args:
+        record: The record to render.
+        position: Its 1-based row number, named in the warning.
+
+    Returns:
+        Field name to cell value, in field order.
 
     Example:
         >>> from pwshpy.domain.enums import TaskState
@@ -254,16 +269,39 @@ def _table_row(record: PSRecord) -> dict[str, Any]:
         >>> from pwshpy.domain.scheduling import TaskSettings
         >>> task = ScheduledTaskInfo(task_name="T", task_path="Root", state=TaskState.READY,
         ...                          settings=TaskSettings(allow_hard_terminate=False))
-        >>> _table_row(task)["settings"]
+        >>> _table_row(task, 1)["settings"]
         'allow_hard_terminate=False'
     """
-    row = record.to_dict()
-    for name in row:
-        nested: object = getattr(record, name)
-        if isinstance(nested, BaseModel):
-            dumped = nested.model_dump(mode="json")
-            row[name] = ", ".join(f"{key}={value}" for key, value in dumped.items() if value is not None)
-    return row
+    repaired = repair_surrogates(record.to_dict())
+    if repaired.replaced:
+        emit_text(f"warning: {describe_replacements(record, position, repaired.replaced)}\n", err=True)
+    row = cast("dict[str, Any]", repaired.value)
+    return {name: _compact(value, nested=isinstance(getattr(record, name), BaseModel)) for name, value in row.items()}
+
+
+def _compact(value: object, *, nested: bool) -> object:
+    """A nested model's JSON object, or a list of JSON objects, as ``k=v`` pairs; anything else as is."""
+    if nested and isinstance(value, Mapping):
+        return _pairs(cast("Mapping[object, object]", value))
+    mappings = _mapping_items(value)
+    if mappings:
+        return "; ".join(_pairs(mapping) for mapping in mappings)
+    return value
+
+
+def _mapping_items(value: object) -> list[Mapping[object, object]] | None:
+    """The items of a non-empty list whose every item is a mapping; None for anything else."""
+    if not isinstance(value, list):
+        return None
+    items = cast("list[object]", value)
+    if not items or not all(isinstance(item, Mapping) for item in items):
+        return None
+    return cast("list[Mapping[object, object]]", items)
+
+
+def _pairs(mapping: Mapping[object, object]) -> str:
+    """``key=value, key=value`` of the entries that are not ``None``."""
+    return ", ".join(f"{key}={value}" for key, value in mapping.items() if value is not None)
 
 
 def is_terminal(stream: TextIO | None) -> bool:
@@ -339,7 +377,10 @@ def _render_table(records: Iterable[PSRecord]) -> None:
     # stay lazy like --jsonl. Bound memory with a soft cap: render the first
     # _MAX_TABLE_ROWS and, if more remain, point the user at the streaming path.
     iterator = iter(records)
-    materialized = [_table_row(record) for record in itertools.islice(iterator, _MAX_TABLE_ROWS)]
+    materialized = [
+        _table_row(record, position)
+        for position, record in enumerate(itertools.islice(iterator, _MAX_TABLE_ROWS), start=1)
+    ]
     truncated = next(iterator, None) is not None
     if not materialized:
         Console().print("[dim]No records.[/dim]")
@@ -361,21 +402,26 @@ def _render_table(records: Iterable[PSRecord]) -> None:
         )
 
 
-def emit_json(data: object) -> None:
+def emit_json(data: object, *, indent: bool = False) -> None:
     """Render arbitrary (non-record) data as one JSON value, broken-pipe safe.
 
     For .NET / web output that is not a typed :class:`PSRecord` (marshaled PowerShell
-    objects, parsed REST JSON). ``default=str`` keeps it total - a ``SecretStr`` renders
-    masked, a ``datetime`` as ISO text - so it never raises on an exotic value. Text holding a
-    byte that is not valid UTF-8 is written with U+FFFD for that byte, and one ``warning: output``
-    line on stderr names where (never the value).
+    objects, parsed REST JSON) and the merged configuration (``config --format json``).
+    ``default=str`` keeps it total - a ``SecretStr`` renders masked, a ``datetime`` as ISO
+    text - so it never raises on an exotic value. Text holding a byte that is not valid UTF-8
+    is written with U+FFFD for that byte, and one ``warning: output`` line on stderr names
+    where (never the value).
+
+    Args:
+        data: The value to write.
+        indent: Indent by two spaces (``config --format json``); compact otherwise.
 
     Example:
         >>> emit_json({"ok": True, "n": 1})
         {"ok":true,"n":1}
     """
     with _clean_broken_pipe():
-        result = json_bytes(data, default=str)
+        result = json_bytes(data, default=str, indent=indent)
         if result.replaced:
             emit_text(f"warning: {describe_output_replacements(result.replaced)}\n", err=True)
         out = _Utf8Writer(sys.stdout)

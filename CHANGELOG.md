@@ -63,6 +63,28 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `NativeCallError`, as it refuses any other name that is not letters, digits and underscores; the
   check accepted one trailing newline before.
 
+### Fixed
+
+- A mapping key holding a byte that is not valid UTF-8 (in an open property bag such as
+  `CimInstance.properties`, `PSObjectRecord.properties` or `PSInvocationResult.output`) is written
+  like such a value: one U+FFFD per undecodable byte, with the `warning:` line naming the record and
+  field. A key nested inside the bag made `--json` / `--jsonl` and `ps.write_records` fail with
+  `UnicodeEncodeError`, and a key of the bag itself was silently rewritten into three U+FFFD, so two
+  keys differing only in their bad bytes collapsed into one entry. `PSRecord.to_dict()` now keeps such
+  a key as it is, exactly as it keeps such a value; a record without one dumps as before.
+- The human table writes a byte that is not valid UTF-8 as U+FFFD, like `--json` / `--jsonl`, with
+  the same `warning: <Record> record N, field <path>: ...` line on stderr. `pwshpy env > file` with
+  such a value wrote the raw byte, so the file was not valid UTF-8 and disagreed with the JSON.
+- The human table shows a list of records or mappings, such as `get_windows_update`'s
+  `category_details`, as `key=value, key=value` of each item's set fields, items joined by `; `,
+  instead of a wide Python list-of-dicts repr. `--json` / `--jsonl` are unchanged.
+- `config --format json` writes a byte that is not valid UTF-8 (a POSIX `--set` argument or
+  environment override) as U+FFFD, with one `warning: output field <path>: ...` line on stderr,
+  like every other JSON output. It exited 22 with `TypeError: str is not valid UTF-8: surrogates
+  not allowed`. Its JSON is now written as UTF-8 bytes with LF line ends whatever the console code
+  page, as `--json` is; clean output is otherwise unchanged (the same redacted, two-space indented
+  JSON).
+
 ## [1.11.0] 2026-10-29 00:00:55
 
 ### Added

@@ -21,7 +21,7 @@ parseable.
 `--json` and `--jsonl` write UTF-8 bytes with LF line ends on every OS, whatever the console
 code page, `PYTHONIOENCODING` or `PYTHONUTF8` say (JSON is UTF-8 by spec), so a consumer reading
 the pipe decodes it as UTF-8 even from a cp1252 Windows console. The JSON that `run`, `cmdlet`,
-`get_command` and `invoke_rest_method` print is written the same way. So is the text that `exec`
+`get_command`, `invoke_rest_method` and `config --format json` print is written the same way. So is the text that `exec`
 (the program's stdout and stderr), `invoke_web_request` (the response body), `get_content` (the
 file's lines) and `download_file` (its `downloaded URL -> DEST` line) write when piped or redirected:
 a character the console code page cannot hold no longer fails the command after the work was done.
@@ -33,19 +33,22 @@ A record field holding a byte that is not valid UTF-8 (a POSIX environment varia
 or account name) is written with U+FFFD for each such byte, so `--json` / `--jsonl` stay valid UTF-8
 JSON and the stream goes on, exit 0; one line per affected record on stderr names the record type,
 its position and the field, never the value (`warning: EnvVar record 7, field value: not valid
-UTF-8; each undecodable byte written as U+FFFD`; `fields name, value` when several are). The JSON
+UTF-8; each undecodable byte written as U+FFFD`; `fields name, value` when several are). The human
+table writes such a byte as U+FFFD too, with the same warning line, so `pwshpy env > file` is valid
+UTF-8 as well. The JSON
 that `get_known_folder --json`, `run`, `cmdlet`, its wrappers (`get_ad_user`, `get_ad_group`,
 `get_ad_computer`, `get_mailbox`, `get_az_vm`, `get_az_resource_group`) and `invoke_rest_method`
 print follows the same rule, with one `warning: output field <path>: ...` line
-(`warning: output: ...` for a bare string, such as `get_known_folder`'s path). `config --format
-json` does not follow it yet and still fails on such a value. A mapping key
+(`warning: output: ...` for a bare string, such as `get_known_folder`'s path), and so does
+`config --format json` (`warning: output field lib_log_rich.service: ...` for such a `--set` value
+or environment override). A mapping key
 that collides with another once repaired is kept as `<key>~2` (`~3`, ...), and the field paths in a
 warning show each non-ASCII key character as `?`. The original bytes cannot be recovered from the
 JSON; for a single undecodable byte this is what pwsh 7 shows.
 
 Every other line the CLI writes to a piped or redirected stdout or stderr is UTF-8 with LF line ends
 too, on every OS: the human table, the status lines (`wrote`, `created`, `copied`, `moved`,
-`removed`, `registered`, ...), `config` and `config --format json`, and error messages. A value the
+`removed`, `registered`, ...), `config`, and error messages. A value the
 console code page cannot hold (`pwshpy env | more` with a CJK value on German Windows) used to fail
 the command with exit 22 (87 on Windows) after the work was done. A reader that decodes the pipe in
 a legacy code page sees non-ASCII characters as mojibake rather than as an error. At a terminal
@@ -59,7 +62,10 @@ characters, breaking a value that holds spaces at a space. The table is for read
 when a script needs a value's exact bytes. An explicit `COLUMNS` in
 the environment still sets the width in both cases. Piped or redirected, the table's frame is ASCII
 (`+`, `-`, `|`) on every OS, so a reader that decodes the pipe in a legacy code page never garbles
-it; at a terminal the table keeps its box-drawing frame.
+it; at a terminal the table keeps its box-drawing frame. A nested record (`get_scheduled_task`'s
+`settings`) reads as `key=value, key=value` of its set fields, and a list of records or mappings
+(`get_windows_update`'s `category_details`) as one such group per item, joined by `; `; any other
+list or mapping prints as it is.
 
 **Everywhere** - one binding on Windows, macOS and Linux:
 

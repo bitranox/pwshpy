@@ -982,7 +982,9 @@ pwshpy_installer_env() {
 # temporary directory, which the run goes on using.
 pwshpy_installer_cleanup() {
     rm -f "$_iu_file"
-    if [ "$_iu_dir" != "${PWSHPY_TMP:-}" ]; then rmdir "$_iu_dir" 2>/dev/null || :; fi
+    if [ "$_iu_dir" != "${PWSHPY_TMP:-}" ]; then
+        rmdir "$_iu_dir" 2>/dev/null || :
+    fi
 }
 
 pwshpy_install_uv() {
@@ -1015,7 +1017,11 @@ pwshpy_install_uv() {
         command -v "${_iu_get%% *}" >/dev/null 2>&1 || continue
         # Word splitting of $_iu_get is intended: the downloader and its flags.
         # shellcheck disable=SC2086
-        if pwshpy_installer_env $_iu_get "$_iu_file" "$_iu_url"; then _iu_rc=0; else _iu_rc=$?; fi
+        if pwshpy_installer_env $_iu_get "$_iu_file" "$_iu_url"; then
+            _iu_rc=0
+        else
+            _iu_rc=$?
+        fi
         [ "$_iu_rc" -eq 0 ] && [ -s "$_iu_file" ] && break
         [ "$_iu_rc" -eq 0 ] && _iu_rc="0 with nothing downloaded"
         _iu_tried="$_iu_tried${_iu_tried:+, }${_iu_get%% *} exited $_iu_rc"
@@ -1034,7 +1040,11 @@ pwshpy_install_uv() {
         fi
         pwshpy_die "$_iu_why" 127
     fi
-    if pwshpy_installer_env /bin/sh "$_iu_file"; then _iu_rc=0; else _iu_rc=$?; fi
+    if pwshpy_installer_env /bin/sh "$_iu_file"; then
+        _iu_rc=0
+    else
+        _iu_rc=$?
+    fi
     pwshpy_installer_cleanup
     [ "$_iu_rc" -eq 0 ] || pwshpy_die "uv's installer (from $_iu_url) failed with exit code $_iu_rc" 127
     if [ "$PWSHPY_AS_ROOT" = "1" ]; then

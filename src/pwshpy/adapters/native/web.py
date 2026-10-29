@@ -11,6 +11,7 @@ Contents:
 
 from __future__ import annotations
 
+import http.client
 import shutil
 import urllib.error
 import urllib.parse
@@ -42,6 +43,11 @@ def _is_timeout(exc: BaseException) -> bool:
     if isinstance(exc, TimeoutError):
         return True
     return isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError)
+
+
+#: What a transport or protocol failure can raise: ``http.client.HTTPException`` (``BadStatusLine`` from
+#: a port that does not speak HTTP, ``IncompleteRead`` from a body cut short) is not an ``OSError``.
+_TRANSPORT_ERRORS = (urllib.error.URLError, OSError, http.client.HTTPException)
 
 
 def _transport_error(what: str, exc: BaseException, timeout: float) -> NativeCallError:
@@ -77,18 +83,25 @@ def _body_excerpt(raw: bytes) -> str:
 def _http_error_response(
     url: str, exc: urllib.error.HTTPError, *, skip_http_error_check: bool, timeout: float
 ) -> WebResponse:
-    """Return the answer urllib raised as HTTPError, or raise it as the cmdlets do for >= 400."""
-    is_error = exc.code >= _HTTP_ERROR_FLOOR and not skip_http_error_check
+    """Return the answer urllib raised as HTTPError, or raise it as the cmdlets do.
+
+    urllib raises ``HTTPError`` for a status of 400 or above and for a 3xx it refuses to follow
+    (a redirect loop, a redirect to a scheme it will not open): both raise unless
+    ``skip_http_error_check``, which returns the answer itself.
+    """
+    is_error = not skip_http_error_check
     try:
         # A raised error needs only the excerpt, so a huge error page is never read in full.
         raw = exc.read(_EXCERPT_BYTES + 1) if is_error else exc.read()
-    except OSError as read_exc:  # the error body itself can stall or break off
+    except _TRANSPORT_ERRORS as read_exc:  # the error body itself can stall or break off
         raise _transport_error(f"web request to {url!r}", read_exc, timeout) from read_exc
     finally:
         exc.close()
     if is_error:
         excerpt = _body_excerpt(raw)
-        raise native_error(f"web request to {url!r} failed: HTTP {exc.code} {exc.reason}{excerpt}", exc) from exc
+        # urllib's reason for a refused redirect spans lines; the message stays one line.
+        reason = " ".join(str(exc.reason).split())
+        raise native_error(f"web request to {url!r} failed: HTTP {exc.code} {reason}{excerpt}", exc) from exc
     return WebResponse(
         url=url,
         status_code=int(exc.code),
@@ -136,7 +149,7 @@ def invoke_web_request(  # noqa: PLR0913 - mirrors the WebRequester port: Invoke
             )
     except urllib.error.HTTPError as exc:
         return _http_error_response(url, exc, skip_http_error_check=skip_http_error_check, timeout=timeout)
-    except (urllib.error.URLError, OSError) as exc:
+    except _TRANSPORT_ERRORS as exc:
         raise _transport_error(f"web request to {url!r}", exc, timeout) from exc
 
 
@@ -180,6 +193,21 @@ def invoke_rest_method(  # noqa: PLR0913 - mirrors the RestInvoker port: Invoke-
         raise native_error(f"response from {url!r} is not JSON: {exc}", exc) from exc
 
 
+def _require_complete_body(response: object) -> None:
+    """Raise when the body ended before its ``Content-Length`` (http.client's count of bytes still due).
+
+    ``http.client`` raises ``IncompleteRead`` for a short body only on a whole read; the chunked
+    reads of ``shutil.copyfileobj`` just see the end of the stream, so a cut-off download would
+    otherwise be kept as a complete file.
+
+    Raises:
+        ConnectionError: Bytes the server announced never arrived.
+    """
+    remaining = getattr(response, "length", None)
+    if remaining:
+        raise ConnectionError(f"the connection closed {remaining} bytes before the announced Content-Length")
+
+
 def download_file(url: str, dest: str | Path, *, chunk_size: int = 65536, timeout: float = 30.0) -> Path:
     """Stream an HTTP download to ``dest``, **memory-bounded** (never buffers the whole body).
 
@@ -188,6 +216,8 @@ def download_file(url: str, dest: str | Path, *, chunk_size: int = 65536, timeou
     gigabyte download stays flat in memory.  A 4xx/5xx or transport failure raises
     :class:`~pwshpy.domain.errors.NativeCallError`, a timeout its subclass
     :class:`~pwshpy.domain.errors.OperationTimeoutError` (no partial file is left as a "success").
+    Only a file this call opened is removed on failure: one that fails before it opens ``dest``
+    (a refused connect, an HTTP error) leaves an existing file there untouched.
 
     Example:
         >>> callable(download_file)
@@ -196,17 +226,20 @@ def download_file(url: str, dest: str | Path, *, chunk_size: int = 65536, timeou
     _require_http_scheme(url)
     destination = Path(dest)
     request = urllib.request.Request(url)  # noqa: S310 - scheme restricted to http/https above
+    opened = False  # set once this call created or truncated ``dest``: only then is it ours to remove
     try:
         with (
             urllib.request.urlopen(request, timeout=timeout) as response,  # noqa: S310  # nosec B310 - http/https only
             destination.open("wb") as handle,
         ):
+            opened = True  # both entered in order: a failed connect or HTTP error never reaches open()
             shutil.copyfileobj(response, handle, chunk_size)
+            _require_complete_body(response)
     except urllib.error.HTTPError as exc:
-        destination.unlink(missing_ok=True)
         raise native_error(f"download of {url!r} failed: HTTP {exc.code}", exc) from exc
-    except (urllib.error.URLError, OSError) as exc:
-        destination.unlink(missing_ok=True)
+    except _TRANSPORT_ERRORS as exc:
+        if opened:
+            destination.unlink(missing_ok=True)
         raise _transport_error(f"download of {url!r}", exc, timeout) from exc
     return destination
 

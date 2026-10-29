@@ -25,7 +25,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   first 200 characters of the body on one line. They returned the answer (and `invoke_rest_method`
   its parsed error body) before, so a caller that reads 4xx or 5xx bodies now passes the new keyword
   `skip_http_error_check=True` (CLI `--skip-http-error-check`, pwsh's `-SkipHttpErrorCheck`) to get
-  the answer back.
+  the answer back. A redirect urllib refuses to follow (a redirect loop, a redirect to a scheme
+  such as `file:`) raises the same way with its 3xx status; it came back as a successful
+  `WebResponse` before.
 - Every public method of the `ps` facade documents each parameter (`Args:`) and its result
   (`Returns:`, or `Yields:` for a generator), and, where traced, the errors it raises (`Raises:`),
   so `help(ps.<method>)` says what a value means and what can fail. A test fails when a method
@@ -64,6 +66,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `OperationTimeoutError` (a `NativeCallError` with `.timeout`) and the `pwshpy` CLI exits 110, as
   for every other timeout; it raised a plain `NativeCallError` and exited 1 before. Both a connect
   timeout and a read that stalls mid-response count.
+- `invoke_web_request`, `invoke_rest_method` and `download_file` raise `NativeCallError` for an
+  answer that is not HTTP (a non-HTTP port, `BadStatusLine`) or a body cut short
+  (`IncompleteRead`); both escaped as raw `http.client` exceptions. `download_file` also refuses a
+  body that ends before its `Content-Length`, which it kept as a complete file, and removes the
+  partial file.
+- `download_file` removes `dest` on failure only when it opened that file itself: a refused
+  connect or an HTTP error deleted an existing file of that name before.
 - `get_cim_instance` refuses a class name followed by a line break (`"Win32_Process\n"`) with
   `NativeCallError`, as it refuses any other name that is not letters, digits and underscores; the
   check accepted one trailing newline before.

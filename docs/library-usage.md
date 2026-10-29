@@ -38,7 +38,12 @@ Records include `ProcessInfo`, `NetConnection`, `NetAdapter`, `NetIpAddress`, `D
 (`ServiceInfo`, `EventLogEntry`, `ScheduledTaskInfo`, `LocalUser`, `LocalGroup`, `AclEntry`,
 `Credential`) and the Windows set (`RegistryValue`, `RegistryKey`, `CimInstance`, `Hotfix`,
 `WindowsUpdate`, `ShortcutInfo`, ...). They serialize to JSON directly (`record.to_dict()`), and enum fields carry
-canonical values regardless of the host locale.
+canonical values regardless of the host locale. `to_dict()` writes a mapping key holding a byte
+that is not valid UTF-8 (in an open property bag such as `CimInstance.properties`, decoded with
+`surrogateescape`) as one U+FFFD per such byte, keeping a key that then collides with another as
+`<key>~2` (`~3`, ...), so `orjson.dumps(record.to_dict())` never fails over a key. A string
+value holding such a byte is left as it is; `ps.write_records` and the CLI's JSON output repair
+it (below).
 
 Compare an enum field with its member, never with a display string. All are exported from `pwshpy`:
 `ProcessStatus` (psutil's lowercase values, `running`), `ConnectionState` (`LISTEN`),
@@ -519,16 +524,19 @@ What each refusal raises, all before anything is written unless noted:
 Calls that can wait take a `timeout` in seconds. What running out of it raises depends on the call:
 
 - `OperationTimeoutError` (its `.timeout` holds the limit; CLI exit 110): `exec`, `start_service`,
-  `stop_service`, `restart_service`, `get_windows_update`, `wait_process`, `resolve_dns_name`, and
-  on Linux the local-account verbs (`new_local_user`, `remove_local_user`, `enable_local_user`,
-  `disable_local_user`, `new_local_group`, `remove_local_group`, `add_local_group_member` and
-  `remove_local_group_member`), whose shadow-utils command it bounds, 30 s by default (Windows
-  accepts their `timeout` and does not use it: the calls are synchronous).
+  `stop_service`, `restart_service`, `get_windows_update`, `wait_process`, `resolve_dns_name`,
+  `download_file`, `invoke_web_request` and `invoke_rest_method` (whose `timeout`, default 30 s,
+  bounds each connect and each read, not the whole transfer), and on Linux the local-account verbs
+  (`new_local_user`, `remove_local_user`, `enable_local_user`, `disable_local_user`,
+  `new_local_group`, `remove_local_group`, `add_local_group_member` and
+  `remove_local_group_member`), whose shadow-utils commands it bounds together, 30 s by default:
+  each command gets what is left, and the one running when it passes is killed (Windows accepts
+  their `timeout` and does not use it: the calls are synchronous). When `new_local_user` already
+  created the account and a later step fails or times out, `disabled=True` still locks it within a
+  fixed 5 s grace, and the error names what was done (created, password set or not, locked or not).
 - `PowerShellError`: the hosted .NET calls `ps.run`, `ps.cmdlet` and the wrappers over it
   (`get_ad_user`, `get_ad_group`, `get_ad_computer`, `get_mailbox`, `get_az_vm`,
   `get_az_resource_group`); the pipeline is stopped. Their `timeout` defaults to `None`, no limit.
-- `NativeCallError` ("timed out"): `download_file`, `invoke_web_request` and `invoke_rest_method`,
-  whose `timeout` (default 30 s) bounds each connect and each read, not the whole transfer.
 - Nothing: `test_connection` returns a `ConnectionTest` with `reachable=False` and the reason in
   `error`.
 
@@ -591,8 +599,7 @@ if __name__ == "__main__":
 
 On the CLI an `OperationTimeoutError` exits 110 (see [CLI Reference](cli-reference.md#exit-codes)).
 The other timeouts exit 1: `pwshpy run`, `pwshpy cmdlet` and the module shortcuts (`get_ad_user`,
-...) with `--timeout` raise `PowerShellError`, and `download_file`, `invoke_web_request` and
-`invoke_rest_method` with `--timeout` raise `NativeCallError`.
+...) with `--timeout` raise `PowerShellError`.
 
 ## Errors
 
@@ -603,13 +610,25 @@ Every failure across both backends raises a subclass of `PwshPyError`, all expor
   HRESULT when the native error carried one (a pywin32 COM or Win32 error, or a Windows `OSError`
   mapped as `HRESULT_FROM_WIN32`), else `None`; branch on it, never on the localized message.
   - `NativeAccessDeniedError` - a call refused for lack of rights (`E_ACCESSDENIED`, `EACCES`,
-    `EPERM`, psutil `AccessDenied`). It is also a `PermissionError`, so `except PermissionError`
-    (and `except OSError`) catches it; `errno` holds the POSIX code when the failure carried one.
-    A refusal pwshpy reads only from a reply or an exit status is a plain `NativeCallError`: a
-    D-Bus error reply from systemd (a polkit refusal) or from the Secret Service, and a non-zero
-    exit of a shadow-utils command.
+    `EPERM`, psutil `AccessDenied`, and a systemd D-Bus `AccessDenied` or
+    `InteractiveAuthorizationRequired`, which a non-root caller gets for `stop_service` where polkit
+    is installed). It is also a `PermissionError`, so `except PermissionError` (and
+    `except OSError`) catches it; `errno` holds the POSIX code when the failure carried one. A
+    refusal pwshpy reads only from a message or an exit status is a plain `NativeCallError`: an
+    error from the Secret Service, and a non-zero exit of a shadow-utils command.
   - `OperationTimeoutError` - a call ran out of its `timeout` (`.timeout` holds the limit).
-  - `ElevationDeclinedError` - the UAC prompt or sudo's password was refused by `ps.elevate()`.
+  - On an HTTP error status: `invoke_web_request` and `invoke_rest_method` raise
+    `NativeCallError` for any status urllib does not follow (a refused 3xx such as a redirect
+    loop, 304, 4xx, 5xx), as `Invoke-WebRequest` does, naming the status and the first 200
+    characters of the body; pass `skip_http_error_check=True` (pwsh's `-SkipHttpErrorCheck`) to get
+    such an answer back (`invoke_rest_method` parses its body; an empty or whitespace-only body,
+    such as a 304's, gives None, where `Invoke-RestMethod` returns the body text). `download_file`
+    always raises for one. A redirect to a scheme other than `http`/`https` raises before anything
+    connects to it, whatever `skip_http_error_check` says.
+  - `ElevationDeclinedError` - the UAC prompt or sudo's password was refused by `ps.elevate()`,
+    or sudo granted root but cached no credential for the command (sudoers `timestamp_timeout=0`):
+    on POSIX `ps.elevate()` asks once with `sudo -v`, checks with `sudo -n -v` and runs the command
+    under `sudo -n`, so sudo never prompts a second time.
 - `ElevationRequiredError` - `ps.require_elevation()` in a process that is not elevated.
 - `PowerShellError` - a .NET error record.
 - `FeatureUnavailableError` - a .NET call without the `[full]` extra.

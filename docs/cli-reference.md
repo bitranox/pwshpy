@@ -11,7 +11,9 @@ translation table (grouped by theme, Python API and CLI in separate columns), se
 Every native record command shares `--json` (a streamed array), `--jsonl` (one record per line,
 lazy end to end), and a default human table; most take `--limit N`.
 
-On an error the exit code is non-zero and the message goes to stderr. `--json` writes nothing
+On an error the exit code is non-zero and the message goes to stderr, after any log lines the
+command already wrote (queued log lines are drained first, so each stays on its own line).
+`--json` writes nothing
 until the source has produced its first record, so a command that fails up front (a missing
 path, a refused native call) leaves stdout empty rather than a bare `[`. An error after records
 were already streamed leaves a partial, unterminated array: that is the price of streaming, so
@@ -21,7 +23,7 @@ parseable.
 `--json` and `--jsonl` write UTF-8 bytes with LF line ends on every OS, whatever the console
 code page, `PYTHONIOENCODING` or `PYTHONUTF8` say (JSON is UTF-8 by spec), so a consumer reading
 the pipe decodes it as UTF-8 even from a cp1252 Windows console. The JSON that `run`, `cmdlet`,
-`get_command` and `invoke_rest_method` print is written the same way. So is the text that `exec`
+`get_command`, `invoke_rest_method` and `config --format json` print is written the same way. So is the text that `exec`
 (the program's stdout and stderr), `invoke_web_request` (the response body), `get_content` (the
 file's lines) and `download_file` (its `downloaded URL -> DEST` line) write when piped or redirected:
 a character the console code page cannot hold no longer fails the command after the work was done.
@@ -33,19 +35,22 @@ A record field holding a byte that is not valid UTF-8 (a POSIX environment varia
 or account name) is written with U+FFFD for each such byte, so `--json` / `--jsonl` stay valid UTF-8
 JSON and the stream goes on, exit 0; one line per affected record on stderr names the record type,
 its position and the field, never the value (`warning: EnvVar record 7, field value: not valid
-UTF-8; each undecodable byte written as U+FFFD`; `fields name, value` when several are). The JSON
+UTF-8; each undecodable byte written as U+FFFD`; `fields name, value` when several are). The human
+table writes such a byte as U+FFFD too, with the same warning line, so `pwshpy env > file` is valid
+UTF-8 as well. The JSON
 that `get_known_folder --json`, `run`, `cmdlet`, its wrappers (`get_ad_user`, `get_ad_group`,
 `get_ad_computer`, `get_mailbox`, `get_az_vm`, `get_az_resource_group`) and `invoke_rest_method`
 print follows the same rule, with one `warning: output field <path>: ...` line
-(`warning: output: ...` for a bare string, such as `get_known_folder`'s path). `config --format
-json` does not follow it yet and still fails on such a value. A mapping key
+(`warning: output: ...` for a bare string, such as `get_known_folder`'s path), and so does
+`config --format json` (`warning: output field lib_log_rich.service: ...` for such a `--set` value
+or environment override). A mapping key
 that collides with another once repaired is kept as `<key>~2` (`~3`, ...), and the field paths in a
 warning show each non-ASCII key character as `?`. The original bytes cannot be recovered from the
 JSON; for a single undecodable byte this is what pwsh 7 shows.
 
 Every other line the CLI writes to a piped or redirected stdout or stderr is UTF-8 with LF line ends
 too, on every OS: the human table, the status lines (`wrote`, `created`, `copied`, `moved`,
-`removed`, `registered`, ...), `config` and `config --format json`, and error messages. A value the
+`removed`, `registered`, ...), `config`, and error messages. A value the
 console code page cannot hold (`pwshpy env | more` with a CJK value on German Windows) used to fail
 the command with exit 22 (87 on Windows) after the work was done. A reader that decodes the pipe in
 a legacy code page sees non-ASCII characters as mojibake rather than as an error. At a terminal
@@ -59,14 +64,17 @@ characters, breaking a value that holds spaces at a space. The table is for read
 when a script needs a value's exact bytes. An explicit `COLUMNS` in
 the environment still sets the width in both cases. Piped or redirected, the table's frame is ASCII
 (`+`, `-`, `|`) on every OS, so a reader that decodes the pipe in a legacy code page never garbles
-it; at a terminal the table keeps its box-drawing frame.
+it; at a terminal the table keeps its box-drawing frame. A nested record (`get_scheduled_task`'s
+`settings`) reads as `key=value, key=value` of its set fields, and a list of records or mappings
+(`get_windows_update`'s `category_details`) as one such group per item, joined by `; `; any other
+list or mapping prints as it is.
 
 **Everywhere** - one binding on Windows, macOS and Linux:
 
 | Command                         | Shows                         | Binding                                |
 |---------------------------------|-------------------------------|----------------------------------------|
 | `pwshpy get_process`            | running processes             | psutil                                 |
-| `pwshpy get_net_tcp_connection` | open TCP and UDP connections  | psutil                                 |
+| `pwshpy get_net_tcp_connection` | open TCP connections          | psutil                                 |
 | `pwshpy get_volume`             | mounted filesystems and usage | psutil                                 |
 | `pwshpy get_uptime`             | boot time and elapsed uptime  | psutil                                 |
 | `pwshpy resolve_dns_name NAME`  | resolved DNS addresses        | stdlib socket                          |
@@ -80,6 +88,9 @@ it; at a terminal the table keeps its box-drawing frame.
 `Get-Process`: the memory compression store is `MemCompression` (`Get-Process`:
 `Memory Compression`) and PID 0 is `System Idle Process` (`Get-Process`: `Idle`). Every other name
 matches `Get-Process`'s `ProcessName`, `.exe` stripped.
+
+`get_net_tcp_connection` lists TCP sockets only, IPv4 and IPv6, like `Get-NetTCPConnection`; UDP
+sockets are `pwshpy get_net_udp_endpoint` (`Get-NetUDPEndpoint`).
 
 `get_windows_image PATH [--index N]` reads the WIM header and its XML resource directly, so it
 lists the images of a `.wim` (or a split `.swm` part) on any OS without DISM. An image file whose XML
@@ -159,7 +170,11 @@ pwsh's `[Environment]::GetFolderPath` prints on the same machine: the Windows sh
 home's `Desktop`, `Documents` and `Library/Application Support` on macOS. `FOLDER` is the .NET
 `SpecialFolder` name, in any case: `Desktop`, `MyDocuments`, `LocalApplicationData`,
 `ApplicationData`, `CommonApplicationData` or `Programs`. It prints the bare path (with `--json` a
-JSON string). A folder that is missing or not readable, where pwsh prints an empty string, exits 1
+JSON string). On macOS the path is standardized as Foundation does it: a leading `/private`,
+`/private/var/automount` or `/var/automount` component is dropped when the rest still exists, so a
+home under `/private/var/folders/...` prints as `/var/folders/...`
+([Backends & Platforms](backends-and-platforms.md#known-folders), the macOS bullet). A folder that
+is missing or not readable, where pwsh prints an empty string, exits 1
 with a line on stderr naming it; `Programs` on Linux or macOS, which .NET maps to no folder, exits 1
 with `PlatformUnsupportedError`. The per-OS rules are in
 [Backends & Platforms](backends-and-platforms.md#known-folders).
@@ -346,12 +361,30 @@ pwshpy unpack dist/tool.ps1 -o src/                          # get the sources b
 
 Exit code 110 (ETIMEDOUT) means an `OperationTimeoutError` on every OS: `exec --timeout N` exits
 110, not 1, when the child outlives `N` seconds, as a service wait that hits its deadline does, and
-so do `wait_process --timeout`, `resolve_dns_name --timeout` and, on Linux, the local-account
-commands (`new_local_user`, `remove_local_user`, `enable_local_user`, `disable_local_user`,
-`new_local_group`, `remove_local_group`, `add_local_group_member` and `remove_local_group_member`),
-whose shadow-utils command gets 30 s. The other timeouts exit 1: `run`, `cmdlet` and the module
-shortcuts (`get_ad_user`, ...) with `--timeout` raise `PowerShellError`, and `download_file`,
-`invoke_web_request` and `invoke_rest_method` with `--timeout` raise `NativeCallError`.
+so do `wait_process --timeout`, `resolve_dns_name --timeout`, `download_file`, `invoke_web_request`
+and `invoke_rest_method` (a connect or a read that stalls past `--timeout`, default 30 s) and, on
+Linux, the local-account commands (`new_local_user`, `remove_local_user`, `enable_local_user`,
+`disable_local_user`, `new_local_group`, `remove_local_group`, `add_local_group_member` and
+`remove_local_group_member`), whose shadow-utils commands share one 30 s limit: each command gets
+what is left of it, and the one running when it passes is killed. When `new_local_user` has
+already created the account and a later step (`chpasswd`, `usermod --lock`) fails or times out,
+`--disabled` still locks the account within a fixed 5 s grace, and the error line names what was
+done: created, password set or not, locked or not. The other timeouts exit 1: `run`, `cmdlet` and
+the module shortcuts (`get_ad_user`, ...) with `--timeout` raise `PowerShellError`.
+
+`invoke_web_request` and `invoke_rest_method` fail (exit 1, `NativeCallError`) on any HTTP status
+urllib does not follow - a refused 3xx such as a redirect loop, 304, 4xx and 5xx - as
+`Invoke-WebRequest` and `Invoke-RestMethod` do; the error line names the status and the first 200
+characters of the body, on one line. `--skip-http-error-check` (pwsh's `-SkipHttpErrorCheck`)
+prints such an answer instead, and `invoke_rest_method` then parses its body like any other; an
+empty or whitespace-only body (a 304) prints `null`, where `Invoke-RestMethod` returns the body
+text.
+`download_file` has no such flag: it always fails on such a status. It removes `DEST` only when
+it had opened that file itself (a transfer that breaks off, or a body that ends before its
+`Content-Length`); a refused connect or an HTTP error leaves an existing file of that name
+untouched. All three follow a redirect only to an `http` or `https` URL: one to any other scheme
+fails before anything connects to it, with or without `--skip-http-error-check`. An answer that
+is not HTTP, or a body cut short, fails with `NativeCallError` too.
 
 `pack` embeds the entry plus every local module it imports into a self-extracting runner that
 unpacks itself, installs `uv` if the target machine has none, runs the script and returns its exit
@@ -380,6 +413,10 @@ script with a git source also refuses that git (exit 127) when it is older than 
 Exit code 77 (`EX_NOPERM`) means an elevation was refused or declined: `pwshpy --elevate`, a `.sh`
 runner's `--pwshpy-elevate` and a `.ps1` runner's `-PwshPyElevate` all exit 77 and write a line
 starting `pwshpy: elevation declined` to stderr, without running the command or the packed script.
+On Linux and macOS `pwshpy --elevate` asks for the password once (`sudo -v`), checks with
+`sudo -n -v` that sudo cached a credential, and runs the command under `sudo -n`, so sudo never
+prompts a second time; a sudo that caches nothing (sudoers `timestamp_timeout=0`) is declined with
+77 too. Run the command under `sudo` yourself on such a system.
 
 The `.NET` commands need the `[full]` extra (else a clear `FeatureUnavailableError`). `run` executes
 an arbitrary script; `cmdlet NAME -p KEY=VALUE` runs one cmdlet with safely-bound params; and the
@@ -393,22 +430,25 @@ The `pwshpy` command and the packed runners share one set of exit codes, so a ca
 refusal, a timeout and a missing tool from an ordinary failure without parsing stderr. Each error
 also writes one `ErrorName: message` line (or a `pwshpy: ...` line from a runner) to stderr.
 
-| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                           | Raised by                                                                                                                                                                                                                                                                                                      |
-|------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 0    | success                                                                                                                                                                                                                                                                                                                                                                                                                           | every command                                                                                                                                                                                                                                                                                                  |
-| 1    | any other failure: a `PwshPyError` (`NativeCallError`, `PlatformUnsupportedError`, `ConfigurationError`, ...), including a missing `sudo` behind `pwshpy --elevate`                                                                                                                                                                                                                                                               | every command                                                                                                                                                                                                                                                                                                  |
-| 2    | a usage error: an unknown option, a value out of range (`--index 0`), an offset-less `--at` time                                                                                                                                                                                                                                                                                                                                  | every command (click)                                                                                                                                                                                                                                                                                          |
-| 13   | a refused native call (`NativeAccessDeniedError`, also a `PermissionError`; 5 on Windows), whatever the failed call reported (`EACCES`, `EPERM`, a pywin32 or COM `E_ACCESSDENIED`, a psutil `AccessDenied`), e.g. `get_acl` on a file in a directory the caller cannot enter                                                                                                                                                     | native commands; a D-Bus (systemd, Secret Service) or shadow-utils refusal exits 1                                                                                                                                                                                                                             |
-| 22   | a value the command accepted but the call refused (`ValueError`; 87 on Windows), e.g. `get_windows_update --timeout nan`                                                                                                                                                                                                                                                                                                          | every command                                                                                                                                                                                                                                                                                                  |
-| 64   | a relative `-PwshPyUv` / `--pwshpy-uv` path                                                                                                                                                                                                                                                                                                                                                                                       | packed runners                                                                                                                                                                                                                                                                                                 |
-| 70   | the runner failed before it ran the script: the elevated `.ps1` child (relayed with a `pwshpy: the elevated child failed before running the script` line), an elevated run that cannot return to the caller's working directory (`pwshpy pack: cannot return to the working directory`), or a root `.sh` run that cannot read the account's home from the passwd database                                                         | packed runners                                                                                                                                                                                                                                                                                                 |
-| 77   | an elevation was refused or declined (`ElevationDeclinedError`), with a `pwshpy: elevation declined` line on stderr                                                                                                                                                                                                                                                                                                               | `pwshpy --elevate`, `-PwshPyElevate`, `--pwshpy-elevate`                                                                                                                                                                                                                                                       |
-| 110  | a timeout (`OperationTimeoutError`, ETIMEDOUT): `exec --timeout`, a service start, stop or restart that did not settle, `get_windows_update --timeout`, `wait_process --timeout`, `resolve_dns_name --timeout`, a Linux local-account command whose shadow-utils command outlasts 30 s                                                                                                                                            | `exec`, `start_service`, `stop_service`, `restart_service`, `get_windows_update`, `wait_process`, `resolve_dns_name`, `new_local_user`, `remove_local_user`, `enable_local_user`, `disable_local_user`, `new_local_group`, `remove_local_group`, `add_local_group_member`, `remove_local_group_member` (Linux) |
-| 127  | a missing or untrusted tool: no `uv` and `-PwshPyNoInstallUv` / `--pwshpy-no-install-uv`, no `uv` an elevated run can trust, a refused `-PwshPyUv` pin, a managed Python an elevated run cannot trust (`refusing the Python uv found at`), a git older than 2.32 (or of no readable version) for a root `.sh` run of a script with a git source (`refusing git`), or no `sudo` for `-PwshPyElevate` / `--pwshpy-elevate` on POSIX | packed runners                                                                                                                                                                                                                                                                                                 |
+| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Raised by                                                                                                                                                                                                                                                                                                                                                                   |
+|------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 0    | success                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | every command                                                                                                                                                                                                                                                                                                                                                               |
+| 1    | any other failure: a `PwshPyError` (`NativeCallError`, `PlatformUnsupportedError`, `ConfigurationError`, ...), including a missing `sudo` behind `pwshpy --elevate`                                                                                                                                                                                                                                                                                                                                                                            | every command                                                                                                                                                                                                                                                                                                                                                               |
+| 2    | a usage error: an unknown option, a value out of range (`--index 0`), an offset-less `--at` time                                                                                                                                                                                                                                                                                                                                                                                                                                               | every command (click)                                                                                                                                                                                                                                                                                                                                                       |
+| 13   | a refused native call (`NativeAccessDeniedError`, also a `PermissionError`; 5 on Windows), whatever the failed call reported (`EACCES`, `EPERM`, a pywin32 or COM `E_ACCESSDENIED`, a psutil `AccessDenied`, a systemd D-Bus `AccessDenied` or `InteractiveAuthorizationRequired`), e.g. `get_acl` on a file in a directory the caller cannot enter, or `stop_service` as a non-root user                                                                                                                                                      | native commands; a Secret Service or shadow-utils refusal exits 1                                                                                                                                                                                                                                                                                                           |
+| 22   | a value the command accepted but the call refused (`ValueError`; 87 on Windows), e.g. `get_windows_update --timeout nan`                                                                                                                                                                                                                                                                                                                                                                                                                       | every command                                                                                                                                                                                                                                                                                                                                                               |
+| 64   | a relative `-PwshPyUv` / `--pwshpy-uv` path                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | packed runners                                                                                                                                                                                                                                                                                                                                                              |
+| 70   | the runner failed before it ran the script: the elevated `.ps1` child (relayed with a `pwshpy: the elevated child failed before running the script` line), an elevated run that cannot return to the caller's working directory (`pwshpy pack: cannot return to the working directory`), or a root `.sh` run that cannot read the account's home from the passwd database                                                                                                                                                                      | packed runners                                                                                                                                                                                                                                                                                                                                                              |
+| 77   | an elevation was refused or declined (`ElevationDeclinedError`), with a `pwshpy: elevation declined` line on stderr; on POSIX also a sudo that caches no credential (`timestamp_timeout=0`)                                                                                                                                                                                                                                                                                                                                                    | `pwshpy --elevate`, `-PwshPyElevate`, `--pwshpy-elevate`                                                                                                                                                                                                                                                                                                                    |
+| 110  | a timeout (`OperationTimeoutError`, ETIMEDOUT): `exec --timeout`, a service start, stop or restart that did not settle, `get_windows_update --timeout`, `wait_process --timeout`, `resolve_dns_name --timeout`, a web request or download whose connect or read stalls past `--timeout`, a Linux local-account command whose shadow-utils commands together outlast 30 s                                                                                                                                                                       | `exec`, `start_service`, `stop_service`, `restart_service`, `get_windows_update`, `wait_process`, `resolve_dns_name`, `invoke_web_request`, `invoke_rest_method`, `download_file`, `new_local_user`, `remove_local_user`, `enable_local_user`, `disable_local_user`, `new_local_group`, `remove_local_group`, `add_local_group_member`, `remove_local_group_member` (Linux) |
+| 127  | a missing or untrusted tool or directory: no `uv` and `-PwshPyNoInstallUv` / `--pwshpy-no-install-uv`, no `uv` an elevated run can trust, a refused `-PwshPyUv` pin, a managed Python an elevated run cannot trust (`refusing the Python uv found at`), a pack cache an elevated run cannot trust (`refusing the cache directory`), a git older than 2.32 (or of no readable version) for an elevated `.ps1` or root `.sh` run of a script with a git source (`refusing git`), or no `sudo` for `-PwshPyElevate` / `--pwshpy-elevate` on POSIX | packed runners                                                                                                                                                                                                                                                                                                                                                              |
 
-A refusal pwshpy reads only from a reply or an exit status is a plain `NativeCallError` and exits
-1: a D-Bus error reply from systemd (a polkit refusal) or from the Secret Service, and a non-zero
-exit of a shadow-utils command.
+A refusal systemd sends over D-Bus (`org.freedesktop.DBus.Error.AccessDenied`, or
+`InteractiveAuthorizationRequired`, which a non-root caller gets where polkit is installed) is a
+`NativeAccessDeniedError` and exits 13, like any other refused native call; any other D-Bus error
+reply from systemd is a plain `NativeCallError` naming that error and exits 1. A refusal pwshpy
+reads only from a message or an exit status is a plain `NativeCallError` and exits 1: an error
+from the Secret Service, and a non-zero exit of a shadow-utils command.
 
 Any other exception that reaches the CLI keeps `lib_cli_exit_tools`' mapping, which reads the codes
 an `OSError` carries before its type: its `winerror` on Windows, else its `errno` (a raw

@@ -11,7 +11,8 @@ call.
 - :func:`elevate` relaunches the current process elevated, **preserving the working
   directory and forwarding argv**.  It is a no-op when already elevated.  Windows uses
   UAC (``ShellExecuteEx`` ``"runas"``, fixing PowerShell's ``System32`` gotcha); POSIX
-  (Linux/macOS) re-execs the command under ``sudo``.
+  (Linux/macOS) asks for the password once with ``sudo -v`` and re-execs the command under
+  ``sudo -n``.
 
 ``win32`` modules are imported lazily so a portable install stays clean.
 
@@ -79,7 +80,8 @@ def elevate(
     A no-op returning ``0`` when already elevated.  Windows triggers a UAC prompt via
     ``ShellExecuteEx`` ``"runas"`` (the elevated child inherits the given/current working
     directory - fixing PowerShell's ``System32`` gotcha).  POSIX (Linux/macOS) asks for the
-    password with ``sudo -v`` on the TTY, then re-execs the command under ``sudo``.  ``argv``
+    password with ``sudo -v`` on the TTY, checks with ``sudo -n -v`` that a credential was
+    cached, then re-execs the command under ``sudo -n``, which never prompts again.  ``argv``
     defaults to the current process's.
 
     Args:
@@ -95,7 +97,8 @@ def elevate(
         ``None`` when ``wait`` is ``False``.
 
     Raises:
-        ElevationDeclinedError: The UAC prompt was refused, or sudo did not grant root.
+        ElevationDeclinedError: The UAC prompt was refused, or sudo did not grant root or
+            cached no credential for the command (sudoers ``timestamp_timeout=0``).
         NativeCallError: If the elevated relaunch (``ShellExecuteEx`` / ``sudo``) fails.
 
     Example:
@@ -117,14 +120,18 @@ def _sudo_relaunch(executable: str, argv: Sequence[str], cwd: str, *, wait: bool
     The password is asked by ``sudo -v`` on its own, before the command: sudo exits
     1 when authentication fails (``man sudo``), which is a code the command itself
     may return, so only a separate step can tell a refusal from a result. The
-    command then runs on the credential ``-v`` cached.
+    command then runs on the credential ``-v`` cached, under ``sudo -n`` so it can
+    never prompt a second time: a sudo that caches nothing (sudoers
+    ``timestamp_timeout=0``) would ask again, and a refusal there would come back
+    as the command's exit 1.
 
     Raises:
         ElevationDeclinedError: sudo did not grant root - a wrong or refused
-            password, a Ctrl+C at the prompt, or a user sudo does not allow.
+            password, a Ctrl+C at the prompt, a user sudo does not allow, or a
+            sudo that cached no credential for the command to run on.
         NativeCallError: sudo could not be started at all.
     """
-    command = ["sudo", executable, *argv]
+    command = ["sudo", "-n", executable, *argv]
     try:
         _ask_sudo_for_root(cwd)
         if wait:
@@ -150,6 +157,14 @@ def _ask_sudo_for_root(cwd: str) -> None:
         raise native_error("The sudo password prompt was interrupted.", exc, kind=ElevationDeclinedError) from exc
     if not granted:
         raise ElevationDeclinedError("sudo did not grant root (refused, a wrong password, or not allowed).")
+    # `-n -v` re-validates without prompting: it fails when `-v` cached nothing. `-n true` would
+    # also fail for a user whose sudoers rule allows only the command itself, not `true`.
+    cached = subprocess.run(["sudo", "-n", "-v"], cwd=cwd, check=False).returncode == 0  # noqa: S607  # nosec B603 B607 - fixed argv, no shell; sudo resolved from PATH like the relaunch
+    if not cached:
+        raise ElevationDeclinedError(
+            "sudo granted root but cached no credential (sudoers timestamp_timeout=0?), so the command "
+            "would ask for the password again; run it under sudo yourself instead."
+        )
 
 
 def _relaunch_target(executable: str | None, argv: Sequence[str] | None) -> tuple[str, list[str]]:

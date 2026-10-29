@@ -34,7 +34,7 @@ _FULL_TEMPLATE = (
     "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|"
     "@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@|@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@|"
     "@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_RELATIVE@@|@@PWSHPY_PYTHON_REQUEST@@|"
-    "@@PWSHPY_PATH_ENV@@|@@PWSHPY_UV_PATH_ENV@@"
+    "@@PWSHPY_PATH_ENV@@|@@PWSHPY_UV_PATH_ENV@@|@@PWSHPY_GIT_SOURCE@@"
 )
 
 _SH_TEMPLATE = (
@@ -190,14 +190,18 @@ def test_render_runner_substitutes_every_placeholder() -> None:
         "'>=3.11'",
         "PWSHPY_PACK_PATH",
         "PWSHPY_PACK_UV_PATH",
+        "$false",
     ]
 
 
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize("placeholder", ["@@PWSHPY_ENTRY@@", "@@PWSHPY_PATH_ENV@@", "@@PWSHPY_UV_PATH_ENV@@"])
+@pytest.mark.parametrize(
+    "placeholder", ["@@PWSHPY_ENTRY@@", "@@PWSHPY_PATH_ENV@@", "@@PWSHPY_UV_PATH_ENV@@", "@@PWSHPY_GIT_SOURCE@@"]
+)
 def test_render_runner_rejects_a_template_missing_a_placeholder(placeholder: str) -> None:
     """Shipping a runner with a literal placeholder would fail cryptically on the target host; the
-    variables an elevated run hands the caller's PATH and uv's over in ([107]) are required too."""
+    variables an elevated run hands the caller's PATH and uv's over in ([107]), and whether the script
+    has a git source ([156]), are required too."""
     with pytest.raises(PackError, match=placeholder):
         render_runner(
             _FULL_TEMPLATE.replace(placeholder, ""),
@@ -658,3 +662,13 @@ def test_the_posix_runner_carries_the_git_source_flag_as_one_shell_word(git_sour
         _SH_TEMPLATE, RunnerContent(payload_b64="x", payload_sha256="y", entry="e", has_git_source=git_source)
     )
     assert rendered.split("|")[12] == ("'1'" if git_source else "'0'")
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("source", [True, False], ids=["source", "none"])
+def test_the_powershell_runner_carries_the_source_flag_as_a_boolean(source: bool) -> None:
+    """[156]: the elevated .ps1 run checks the version of the tool uv fetches with, as the .sh root run does."""
+    rendered = render_runner(
+        _FULL_TEMPLATE, RunnerContent(payload_b64="x", payload_sha256="y", entry="e", has_git_source=source)
+    )
+    assert rendered.split("|")[12] == ("$true" if source else "$false")

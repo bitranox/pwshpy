@@ -24,7 +24,7 @@ Contents:
     * :func:`candidate_relative_paths` - the file paths a dotted name may live at.
     * :func:`extract_script_metadata` - lift the entry's PEP 723 block onto the shim.
     * :func:`extract_requires_python` - the block's ``requires-python``, the request an elevated run makes.
-    * :func:`has_git_source` - whether uv runs git for the script, which a root ``.sh`` run checks.
+    * :func:`has_git_source` - whether uv runs git for the script, which an elevated run checks.
     * :func:`render_shim` - the generated ``__main__`` shim for one entry.
     * :func:`render_runner` - substitute a payload into the runner template.
     * :func:`split_relative_requirement` - a ``--with`` path an elevated run re-anchors.
@@ -89,8 +89,8 @@ class RunnerContent:
         file_hashes: ``(digest, path)`` pairs the runner verifies before running.
         python_request: The entry's ``requires-python`` (see :func:`extract_requires_python`), which
             an elevated run hands ``uv python find``; ``""`` for none.
-        has_git_source: Whether the script has a git source (see :func:`has_git_source`), for which a
-            root ``.sh`` run refuses a git older than 2.32.
+        has_git_source: Whether the script has a git source (see :func:`has_git_source`), for which an
+            elevated run of either runner refuses a git older than 2.32.
     """
 
     payload_b64: str
@@ -157,7 +157,8 @@ _POWERSHELL_QUOTES = frozenset(chr(code) for code in (0x27, 0x2018, 0x2019, 0x20
 
 #: Placeholders the runner template exposes for substitution.  Distinctive enough that
 #: they cannot occur in hand-written PowerShell by accident. The two PATH variables are the ones an
-#: elevated run hands the shim the caller's PATH and uv's in ([107]).
+#: elevated run hands the shim the caller's PATH and uv's in ([107]); the git-source flag is what an
+#: elevated run checks the git version for ([156]).
 _PLACEHOLDERS = (
     "@@PWSHPY_PAYLOAD_B64@@",
     "@@PWSHPY_PAYLOAD_SHA256@@",
@@ -171,6 +172,7 @@ _PLACEHOLDERS = (
     "@@PWSHPY_PYTHON_REQUEST@@",
     "@@PWSHPY_PATH_ENV@@",
     "@@PWSHPY_UV_PATH_ENV@@",
+    "@@PWSHPY_GIT_SOURCE@@",
 )
 
 #: The entry name as plain text, for the runners' help comments. Optional (a template may or may not
@@ -782,7 +784,8 @@ def render_runner(template: str, content: RunnerContent) -> str:
         ...                         uv_args=["--with", "rich"], file_hashes=[FileDigest("ff", "t.py")])
         >>> render_runner("|".join(_PLACEHOLDERS), content).split("|")  # doctest: +NORMALIZE_WHITESPACE
         ['Ym9keQ==', 'ab12', "'t.py'", "'--with','rich'", 'ff *t.py', '__pwshpy_pack_main__.py',
-         'PWSHPY_PACK_ARGV', 'PWSHPY_PACK_CWD', "'',''", "''", 'PWSHPY_PACK_PATH', 'PWSHPY_PACK_UV_PATH']
+         'PWSHPY_PACK_ARGV', 'PWSHPY_PACK_CWD', "'',''", "''", 'PWSHPY_PACK_PATH', 'PWSHPY_PACK_UV_PATH',
+         '$false']
     """
     missing = [token for token in _PLACEHOLDERS if token not in template]
     if missing:
@@ -809,6 +812,7 @@ def render_runner(template: str, content: RunnerContent) -> str:
             "@@PWSHPY_UV_PATH_ENV@@": UV_PATH_ENV_VAR,
             "@@PWSHPY_UV_ARGS_RELATIVE@@": _powershell_relative_suffixes(content.uv_args),
             "@@PWSHPY_PYTHON_REQUEST@@": _powershell_literal(content.python_request),
+            "@@PWSHPY_GIT_SOURCE@@": "$true" if content.has_git_source else "$false",
         },
     )
 

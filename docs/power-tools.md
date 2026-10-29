@@ -588,7 +588,13 @@ Details worth knowing:
   on purpose, since a false positive only refuses a root run on a git older than 2.32: a `git+` in
   any other string, a `git` key in another tool's table and a line-ending backslash in a literal
   (`'''`) string, which joins nothing, count too. It reads only the script's own declarations, so a git requirement inside a local
-  wheel or path dependency is not seen. An elevated `.ps1` run does not check the git version. The
+  wheel or path dependency is not seen. An elevated `.ps1` run (an administrator token, SYSTEM, or
+  root) of a script with a git source checks the git version the same way, with the same rule and
+  pack-time flag (`-PwshPyInfo` shows `git source : yes (an elevated run needs git 2.32 or later)`):
+  it stops with `pwshpy: refusing git at <path>: git <version> ignores GIT_CONFIG_GLOBAL, ...` (or
+  `git --version names no version this runner can read, ...`) and exit code 127, naming the remedy
+  to upgrade git or to run the script without elevation; Git for Windows' `2.x.y.windows.n` counts
+  by its major and minor numbers. The
   system file (`/etc/gitconfig`, or the one below Git
   for Windows' install directory) is the administrators' and still applies. The runner cannot tell
   who set a variable, so an elevated run in a network that reaches the internet only through a proxy

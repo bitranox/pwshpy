@@ -29,6 +29,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   runner creates `pwshpy\empty.gitconfig` below it, so a link on the way no longer gets a directory
   created at its target, and a create that fails (a file named `pwshpy` in the way) is refused with
   exit code 127 and the usual remedy instead of stopping with exit code 1 (70 in an elevated child).
+- Packed `.ps1` runner, elevated (administrator token, SYSTEM, or root): a script with a git source
+  now refuses a git older than 2.32 (or one whose `git --version` it cannot read) with exit code 127,
+  as the `.sh` root run already did. Such a git ignores `GIT_CONFIG_GLOBAL` and read the caller's
+  global git configuration, whose `core.fsmonitor` or `credential.helper` ran a command elevated.
+  `-PwshPyInfo` shows whether the pack recorded a git source.
 
 ## [1.11.0] 2026-10-29 00:00:55
 

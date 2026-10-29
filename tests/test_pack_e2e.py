@@ -3828,7 +3828,7 @@ def test_an_elevated_run_on_windows_creates_nothing_where_its_git_config_file_ca
         empty.parent.write_text("", encoding="utf-8")
     elif where == "dangling-link":
         empty.parent.mkdir()
-        os.symlink(tmp_path / "no-such-file", empty)
+        empty.symlink_to(tmp_path / "no-such-file")
     else:
         shutil.move(str(home), str(opened))
         _icacls(opened, "/grant", f"{_SID_USERS}:(OI)(CI)M")
@@ -3938,3 +3938,170 @@ def test_an_elevated_run_refuses_a_cached_file_another_account_can_modify(tmp_pa
     assert result.returncode == 127, result.stdout + result.stderr
     assert _CACHE_REFUSAL in result.stderr and "mark.py" in result.stderr, result.stderr
     assert not marker.exists()
+
+
+# --- [156] elevated .ps1 runs of a script with a git source refuse a git older than 2.32 ----------------
+
+#: The start of the refusal an elevated run prints for a git that may ignore GIT_CONFIG_GLOBAL.
+_OLD_GIT_REFUSED = "pwshpy: refusing git at "
+#: The remedy that refusal names.
+_OLD_GIT_REMEDY = "upgrade git, or run the script without elevation"
+#: A git source the recording double never fetches (POSIX) and a real uv cannot reach (Windows).
+_GIT_SOURCE_PACKAGE = "pwshpy-git-probe @ git+https://example.invalid/r.git"
+#: Where every Windows host keeps the .NET Framework C# compiler, which builds a git.exe double.
+_CSC = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "csc.exe"
+
+
+def _posix_git_double(directory: Path, marker: Path, *, version_output: str, git_exit: int) -> Path:
+    """A ``git`` (POSIX) that records it ran, prints ``version_output`` and exits ``git_exit``."""
+    _marker_double(directory, "git", marker, f"printf '%s\\n' '{version_output}'\nexit {git_exit}")
+    return directory / "git"
+
+
+def _windows_git_double(directory: Path, marker: Path, *, version_output: str) -> Path:
+    """A ``git.exe`` (Windows) that records it ran and prints ``version_output``, built with csc.
+
+    The runner looks for git.exe by name, so a script double cannot stand in for it.
+    """
+    source = directory / "git_double.cs"
+    source.write_text(
+        "class GitDouble { static int Main() { System.IO.File.AppendAllText("
+        f'@"{marker}", "ran\\n"); System.Console.WriteLine("{version_output}"); return 0; }} }}\n',
+        encoding="utf-8",
+    )
+    target = directory / "git.exe"
+    result = subprocess.run(  # noqa: S603 - fixed argv; csc ships with the .NET Framework on every Windows
+        [str(_CSC), "/nologo", f"/out:{target}", str(source)],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    source.unlink()
+    return target
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize(
+    ("version_output", "git_exit", "refused_version"),
+    [
+        pytest.param("git version 2.31.0", 0, "2.31.0", id="2.31-refused"),
+        pytest.param("git version 1.99.9", 0, "1.99.9", id="older-major-refused"),
+        pytest.param("git version 2.32.0", 0, None, id="2.32-runs"),
+        pytest.param("git version 2.43.1.windows.1", 0, None, id="windows-suffix-runs"),
+        pytest.param("git version 2.39.3 (Apple Git-145)", 0, None, id="apple-suffix-runs"),
+        pytest.param("git version 10.0.0", 0, None, id="two-digit-major-runs"),
+        pytest.param("not git at all", 0, "", id="unparsable-refused"),
+        pytest.param("git version 2", 0, "", id="no-minor-refused"),
+        pytest.param("git version 2.40.0", 1, "", id="failing-git-refused"),
+    ],
+)
+def test_an_elevated_run_of_a_git_source_needs_git_2_32(
+    tmp_path: Path, version_output: str, git_exit: int, refused_version: str | None
+) -> None:
+    """[156]: as the .sh root run ([116]), an elevated .ps1 run of a script with a git source asks the
+    git uv will run for its version and exits 127 when it is older than 2.32, unreadable, or the command
+    fails, before uv is asked for a managed Python or runs the script; 2.32 or later runs."""
+    runner, uv, record = _recording_runner(tmp_path, elevated="$true", with_packages=[_GIT_SOURCE_PACKAGE])
+    marker = tmp_path / "git-ran.txt"
+    git = _posix_git_double(uv.parent, marker, version_output=version_output, git_exit=git_exit)
+    result = _run_with_path(
+        tmp_path, runner, "-PwshPyUv", str(uv), path_first=[uv.parent], env={}, cwd=_clean_cwd(tmp_path)
+    )
+    assert marker.exists(), "the runner never asked git for its version: " + result.stderr
+    refusals = [line for line in result.stderr.splitlines() if line.startswith(_OLD_GIT_REFUSED)]
+    if refused_version is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert refusals == [], result.stderr
+        assert "run" in record.read_text(encoding="utf-8").splitlines(), "uv never ran the script"
+        assert Path(f"{record}.python").exists(), "uv was never asked for a Python"
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert not record.exists(), "uv ran the script"
+    assert not Path(f"{record}.python").exists(), "uv was asked for a Python"
+    assert len(refusals) == 1, result.stderr
+    (refusal,) = refusals
+    assert refusal.startswith(f"{_OLD_GIT_REFUSED}{git}: "), refusal
+    if refused_version:
+        assert f": git {refused_version} ignores GIT_CONFIG_GLOBAL" in refusal, refusal
+    assert "GIT_CONFIG_GLOBAL" in refusal and "2.32 or later" in refusal, refusal
+    assert refusal.endswith(_OLD_GIT_REMEDY), refusal
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize(
+    ("elevated", "git_source"),
+    [("$true", False), ("$false", True)],
+    ids=["elevated-without-git-source", "not-elevated"],
+)
+def test_an_old_git_is_neither_asked_nor_refused_without_elevation_and_a_git_source(
+    tmp_path: Path, elevated: str, git_source: bool
+) -> None:
+    """[156]: only an elevated run of a script with a git source asks git; the others run on an old git."""
+    packages = [_GIT_SOURCE_PACKAGE] if git_source else []
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated, with_packages=packages)
+    marker = tmp_path / "git-ran.txt"
+    _posix_git_double(uv.parent, marker, version_output="git version 2.25.1", git_exit=0)
+    result = _run_with_path(
+        tmp_path, runner, "-PwshPyUv", str(uv), path_first=[uv.parent], env={}, cwd=_clean_cwd(tmp_path)
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not marker.exists(), "the runner ran git --version"
+    assert _OLD_GIT_REFUSED not in result.stderr, result.stderr
+    assert "run" in record.read_text(encoding="utf-8").splitlines(), "uv never ran the script"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.skipif(not _CSC.is_file(), reason="needs the .NET Framework C# compiler to build a git.exe double")
+@pytest.mark.parametrize(
+    ("version_output", "refused"),
+    [
+        pytest.param("git version 2.31.1.windows.1", True, id="2.31-refused"),
+        pytest.param("git version 2.32.0.windows.1", False, id="2.32-passes-the-check"),
+    ],
+)
+def test_an_elevated_windows_run_of_a_git_source_needs_git_2_32(
+    tmp_path: Path, version_output: str, refused: bool
+) -> None:
+    """[156] on Windows (pwsh 7 and, with PWSHPY_TEST_POWERSHELL=powershell, Windows PowerShell 5.1): a
+    git.exe double first on a trusted PATH directory answers the version. Refused, the run exits 127 with
+    the remedy and uv never runs the script; 2.32 passes the check (uv then fails to fetch the source
+    from the double, which is not under test)."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated="$true", with_packages=[_GIT_SOURCE_PACKAGE])
+    marker = tmp_path / "git-ran.txt"
+    git = _windows_git_double(_private_dir(tmp_path / "git-bin"), marker, version_output=version_output)
+    environment = interpreter_probe_env(tmp_path, managed=managed)
+    result = _run_with_path(tmp_path, runner, path_first=[git.parent, *head], env=environment, cwd=_clean_cwd(tmp_path))
+    assert marker.exists(), "the runner never asked git for its version: " + result.stderr
+    refusals = [line for line in result.stderr.splitlines() if line.startswith(_OLD_GIT_REFUSED)]
+    if not refused:
+        assert refusals == [], result.stderr
+        assert result.returncode != 127, result.stdout + result.stderr
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert len(refusals) == 1, result.stderr
+    assert refusals[0].startswith(f"{_OLD_GIT_REFUSED}{git}: git 2.31.1.windows.1 ignores GIT_CONFIG_GLOBAL"), refusals
+    assert refusals[0].endswith(_OLD_GIT_REMEDY), refusals
+    assert "python:" not in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("git_source", [True, False], ids=["git-source", "none"])
+def test_info_names_whether_the_script_has_a_git_source(tmp_path: Path, git_source: bool) -> None:
+    """[156]: -PwshPyInfo shows what the pack recorded, so a refused elevated run can be explained."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('hi')\n")
+    packages = [_GIT_SOURCE_PACKAGE] if git_source else []
+    manifest = pack_script(entry, options=PackOptions(with_packages=packages))
+    result = _run(Path(manifest.output_path), "-PwshPyInfo", env=_isolated_cache(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected = "git source : yes (an elevated run needs git 2.32 or later)" if git_source else "git source : no"
+    assert expected in result.stdout.splitlines(), result.stdout

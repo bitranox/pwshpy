@@ -63,7 +63,8 @@
     stderr; git reads no global config file (GIT_CONFIG_GLOBAL is /dev/null on POSIX and on Windows
     an empty file below the account's data directory, pwshpy\empty.gitconfig, refused with exit 127
     when another account could change it, so not the .gitconfig below the HOME, USERPROFILE or
-    XDG_CONFIG_HOME it was given; git 2.32 or later); the user site-packages is off
+    XDG_CONFIG_HOME it was given; git 2.32 or later, so for a script with a git source a git older
+    than 2.32, which ignores that variable, is refused with exit code 127); the user site-packages is off
     (PYTHONNOUSERSITE=1) and uv run reads no .env file (--no-env-file). In a network that reaches
     the internet only through a proxy, an elevated run can download nothing: the managed Python and
     every package the script needs must already be in the account's directories named above.
@@ -97,6 +98,9 @@ $PwshPyUvPathEnv = '@@PWSHPY_UV_PATH_ENV@@'
 $PwshPyUvArgsRelative = @(@@PWSHPY_UV_ARGS_RELATIVE@@)
 # The packed script's requires-python ('' for none): the request an elevated run hands `uv python find`.
 $PwshPyPythonRequest = @@PWSHPY_PYTHON_REQUEST@@
+# $true when the packed script has a git source (pack-time detection, which errs towards $true): an
+# elevated run then refuses a git older than 2.32 ([156]).
+$PwshPyGitSource = @@PWSHPY_GIT_SOURCE@@
 
 $PwshPyFileHashes = @'
 @@PWSHPY_FILE_HASHES@@
@@ -634,6 +638,42 @@ function Get-PwshPyGitOn {
         return $candidate
     }
     return ''
+}
+
+function Get-PwshPyGitVersionDistrust {
+    param([string] $Git)
+
+    # Why an elevated run of a script with a git source must not let uv run the git $Git, or '' when it
+    # is 2.32 or later ([156], the .sh runner's pwshpy_require_git_config_global): git honours
+    # GIT_CONFIG_GLOBAL from 2.32 on, and an older one reads the caller's global git configuration, whose
+    # core.fsmonitor, core.sshCommand or credential.helper runs a command elevated. A version this cannot
+    # read, or a git --version that fails, is refused too: the check fails closed. The first line only,
+    # as the .sh: a git printing a warning before its "git version" line names no version here.
+    # 'Continue' for the call: with 'Stop', Windows PowerShell 5.1 stops at the first line a native
+    # program writes to a redirected stderr.
+    $stderr = [IO.Path]::GetTempFileName()
+    $saved = $ErrorActionPreference
+    $first = ''
+    try {
+        $ErrorActionPreference = 'Continue'
+        $lines = @(. (ConvertTo-PwshPyNativeCall -FilePath $Git -ArgumentList @('--version') -StderrPath $stderr))
+        if ($LASTEXITCODE -eq 0 -and $lines.Count -gt 0) { $first = [string]$lines[0] }
+    } catch {
+        $first = ''
+    } finally {
+        $ErrorActionPreference = $saved
+        Remove-Item -LiteralPath $stderr -Force -ErrorAction SilentlyContinue
+    }
+    $why = 'elevated it would read the caller''s git configuration (a script with a git source needs git 2.32 or later elevated): upgrade git, or run the script without elevation'
+    # Case-sensitive and ASCII digits only: a version spelled any other way is not one this can read.
+    if (-not ($first -cmatch '^git version ([0-9]{1,6})\.([0-9]{1,6})')) {
+        return "git --version names no version this runner can read, and a git older than 2.32 ignores GIT_CONFIG_GLOBAL, so $why"
+    }
+    $major = [int]$Matches[1]
+    $minor = [int]$Matches[2]
+    if ($major -gt 2 -or ($major -eq 2 -and $minor -ge 32)) { return '' }
+    $version = ($first.Substring('git version '.Length) -split ' ', 2)[0]
+    return "git $version ignores GIT_CONFIG_GLOBAL, so $why"
 }
 
 function Get-PwshPyUvLocation {
@@ -1464,6 +1504,11 @@ function Write-PwshPyManifest {
     Write-Host "entry      : $PwshPyEntry"
     Write-Host "payload    : sha256 $PwshPySha"
     Write-Host "uv args    : $($PwshPyUvArgs -join ' ')"
+    if ($PwshPyGitSource) {
+        Write-Host 'git source : yes (an elevated run needs git 2.32 or later)'
+    } else {
+        Write-Host 'git source : no'
+    }
     Write-Host "cache dir  : $CacheDir"
     Write-Host 'files      :'
     foreach ($line in ($PwshPyFileHashes -split "`n")) {
@@ -1632,7 +1677,7 @@ $PwshPyPrepare = {
         # caller's profile) and XDG_CONFIG_HOME this run got, and a core.fsmonitor, core.sshCommand or
         # credential.helper there runs a command elevated when uv fetches a git source. A set
         # GIT_CONFIG_GLOBAL replaces both (git 2.32 and later; an older git ignores it and still reads
-        # them). POSIX: /dev/null, which only root can change. Windows: an empty file below the
+        # them, so for a script with a git source one is refused below, [156]). POSIX: /dev/null, which only root can change. Windows: an empty file below the
         # account's own data directory, judged as an elevated run judges a uv, which Git for Windows
         # reads as an empty configuration (measured with 2.55). Not the NUL device, which an MSYS2 or
         # Cygwin git may read as a file named NUL in its working directory, nor a path such as
@@ -1668,6 +1713,23 @@ $PwshPyPrepare = {
             Write-PwshPyFailure "pwshpy: refusing uv's managed-Python directory $($env:UV_PYTHON_INSTALL_DIR): $PwshPyPythonDirWhy (an elevated run lets uv search only a directory no other account can modify, nor anything below it): $(Get-PwshPyPythonRemedy -Why $PwshPyPythonDirWhy)"
             exit 127
         }
+        # The PATH uv will see: the caller's directories no other account can modify ([107]), judged
+        # while a POSIX root run's helpers still come from the fixed PATH. Script scope by name: the run
+        # preparation, a block of its own, reads it.
+        $script:PwshPyTrustedUvPath = Get-PwshPyTrustedPath -Path $PwshPyCallerPath
+        # The git uv will run, asked only for a script that needs one; with none, uv fails on its own.
+        # Before uv is asked for a managed Python, which it may download: a run refused here calls no uv
+        # ([156], as the .sh root run).
+        if ($PwshPyGitSource) {
+            $PwshPyUvGit = Get-PwshPyGitOn -Path $script:PwshPyTrustedUvPath
+            if ($PwshPyUvGit) {
+                $PwshPyGitWhy = Get-PwshPyGitVersionDistrust -Git $PwshPyUvGit
+                if ($PwshPyGitWhy) {
+                    Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy"
+                    exit 127
+                }
+            }
+        }
         # Script scope by name: the run preparation, a block of its own, reads it.
         $script:PwshPyPython = Resolve-PwshPyManagedPython -Uv $PwshPyUv
     }
@@ -1697,7 +1759,7 @@ $PwshPyPrepareRun = {
     # gets the caller's whole PATH back from the shim, behind the entries uv puts in front of the PATH
     # it was given, which the shim is handed too ([107]).
     if ($PwshPyElevatedRun) {
-        $PwshPyTrustedUvPath = Get-PwshPyTrustedPath -Path $PwshPyCallerPath
+        $PwshPyTrustedUvPath = $script:PwshPyTrustedUvPath
         Set-Item -LiteralPath ('Env:' + $PwshPyPathEnv) -Value $PwshPyCallerPath
         # When no caller directory is trusted this is ''. Windows PowerShell 5.1 deletes a variable set
         # to '', so under 5.1 the shim finds no uv PATH, cannot tell what uv put in front, and gives

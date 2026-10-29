@@ -31,6 +31,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- `get_acl` on Linux raises `NativeCallError` (a `NativeAccessDeniedError` for a refusal) when the
+  extended ACL cannot be read; it read such an ACL silently as the three mode-bit entries, and
+  `add_acl_ace` / `remove_acl_ace` then rewrote the ACL from those bits. Only "no extended ACL"
+  (`ENODATA`) and a filesystem without POSIX ACLs (`ENOTSUP`) still fall back to the mode bits.
 - A timeout in `invoke_web_request`, `invoke_rest_method` or `download_file` raises
   `OperationTimeoutError` (a `NativeCallError` with `.timeout`) and the `pwshpy` CLI exits 110, as
   for every other timeout; it raised a plain `NativeCallError` and exited 1 before. Both a connect

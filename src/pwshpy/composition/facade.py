@@ -1442,8 +1442,9 @@ class Ps:
         Raises:
             NativeCallError: The path cannot be read, or on Windows its security descriptor
                 cannot (raised on iteration; a :class:`NativeAccessDeniedError` when access is
-                denied). On POSIX an extended ACL that cannot be read falls back to the three
-                mode-bit entries instead of raising.
+                denied). On POSIX the extended ACL is read too: only a file with none (or a
+                filesystem without POSIX ACLs) yields the three mode-bit entries; an extended ACL
+                that cannot be read raises.
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline

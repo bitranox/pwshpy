@@ -19,6 +19,7 @@ Contents:
 
 from __future__ import annotations
 
+import errno
 import importlib
 import os
 import struct
@@ -148,12 +149,26 @@ def _base_entries(mode: int) -> list[_XattrAclEntry]:
     ]
 
 
+#: The getxattr errnos that mean "no extended ACL": none is set (ENODATA), or the filesystem
+#: has no POSIX ACL support (ENOTSUP / EOPNOTSUPP, one value on Linux). Any other failure (a
+#: refusal, an I/O error) must raise: reading it as the mode bits would report a narrower ACL
+#: than the file has, and a mutation would rewrite the ACL from those bits.
+_NO_EXTENDED_ACL = frozenset({errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP})
+
+
 def _read_raw(path: str) -> list[_XattrAclEntry] | None:
-    """The extended access ACL as entries, or ``None`` when the file has none (mode bits only)."""
+    """The extended access ACL as entries, or ``None`` when the file has none (mode bits only).
+
+    Raises:
+        NativeCallError: ``getxattr`` failed for any reason but "no extended ACL" (a
+            ``NativeAccessDeniedError`` when it was refused).
+    """
     try:
         blob: bytes = _os.getxattr(path, _XATTR_ACCESS)
-    except OSError:
-        return None  # ENODATA (no extended ACL) or ENOTSUP (fs/OS without POSIX ACLs)
+    except OSError as exc:
+        if exc.errno in _NO_EXTENDED_ACL:
+            return None
+        raise native_error(f"cannot read the ACL of {path!r}: {exc}", exc) from exc
     entries: list[_XattrAclEntry] = []
     offset = _HEADER.size
     while offset < len(blob):

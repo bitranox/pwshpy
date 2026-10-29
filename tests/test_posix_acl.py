@@ -7,6 +7,7 @@ CI's ubuntu lane - and skip cleanly on a filesystem without POSIX ACL support.
 
 from __future__ import annotations
 
+import errno
 import os
 import struct
 import sys
@@ -20,7 +21,7 @@ import pytest
 from pwshpy.adapters.native import posix_acl
 from pwshpy.adapters.native.posix_acl import PosixAclController, iter_acl, perm_to_rwx
 from pwshpy.domain.enums import AceType, AclEntryKind
-from pwshpy.domain.errors import NativeCallError
+from pwshpy.domain.errors import NativeAccessDeniedError, NativeCallError
 
 _LINUX = sys.platform.startswith("linux")
 _os: Any = os  # funnel the Linux-only os.getxattr past the type checker's platform pruning
@@ -153,3 +154,70 @@ def test_add_ace_writes_the_canonical_xattr_bytes(scratch_file: str) -> None:
     except NativeCallError as exc:
         pytest.skip(f"filesystem without POSIX ACL support: {exc}")
     assert _os.getxattr(scratch_file, "system.posix_acl_access") == _GRANTED_BLOB
+
+
+def _getxattr_failing_with(code: int) -> Any:
+    """A stand-in for os.getxattr (the OS call is the external edge) that fails with ``code``."""
+
+    def _fail(path: str, attribute: str) -> bytes:
+        raise OSError(code, os.strerror(code), path)
+
+    return _fail
+
+
+#: The errnos that mean "no extended ACL here": none set (ENODATA), or a filesystem/OS without
+#: POSIX ACL support (ENOTSUP, which is EOPNOTSUPP on Linux).
+_NO_EXTENDED_ACL = [errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP]
+
+
+@pytest.mark.os_linux
+@pytest.mark.skipif(not _LINUX, reason="POSIX ACLs are Linux")
+@pytest.mark.parametrize("code", _NO_EXTENDED_ACL)
+def test_no_extended_acl_falls_back_to_the_mode_bits(
+    scratch_file: str, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """ENODATA / ENOTSUP mean the file has no extended ACL: the three mode-bit entries are read."""
+    monkeypatch.setattr(os, "getxattr", _getxattr_failing_with(code))
+    kinds = [entry.kind for entry in iter_acl(scratch_file)]
+    assert kinds == [AclEntryKind.OWNER, AclEntryKind.OWNING_GROUP, AclEntryKind.OTHER]
+
+
+@pytest.mark.os_linux
+@pytest.mark.skipif(not _LINUX, reason="POSIX ACLs are Linux")
+def test_an_unreadable_extended_acl_is_access_denied_not_the_mode_bits(
+    scratch_file: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused getxattr raises NativeAccessDeniedError instead of silently reading as mode bits."""
+    monkeypatch.setattr(os, "getxattr", _getxattr_failing_with(errno.EACCES))
+    with pytest.raises(NativeAccessDeniedError) as caught:
+        list(iter_acl(scratch_file))
+    assert caught.value.errno == errno.EACCES
+
+
+@pytest.mark.os_linux
+@pytest.mark.skipif(not _LINUX, reason="POSIX ACLs are Linux")
+def test_a_failed_extended_acl_read_is_native_call_error(scratch_file: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any other getxattr failure (an I/O error) raises NativeCallError naming the path."""
+    monkeypatch.setattr(os, "getxattr", _getxattr_failing_with(errno.EIO))
+    with pytest.raises(NativeCallError) as caught:
+        list(iter_acl(scratch_file))
+    assert scratch_file in str(caught.value)
+    assert not isinstance(caught.value, NativeAccessDeniedError)
+
+
+@pytest.mark.os_linux
+@pytest.mark.skipif(not _LINUX, reason="POSIX ACLs are Linux")
+def test_a_mutation_on_an_unreadable_acl_refuses_instead_of_writing_mode_bits(
+    scratch_file: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """remove_ace reads the ACL first: an unreadable one must refuse, never rewrite from the mode bits."""
+    monkeypatch.setattr(os, "getxattr", _getxattr_failing_with(errno.EIO))
+    written: list[str] = []
+
+    def _record_write(path: str, *_args: object) -> None:
+        written.append(path)
+
+    monkeypatch.setattr(os, "setxattr", _record_write)
+    with pytest.raises(NativeCallError):
+        PosixAclController().remove_ace(scratch_file, trustee="0")
+    assert written == []

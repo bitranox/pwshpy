@@ -6,12 +6,14 @@ runs, so the oracle must expect those rewrites rather than equality. Whether the
 anything depends on the shell that launched pytest: under a pwsh 7 parent both variables already
 carry pwsh's entries and the rewrite is a no-op; under a Windows PowerShell 5.1 parent (or cmd) it
 prepends them. These tests pin both shapes and the idempotence that makes the first one a no-op.
+PATHEXT gains ``.CPL`` whatever the parent, unless it already holds it; the cases below are the
+ones measured against pwsh 7.6.9 on Windows.
 """
 
 from __future__ import annotations
 
 import pytest
-from pwsh_child_env import expected_child_module_path, expected_child_path
+from pwsh_child_env import expected_child_module_path, expected_child_path, expected_child_pathext
 
 _HOME = r"C:\Program Files\PowerShell\7"
 _USER_MODULES = r"C:\Users\someone\Documents\PowerShell\Modules"
@@ -85,3 +87,40 @@ def test_both_rewrites_are_idempotent_which_is_why_a_pwsh_parent_sees_no_change(
     assert expected_child_path(path_once, _HOME) == path_once
     module_once = expected_child_module_path(_WINPS_MODULES, _INSERTS)
     assert expected_child_module_path(module_once, _INSERTS) == module_once
+
+
+_PATHEXT = ".COM;.EXE;.BAT;.CMD;.PY;.PYW"
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("parent", "child"),
+    [
+        (_PATHEXT, _PATHEXT + ";.CPL"),
+        (_PATHEXT + ";", _PATHEXT + ";.CPL"),
+        (".COM;.EXE;;", ".COM;.EXE;;.CPL"),
+        (".COM;.EXE;.CPLX", ".COM;.EXE;.CPLX;.CPL"),
+        (".COM;.EXE; .CPL", ".COM;.EXE; .CPL;.CPL"),
+        ("", ".CPL"),
+        (None, ".CPL"),
+    ],
+)
+def test_pathext_gains_cpl_at_the_end_when_no_entry_is_exactly_cpl(parent: str | None, child: str) -> None:
+    """pwsh appends ``.CPL`` (after a ``;`` unless the value ends with one); a near-miss entry does not count."""
+    assert expected_child_pathext(parent) == child
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "parent", [".COM;.CPL;.EXE", ".COM;.cpl;.EXE", _PATHEXT + ";.CPL", _PATHEXT + ";.CPL;", ".CPL"]
+)
+def test_pathext_is_unchanged_when_an_entry_is_cpl_in_any_case(parent: str) -> None:
+    """An inherited ``.CPL`` entry, in any case and position, leaves the value verbatim."""
+    assert expected_child_pathext(parent) == parent
+
+
+@pytest.mark.os_agnostic
+def test_pathext_rewrite_is_idempotent() -> None:
+    """A pwsh 7 parent already appended ``.CPL``, so its child changes nothing."""
+    once = expected_child_pathext(_PATHEXT)
+    assert expected_child_pathext(once) == once

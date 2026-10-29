@@ -85,6 +85,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   page, as `--json` is; clean output is otherwise unchanged (the same redacted, two-space indented
   JSON).
 
+### Fixed
+
+- The `pwshpy` CLI prints a command's error after the log lines the command already wrote, each
+  on its own line. Before, an error printed while a log line was still queued could run into it
+  on one line (seen on Windows, e.g. `pwshpy get_scheduled_task --task-name 'a\b'`).
+
 ## [1.11.0] 2026-10-29 00:00:55
 
 ### Added

@@ -16,13 +16,25 @@ from pathlib import Path
 __all__ = ["home_followed"]
 
 
-def _deepest_ancestors(answers: list[Path], homes: Mapping[str, Path]) -> list[str]:
-    """Return the labels of the deepest candidate homes that are an ancestor of some answer."""
-    hits = {label: home for label, home in homes.items() if any(home in answer.parents for answer in answers)}
+def _deepest_for(answer: Path, homes: Mapping[str, Path]) -> set[str]:
+    """Return the labels of the deepest candidate homes that are an ancestor of ``answer``."""
+    hits = {label: home for label, home in homes.items() if home in answer.parents}
     if not hits:
-        return []
+        return set()
     depth = max(len(home.parts) for home in hits.values())
-    return [f"{label} ({home})" for label, home in hits.items() if len(home.parts) == depth]
+    return {label for label, home in hits.items() if len(home.parts) == depth}
+
+
+def _deepest_ancestors(answers: list[Path], homes: Mapping[str, Path]) -> list[str]:
+    """Return, in ``homes`` order, each answer's deepest ancestor home, labelled with its path.
+
+    Decided per answer: a split answer (one member under one home, another under a different or
+    an enclosing one) names every home some answer followed, not only the deepest one overall.
+    """
+    chosen: set[str] = set()
+    for answer in answers:
+        chosen |= _deepest_for(answer, homes)
+    return [f"{label} ({home})" for label, home in homes.items() if label in chosen]
 
 
 def _real(path: Path) -> Path:
@@ -32,10 +44,11 @@ def _real(path: Path) -> Path:
 def home_followed(answers: Iterable[Path | None], homes: Mapping[str, Path]) -> str:
     """Name the candidate home pwsh's answers sit under.
 
-    The deepest matching home wins, so a scratch home created inside another candidate is still
-    told apart from it. Spellings are compared as given first; only when none matches are both
-    sides resolved with :func:`os.path.realpath`, and such a match is marked, so a symlinked
-    spelling (macOS ``/var`` vs ``/private/var``) is neither mislabelled "neither" nor hidden.
+    For each answer the deepest matching home wins, so a scratch home created inside another
+    candidate is still told apart from it; answers split over several homes name each of them.
+    Spellings are compared as given first; only when none matches are both sides resolved with
+    :func:`os.path.realpath`, and such a match is marked, so a symlinked spelling (macOS ``/var``
+    vs ``/private/var``) is neither mislabelled "neither" nor hidden.
 
     Args:
         answers: pwsh's answers per member; ``None`` (pwsh's ``""``) is skipped.

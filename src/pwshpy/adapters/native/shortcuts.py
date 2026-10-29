@@ -95,10 +95,18 @@ class NativeShortcutController:
         written even without an ``icon`` file, so a value the caller set is never dropped. No
         directory is created: saving into a missing one fails.
 
+        ``force=False`` is a check before the save, not an atomic create: a file another process
+        creates at ``spec.path`` between the check and ``IPersistFile.Save`` is overwritten, as
+        ``Save`` always overwrites. Saving to a temporary name and renaming it into place would
+        close that window, but was rejected: the temporary name can push the path past the 259
+        characters ``spec`` was validated against, a failed rename leaves a file to clean up, and
+        a rename replaces the file (its ACL and attributes) where ``Save`` with ``force=True``
+        rewrites it in place. Callers that race other writers on one path must coordinate.
+
         Args:
             spec: The validated shortcut; its ``path`` is absolute and at most 259 characters.
-            force: Overwrite an existing file at ``spec.path``; False refuses it before any COM
-                call.
+            force: Overwrite an existing file at ``spec.path``; False refuses one that exists
+                when the call checks, before any COM call (see the race above).
 
         Returns:
             The shortcut as :meth:`read` reads it back from ``spec.path``.

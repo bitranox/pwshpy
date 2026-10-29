@@ -18,9 +18,9 @@ different name in each: PID 0, the idle process (psutil ``System Idle Process`` 
 Get-Process ``Idle``), and the kernel's memory compression store (psutil
 ``MemCompression`` vs Get-Process ``Memory Compression``), both excluded from the
 name check. pwshpy keeps psutil's names (documented on ``ps.get_process``). And the
-pwsh 7 child the env oracle reads rewrites its own PATH and PSModulePath at
-startup, so those two are compared against that rewrite (``pwsh_child_env``), not
-against the raw value.
+pwsh 7 child the env oracle reads rewrites its own PATH, PSModulePath and PATHEXT
+at startup, so those three are compared against that rewrite (``pwsh_child_env``),
+not against the raw value.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from pwsh_child_env import expected_child_module_path, expected_child_path
+from pwsh_child_env import expected_child_module_path, expected_child_path, expected_child_pathext
 
 from pwshpy import ps
 
@@ -136,24 +136,27 @@ _ENV_ORACLE_SCRIPT = (
 def test_env_matches_get_childitem_env() -> None:
     """Env var names (case-insensitive) and values match Get-ChildItem env: in a pwsh 7 child.
 
-    Every variable is compared exactly. PATH and PSModulePath are compared against the value the
-    child derives from ours at its startup (``pwsh_child_env``), not against ours: that rewrite is
-    a no-op when pytest runs under pwsh 7 and prepends pwsh's entries when it runs under Windows
-    PowerShell 5.1 or cmd, which is what made this test pass or fail by launching shell alone.
+    Every variable is compared exactly. PATH, PSModulePath and PATHEXT are compared against the
+    value the child derives from ours at its startup (``pwsh_child_env``), not against ours: that
+    rewrite is a no-op when pytest runs under pwsh 7 and adds pwsh's entries when it runs under
+    Windows PowerShell 5.1 or cmd, which is what made this test pass or fail by launching shell
+    alone. PATHEXT gains only pwsh's own ``.CPL``, so any other PATHEXT difference still fails.
     """
     if not _PWSH7.exists():
-        pytest.skip("needs pwsh 7: the expected PATH/PSModulePath rewrite is pwsh 7's own")
+        pytest.skip("needs pwsh 7: the expected PATH/PSModulePath/PATHEXT rewrite is pwsh 7's own")
     ours = {e.name.upper(): e.value for e in ps.environment().to_list()}
     oracle = cast("dict[str, Any]", _run_ps_json(_ENV_ORACLE_SCRIPT))
     theirs = {str(e["Name"]).upper(): str(e["Value"]) for e in cast("list[dict[str, Any]]", oracle["Env"])}
 
-    assert set(ours) == set(theirs), f"env name sets differ: {sorted(set(ours) ^ set(theirs))[:8]}"
     expected = dict(ours)
     if "PATH" in ours:
         expected["PATH"] = expected_child_path(ours["PATH"], str(oracle["ExeHome"]))
     if "PSMODULEPATH" in ours:
         inserts = [str(p) for p in cast("list[Any]", oracle["ModuleInserts"]) if p]
         expected["PSMODULEPATH"] = expected_child_module_path(ours["PSMODULEPATH"], inserts)
+    # Set even when ours lacks it: pwsh creates PATHEXT as ".CPL" when it inherits none.
+    expected["PATHEXT"] = expected_child_pathext(ours.get("PATHEXT"))
+    assert set(expected) == set(theirs), f"env name sets differ: {sorted(set(expected) ^ set(theirs))[:8]}"
     mismatches = {k: (expected[k], theirs[k]) for k in expected if expected[k] != theirs[k]}
     assert not mismatches, f"env value mismatches (expected, Get-ChildItem): {list(mismatches.items())[:3]}"
 

@@ -145,6 +145,13 @@ PATH_ENV_VAR = "PWSHPY_PACK_PATH"
 #: them in front of the caller's PATH, so the script sees what an unelevated run sees.
 UV_PATH_ENV_VAR = "PWSHPY_PACK_UV_PATH"
 
+#: The variable a root run (the ``.sh`` as root, the ``.ps1`` elevated on POSIX) sets to the names, one
+#: space between each, of the home variables it replaced for uv and git with the running account's own
+#: ([159]): HOME, the XDG directories, NETRC and uv's credentials directory. Each one the caller had set
+#: travels in ``<this name>_<NAME>``; the shim gives the script those values back, and removes a name
+#: the caller had not set, so the script sees the caller's environment as PATH is given back ([107]).
+CALLER_ENV_VAR = "PWSHPY_PACK_CALLER"
+
 #: Exit code of a shim that cannot change back to the caller's directory (``EX_SOFTWARE``, the
 #: code the runner uses when the script never started).
 SHIM_CWD_EXIT = 70
@@ -173,6 +180,7 @@ _PLACEHOLDERS = (
     "@@PWSHPY_PATH_ENV@@",
     "@@PWSHPY_UV_PATH_ENV@@",
     "@@PWSHPY_GIT_SOURCE@@",
+    "@@PWSHPY_CALLER_ENV@@",
 )
 
 #: The entry name as plain text, for the runners' help comments. Optional (a template may or may not
@@ -203,6 +211,7 @@ _SH_PLACEHOLDERS = (
     "@@PWSHPY_UV_ARGS_ANCHORED@@",
     "@@PWSHPY_PYTHON_REQUEST@@",
     "@@PWSHPY_GIT_SOURCE@@",
+    "@@PWSHPY_CALLER_ENV@@",
 )
 
 #: The variable the POSIX runner sets, for a root run, to the caller's directory with one trailing
@@ -284,6 +293,24 @@ def _entries_uv_added(current, given):
     return added if added.endswith(os.pathsep) else ""
 
 
+def _restore_the_callers_home():
+    """Give the script the HOME, XDG directories and netrc its caller had ([159]).
+
+    A root run ran uv and git with the running account's own, so neither read nor wrote the caller's
+    files; the names it replaced arrive in one variable, each value the caller had in a variable of
+    its own, and a name the caller had not set is removed again.
+    """
+    names = os.environ.pop({caller_env!r}, None)
+    if names is None:
+        return
+    for name in names.split():
+        value = os.environ.pop({caller_env!r} + "_" + name, None)
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
 def _argv_from_environment():
     """Decode the out-of-band argument vector written by the PowerShell runner.
 
@@ -306,6 +333,7 @@ def _argv_from_environment():
 
 _return_to_the_callers_directory()
 _restore_the_callers_path()
+_restore_the_callers_home()
 sys.argv = [_ENTRY] + _argv_from_environment()
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
@@ -735,6 +763,7 @@ def render_shim(*, entry: str, metadata: str) -> str:
         cwd_exit=SHIM_CWD_EXIT,
         path_env=PATH_ENV_VAR,
         uv_path_env=UV_PATH_ENV_VAR,
+        caller_env=CALLER_ENV_VAR,
     )
 
 
@@ -813,6 +842,7 @@ def render_runner(template: str, content: RunnerContent) -> str:
             "@@PWSHPY_UV_ARGS_RELATIVE@@": _powershell_relative_suffixes(content.uv_args),
             "@@PWSHPY_PYTHON_REQUEST@@": _powershell_literal(content.python_request),
             "@@PWSHPY_GIT_SOURCE@@": "$true" if content.has_git_source else "$false",
+            "@@PWSHPY_CALLER_ENV@@": CALLER_ENV_VAR,
         },
     )
 
@@ -945,6 +975,7 @@ def render_posix_runner(template: str, content: RunnerContent) -> str:
             "@@PWSHPY_UV_ARGS_ANCHORED@@": _posix_shell_word(_posix_anchored_args(content.uv_args)),
             "@@PWSHPY_PYTHON_REQUEST@@": _posix_shell_word(content.python_request),
             "@@PWSHPY_GIT_SOURCE@@": _posix_shell_word("1" if content.has_git_source else "0"),
+            "@@PWSHPY_CALLER_ENV@@": CALLER_ENV_VAR,
         },
     )
 
@@ -1059,6 +1090,7 @@ def _posix_anchored_args(values: Sequence[str]) -> str:
 __all__ = [
     "ARGV_ENCODING_TAG",
     "ARGV_ENV_VAR",
+    "CALLER_ENV_VAR",
     "CWD_ENV_VAR",
     "DEFAULT_PACK_OPTIONS",
     "PATH_ENV_VAR",

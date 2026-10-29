@@ -38,6 +38,7 @@ from typing import cast
 import pytest
 from elevation_doubles import (
     GIT_VARIABLES,
+    HOME_VARIABLES,
     INTERPRETER_VARIABLES,
     LIBRARY_PATH_PLANTS,
     LIBRARY_VARIABLES,
@@ -75,7 +76,7 @@ from elevation_doubles import (
 )
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
-from pwshpy.domain.packing import PackOptions
+from pwshpy.domain.packing import CALLER_ENV_VAR, PackOptions
 
 if sys.platform != "win32":
     import pwd
@@ -4290,6 +4291,46 @@ def test_an_elevated_posix_run_writes_no_stderr_file_in_the_callers_tmpdir(tmp_p
     if own.is_dir():
         assert own.stat().st_mode & 0o777 == 0o700
         assert list(own.iterdir()) == [], "a stderr file was left behind"
+
+
+def _caller_home_env(tmp_path: Path) -> dict[str, str]:
+    """[159]: the caller's own HOME, XDG directories, netrc and uv credentials directory, each its own path
+    (XDG_STATE_HOME is left unset: the shim must remove what the caller did not have)."""
+    names = ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "NETRC", "UV_CREDENTIALS_DIR")
+    return {name: str(tmp_path / ("caller-" + name.lower())) for name in names}
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_posix_run_gives_uv_and_git_the_accounts_own_home(tmp_path: Path, elevated: str) -> None:
+    """[159], as the .sh root run: an elevated POSIX run hands uv the account's own HOME (its passwd home,
+    answered inside tmp_path here), XDG directories and the netrc and credentials defaults below it, and
+    each caller value to the shim under PWSHPY_PACK_CALLER_<NAME>. The control hands uv the caller's."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
+    caller = _caller_home_env(tmp_path)
+    result = _run_with_path(
+        tmp_path, runner, "-PwshPyUv", str(uv), path_first=[uv.parent], env=caller, cwd=_clean_cwd(tmp_path)
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = record.read_text(encoding="utf-8").splitlines()
+    recorded = dict(line[4:].split("=", 1) for line in lines if line.startswith("env:"))
+    if elevated == "$false":
+        assert {name: recorded.get(name) for name in caller} == caller, recorded
+        assert not [name for name in recorded if name.startswith(CALLER_ENV_VAR)], recorded
+        return
+    home = tmp_path
+    assert recorded["HOME"] == str(home), recorded
+    assert recorded["XDG_CONFIG_HOME"] == f"{home}/.config", recorded
+    assert recorded["XDG_CACHE_HOME"] == str(default_uv_cache_dir(tmp_path).parent), recorded
+    assert recorded["XDG_DATA_HOME"] == str(data_home(tmp_path)), recorded
+    assert [name for name in ("XDG_STATE_HOME", "NETRC", "UV_CREDENTIALS_DIR") if name in recorded] == []
+    assert recorded[CALLER_ENV_VAR] == " ".join(HOME_VARIABLES), recorded
+    handed = {name: recorded.get(f"{CALLER_ENV_VAR}_{name}") for name in HOME_VARIABLES}
+    caller_state = os.environ.get("XDG_STATE_HOME")
+    assert handed == {**dict.fromkeys(HOME_VARIABLES), "XDG_STATE_HOME": caller_state, **caller}, handed
+    assert f"pwshpy: setting HOME={home}: " in result.stderr, result.stderr
 
 
 # --- [156] elevated .ps1 runs of a script with a git source refuse a git older than 2.32 ----------------

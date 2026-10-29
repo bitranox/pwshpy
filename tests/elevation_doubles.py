@@ -240,6 +240,18 @@ NETWORK_VARIABLES = (
     "UV_KEYRING_PROVIDER",
 )
 
+#: [159] The home variables a root run replaces for uv and git with the running account's own, in the
+#: runners' order; the shim gives the script the caller's back.
+HOME_VARIABLES = (
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "NETRC",
+    "UV_CREDENTIALS_DIR",
+)
+
 #: [X23 G1] Variables git reads, which an elevated run drops because their name starts with GIT_ (one
 #: no git release reads, so a fixed list would miss it), plus SSH_ASKPASS, which git runs for a
 #: password. [113]: and the ones Git Credential Manager, the credential helper git runs, reads: every
@@ -432,8 +444,8 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
 
     After the arguments it records ``env:<NAME>=<value>`` for each of :data:`INTERPRETER_VARIABLES`,
     :data:`LIBRARY_VARIABLES`, :data:`UV_SOURCE_VARIABLES`, :data:`NETWORK_VARIABLES`,
-    ``SSH_ASKPASS``, ``PASSWORD_STORE_DIR``, ``PYTHONNOUSERSITE`` and every variable whose name holds
-    ``GIT_`` or ``GCM_`` it was handed, so a
+    :data:`HOME_VARIABLES`, ``SSH_ASKPASS``, ``PASSWORD_STORE_DIR``, ``PYTHONNOUSERSITE`` and every
+    variable whose name holds ``GIT_`` or ``GCM_`` or starts with ``PWSHPY_PACK_CALLER`` it was handed, so a
     test can read both what a runner passed, dropped and set. A ``uv python ...`` call (an elevated
     run resolving its interpreter) is recorded the same way into ``record`` with ``.python`` appended
     to its name, and ``uv python find`` prints the path of a stand-in ``python`` beside the double, so
@@ -452,6 +464,7 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
             *LIBRARY_VARIABLES,
             *UV_SOURCE_VARIABLES,
             *NETWORK_VARIABLES,
+            *HOME_VARIABLES,
             "SSH_ASKPASS",
             "PASSWORD_STORE_DIR",
             "PYTHONNOUSERSITE",
@@ -460,7 +473,8 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
     # Every name holding GIT_ or GCM_, found by pattern: the runners drop by prefix, so no list can name
     # them all.
     report += "env | sed -n -e 's/^\\([A-Za-z0-9_]*GIT_[A-Za-z0-9_]*=.*\\)$/env:\\1/p' "
-    report += "-e 's/^\\([A-Za-z0-9_]*GCM_[A-Za-z0-9_]*=.*\\)$/env:\\1/p' >> \"$record\"\n"
+    report += "-e 's/^\\([A-Za-z0-9_]*GCM_[A-Za-z0-9_]*=.*\\)$/env:\\1/p' "
+    report += "-e 's/^\\(PWSHPY_PACK_CALLER[A-Za-z0-9_]*=.*\\)$/env:\\1/p' >> \"$record\"\n"
     python = directory / "python"
     python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
     python.chmod(0o755)
@@ -928,6 +942,7 @@ __all__ = [
     "LIBRARY_VARIABLES",
     "LOCAL_WHEEL_DISTRIBUTION",
     "MANAGED_PYTHON_VARIABLES",
+    "HOME_VARIABLES",
     "NETWORK_VARIABLES",
     "NOT_A_GCM_VARIABLE",
     "NOT_A_GIT_VARIABLE",

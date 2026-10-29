@@ -93,6 +93,9 @@ $PwshPyCwdEnv = '@@PWSHPY_CWD_ENV@@'
 # gets the first back behind the entries uv put in front of the second ([107]).
 $PwshPyPathEnv = '@@PWSHPY_PATH_ENV@@'
 $PwshPyUvPathEnv = '@@PWSHPY_UV_PATH_ENV@@'
+# An elevated POSIX run names here the home variables it replaced for uv and git with the account's own,
+# each caller value in <this>_<NAME>, so the shim gives the script the caller's back ([159]).
+$PwshPyCallerEnv = '@@PWSHPY_CALLER_ENV@@'
 # Per uv arg, the relative path an elevated run (which starts uv in another directory) puts the
 # caller's directory in front of: '' for a value left as it is. Parallel to $PwshPyUvArgs.
 $PwshPyUvArgsRelative = @(@@PWSHPY_UV_ARGS_RELATIVE@@)
@@ -1954,6 +1957,38 @@ $PwshPyPrepare = {
         if ($PwshPyOnWindows) { $PwshPyUvCache = Join-Path $PwshPyUvCache 'cache' }
         Set-Item -LiteralPath 'Env:UV_CACHE_DIR' -Value $PwshPyUvCache
         Write-PwshPyNotice "pwshpy: uv caches in ${PwshPyUvCache}: an elevated run uses the running account's own cache directory"
+        # POSIX: the home too ([159], user decision: own HOME for uv), as the .sh root run. uv and the git
+        # it runs read and write below HOME and the XDG directories (uv's credentials and its netrc, git's
+        # ~/.git-credentials, caches, state), which sudo -E or env_keep hand over from the caller, so as
+        # root they would read the caller's secrets and create files the caller cannot remove. uv and git
+        # get the running account's own: its passwd home (the directory its cache directory is in), its
+        # cache and data directories, <home>/.config, and the defaults below that home for the state
+        # directory, the netrc and uv's credentials; the shim gives the script the caller's back. Windows
+        # is not covered: an elevated token keeps the caller's own profile there.
+        if (-not $PwshPyOnWindows) {
+            $PwshPyCallerNames = New-Object System.Collections.Generic.List[string]
+            foreach ($name in @('HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'NETRC', 'UV_CREDENTIALS_DIR')) {
+                $handOver = "Env:${PwshPyCallerEnv}_$name"
+                if (Test-Path -LiteralPath "Env:$name") {
+                    Set-Item -LiteralPath $handOver -Value ([Environment]::GetEnvironmentVariable($name))
+                } else {
+                    Remove-Item -LiteralPath $handOver -ErrorAction SilentlyContinue
+                }
+                $PwshPyCallerNames.Add($name)
+            }
+            Set-Item -LiteralPath "Env:$PwshPyCallerEnv" -Value ($PwshPyCallerNames -join ' ')
+            foreach ($name in @('XDG_STATE_HOME', 'NETRC', 'UV_CREDENTIALS_DIR')) {
+                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+            }
+            $PwshPyAccountCache = Get-PwshPyAccountCacheHome
+            $PwshPyAccountHome = Split-Path -Parent $PwshPyAccountCache
+            if (-not $PwshPyAccountHome) { $PwshPyAccountHome = '/' }
+            Set-Item -LiteralPath 'Env:HOME' -Value $PwshPyAccountHome
+            Set-Item -LiteralPath 'Env:XDG_CONFIG_HOME' -Value ($PwshPyAccountHome.TrimEnd('/') + '/.config')
+            Set-Item -LiteralPath 'Env:XDG_CACHE_HOME' -Value $PwshPyAccountCache
+            Set-Item -LiteralPath 'Env:XDG_DATA_HOME' -Value $PwshPyDataHome
+            Write-PwshPyNotice "pwshpy: setting HOME=${PwshPyAccountHome}: an elevated run lets uv and git use the running account's own home"
+        }
         # The directory before uv searches it: uv runs every Python it finds there.
         $PwshPyPythonDirWhy = Get-PwshPyPythonDirDistrust -Path $env:UV_PYTHON_INSTALL_DIR
         if ($PwshPyPythonDirWhy) {

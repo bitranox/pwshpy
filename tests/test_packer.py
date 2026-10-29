@@ -22,6 +22,7 @@ from pwshpy.domain.enums import RunnerFormat
 from pwshpy.domain.errors import PackError
 from pwshpy.domain.packing import (
     ARGV_ENV_VAR,
+    CALLER_ENV_VAR,
     CWD_ENV_VAR,
     PATH_ENV_VAR,
     SHIM_CWD_EXIT,
@@ -541,6 +542,48 @@ def test_the_shim_gives_the_entry_the_path_an_elevated_run_hands_over(tmp_path: 
     assert result.returncode == 0, result.stderr
     assert f"path:{caller}" in result.stdout, result.stdout
     assert "leak:False" in result.stdout, result.stdout
+
+
+@pytest.mark.os_agnostic
+def test_the_shim_gives_the_entry_the_home_variables_a_root_run_hands_over(tmp_path: Path) -> None:
+    """[159]: a root run ran uv with the account's own HOME and XDG directories; the shim restores each
+    one the caller had, removes one the caller had not set, and consumes every hand-over variable."""
+    (tmp_path / "entry.py").write_text(
+        "import os\n"
+        "for name in ('HOME', 'XDG_CONFIG_HOME', 'NETRC'):\n"
+        "    print(name + '=' + os.environ.get(name, '<unset>'))\n"
+        f"print('leaks=' + repr(sorted(n for n in os.environ if n.startswith({CALLER_ENV_VAR!r}))))\n"
+    )
+    shim = tmp_path / SHIM_MODULE
+    shim.write_text(render_shim(entry="entry.py", metadata=""), encoding="utf-8")
+    child = {k: v for k, v in os.environ.items() if not k.startswith(CALLER_ENV_VAR)}
+    child.update(
+        {
+            "HOME": str(tmp_path / "account"),
+            "XDG_CONFIG_HOME": str(tmp_path / "account" / ".config"),
+            "NETRC": str(tmp_path / "account-netrc"),
+            CALLER_ENV_VAR: "HOME XDG_CONFIG_HOME NETRC",
+            f"{CALLER_ENV_VAR}_HOME": str(tmp_path / "caller"),
+            f"{CALLER_ENV_VAR}_XDG_CONFIG_HOME": "",
+        }
+    )
+    result = subprocess.run(  # noqa: S603 - the running interpreter and a file this test wrote
+        [sys.executable, str(shim)],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+        env=child,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        f"HOME={tmp_path / 'caller'}",
+        "XDG_CONFIG_HOME=",
+        "NETRC=<unset>",
+        "leaks=[]",
+    ], result.stdout
 
 
 def _shim_path(result: subprocess.CompletedProcess[str]) -> str:

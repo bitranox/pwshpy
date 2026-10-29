@@ -63,6 +63,25 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   account's own cache directory. Before, it went to a temporary file in `TMPDIR`, which `sudo -E`
   hands over from the caller, so an entry the caller swapped in at that name had root truncate and
   write the file it pointed to.
+- Packed runners, root or elevated run of a script with a git source: the git uv would run is
+  judged as a file, like `uv` (owner, write access, every directory and link on the way), and one
+  another account can modify stops the run with `refusing git at <path>` and exit code 127 before
+  it runs. Before, only the directories on uv's `PATH` were judged, so such a git ran as root.
+- Packed `.ps1` runner, elevated on Windows: the git that is judged is the one uv runs, found in each
+  `PATH` directory by the `PATHEXT` extensions in order and then the bare name, so a `git.cmd` in an
+  earlier directory is no longer passed over for a `git.exe` further down. A git that is not a
+  `.exe`, `.com`, `.cmd` or `.bat` is refused with exit code 127.
+- Packed `.ps1` runner, elevated on Windows: a symlink or junction whose target is rooted on the
+  current drive (`\Users\...`), a volume GUID name or a `GLOBALROOT` device path is refused (exit
+  code 127, `points to <target>, which names no drive or share path`) in uv's managed-Python
+  directory, the pack cache and on the way to a `uv`. Before, such a target counted as relative to
+  the link's directory, so a link out of the tree passed.
+- Packed runners, root run on Linux and macOS (the `.sh` as root, the `.ps1` elevated): uv and the
+  git it runs get the running account's own `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and
+  `XDG_DATA_HOME`, with `XDG_STATE_HOME`, `NETRC` and `UV_CREDENTIALS_DIR` unset. Before, they used
+  the caller's, which `sudo -E` or `env_keep` hand over, so uv read the caller's netrc and
+  credentials and created root-owned directories in the caller's home. The packed script still sees
+  the caller's values.
 - Packed `.sh` runner, `--pwshpy-elevate`: the sudo relaunch runs as a child of the runner's shell
   and exits with its status. Before, it replaced the shell (`exec`), so under sudo's
   `timestamp_type=ppid` the relaunch found no cached credential and exited 1.

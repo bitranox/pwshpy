@@ -1203,6 +1203,34 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     UV_CACHE_DIR=$PWSHPY_CACHE_HOME/uv
     export UV_CACHE_DIR
     printf '%s\n' "pwshpy: uv caches in $UV_CACHE_DIR: as root uv uses the running account's own cache directory" >&2
+    # The home too ([159], user decision: own HOME for uv): uv and the git it runs read and write below
+    # HOME and the XDG directories (uv's credentials and its netrc, git's ~/.git-credentials, caches,
+    # state), which sudo's env_keep or sudo -E hand over from the caller, so as root they would read the
+    # caller's secrets and create files the caller then cannot remove. From here on uv and git get the
+    # running account's own: its passwd home (the directory its cache directory is in), its cache and
+    # data directories as named above, <home>/.config, and the defaults below that home for the state
+    # directory, the netrc and uv's credentials. The packed script gets the caller's back from the shim
+    # (@@PWSHPY_CALLER_ENV@@ names what was replaced), as it gets the caller's PATH ([107]).
+    PWSHPY_CALLER_NAMES=
+    for _ce in HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME NETRC UV_CREDENTIALS_DIR; do
+        if eval "[ -n \"\${$_ce+set}\" ]"; then
+            eval "@@PWSHPY_CALLER_ENV@@_$_ce=\$$_ce"
+            export "@@PWSHPY_CALLER_ENV@@_$_ce"
+        else
+            unset "@@PWSHPY_CALLER_ENV@@_$_ce"
+        fi
+        PWSHPY_CALLER_NAMES="$PWSHPY_CALLER_NAMES $_ce"
+    done
+    export "@@PWSHPY_CALLER_ENV@@=${PWSHPY_CALLER_NAMES# }"
+    unset XDG_STATE_HOME NETRC UV_CREDENTIALS_DIR
+    HOME=${PWSHPY_CACHE_HOME%/*}
+    # A home of / reads "" in pwshpy_account_home (no trailing slash).
+    [ -n "$HOME" ] || HOME=/
+    XDG_CONFIG_HOME=${HOME%/}/.config
+    XDG_CACHE_HOME=$PWSHPY_CACHE_HOME
+    XDG_DATA_HOME=$PWSHPY_DATA_HOME
+    export HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME
+    printf '%s\n' "pwshpy: setting HOME=$HOME: as root uv and git use the running account's own home" >&2
     # While the helpers still come from the fixed PATH: the checks of the directory and of the Python's
     # path run ls. The directory first: uv runs every Python it finds there.
     PWSHPY_PYTHON_DIR_WHY=$(pwshpy_python_dir_distrust "$UV_PYTHON_INSTALL_DIR")

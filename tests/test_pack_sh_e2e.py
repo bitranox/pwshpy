@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 from elevation_doubles import (
     GIT_VARIABLES,
+    HOME_VARIABLES,
     LIBRARY_PATH_PLANTS,
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
@@ -64,7 +65,7 @@ from elevation_doubles import (
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.enums import RunnerFormat
-from pwshpy.domain.packing import SHIM_MODULE, PackOptions
+from pwshpy.domain.packing import CALLER_ENV_VAR, SHIM_MODULE, PackOptions
 
 if sys.platform != "win32":
     import pwd
@@ -1437,6 +1438,13 @@ def _recording_python_runner(
     return runner, uv, record
 
 
+def _caller_home_env(tmp_path: Path) -> dict[str, str]:
+    """[159]: the caller's own HOME, XDG directories, netrc and uv credentials directory, each its own path
+    (XDG_STATE_HOME is left unset: the shim must remove what the caller did not have)."""
+    names = ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "NETRC", "UV_CREDENTIALS_DIR")
+    return {name: str(tmp_path / ("caller-" + name.lower())) for name in names}
+
+
 def _recorded_variables(record: Path) -> dict[str, str]:
     lines = record.read_text(encoding="utf-8").splitlines()
     return dict(line[4:].split("=", 1) for line in lines if line.startswith("env:"))
@@ -1557,6 +1565,60 @@ def test_as_root_uv_caches_in_the_accounts_own_cache_never_the_callers(tmp_path:
     account_cache = default_uv_cache_dir(tmp_path)
     assert account_cache.is_dir() is as_root, result.stderr
     assert (f"pwshpy: uv caches in {account_cache}:" in result.stderr) is as_root, result.stderr
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_uv_and_git_run_with_the_accounts_own_home(tmp_path: Path, as_root: bool) -> None:
+    """[159] (user decision: own HOME for uv): as root uv and the git it runs got the HOME, XDG
+    directories, NETRC and UV_CREDENTIALS_DIR sudo -E or env_keep handed over, so they read the
+    caller's netrc, credentials and git credential store and wrote below the caller's home. Now uv
+    gets the account's own (its passwd home, answered inside tmp_path here; the cache and data
+    directories the runner names; <home>/.config; the rest unset to their defaults below that home),
+    and each caller value travels to the shim under PWSHPY_PACK_CALLER_<NAME>, the names in
+    PWSHPY_PACK_CALLER. The control (not root) hands uv the caller's environment untouched."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root)
+    caller = _caller_home_env(tmp_path)
+    environment = {**_trust_env(tmp_path, uv.parent), **caller}
+    environment.pop("XDG_STATE_HOME", None)
+    result = _run_in(["sh"], runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = _recorded_variables(record)
+    if not as_root:
+        assert {name: recorded.get(name) for name in caller} == caller, recorded
+        assert not [name for name in recorded if name.startswith(CALLER_ENV_VAR)], recorded
+        return
+    home = tmp_path
+    assert recorded["HOME"] == str(home), recorded
+    assert recorded["XDG_CONFIG_HOME"] == f"{home}/.config", recorded
+    assert recorded["XDG_CACHE_HOME"] == str(default_uv_cache_dir(tmp_path).parent), recorded
+    assert recorded["XDG_DATA_HOME"] == str(data_home(tmp_path)), recorded
+    assert [name for name in ("XDG_STATE_HOME", "NETRC", "UV_CREDENTIALS_DIR") if name in recorded] == []
+    assert recorded[CALLER_ENV_VAR] == " ".join(HOME_VARIABLES), recorded
+    handed = {name: recorded.get(f"{CALLER_ENV_VAR}_{name}") for name in HOME_VARIABLES}
+    assert handed == {**dict.fromkeys(HOME_VARIABLES), **caller}, handed
+    assert f"pwshpy: setting HOME={home}: " in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_the_script_gets_the_callers_home_back(tmp_path: Path, as_root: bool) -> None:
+    """[159]: the packed script itself, started by a real uv through the shim, sees the caller's HOME
+    and XDG directories again, and no XDG_STATE_HOME the caller did not have, as it gets the caller's
+    PATH back ([107])."""
+    _needs_managed_python()
+    source = (
+        "import os\n"
+        "for name in ('HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'NETRC', 'XDG_STATE_HOME'):\n"
+        "    print('home:' + name + '=' + os.environ.get(name, '<unset>'))\n"
+    )
+    runner, uv = _python_runner(tmp_path, as_root=as_root, source=source)
+    caller = _caller_home_env(tmp_path)
+    environment = {**_trust_env(tmp_path, uv.parent), **caller}
+    environment.pop("XDG_STATE_HOME", None)
+    result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    seen = dict(line[5:].split("=", 1) for line in result.stdout.splitlines() if line.startswith("home:"))
+    expected = {name: caller[name] for name in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "NETRC")}
+    assert seen == {**expected, "XDG_STATE_HOME": "<unset>"}, result.stdout
 
 
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])

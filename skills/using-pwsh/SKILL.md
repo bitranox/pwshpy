@@ -207,8 +207,12 @@ catch a subclass before its parent:
   `enable_local_user`, `disable_local_user`, `new_local_group`, `remove_local_group`,
   `add_local_group_member` and `remove_local_group_member`, whose `timeout=`, default 30 s, bounds
   all of the verb's commands together)) and `ElevationDeclinedError` (the UAC prompt or sudo's
-  password refused, or a sudo that caches no credential, `timestamp_timeout=0`: `elevate()` asks
-  once with `sudo -v` and runs the command under `sudo -n`) and `NativeAccessDeniedError` (a call
+  password refused, or a sudo that caches no credential, `timestamp_timeout=0`: `elevate()` first
+  runs the program the relaunch runs (its Python interpreter) as `<python> -c pass` under `sudo -n`,
+  silently, to learn whether it may run without a password, and if so relaunches under `sudo -n`
+  with no prompt; only otherwise does it ask once with `sudo -v` - with no terminal to ask on, that
+  fails and raises this error - and, once `sudo -v` succeeds and sudo has cached the credential,
+  relaunches under `sudo -n`) and `NativeAccessDeniedError` (a call
   refused for lack of rights: `E_ACCESSDENIED`, `EACCES`, `EPERM`, psutil `AccessDenied`, a systemd
   D-Bus `AccessDenied` or `InteractiveAuthorizationRequired` - a Windows service stop denied,
   `stop_service` as a non-root Linux user, a file or registry key the caller cannot open).
@@ -254,8 +258,10 @@ call reported), 22 a refused value
 (`ValueError`; 87 on Windows), 64 a relative `-PwshPyUv` / `--pwshpy-uv`, 70 the runner failed before the script ran
 (the elevated `.ps1` child, or an elevated run that cannot return to the caller's directory), 77
 elevation declined (`pwshpy --elevate`, `-PwshPyElevate`, `--pwshpy-elevate`; stderr line `pwshpy:
-elevation declined`), 110 `OperationTimeoutError`, 127 a missing or untrusted `uv` (or, run
-elevated, an untrusted managed Python, pack cache or old git), or no `sudo` for a runner's
+elevation declined`), 110 `OperationTimeoutError`, 127 a missing or untrusted `uv` (an install
+of uv that failed, or found no curl or wget, counts as missing; run elevated, also an untrusted
+managed Python, pack cache, temporary directory, git configuration file, or an old or untrusted
+git), or no `sudo` for a runner's
 elevation. `pwshpy exec`, `pwshpy --elevate <command>` (a no-op when already elevated) and a
 runner otherwise return the program's, command's or script's own code, so check the stderr line too.
 

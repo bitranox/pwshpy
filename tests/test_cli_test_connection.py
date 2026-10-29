@@ -1,4 +1,4 @@
-"""CLI story: ``pwshpy test-connection HOST`` output and options."""
+"""CLI story: ``pwshpy test_connection HOST`` output and options."""
 
 from __future__ import annotations
 

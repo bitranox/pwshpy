@@ -102,7 +102,7 @@ pwshpy --traceback config-deploy --target user
 
 ### View Configuration
 
-Display the merged configuration from all sources (defaults → app → host → user → .env → env vars).
+Display the merged configuration from all sources (defaults -> app -> host -> user -> .env -> env vars).
 
 #### Options Reference
 
@@ -451,8 +451,8 @@ Configuration can be overridden via environment variables using two methods:
 For logging configuration, use the native `LOG_*` variables (highest precedence):
 
 ```bash
-LOG_CONSOLE_LEVEL=DEBUG pwshpy processes
-LOG_ENABLE_GRAYLOG=true LOG_GRAYLOG_ENDPOINT="logs.example.com:12201" pwshpy processes
+LOG_CONSOLE_LEVEL=DEBUG pwshpy get_process
+LOG_ENABLE_GRAYLOG=true LOG_GRAYLOG_ENDPOINT="logs.example.com:12201" pwshpy get_process
 ```
 
 A `LOG_*` line in a `.env` file counts too: the `--env-file` when one is given, otherwise the
@@ -465,7 +465,7 @@ other line of a `.env` can pass itself off as an environment variable.
 For any configuration section, use the format: `<PREFIX>___<SECTION>__<KEY>=value`
 
 ```bash
-PWSHPY___LIB_LOG_RICH__CONSOLE_LEVEL=DEBUG pwshpy processes
+PWSHPY___LIB_LOG_RICH__CONSOLE_LEVEL=DEBUG pwshpy get_process
 PWSHPY___LIB_LOG_RICH__CONSOLE_STREAM=stderr pwshpy info
 ```
 

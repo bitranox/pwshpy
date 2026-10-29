@@ -1,4 +1,4 @@
-"""CLI story: ``pwshpy processes`` output modes and option handling."""
+"""CLI story: ``pwshpy get_process`` output modes and option handling."""
 
 from __future__ import annotations
 

@@ -1,11 +1,11 @@
-"""``pwshpy resolve NAME`` — resolve a host name through the pipeline.
+"""``pwshpy resolve_dns_name NAME`` - resolve a host name through the pipeline.
 
 A thin front end over the ``ps`` facade (native / stdlib socket), mirroring
 ``Resolve-DnsName``.  Streams :class:`~pwshpy.domain.records.DnsRecord` records;
 a resolution failure surfaces as a clean CLI error via the exit-code machinery.
 
 Contents:
-    * :func:`cli_resolve` — the ``resolve`` subcommand.
+    * :func:`cli_resolve` - the ``resolve_dns_name`` subcommand.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 @option("--jsonl", "as_jsonl", is_flag=True, default=False, help="Stream one JSON record per line.")
 @click.pass_context
 def cli_resolve(ctx: click.Context, name: str, timeout: float | None, as_json: bool, as_jsonl: bool) -> None:
-    """Resolve NAME to its addresses as typed records (native, native).
+    """Resolve NAME to its addresses as typed records (native).
 
     \f
     Example:

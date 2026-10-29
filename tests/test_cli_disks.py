@@ -1,4 +1,4 @@
-"""CLI story: ``pwshpy disks`` output modes and option handling."""
+"""CLI story: ``pwshpy get_volume`` output modes and option handling."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""CLI story: ``pwshpy connections`` output modes and option handling."""
+"""CLI story: ``pwshpy get_net_tcp_connection`` output modes and option handling."""
 
 from __future__ import annotations
 

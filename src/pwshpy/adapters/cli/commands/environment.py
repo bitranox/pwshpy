@@ -1,11 +1,11 @@
-"""``pwshpy env`` — list environment variables through the pipeline.
+"""``pwshpy env`` - list environment variables through the pipeline.
 
 A thin front end over the ``ps`` facade (native / os.environ), mirroring the
 PowerShell ``env:`` drive.  Streams :class:`~pwshpy.domain.records.EnvVar`
 records.
 
 Contents:
-    * :func:`cli_env` — the ``env`` subcommand.
+    * :func:`cli_env` - the ``env`` subcommand.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 @option("--limit", "-n", "limit", type=int, default=None, help="Emit at most N variables.")
 @click.pass_context
 def cli_env(ctx: click.Context, as_json: bool, as_jsonl: bool, limit: int | None) -> None:
-    """List environment variables as typed records (native, native).
+    """List environment variables as typed records (native).
 
     \f
     Example:

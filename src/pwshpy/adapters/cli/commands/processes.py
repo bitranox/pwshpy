@@ -1,4 +1,4 @@
-"""``pwshpy processes`` — list running processes through the shared pipeline.
+"""``pwshpy get_process`` - list running processes through the shared pipeline.
 
 A thin front end over the ``ps`` facade (native / psutil): it parses options,
 picks an output format, and streams :class:`~pwshpy.domain.records.ProcessInfo`
@@ -6,7 +6,7 @@ records.  ``--jsonl`` stays lazy end to end so ``| head`` is cheap and exits
 cleanly.
 
 Contents:
-    * :func:`cli_processes` — the ``processes`` subcommand.
+    * :func:`cli_processes` - the ``get_process`` subcommand.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 @option("--limit", "-n", "limit", type=int, default=None, help="Emit at most N processes.")
 @click.pass_context
 def cli_processes(ctx: click.Context, as_json: bool, as_jsonl: bool, limit: int | None) -> None:
-    """List running processes as typed records (native, native — no pwsh subprocess).
+    """List running processes as typed records (native, no pwsh subprocess).
 
     The ``ps`` facade is injected via the CLI context (wired at the composition
     root), so this adapter never imports the composition layer.

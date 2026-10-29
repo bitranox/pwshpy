@@ -193,7 +193,7 @@ def test_listening_ports_cover_get_nettcpconnection() -> None:
 
 
 def test_uptime_matches_within_tolerance() -> None:
-    """pwshpy uptime matches (Now - LastBootUpTime) within a few seconds."""
+    """pwshpy get_uptime matches (Now - LastBootUpTime) within a few seconds."""
     ours = ps.get_uptime().uptime_seconds
     theirs = cast(
         "float",

@@ -1,14 +1,14 @@
-"""``pwshpy is-elevated`` — report administrative-privilege status.
+"""``pwshpy is-elevated`` - report administrative-privilege status.
 
 A thin front end over the ``ps`` facade (native, portable).  Prints whether the
 process is elevated and mirrors it in the exit code (0 = elevated, 1 = not), so it
-scripts cleanly: ``pwshpy is-elevated -q && pwshpy clear-event-log Application``.
+scripts cleanly: ``pwshpy is-elevated -q && pwshpy clear_event_log Application``.
 
-The companion global flag ``pwshpy --elevate <subcommand …>`` (defined on the root
-group) relaunches the command elevated via UAC when needed.
+The companion global flag ``pwshpy --elevate <subcommand ...>`` (defined on the root
+group) relaunches the command elevated when needed (UAC on Windows, sudo on POSIX).
 
 Contents:
-    * :func:`cli_is_elevated` — the ``is-elevated`` subcommand.
+    * :func:`cli_is_elevated` - the ``is-elevated`` subcommand.
 """
 
 from __future__ import annotations

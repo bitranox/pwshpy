@@ -5,7 +5,7 @@ its missing stubs is confined here).  Mirrors ``Get-Volume``: each mounted
 partition marshals into a :class:`DiskUsage` via ``model_construct``.
 
 Contents:
-    * :func:`iter_disks` — yield one :class:`DiskUsage` per mounted filesystem.
+    * :func:`iter_disks` - yield one :class:`DiskUsage` per mounted filesystem.
 """
 
 from __future__ import annotations

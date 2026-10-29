@@ -1,4 +1,4 @@
-"""CLI story: ``pwshpy uptime`` output modes."""
+"""CLI story: ``pwshpy get_uptime`` output modes."""
 
 from __future__ import annotations
 

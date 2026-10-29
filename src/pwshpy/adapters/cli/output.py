@@ -1,7 +1,7 @@
 """Record output for the CLI - streaming JSON/JSONL and human tables.
 
 Keeps the lazy pipeline lazy end to end: ``--jsonl`` writes one record at a time,
-so ``pwshpy processes --jsonl | head`` stops early and cheaply.  Writes are
+so ``pwshpy get_process --jsonl | head`` stops early and cheaply.  Writes are
 wrapped so a downstream reader closing the pipe exits cleanly (exit 0, no
 ``BrokenPipeError`` traceback) on both POSIX and Windows.
 

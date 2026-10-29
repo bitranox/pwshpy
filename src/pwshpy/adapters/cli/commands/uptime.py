@@ -1,11 +1,11 @@
-"""``pwshpy uptime`` — show system boot time and elapsed uptime.
+"""``pwshpy get_uptime`` - show system boot time and elapsed uptime.
 
 A thin front end over the ``ps`` facade (native / psutil).  Emits a single
 :class:`~pwshpy.domain.records.SystemUptime` record through the shared output
 path (``--json`` / ``--jsonl`` / human table).
 
 Contents:
-    * :func:`cli_uptime` — the ``uptime`` subcommand.
+    * :func:`cli_uptime` - the ``get_uptime`` subcommand.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 @option("--jsonl", "as_jsonl", is_flag=True, default=False, help="Emit the record as one JSON line.")
 @click.pass_context
 def cli_uptime(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
-    """Show system boot time and elapsed uptime as a typed record (native, native).
+    """Show system boot time and elapsed uptime as a typed record (native).
 
     \f
     Example:

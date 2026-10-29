@@ -1,8 +1,8 @@
 """Public package surface for pwshpy.
 
 A genuinely Pythonic PowerShell: typed records and a fluent, lazy pipeline over
-native Windows bindings (native), with an in-process PowerShell 7.6 SDK fallback
-(.NET) - never a ``pwsh.exe`` subprocess.
+native OS bindings (win32 on Windows, the honest Linux backends on Linux), with an
+in-process PowerShell 7.6 SDK fallback (.NET) - never a ``pwsh.exe`` subprocess.
 
 Typical use::
 

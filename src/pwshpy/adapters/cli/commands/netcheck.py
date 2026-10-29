@@ -1,11 +1,11 @@
-"""``pwshpy test-connection HOST`` — probe TCP reachability through the pipeline.
+"""``pwshpy test_connection HOST`` - probe TCP reachability through the pipeline.
 
 A thin front end over the ``ps`` facade (native / stdlib socket), mirroring
 ``Test-Connection`` (TCP-connect form).  Emits a single
 :class:`~pwshpy.domain.records.ConnectionTest` record.
 
 Contents:
-    * :func:`cli_test_connection` — the ``test-connection`` subcommand.
+    * :func:`cli_test_connection` - the ``test_connection`` subcommand.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def cli_test_connection(
     as_json: bool,
     as_jsonl: bool,
 ) -> None:
-    """Probe TCP reachability of HOST:PORT as a typed record (native, native).
+    """Probe TCP reachability of HOST:PORT as a typed record (native).
 
     \f
     Example:

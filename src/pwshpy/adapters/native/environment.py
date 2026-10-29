@@ -4,7 +4,7 @@ Mirrors PowerShell's ``env:`` drive.  ``os.environ`` is fully typed, so no
 pyright suppression is needed here.
 
 Contents:
-    * :func:`iter_env` — yield one :class:`EnvVar` per environment variable.
+    * :func:`iter_env` - yield one :class:`EnvVar` per environment variable.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Lazy fluent pipeline over records — the Pythonic PowerShell object pipeline.
+"""Lazy fluent pipeline over records - the Pythonic PowerShell object pipeline.
 
 :class:`Pipeline` wraps any iterable of records and exposes chainable, generator-
 backed operators (``.where`` / ``.select`` / ``.sort_by`` / ``.take`` / ``.first``
@@ -6,7 +6,7 @@ backed operators (``.where`` / ``.select`` / ``.sort_by`` / ``.take`` / ``.first
 by nature (it must see every item), mirroring PowerShell's ``Sort-Object``.
 
 Laziness note:
-    A pipeline fed a one-shot generator is itself single-consumption — iterate it
+    A pipeline fed a one-shot generator is itself single-consumption - iterate it
     once.  Fed a re-iterable source (list, tuple), it can be traversed repeatedly.
     The facade hands out a fresh generator per call (``ps.get_process()``), so each
     call is independently consumable.
@@ -21,20 +21,20 @@ Materialization & memory (what each operator costs):
       touches at most 10 items no matter how large the source.
     * **Iterating terminal (O(1) extra memory):** ``for x in pipeline`` / ``iter()``
       consume the source one item at a time without buffering.
-    * **Materializing terminal (O(n) memory — the effect to know about):**
+    * **Materializing terminal (O(n) memory - the effect to know about):**
       ``to_list()`` pulls the **entire** source into a list, and ``sort_by()`` must buffer
       **every** item before it can yield (sorting needs them all). On an unbounded or huge
       source (millions of event-log rows, a giant directory tree) these hold everything in
       memory at once.
 
-    Rule of thumb: keep it lazy — narrow with ``.where(...)`` and cap with ``.take(N)`` (or
+    Rule of thumb: keep it lazy - narrow with ``.where(...)`` and cap with ``.take(N)`` (or
     use ``.first()``) *before* ``.to_list()`` or ``.sort_by()``, and on the CLI prefer
     ``--jsonl`` (streams) over the human table (which materializes, soft-capped at 1000).
     Calling ``.to_list()`` on a full unbounded source is the one way to blow memory, and it
     is always the caller's explicit choice.
 
 Contents:
-    * :class:`Pipeline` — the fluent, lazy record pipeline.
+    * :class:`Pipeline` - the fluent, lazy record pipeline.
 """
 
 from __future__ import annotations
@@ -91,10 +91,10 @@ class Pipeline(Generic[T]):
         return Pipeline(selector(item) for item in self._source)
 
     def sort_by(self, key: Callable[[T], Any], *, reverse: bool = False) -> Pipeline[T]:
-        """Return a pipeline sorted by ``key`` (blocking — buffers every item, O(n) memory).
+        """Return a pipeline sorted by ``key`` (blocking - buffers every item, O(n) memory).
 
         Sorting needs all records, so this reads the whole source into memory before it can
-        yield — like PowerShell's ``Sort-Object``. Cap the source first on a huge stream.
+        yield - like PowerShell's ``Sort-Object``. Cap the source first on a huge stream.
 
         Example:
             >>> Pipeline([3, 1, 2]).sort_by(lambda n: n, reverse=True).to_list()
@@ -117,7 +117,7 @@ class Pipeline(Generic[T]):
     def first(self, predicate: Callable[[T], bool] | None, *, default: R) -> T | R: ...
 
     def first(self, predicate: Callable[[T], bool] | None = None, *, default: Any = None) -> Any:
-        """Return the first matching record, or ``default`` if none (lazy — stops early).
+        """Return the first matching record, or ``default`` if none (lazy - stops early).
 
         Example:
             >>> Pipeline([1, 2, 3]).first(lambda n: n > 1)
@@ -131,11 +131,11 @@ class Pipeline(Generic[T]):
         return default
 
     def to_list(self) -> list[T]:
-        """Materialize the **entire** pipeline into a list (O(n) memory — see the module note).
+        """Materialize the **entire** pipeline into a list (O(n) memory - see the module note).
 
         This is the one operator that holds every record at once: it pulls the whole source.
         On an unbounded/huge source, narrow with ``.where(...)`` and cap with ``.take(N)`` (or
-        use ``.first()`` / iterate) first — this call cannot stay memory-bounded on its own.
+        use ``.first()`` / iterate) first - this call cannot stay memory-bounded on its own.
 
         Example:
             >>> Pipeline(range(3)).to_list()

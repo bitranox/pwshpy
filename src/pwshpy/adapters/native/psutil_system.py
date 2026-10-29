@@ -4,7 +4,7 @@ Typed facade over the untyped ``psutil`` surface (the ``# pyright: ignore`` for
 its missing stubs is confined here).  Mirrors ``Get-Uptime``.
 
 Contents:
-    * :func:`get_uptime` — boot time + elapsed uptime as a :class:`SystemUptime`.
+    * :func:`get_uptime` - boot time + elapsed uptime as a :class:`SystemUptime`.
 """
 
 from __future__ import annotations

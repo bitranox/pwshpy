@@ -1,12 +1,12 @@
 """native TCP reachability probe over the stdlib ``socket`` (portable).
 
 Mirrors ``Test-Connection`` (TCP-connect form): attempts a bounded connection to
-``host:port`` and returns a :class:`ConnectionTest` describing the outcome — it
+``host:port`` and returns a :class:`ConnectionTest` describing the outcome - it
 never raises for an unreachable target, it reports ``reachable=False`` with the
 reason.  Honors the design's timeout requirement for blocking native calls.
 
 Contents:
-    * :func:`test_connection` — probe one ``host:port`` and return the result.
+    * :func:`test_connection` - probe one ``host:port`` and return the result.
 """
 
 from __future__ import annotations

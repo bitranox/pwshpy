@@ -5,11 +5,11 @@ single ``# pyright: ignore`` for its missing stubs is confined here, and the res
 of the codebase consumes the fully-typed :func:`iter_processes`.
 
 Records come from a trusted native API, so they are built with
-``model_construct`` (validation skipped) on this hot path — thousands of
+``model_construct`` (validation skipped) on this hot path - thousands of
 processes must not each pay Pydantic validation.
 
 Contents:
-    * :func:`iter_processes` — yield one :class:`ProcessInfo` per live process.
+    * :func:`iter_processes` - yield one :class:`ProcessInfo` per live process.
 """
 
 from __future__ import annotations

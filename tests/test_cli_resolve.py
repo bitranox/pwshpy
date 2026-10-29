@@ -1,4 +1,4 @@
-"""CLI story: ``pwshpy resolve NAME`` output and error handling."""
+"""CLI story: ``pwshpy resolve_dns_name NAME`` output and error handling."""
 
 from __future__ import annotations
 

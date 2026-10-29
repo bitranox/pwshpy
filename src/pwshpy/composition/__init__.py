@@ -17,7 +17,7 @@ from ..adapters.logging.setup import init_logging
 # The ps facade (native + hosted .NET, over the shared pipeline)
 from .facade import Ps, build_ps, ps
 
-# Static conformance assertions — pyright verifies that each adapter function
+# Static conformance assertions - pyright verifies that each adapter function
 # structurally satisfies its corresponding Protocol at type-check time.
 if TYPE_CHECKING:
     from ..application.ports import (

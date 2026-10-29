@@ -4723,6 +4723,49 @@ def test_a_failed_posix_installer_download_is_named_and_wget_is_tried(
     assert not record.exists(), "uv ran"
 
 
+def _write_umask_double(directory: Path, name: str, log: Path) -> Path:
+    """A downloader double that records the umask it runs under in ``log`` and fails (exit 6)."""
+    double = directory / name
+    double.write_text(f"#!/bin/sh\numask >> '{log}'\nexit 6\n", encoding="utf-8", newline="\n")
+    double.chmod(0o755)
+    return double
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_posix_download_runs_under_umask_022(tmp_path: Path, elevated: str) -> None:
+    """[R3] round 5, as the .sh: an elevated run downloaded uv's installer under the caller's umask while
+    it ran the installer under 022. Both downloaders now run under 022 when elevated; not elevated they
+    keep the caller's (077 here)."""
+    runner, _uv, _record = _recording_runner(tmp_path, elevated=elevated)
+    doubles = tmp_path / "download-bin"
+    doubles.mkdir()
+    log = tmp_path / "umask.txt"
+    curl = _write_umask_double(doubles, "curl", log)
+    wget = _write_umask_double(doubles, "wget", log)
+    _with_posix_download_doubles(tmp_path, runner, curl=curl, wget=wget)
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    previous = os.umask(0o077)
+    try:
+        result = _run_with_path(
+            tmp_path,
+            runner,
+            path_first=["/usr/bin", "/bin"],
+            env={"HOME": str(caller_home)},
+            cwd=_clean_cwd(tmp_path),
+            inherit_path=False,
+            install_uv=True,
+        )
+    finally:
+        os.umask(previous)
+    assert result.returncode == 127, result.stdout + result.stderr
+    expected = "0022" if elevated == "$true" else "0077"
+    assert log.read_text(encoding="utf-8").split() == [expected, expected], result.stderr
+
+
 #: The start of the refusal a run that is not elevated prints when its TMPDIR cannot take uv's installer.
 _NO_INSTALLER_TEMP = "pwshpy: cannot create a temporary directory for uv's installer in "
 

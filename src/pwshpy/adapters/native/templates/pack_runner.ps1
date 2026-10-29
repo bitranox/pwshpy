@@ -1012,9 +1012,10 @@ function Get-PwshPyPosixUvInstaller {
             [bool](Get-Command -Name $tool -CommandType Application -ErrorAction SilentlyContinue)
         }
         if (-not $present) { continue }
-        # Assigned away: anything a downloader prints must not become part of the path returned.
+        # Assigned away: anything a downloader prints must not become part of the path returned. As root
+        # under umask 022, as the installer after it and the .sh's download.
         if ($PwshPyRootPath) {
-            $null = & env -i "HOME=$homeValue" "PATH=$env:PATH" @words $file $Url
+            $null = & env -i "HOME=$homeValue" "PATH=$env:PATH" /bin/sh -c 'umask 022 && exec "$@"' sh @words $file $Url
         } else {
             $null = & $tool @($words | Select-Object -Skip 1) $file $Url
         }

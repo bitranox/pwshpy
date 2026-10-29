@@ -1843,6 +1843,34 @@ def test_a_run_finds_its_installer_downloaders_by_name_on_path(tmp_path: Path) -
     assert record.is_file(), result.stderr
 
 
+def _write_umask_double(directory: Path, name: str, log: Path) -> Path:
+    """A downloader double that records the umask it runs under in ``log`` and fails (exit 6)."""
+    double = directory / name
+    double.write_text(f"#!/bin/sh\numask >> '{log}'\nexit 6\n", encoding="utf-8", newline="\n")
+    double.chmod(0o755)
+    return double
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_the_installer_download_runs_under_umask_022(tmp_path: Path, as_root: bool) -> None:
+    """[R3] round 5, the twin of the .ps1's: as root both downloaders run under umask 022, as the
+    installer after them does; not root they keep the caller's (077 here)."""
+    runner, _uv, _record = _recording_python_runner(tmp_path, as_root=as_root)
+    doubles = tmp_path / "download-bin"
+    doubles.mkdir()
+    log = tmp_path / "umask.txt"
+    curl = _write_umask_double(doubles, "curl", log)
+    wget = _write_umask_double(doubles, "wget", log)
+    with_download_doubles(runner, curl=curl, wget=wget, powershell=False)
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    environment = {**_trust_env(tmp_path), "HOME": str(caller_home), "PATH": "/usr/bin:/bin"}
+    result = _run_in(["sh", "-c", 'umask 077 && exec sh "$0" "$@"'], runner, env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 127, result.stdout + result.stderr
+    expected = "0022" if as_root else "0077"
+    assert log.read_text(encoding="utf-8").split() == [expected, expected], result.stderr
+
+
 #: The start of the refusal a run that is not root prints when its TMPDIR cannot take uv's installer.
 _NO_INSTALLER_TEMP = "cannot create a temporary directory for uv's installer in "
 

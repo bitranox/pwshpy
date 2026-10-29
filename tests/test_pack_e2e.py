@@ -4260,6 +4260,38 @@ def test_an_elevated_posix_run_takes_its_default_pack_cache_from_the_account(tmp
     assert [path.name for path in caller.rglob("pwshpy-pack")] == []
 
 
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_posix_run_writes_no_stderr_file_in_the_callers_tmpdir(tmp_path: Path, elevated: str) -> None:
+    """[R5]: an elevated POSIX run kept the stderr of `uv python find` (and of `git --version`) in a
+    file from [IO.Path]::GetTempFileName(), which follows TMPDIR, the caller's under sudo -E: an entry
+    swapped in there at that name would have root truncate any file. TMPDIR here is a directory no file
+    can be created in, so a runner still writing there fails; the elevated run keeps the file in a 0700
+    directory below the account's own cache instead, and the control shows the directory alone stops
+    nothing."""
+    if RUNNING_AS_ROOT:
+        pytest.skip("root creates files in a 0555 directory")
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated=elevated)
+    caller_tmp = tmp_path / "caller-tmp"
+    caller_tmp.mkdir()
+    caller_tmp.chmod(0o555)
+    environment = {**interpreter_probe_env(tmp_path, managed=managed), "TMPDIR": str(caller_tmp)}
+    try:
+        result = _run_with_path(tmp_path, runner, path_first=head, env=environment, cwd=_clean_cwd(tmp_path))
+    finally:
+        caller_tmp.chmod(0o755)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert list(caller_tmp.iterdir()) == []
+    own = tmp_path / "default-cache" / "pwshpy-tmp"
+    assert own.is_dir() is (elevated == "$true"), result.stderr
+    if own.is_dir():
+        assert own.stat().st_mode & 0o777 == 0o700
+        assert list(own.iterdir()) == [], "a stderr file was left behind"
+
+
 # --- [156] elevated .ps1 runs of a script with a git source refuse a git older than 2.32 ----------------
 
 #: The start of the refusal an elevated run prints for a git that may ignore GIT_CONFIG_GLOBAL.

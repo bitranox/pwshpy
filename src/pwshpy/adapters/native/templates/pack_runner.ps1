@@ -714,6 +714,24 @@ function Get-PwshPyGitOn {
     return ''
 }
 
+function New-PwshPyStderrFile {
+    # A new empty file for a native program's stderr, its path returned. [IO.Path]::GetTempFileName()
+    # places it in TMPDIR, which an elevated POSIX run got from the caller (sudo -E, env_keep): in a
+    # directory the caller can write, an entry the caller swaps in at that name (a link) would have root
+    # truncate and write the file it names ([R5]). So an elevated POSIX run makes it in a directory only
+    # root can enter, below the running account's own cache directory, and opens it CreateNew, which
+    # refuses an entry already there. Elsewhere GetTempFileName: unelevated the directory is the caller's
+    # own, and an elevated Windows run's TEMP is the elevated token's profile.
+    if (-not $PwshPyRootPath) { return [IO.Path]::GetTempFileName() }
+    $directory = Join-Path (Get-PwshPyAccountCacheHome) 'pwshpy-tmp'
+    New-PwshPyDirectory -Path $directory -Private $true
+    # An existing one too: whatever made it, from here only root can enter it.
+    Set-PwshPyMode -Arguments @('700', '--', $directory)
+    $path = Join-Path $directory ([Guid]::NewGuid().ToString('N'))
+    [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None).Dispose()
+    return $path
+}
+
 function Get-PwshPyGitVersionDistrust {
     param([string] $Git)
 
@@ -725,7 +743,7 @@ function Get-PwshPyGitVersionDistrust {
     # as the .sh: a git printing a warning before its "git version" line names no version here.
     # 'Continue' for the call: with 'Stop', Windows PowerShell 5.1 stops at the first line a native
     # program writes to a redirected stderr.
-    $stderr = [IO.Path]::GetTempFileName()
+    $stderr = New-PwshPyStderrFile
     $saved = $ErrorActionPreference
     $first = ''
     try {
@@ -970,7 +988,7 @@ function Invoke-PwshPyUvPython {
     # redirected stderr, so the call runs under 'Continue'.
     $words = @('python') + $Arguments + @('--no-config', '--directory', (Get-PwshPyAnchorDirectory))
     if ($PwshPyPythonRequest) { $words += $PwshPyPythonRequest }
-    $stderr = [IO.Path]::GetTempFileName()
+    $stderr = New-PwshPyStderrFile
     $saved = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'

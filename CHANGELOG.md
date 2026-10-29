@@ -58,6 +58,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   uv's cache already was. Before, it followed `XDG_CACHE_HOME` or `HOME`, which `sudo -E` or
   `env_keep` hand over from the caller, so the run unpacked where the caller chose, or refused its
   own default cache with exit code 127.
+- Packed `.ps1` runner, elevated on Linux and macOS: the stderr of `uv python find` and of
+  `git --version` is kept in a new file in a directory only root can enter, below the running
+  account's own cache directory. Before, it went to a temporary file in `TMPDIR`, which `sudo -E`
+  hands over from the caller, so an entry the caller swapped in at that name had root truncate and
+  write the file it pointed to.
 - Packed `.sh` runner, `--pwshpy-elevate`: the sudo relaunch runs as a child of the runner's shell
   and exits with its status. Before, it replaced the shell (`exec`), so under sudo's
   `timestamp_type=ppid` the relaunch found no cached credential and exited 1.

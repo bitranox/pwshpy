@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from pwshpy.adapters.native.posix_account_control import PosixLocalAccountController
-from pwshpy.domain.errors import OperationTimeoutError
+from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
 
 pytestmark = [
     pytest.mark.os_posix,
@@ -106,3 +106,45 @@ def test_a_timed_out_enabled_new_user_is_not_locked(slow_shadow_utils: Path) -> 
     assert "'root' was created" in message
     assert "its password may not be set" in message
     assert "locked" not in message
+
+
+@pytest.fixture
+def failing_chpasswd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Quick useradd / usermod stand-ins that log their argv, and a chpasswd that fails (exit 1)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "calls.log"
+    for command in ("useradd", "usermod"):
+        script = bin_dir / command
+        script.write_text(f'#!/bin/sh\necho "{command} $*" >>"{log}"\n', encoding="utf-8")
+        script.chmod(0o755)
+    chpasswd = bin_dir / "chpasswd"
+    chpasswd.write_text(
+        "#!/bin/sh\ncat >/dev/null\necho 'chpasswd: PAM: Authentication failure' >&2\nexit 1\n", encoding="utf-8"
+    )
+    chpasswd.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    return log
+
+
+def test_a_failed_chpasswd_still_locks_a_disabled_new_user(failing_chpasswd: Path) -> None:
+    """Not a timeout: chpasswd exits 1. The account requested disabled is still locked, and the
+    error names the partial state, as the timeout path does."""
+    with pytest.raises(NativeCallError) as caught:
+        PosixLocalAccountController().new_user("root", password="pw", disabled=True, timeout=10.0)
+    assert not isinstance(caught.value, OperationTimeoutError)
+    assert _calls(failing_chpasswd) == ["useradd root", "usermod --lock root"]
+    message = str(caught.value)
+    assert "chpasswd failed: chpasswd: PAM: Authentication failure" in message
+    assert "'root' was created" in message
+    assert "its password may not be set" in message
+    assert "the account was locked" in message
+
+
+def test_a_failed_chpasswd_on_an_enabled_new_user_locks_nothing(failing_chpasswd: Path) -> None:
+    """Not disabled: no lock runs; the error still names what was done."""
+    with pytest.raises(NativeCallError) as caught:
+        PosixLocalAccountController().new_user("root", password="pw", timeout=10.0)
+    assert _calls(failing_chpasswd) == ["useradd root"]
+    assert "'root' was created" in str(caught.value)
+    assert "locked" not in str(caught.value)

@@ -35,11 +35,12 @@ _NAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}\$?")
 #: (guards a wedged /etc/passwd lock); overridable per call via each verb's ``timeout`` parameter.
 _DEFAULT_TIMEOUT = 30.0
 
-#: Seconds ``new_user(disabled=True)`` still gives ``usermod --lock`` after the verb's deadline passed
-#: with the account already created. Without it the timeout leaves an account the caller asked to be
-#: disabled ENABLED, with the password just set: the one outcome worse than running a little late.
-#: Small and fixed (not a share of ``timeout``) because locking is one quick write of /etc/shadow;
-#: if that too hangs, the verb gives up after this long and says the account was NOT locked.
+#: Seconds ``new_user(disabled=True)`` gives ``usermod --lock`` when a step after ``useradd`` failed or
+#: ran out of time, the account already created. Without it the failure leaves an account the caller
+#: asked to be disabled ENABLED, maybe with the password just set: the one outcome worse than running
+#: a little late. Its own fixed limit (not what is left of ``timeout``, which may be nothing) because
+#: locking is one quick write of /etc/shadow; if that too hangs, the verb gives up after this long and
+#: says the account was NOT locked.
 _LOCK_GRACE_SECONDS = 5.0
 
 
@@ -109,7 +110,7 @@ class _Deadline:
 
 
 class _NewUserProgress:
-    """What a ``new_user`` call has done so far, for the message of a timeout after ``useradd``."""
+    """What a ``new_user`` call has done so far, for the error raised when a step after ``useradd`` fails."""
 
     def __init__(self, name: str, *, password_requested: bool, lock_requested: bool) -> None:
         self.name = name
@@ -123,11 +124,11 @@ class _NewUserProgress:
         parts = [f"user {self.name!r} was created"]
         if self.password_requested:
             parts.append(
-                "its password was set" if self.password_set else "its password may not be set (chpasswd did not finish)"
+                "its password was set" if self.password_set else "its password may not be set (chpasswd failed)"
             )
         if self.lock_requested:
             if self.lock_failure is None:
-                parts.append(f"the account was locked within a {_LOCK_GRACE_SECONDS}s grace after the timeout")
+                parts.append(f"the account was locked within a {_LOCK_GRACE_SECONDS}s grace after the failure")
             else:
                 parts.append(f"the account was NOT locked ({self.lock_failure})")
         return ", ".join(parts)
@@ -173,14 +174,28 @@ class PosixLocalAccountController:
                 progress.password_set = True
             if disabled:
                 self._run(["usermod", "--lock", name], deadline=deadline)
-        except OperationTimeoutError as exc:
-            if disabled:
-                progress.lock_failure = self._lock_within_grace(name)
-            raise OperationTimeoutError(f"{exc}; {progress.describe()}", timeout=deadline.limit) from exc
+        except NativeCallError as exc:  # a failure and a timeout (its subclass) alike
+            raise self._after_partial_create(exc, progress, deadline) from exc
         return _read_user(name, enabled=not disabled)
 
+    def _after_partial_create(
+        self, exc: NativeCallError, progress: _NewUserProgress, deadline: _Deadline
+    ) -> NativeCallError:
+        """The error to raise when a step after ``useradd`` failed: lock a disabled account first.
+
+        The one path for a failed and a timed-out step: the account exists, so a requested lock is
+        still applied (within its own grace), and the error names the partial state. A timeout stays
+        an :class:`OperationTimeoutError` with the verb's limit; any other failure keeps its type.
+        """
+        if progress.lock_requested:
+            progress.lock_failure = self._lock_within_grace(progress.name)
+        message = f"{exc}; {progress.describe()}"
+        if isinstance(exc, OperationTimeoutError):
+            return OperationTimeoutError(message, timeout=deadline.limit)
+        return native_error(message, exc)
+
     def _lock_within_grace(self, name: str) -> str | None:
-        """Lock ``name`` after the verb's deadline passed; None when locked, else why it was not."""
+        """Lock ``name`` after a step of ``new_user`` failed; None when locked, else why it was not."""
         try:
             self._run(["usermod", "--lock", name], deadline=_Deadline(_LOCK_GRACE_SECONDS))
         except NativeCallError as exc:  # OperationTimeoutError included

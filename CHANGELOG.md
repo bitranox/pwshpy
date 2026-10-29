@@ -51,11 +51,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   (`useradd`, then `chpasswd` and `usermod --lock` as needed), as documented; each command got the
   whole `timeout` before, so the verb could run for about three times as long. The
   `OperationTimeoutError` carries the verb's `timeout`.
-- On Linux, `new_local_user(disabled=True)` still locks the account when its `timeout` passes after
-  `useradd` created it: `usermod --lock` gets a fixed 5 s grace, so the timeout no longer leaves an
-  account requested disabled enabled with its password set. The `OperationTimeoutError` message
-  names the partial state: the account was created, its password set or not, and whether the lock
-  was applied.
+- On Linux, `new_local_user(disabled=True)` still locks the account when a step after `useradd`
+  fails or its `timeout` passes: `usermod --lock` gets a fixed 5 s grace, so a timed-out or failed
+  `chpasswd` no longer leaves an account requested disabled enabled. The error (an
+  `OperationTimeoutError` for a timeout, else the step's own `NativeCallError`) names the partial
+  state: the account was created, its password set or not, and whether the lock was applied.
 - `get_windows_update` records an update category's `type`, `name` or `category_id`, and an
   update's `title`, that the agent leaves empty as `""`; they read as the text `"None"` before.
 - `get_acl` on Linux raises `NativeCallError` (a `NativeAccessDeniedError` for a refusal) when the

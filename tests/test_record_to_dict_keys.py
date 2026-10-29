@@ -155,11 +155,14 @@ class _Node(PSRecord):
     ids=["nested-model", "list-of-any", "optional-dict", "annotated-dict", "tuple-of-models", "recursive"],
 )
 def test_a_surrogate_key_is_found_through_every_annotation_shape(record: PSRecord, field: str) -> None:
-    """Restricting the walk to mapping-capable fields must never skip one: each key is repaired."""
-    dumped = orjson.dumps(record.to_dict()).decode()
-    assert "k" + _FFFD in dumped
-    assert to_dict_keeping_surrogate_keys(record) != record.to_dict()
-    assert field in record.to_dict()
+    """Restricting the walk to mapping-capable fields must never skip one: each key is repaired.
+
+    Checked on the named field's own JSON: the key is there as ``"k<U+FFFD>":1``, one U+FFFD for the
+    one bad byte (pydantic alone writes three, or raises for a nested key).
+    """
+    repaired_field = orjson.dumps(record.to_dict()[field]).decode()
+    assert '"k' + _FFFD + '":1' in repaired_field
+    assert to_dict_keeping_surrogate_keys(record)[field] != record.to_dict()[field]
 
 
 @pytest.mark.os_agnostic

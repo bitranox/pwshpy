@@ -16,9 +16,10 @@ Contents:
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+import functools
+from collections.abc import Collection, Iterator, Mapping
 from datetime import datetime
-from typing import Any, cast
+from typing import Annotated, Any, Literal, cast, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -135,10 +136,62 @@ def _repair_keys(value: object) -> object:
     return value
 
 
+@functools.cache
+def _mapping_fields(model: type[BaseModel]) -> tuple[str, ...]:
+    """The fields of ``model`` whose annotation lets them hold a mapping, at any depth; cached per class.
+
+    Only a mapping has keys, so only these fields are walked for a surrogate key: a record of
+    scalars (``ProcessInfo``) is not walked at all on the clean path, which is every record but
+    one in millions. Records built with ``model_construct`` are trusted to match their annotations.
+    """
+    # The search starts with nothing seen: a field typed as its own model (a tree of records) holds
+    # a mapping exactly when the model does, which seeding ``seen`` with the model would deny.
+    return tuple(name for name, field in model.model_fields.items() if _can_hold_mapping(field.annotation, frozenset()))
+
+
+def _can_hold_mapping(annotation: object, seen: frozenset[type]) -> bool:
+    """Whether a value of ``annotation`` can be or contain a mapping; True when it cannot be told."""
+    if annotation is Any or annotation is object:  # Any is a class from Python 3.11 on: test it first
+        return True
+    if annotation is None or annotation is type(None) or get_origin(annotation) is Literal:
+        return False
+    if get_origin(annotation) is not None:
+        return _generic_can_hold_mapping(annotation, seen)
+    if not isinstance(annotation, type):  # a TypeVar, an unresolved forward reference
+        return True
+    return _class_can_hold_mapping(annotation, seen)
+
+
+def _generic_can_hold_mapping(annotation: object, seen: frozenset[type]) -> bool:
+    """``dict[...]`` can; ``Annotated[X, ...]`` as X; ``list[...]``, ``X | Y``, ``tuple[...]`` as any argument."""
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return _can_hold_mapping(get_args(annotation)[0], seen)
+    if isinstance(origin, type) and issubclass(origin, Mapping):
+        return True
+    return any(_can_hold_mapping(arg, seen) for arg in get_args(annotation) if arg is not Ellipsis)
+
+
+def _class_can_hold_mapping(annotation: type, seen: frozenset[type]) -> bool:
+    """A model through its own fields; a bare container (dict, list, tuple, set) can; text, numbers, enums cannot.
+
+    A model already on the current path (``seen``) adds nothing: any mapping reachable through the
+    repeat is reachable without it, so cutting the cycle there loses no answer.
+    """
+    if issubclass(annotation, BaseModel):
+        return annotation not in seen and any(
+            _can_hold_mapping(field.annotation, seen | {annotation}) for field in annotation.model_fields.values()
+        )
+    return issubclass(annotation, Collection) and not issubclass(annotation, (str, bytes, bytearray))
+
+
 def _children(value: object) -> Iterator[tuple[object, object]]:
-    """``(key, item)`` for each member of a record, mapping, list or tuple (key None for a non-mapping)."""
+    """``(key, item)`` for each member of a record, mapping, list or tuple (key None for a non-mapping).
+
+    Of a record, only the fields that can hold a mapping (:func:`_mapping_fields`).
+    """
     if isinstance(value, BaseModel):
-        for name in type(value).model_fields:
+        for name in _mapping_fields(type(value)):
             yield None, getattr(value, name)
     elif isinstance(value, Mapping):
         yield from cast("Mapping[object, object]", value).items()
@@ -174,7 +227,7 @@ class _KeyMask:
     def mask(self, value: object) -> object:
         """``value`` with every surrogate key replaced by a placeholder, records copied as needed."""
         if isinstance(value, BaseModel):
-            update = {name: self.mask(getattr(value, name)) for name in type(value).model_fields}
+            update = {name: self.mask(getattr(value, name)) for name in _mapping_fields(type(value))}
             return value.model_copy(update=update)
         if isinstance(value, Mapping):
             mapping = cast("Mapping[object, object]", value)

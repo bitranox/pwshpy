@@ -13,16 +13,26 @@ from __future__ import annotations
 import io
 import json
 from contextlib import redirect_stderr
+from typing import Annotated, Any
 
 import orjson
 import pytest
 from click.testing import CliRunner
 from fake_services import services_with_ps
+from pydantic import Field
 
 from pwshpy.adapters.cli.output import RecordFormat, emit
 from pwshpy.adapters.cli.root import cli
 from pwshpy.adapters.native.record_json import record_json_bytes
-from pwshpy.domain.records import CimInstance, PSInvocationResult, PSObjectRecord
+from pwshpy.domain.records import (
+    CimInstance,
+    ProcessInfo,
+    PSInvocationResult,
+    PSObjectRecord,
+    PSRecord,
+    _mapping_fields,  # pyright: ignore[reportPrivateUsage] - pins which fields the hot path walks
+    to_dict_keeping_surrogate_keys,
+)
 
 _BAD = chr(0xDCFF)
 _FFFD = chr(0xFFFD)
@@ -102,3 +112,60 @@ def test_cmdlet_streams_still_names_a_repaired_key() -> None:
     assert json.loads(result.stdout)["output"] == [{"k" + _FFFD: "Get-Thing"}]
     warnings = [line for line in result.stderr.splitlines() if line.startswith("warning:")]
     assert warnings == ["warning: output field output.0.k?: not valid UTF-8; each undecodable byte written as U+FFFD"]
+
+
+# --- only fields that can hold a mapping are walked (F6), and none that can is skipped ------------
+
+
+class _Inner(PSRecord):
+    bag: dict[str, int]
+
+
+class _Shapes(PSRecord):
+    """One field per annotation shape that can carry a mapping, beside scalars that cannot."""
+
+    name: str = ""
+    count: int = 0
+    tags: list[str] = Field(default_factory=list)
+    nested: _Inner | None = None
+    anything: list[Any] = Field(default_factory=list)
+    maybe: dict[str, int] | None = None
+    tagged: Annotated[dict[str, int], "meta"] = Field(default_factory=dict)
+    inners: tuple[_Inner, ...] = ()
+
+
+class _Node(PSRecord):
+    """A self-referencing record: the walk must terminate and still look inside."""
+
+    children: list[_Node] = Field(default_factory=list)
+    data: dict[str, int] = Field(default_factory=dict)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("record", "field"),
+    [
+        (_Shapes(nested=_Inner(bag={"k" + _BAD: 1})), "nested"),
+        (_Shapes(anything=[{"k" + _BAD: 1}]), "anything"),
+        (_Shapes(maybe={"k" + _BAD: 1}), "maybe"),
+        (_Shapes(tagged={"k" + _BAD: 1}), "tagged"),
+        (_Shapes(inners=(_Inner(bag={}), _Inner(bag={"k" + _BAD: 1}))), "inners"),
+        (_Node(children=[_Node(children=[_Node(data={"k" + _BAD: 1})])]), "children"),
+    ],
+    ids=["nested-model", "list-of-any", "optional-dict", "annotated-dict", "tuple-of-models", "recursive"],
+)
+def test_a_surrogate_key_is_found_through_every_annotation_shape(record: PSRecord, field: str) -> None:
+    """Restricting the walk to mapping-capable fields must never skip one: each key is repaired."""
+    dumped = orjson.dumps(record.to_dict()).decode()
+    assert "k" + _FFFD in dumped
+    assert to_dict_keeping_surrogate_keys(record) != record.to_dict()
+    assert field in record.to_dict()
+
+
+@pytest.mark.os_agnostic
+def test_a_record_of_scalars_has_no_field_to_walk() -> None:
+    """The clean hot path: ProcessInfo has no field that can hold a mapping, CimInstance one."""
+    assert _mapping_fields(ProcessInfo) == ()
+    assert _mapping_fields(CimInstance) == ("properties",)
+    assert _mapping_fields(_Shapes) == ("nested", "anything", "maybe", "tagged", "inners")
+    assert _mapping_fields(_Node) == ("children", "data")

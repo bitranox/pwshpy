@@ -125,8 +125,10 @@ def test_refused_connection_stays_a_plain_native_call_error() -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
         closed_port = probe.getsockname()[1]
+    # A generous timeout: Windows retries a refused connect for about two seconds before it reports
+    # WSAECONNREFUSED (measured on a Windows 11 VM: at 0.3 s the connect timed out first).
     with pytest.raises(NativeCallError) as caught:
-        invoke_web_request(f"http://127.0.0.1:{closed_port}/", timeout=_TIMEOUT)
+        invoke_web_request(f"http://127.0.0.1:{closed_port}/", timeout=15.0)
     assert not isinstance(caught.value, OperationTimeoutError)
 
 

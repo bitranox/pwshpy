@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from elevation_doubles import second_prompts, write_fake_sudo
 
 from pwshpy.adapters.native import elevation
 
@@ -58,58 +59,27 @@ def test_elevate_is_noop_when_already_elevated(monkeypatch: pytest.MonkeyPatch) 
     assert calls == []
 
 
-#: A stand-in for sudo: it logs every call, answers ``-v`` with ``$FAKE_SUDO_VALIDATE``
-#: (0 when unset) and otherwise runs the command it was given, as sudo does once
-#: the credential is cached. Written as a real executable so the real
-#: ``_sudo_relaunch`` runs it through the real subprocess call.
-#: ``FAKE_SUDO_VALIDATE=interrupt`` plays a Ctrl+C at the prompt: a terminal sends
-#: SIGINT to the whole foreground group, so the caller receives it as well as sudo
-#: (measured with real sudo 1.9.15p5 in a pty on Ubuntu 24.04).
-#: ``FAKE_SUDO_CACHES=0`` plays sudoers ``timestamp_timeout=0``: ``-v`` still asks and
-#: succeeds, but caches nothing, so ``-n`` (never prompt) fails with sudo's exit 1 and a
-#: call without ``-n`` would prompt again - the stand-in refuses that second prompt.
-_FAKE_SUDO = """#!/bin/sh
-printf '%s\\n' "$*" >> "$FAKE_SUDO_LOG"
-if [ "$1" = "-v" ]; then
-    if [ "$FAKE_SUDO_VALIDATE" = "interrupt" ]; then
-        kill -INT "$PPID"
-        sleep 2
-        exit 1
-    fi
-    exit "${FAKE_SUDO_VALIDATE:-0}"
-fi
-if [ "$1" = "-n" ]; then
-    shift
-    if [ "${FAKE_SUDO_CACHES:-1}" = "0" ]; then
-        echo "sudo: a password is required" >&2
-        exit 1
-    fi
-    if [ "$1" = "-v" ]; then
-        exit 0
-    fi
-    exec "$@"
-fi
-if [ "${FAKE_SUDO_CACHES:-1}" = "0" ]; then
-    exit 1
-fi
-exec "$@"
-"""
-
-
 def _sudo_on_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, validate: int | str = 0, caches: bool = True
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    grant: bool = True,
+    cached: bool = True,
+    interrupt_prompt: bool = False,
 ) -> Path:
-    """Put the stand-in sudo first on PATH and return the log it writes."""
+    """Put the shared sudo double first on PATH and return the log it writes.
+
+    The double (``elevation_doubles.write_fake_sudo``) is a real executable, so the real
+    ``_sudo_relaunch`` runs it through the real subprocess call. ``grant=False`` refuses the
+    password at ``sudo -v``; ``cached=False`` plays sudoers ``timestamp_timeout=0`` (``-v`` succeeds
+    but caches nothing, so ``-n`` fails with sudo's exit 1); ``interrupt_prompt`` plays a Ctrl+C at
+    the prompt, which a terminal sends to the caller as well as to sudo.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    sudo = bin_dir / "sudo"
-    sudo.write_text(_FAKE_SUDO, encoding="utf-8")
-    sudo.chmod(0o755)
     log = tmp_path / "sudo.log"
+    write_fake_sudo(bin_dir, grant=grant, cached=cached, calls=log, interrupt_prompt=interrupt_prompt)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-    monkeypatch.setenv("FAKE_SUDO_LOG", str(log))
-    monkeypatch.setenv("FAKE_SUDO_VALIDATE", str(validate))
-    monkeypatch.setenv("FAKE_SUDO_CACHES", "1" if caches else "0")
     return log
 
 
@@ -149,7 +119,7 @@ def test_a_sudo_that_caches_no_credential_is_declined_before_the_command(
     """
     from pwshpy import ElevationDeclinedError
 
-    log = _sudo_on_path(tmp_path, monkeypatch, caches=False)
+    log = _sudo_on_path(tmp_path, monkeypatch, cached=False)
 
     with pytest.raises(ElevationDeclinedError, match="cached no credential"):
         _sudo_relaunch()(sys.executable, _exits_with(0), str(tmp_path), wait=True)
@@ -171,6 +141,7 @@ def test_the_command_never_prompts_a_second_time(tmp_path: Path, monkeypatch: py
         time.sleep(0.05)
     assert len(lines) == 3, lines
     assert lines[2].startswith("-n "), lines
+    assert second_prompts(log) == [], "the command was started without -n and prompted again"
 
 
 @pytest.mark.os_posix
@@ -180,7 +151,7 @@ def test_a_refused_sudo_password_is_declined_and_never_runs_the_command(
     """sudo exits 1 on a failed authentication, the same as any command's 1, so ``-v`` tells them apart."""
     from pwshpy import ElevationDeclinedError
 
-    log = _sudo_on_path(tmp_path, monkeypatch, validate=1)
+    log = _sudo_on_path(tmp_path, monkeypatch, grant=False)
 
     with pytest.raises(ElevationDeclinedError, match="sudo"):
         _sudo_relaunch()(sys.executable, _exits_with(0), str(tmp_path), wait=True)
@@ -192,7 +163,7 @@ def test_ctrl_c_at_the_sudo_prompt_is_declined(tmp_path: Path, monkeypatch: pyte
     """A password prompt has no 'No' button, so Ctrl+C there is how a person says no."""
     from pwshpy import ElevationDeclinedError
 
-    log = _sudo_on_path(tmp_path, monkeypatch, validate="interrupt")
+    log = _sudo_on_path(tmp_path, monkeypatch, interrupt_prompt=True)
 
     with pytest.raises(ElevationDeclinedError, match="interrupted"):
         _sudo_relaunch()(sys.executable, _exits_with(0), str(tmp_path), wait=True)

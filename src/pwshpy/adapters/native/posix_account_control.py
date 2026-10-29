@@ -35,6 +35,13 @@ _NAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}\$?")
 #: (guards a wedged /etc/passwd lock); overridable per call via each verb's ``timeout`` parameter.
 _DEFAULT_TIMEOUT = 30.0
 
+#: Seconds ``new_user(disabled=True)`` still gives ``usermod --lock`` after the verb's deadline passed
+#: with the account already created. Without it the timeout leaves an account the caller asked to be
+#: disabled ENABLED, with the password just set: the one outcome worse than running a little late.
+#: Small and fixed (not a share of ``timeout``) because locking is one quick write of /etc/shadow;
+#: if that too hangs, the verb gives up after this long and says the account was NOT locked.
+_LOCK_GRACE_SECONDS = 5.0
+
 
 def _valid_name(value: str) -> str:
     """Return a validated user/group/member name; raise on anything that could inject into a command."""
@@ -101,6 +108,31 @@ class _Deadline:
         return self._ends_at - time.monotonic()
 
 
+class _NewUserProgress:
+    """What a ``new_user`` call has done so far, for the message of a timeout after ``useradd``."""
+
+    def __init__(self, name: str, *, password_requested: bool, lock_requested: bool) -> None:
+        self.name = name
+        self.password_requested = password_requested
+        self.lock_requested = lock_requested
+        self.password_set = False
+        self.lock_failure: str | None = None
+
+    def describe(self) -> str:
+        """The account's partial state, e.g. ``user 'svc' was created, its password was set, ...``."""
+        parts = [f"user {self.name!r} was created"]
+        if self.password_requested:
+            parts.append(
+                "its password was set" if self.password_set else "its password may not be set (chpasswd did not finish)"
+            )
+        if self.lock_requested:
+            if self.lock_failure is None:
+                parts.append(f"the account was locked within a {_LOCK_GRACE_SECONDS}s grace after the timeout")
+            else:
+                parts.append(f"the account was NOT locked ({self.lock_failure})")
+        return ", ".join(parts)
+
+
 class PosixLocalAccountController:
     """Mutating local-account control over shadow-utils (Linux, **mutating**; needs root).
 
@@ -134,11 +166,26 @@ class PosixLocalAccountController:
         # chpasswd + usermod together never run longer than the caller asked for.
         deadline = _Deadline(timeout)
         self._run(argv, deadline=deadline)
-        if password:
-            self._run(["chpasswd"], input_text=f"{name}:{password}\n", deadline=deadline)
-        if disabled:
-            self._run(["usermod", "--lock", name], deadline=deadline)
+        progress = _NewUserProgress(name, password_requested=bool(password), lock_requested=disabled)
+        try:
+            if password:
+                self._run(["chpasswd"], input_text=f"{name}:{password}\n", deadline=deadline)
+                progress.password_set = True
+            if disabled:
+                self._run(["usermod", "--lock", name], deadline=deadline)
+        except OperationTimeoutError as exc:
+            if disabled:
+                progress.lock_failure = self._lock_within_grace(name)
+            raise OperationTimeoutError(f"{exc}; {progress.describe()}", timeout=deadline.limit) from exc
         return _read_user(name, enabled=not disabled)
+
+    def _lock_within_grace(self, name: str) -> str | None:
+        """Lock ``name`` after the verb's deadline passed; None when locked, else why it was not."""
+        try:
+            self._run(["usermod", "--lock", name], deadline=_Deadline(_LOCK_GRACE_SECONDS))
+        except NativeCallError as exc:  # OperationTimeoutError included
+            return str(exc)
+        return None
 
     def remove_user(self, name: str, *, timeout: float = _DEFAULT_TIMEOUT) -> None:
         """Delete a user (``userdel``; the home directory is left in place)."""

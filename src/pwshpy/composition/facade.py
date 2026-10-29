@@ -860,7 +860,9 @@ class Ps:
             log_name: On Windows the channel to read (``"System"``, ``"Setup"``,
                 ``"Microsoft-Windows-.../Operational"``). On Linux a unit filter: a name without
                 a dot gets ``.service`` appended, and ``"System"``, ``"*"`` or ``""`` read the
-                whole journal (which needs the ``systemd-journal`` group or root).
+                whole journal. Per journalctl(1), root and members of ``systemd-journal``,
+                ``adm`` or ``wheel`` read the whole system journal; anyone else reads only the
+                entries their own journal files hold.
 
         Returns:
             A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`EventLogEntry` records,
@@ -1438,8 +1440,10 @@ class Ps:
             A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`AclEntry` records.
 
         Raises:
-            NativeCallError: The path or its ACL cannot be read (raised on iteration; a
-                :class:`NativeAccessDeniedError` when access is denied).
+            NativeCallError: The path cannot be read, or on Windows its security descriptor
+                cannot (raised on iteration; a :class:`NativeAccessDeniedError` when access is
+                denied). On POSIX an extended ACL that cannot be read falls back to the three
+                mode-bit entries instead of raising.
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
@@ -1830,7 +1834,8 @@ class Ps:
 
         Args:
             entry: The script to pack.
-            dest: The runner to write; None writes ``<entry>.ps1`` beside the entry.
+            dest: The runner to write; None writes ``<entry>.ps1`` beside the entry, or
+                ``<entry>.sh`` when ``options.format`` is :attr:`RunnerFormat.SH`.
             options: How to pack (:class:`PackOptions`: ``include``, ``with_packages``,
                 ``root``, ``force``, ``format``).
 
@@ -2685,7 +2690,7 @@ class Ps:
             PlatformUnsupportedError: No credential vault on this OS (macOS, which has no
                 Secret Service).
             NativeCallError: The vault call failed; on Linux also no session D-Bus, no Secret
-                Service, no default collection, or a locked keyring (no headless unlock prompt).
+                Service, or a matching keyring item that is locked (no headless unlock prompt).
 
         Example:
             >>> callable(build_ps().load_credential)
@@ -2706,7 +2711,7 @@ class Ps:
             PlatformUnsupportedError: No credential vault on this OS (macOS, which has no
                 Secret Service).
             NativeCallError: The vault call failed; on Linux also no session D-Bus, no Secret
-                Service, no default collection, or a locked keyring (no headless unlock prompt);
+                Service, or a matching keyring item that is locked (no headless unlock prompt);
                 on Windows also nothing stored under ``target``.
 
         Example:

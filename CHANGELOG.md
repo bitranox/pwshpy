@@ -9,8 +9,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 ### Changed
 
 - Every public method of the `ps` facade documents each parameter (`Args:`) and its result
-  (`Returns:`), plus the errors its code path raises (`Raises:`), so `help(ps.<method>)` says what
-  a value means and what can fail. A test fails when a method lacks an `Args:` entry or `Returns:`.
+  (`Returns:`, or `Yields:` for a generator), and, where traced, the errors it raises (`Raises:`),
+  so `help(ps.<method>)` says what a value means and what can fail. A test fails when a method
+  lacks an `Args:` entry, documents a parameter it does not have, or has an empty or missing result
+  section.
 - `get_net_tcp_connection` is documented as psutil's `inet` listing: it includes UDP sockets as
   well as TCP. Filter on `protocol` for TCP only. The behaviour is unchanged.
 

@@ -117,8 +117,9 @@ def iter_event_log(log_name: str) -> Iterator[EventLogEntry]:
     """Stream the systemd journal newest-first as :class:`EventLogEntry` records (like Get-WinEvent).
 
     ``log_name`` is a systemd unit filter (``"sshd"`` / ``"nginx.service"``); ``"System"`` or
-    an empty string reads the whole journal. Reading the system journal needs the
-    ``systemd-journal`` group or root.
+    an empty string reads the whole journal. Per journalctl(1), root and members of
+    ``systemd-journal``, ``adm`` or ``wheel`` read the whole system journal; anyone else reads
+    only the entries their own journal files hold.
 
     Example:
         >>> import sys

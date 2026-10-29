@@ -66,7 +66,7 @@ it; at a terminal the table keeps its box-drawing frame.
 | Command                         | Shows                         | Binding                                |
 |---------------------------------|-------------------------------|----------------------------------------|
 | `pwshpy get_process`            | running processes             | psutil                                 |
-| `pwshpy get_net_tcp_connection` | open network connections      | psutil                                 |
+| `pwshpy get_net_tcp_connection` | open TCP and UDP connections  | psutil                                 |
 | `pwshpy get_volume`             | mounted filesystems and usage | psutil                                 |
 | `pwshpy get_uptime`             | boot time and elapsed uptime  | psutil                                 |
 | `pwshpy resolve_dns_name NAME`  | resolved DNS addresses        | stdlib socket                          |

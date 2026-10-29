@@ -6,8 +6,9 @@ connect uses a port that was just closed. Nothing reaches a public address.
 
 * ``http.client.HTTPException`` (``BadStatusLine``, ``IncompleteRead``) is not an ``OSError``, so it
   escaped the web verbs raw.
-* urllib refuses a redirect loop or a redirect to a non-http scheme by raising ``HTTPError`` with the
-  3xx code; below 400 that came back as a successful ``WebResponse``.
+* urllib refuses a redirect loop by raising ``HTTPError`` with the 3xx code; below 400 that came
+  back as a successful ``WebResponse``.
+* urllib's default opener follows a redirect to ``ftp://``; only http/https may be followed.
 * ``download_file`` deleted ``dest`` on any failure, also one that came before it opened the file.
 """
 
@@ -87,10 +88,6 @@ def _redirect_to_self(port: int) -> bytes:
     return f"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/x\r\nContent-Length: 0\r\n\r\n".encode()
 
 
-def _redirect_to_file(_port: int) -> bytes:
-    return b"HTTP/1.1 302 Found\r\nLocation: file:///etc/hostname\r\nContent-Length: 0\r\n\r\n"
-
-
 def _assert_plain_native_error(error: BaseException) -> None:
     assert isinstance(error, NativeCallError)
     assert not isinstance(error, OperationTimeoutError)
@@ -123,13 +120,13 @@ def test_a_broken_download_raises_and_leaves_no_partial_file(
 
 
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize("respond", [_redirect_to_self, _redirect_to_file], ids=["loop", "to-file"])
-def test_a_redirect_urllib_refuses_raises(
-    serve: Callable[[Callable[[int], bytes]], str], respond: Callable[[int], bytes]
-) -> None:
-    """A 3xx urllib will not follow is an error, not a successful WebResponse."""
+def test_a_redirect_urllib_refuses_raises(serve: Callable[[Callable[[int], bytes]], str]) -> None:
+    """A 3xx urllib will not follow (a loop) is an error, not a successful WebResponse.
+
+    A redirect to a non-http scheme is refused even earlier, by the http/https rule (below).
+    """
     with pytest.raises(NativeCallError, match="HTTP 302") as caught:
-        invoke_web_request(serve(respond), timeout=_TIMEOUT)
+        invoke_web_request(serve(_redirect_to_self), timeout=_TIMEOUT)
     _assert_plain_native_error(caught.value)
 
 
@@ -169,3 +166,80 @@ def test_a_download_refused_with_an_http_error_keeps_an_existing_file(
     with pytest.raises(NativeCallError, match="HTTP 302"):
         download_file(serve(_redirect_to_self), dest, timeout=_TIMEOUT)
     assert dest.read_bytes() == b"keep me"
+
+
+# --- a redirect may only lead to http/https (N1) -------------------------------------------------
+
+
+@pytest.fixture
+def untouched_listener() -> Iterator[socket.socket]:
+    """A local listener nothing may connect to: the refused redirect points at it."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        yield listener
+
+
+def _assert_never_connected(listener: socket.socket) -> None:
+    listener.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        listener.accept()
+
+
+def _redirect_to(location: str) -> Callable[[int], bytes]:
+    def respond(_port: int) -> bytes:
+        return f"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n".encode()
+
+    return respond
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("skip", [False, True], ids=["checked", "skip-http-error-check"])
+@pytest.mark.parametrize("verb", [invoke_web_request, invoke_rest_method], ids=["web", "rest"])
+def test_a_redirect_to_ftp_is_refused_before_any_connect(
+    serve: Callable[[Callable[[int], bytes]], str],
+    untouched_listener: socket.socket,
+    verb: Callable[..., object],
+    skip: bool,
+) -> None:
+    """urllib's default opener follows a redirect to ftp://; the http/https-only rule refuses it."""
+    target = f"ftp://127.0.0.1:{untouched_listener.getsockname()[1]}/x"
+    with pytest.raises(NativeCallError, match="redirect") as caught:
+        verb(serve(_redirect_to(target)), timeout=_TIMEOUT, skip_http_error_check=skip)
+    _assert_plain_native_error(caught.value)
+    assert "ftp" in str(caught.value)
+    _assert_never_connected(untouched_listener)
+
+
+@pytest.mark.os_agnostic
+def test_a_download_redirected_to_ftp_is_refused_and_writes_nothing(
+    serve: Callable[[Callable[[int], bytes]], str], untouched_listener: socket.socket, tmp_path: Path
+) -> None:
+    """The download path refuses it too, before ``dest`` is opened."""
+    target = f"ftp://127.0.0.1:{untouched_listener.getsockname()[1]}/x"
+    dest = tmp_path / "out.bin"
+    with pytest.raises(NativeCallError, match="redirect"):
+        download_file(serve(_redirect_to(target)), dest, timeout=_TIMEOUT)
+    assert not dest.exists()
+    _assert_never_connected(untouched_listener)
+
+
+@pytest.mark.os_agnostic
+def test_a_redirect_to_file_is_refused_even_when_the_check_is_skipped(
+    serve: Callable[[Callable[[int], bytes]], str],
+) -> None:
+    """skip_http_error_check returns HTTP error answers; it never makes a non-http redirect acceptable."""
+    with pytest.raises(NativeCallError, match="redirect"):
+        invoke_web_request(serve(_redirect_to("file:///etc/hostname")), timeout=_TIMEOUT, skip_http_error_check=True)
+
+
+@pytest.mark.os_agnostic
+def test_a_redirect_to_http_is_still_followed(serve: Callable[[Callable[[int], bytes]], str]) -> None:
+    """Control: an http redirect is followed as before (the target answers 200)."""
+
+    def ok(_port: int) -> bytes:
+        return b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+
+    target = serve(ok)
+    response = invoke_web_request(serve(_redirect_to(target)), timeout=_TIMEOUT)
+    assert (response.status_code, response.text) == (200, "ok")

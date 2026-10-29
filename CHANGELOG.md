@@ -71,6 +71,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   (`IncompleteRead`); both escaped as raw `http.client` exceptions. `download_file` also refuses a
   body that ends before its `Content-Length`, which it kept as a complete file, and removes the
   partial file.
+- `invoke_web_request`, `invoke_rest_method` and `download_file` follow a redirect only to an
+  `http` or `https` URL, as they accept only those as the first URL. A redirect to `ftp://` was
+  followed (urllib's default), and one to `file:` came back as a 302 answer under
+  `skip_http_error_check`; both now raise `NativeCallError` before anything connects to the target,
+  whatever `skip_http_error_check` says.
 - `download_file` removes `dest` on failure only when it opened that file itself: a refused
   connect or an HTTP error deleted an existing file of that name before.
 - `get_cim_instance` refuses a class name followed by a line break (`"Win32_Process\n"`) with

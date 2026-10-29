@@ -2,7 +2,7 @@
 
 A hermetic stalling server on 127.0.0.1 accepts the connection and then sends nothing
 (or only the headers), so the client's socket read runs into ``timeout``. The only
-patched seam is ``urllib.request.urlopen`` (stdlib, an external edge) for the
+patched seam is ``urllib.request.OpenerDirector.open`` (stdlib, an external edge) for the
 connect-phase timeout urllib wraps in ``URLError``, which a local server cannot produce
 hermetically.
 """
@@ -103,7 +103,7 @@ def _raise_wrapped_timeout(*_args: object, **_kwargs: object) -> object:
 @pytest.mark.os_agnostic
 def test_connect_timeout_wrapped_in_urlerror_is_operation_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """urllib wraps a connect-phase timeout in URLError; it still maps to OperationTimeoutError."""
-    monkeypatch.setattr(urllib.request, "urlopen", _raise_wrapped_timeout)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", _raise_wrapped_timeout)
     with pytest.raises(OperationTimeoutError) as caught:
         invoke_web_request("http://192.0.2.1/", timeout=_TIMEOUT)
     assert caught.value.timeout == _TIMEOUT
@@ -114,7 +114,7 @@ def test_connect_timeout_wrapped_in_urlerror_is_operation_timeout_for_download(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The download path classifies the wrapped connect timeout the same way."""
-    monkeypatch.setattr(urllib.request, "urlopen", _raise_wrapped_timeout)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", _raise_wrapped_timeout)
     with pytest.raises(OperationTimeoutError):
         download_file("http://192.0.2.1/", tmp_path / "x", timeout=_TIMEOUT)
 

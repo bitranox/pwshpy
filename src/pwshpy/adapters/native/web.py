@@ -34,6 +34,41 @@ def _require_http_scheme(url: str) -> None:
         raise NativeCallError(f"unsupported URL scheme {scheme!r}; only http/https are allowed")
 
 
+class _RedirectRefusedError(urllib.error.URLError):
+    """A redirect to a scheme other than http/https; mapped like any other transport failure."""
+
+
+class _HttpOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to http/https.
+
+    urllib's own handler follows a redirect to ``ftp://`` too (and refuses ``file:`` only as a 3xx
+    answer, which ``skip_http_error_check`` would return), so the http/https rule
+    :func:`_require_http_scheme` applies to the first URL would not bind the URL actually fetched.
+    The target is checked before anything connects to it, whatever ``skip_http_error_check`` says.
+    """
+
+    def http_error_302(self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any) -> Any:
+        """Refuse a non-http(s) redirect target, else redirect as urllib does."""
+        location = headers.get("location") or headers.get("uri")
+        if location is not None:
+            target = urllib.parse.urljoin(req.full_url, str(location))
+            if urllib.parse.urlsplit(target).scheme.lower() not in ("http", "https"):
+                fp.close()
+                raise _RedirectRefusedError(f"redirect to {target!r} refused: only http/https URLs are allowed")
+        return super().http_error_302(req, fp, code, msg, headers)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+def _open(request: urllib.request.Request, timeout: float) -> Any:
+    """Open ``request`` with an opener that follows redirects to http/https only.
+
+    Built per call, not once at import: ``build_opener`` reads the proxy environment when it runs.
+    """
+    opener = urllib.request.build_opener(_HttpOnlyRedirectHandler())
+    return opener.open(request, timeout=timeout)
+
+
 def _is_timeout(exc: BaseException) -> bool:
     """Whether a urllib failure is the socket timeout running out.
 
@@ -139,7 +174,7 @@ def invoke_web_request(  # noqa: PLR0913 - mirrors the WebRequester port: Invoke
         headers=dict(headers or {}),
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310  # nosec B310 - http/https only
+        with _open(request, timeout) as response:
             raw = response.read()
             return WebResponse(
                 url=url,
@@ -229,7 +264,7 @@ def download_file(url: str, dest: str | Path, *, chunk_size: int = 65536, timeou
     opened = False  # set once this call created or truncated ``dest``: only then is it ours to remove
     try:
         with (
-            urllib.request.urlopen(request, timeout=timeout) as response,  # noqa: S310  # nosec B310 - http/https only
+            _open(request, timeout) as response,
             destination.open("wb") as handle,
         ):
             opened = True  # both entered in order: a failed connect or HTTP error never reaches open()

@@ -172,6 +172,19 @@ def _check_task_name(task_name: str) -> None:
         )
 
 
+def _com_folder(folder_path: str) -> str:
+    """``folder_path`` as GetFolder takes it: trailing backslashes stripped, the root kept as ``\\``.
+
+    A record's ``task_path`` ends in a backslash (``\\Microsoft\\Windows\\Defrag\\``), and GetFolder
+    refuses that form for a non-root folder with ERROR_INVALID_NAME, existing or not (measured).
+
+    Example:
+        >>> _com_folder("\\\\Sub\\\\") == "\\\\Sub", _com_folder("\\\\") == _com_folder("") == "\\\\"
+        (True, True)
+    """
+    return folder_path.rstrip("\\") or _ROOT
+
+
 def _lookup(service: Any, folder_path: str, task_name: str, *, strict: bool) -> Iterator[ScheduledTaskInfo]:
     """Yield the one task ``task_name`` in ``folder_path``, or nothing when it does not exist.
 
@@ -181,7 +194,7 @@ def _lookup(service: Any, folder_path: str, task_name: str, *, strict: bool) -> 
     skip-or-raise rule, naming the task's full path. ``folder_path`` may end in a backslash, the
     form a record's ``task_path`` carries: it is stripped, because GetFolder refuses it.
     """
-    com_folder = folder_path.rstrip("\\") or _ROOT
+    com_folder = _com_folder(folder_path)
     prefix = "" if com_folder == _ROOT else com_folder
     label = f"'{prefix}\\{task_name}'"
     try:
@@ -223,8 +236,8 @@ def iter_scheduled_tasks(
     Args:
         folder_path: The task folder to recurse, e.g. ``"\\Microsoft\\Windows"``; the root
             by default. Without ``task_name`` a folder that does not exist or cannot be opened
-            always raises; with it, a missing folder means the task is absent (empty result),
-            and a trailing backslash (the form ``task_path`` carries) is accepted.
+            always raises; with it, a missing folder means the task is absent (empty result).
+            A trailing backslash (the form ``task_path`` carries) is accepted either way.
         strict: What happens to an item the caller cannot read (a folder whose tasks or
             subfolders it may not list, a protected or corrupt task). False (default) skips it
             and logs a WARNING naming it, so a non-elevated caller can list what it CAN read.
@@ -266,7 +279,7 @@ def iter_scheduled_tasks(
         yield from _lookup(service, folder_path, task_name, strict=strict)
         return
     try:
-        root = service.GetFolder(folder_path)
+        root = service.GetFolder(_com_folder(folder_path))
         root_path = _folder_path(root)
     except Exception as exc:
         raise native_error(f"cannot open task folder '{folder_path}': {exc}", exc) from exc

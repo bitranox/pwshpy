@@ -37,6 +37,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- `get_scheduled_task("\\Microsoft\\Windows\\Defrag\\")` lists the folder on Windows: a folder path
+  ending in a backslash, the form every record's `task_path` carries, raised `NativeCallError`
+  0x8007007B because the Task Scheduler refuses it. The listing strips the trailing backslash, as
+  the lookup by `task_name` already did.
 - `elevate` on Linux and macOS raises `ElevationDeclinedError` (CLI exit 77) when `sudo -v` grants
   root but caches no credential (sudoers `timestamp_timeout=0`), and runs the command under
   `sudo -n`, so it never asks for the password a second time. Such a sudo prompted again for the

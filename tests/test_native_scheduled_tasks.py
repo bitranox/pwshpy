@@ -725,6 +725,28 @@ def test_a_slash_in_task_name_is_left_to_the_scheduler(monkeypatch: pytest.Monke
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("folder_path", ["\\Sub\\", "\\Sub", "\\Sub\\\\"])
+def test_listing_accepts_the_trailing_backslash_its_records_carry(
+    monkeypatch: pytest.MonkeyPatch, folder_path: str
+) -> None:
+    """[132] GetFolder refuses a non-root path ending in a backslash (ERROR_INVALID_NAME, measured), but
+    every record's task_path has that form: the listing strips it, as the by-name lookup does."""
+    sub = _LookupFolder("\\Sub", [_FakeTask("x", 3, True)], [])
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [], [sub]), "\\Sub": sub})
+    listed = list(iter_scheduled_tasks(folder_path, strict=True))
+    assert [(info.task_name, info.task_path) for info in listed] == [("x", "\\Sub\\")]
+
+
+@pytest.mark.os_agnostic
+def test_listing_the_root_by_its_one_backslash_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[132] The root is the one folder whose path IS a backslash: stripping must not empty it wrongly."""
+    sub = _LookupFolder("\\Sub", [_FakeTask("x", 3, True)], [])
+    _install(monkeypatch, {"\\": _LookupFolder("\\", [_FakeTask("r", 3, True)], [sub]), "\\Sub": sub})
+    names = sorted(info.task_name for info in iter_scheduled_tasks("\\", strict=True))
+    assert names == ["r", "x"]
+
+
+@pytest.mark.os_agnostic
 def test_missing_folder_without_task_name_still_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """[50] Unchanged: without task_name a folder that does not exist raises, whatever strict says."""
     _install(monkeypatch, {"\\": _LookupFolder("\\", [], [])})

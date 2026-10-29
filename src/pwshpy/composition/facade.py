@@ -1177,6 +1177,9 @@ class Ps:
         stable id (SID on Windows, uid on POSIX); filter with e.g.
         ``ps.get_local_user().where(lambda u: not u.enabled)``.
 
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`LocalUser` records.
+
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().get_local_user(), Pipeline)
@@ -1188,6 +1191,9 @@ class Ps:
         """Return a lazy pipeline over the local groups (native, portable).
 
         win32net on Windows, stdlib ``grp`` on Linux/macOS.
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`LocalGroup` records.
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
@@ -1210,6 +1216,30 @@ class Ps:
 
         On Linux the shadow-utils command is bounded by ``timeout`` seconds.
 
+        Win32 ``NetUserAdd`` on Windows; ``useradd`` (then ``chpasswd`` and ``usermod --lock``
+        as needed) on Linux, which needs root.
+
+        Args:
+            name: The account name.
+            password: The initial password; on Linux an empty one (default) sets none.
+            full_name: The display name. Linux has one GECOS comment, which takes ``full_name``,
+                or ``description`` when ``full_name`` is empty.
+            description: The account description (on Linux see ``full_name``).
+            disabled: Create the account disabled (on Linux its password is locked).
+            timeout: Linux: seconds each shadow-utils command may run before it is killed
+                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+
+        Returns:
+            The created :class:`LocalUser`: on Windows read back, on Linux read from ``pwd``
+            with ``enabled`` set from ``disabled`` and an empty ``description``.
+
+        Raises:
+            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+                ``NativeCallError`` subclass, so catch it first to tell it apart.
+            NativeCallError: The account could not be created; on Linux also a name that is not a valid POSIX account name (checked before
+                any command runs), or a CR, LF (or, in
+                the comment, a colon) that would corrupt the account entry.
+
         Example:
             >>> callable(build_ps().new_local_user)
             True
@@ -1226,6 +1256,19 @@ class Ps:
     def remove_local_user(self, name: str, *, timeout: float = 30.0) -> None:
         """Delete a local user (native, **mutating**; Linux bounds the command by ``timeout`` s).
 
+        Win32 ``NetUserDel`` on Windows; ``userdel`` on Linux, which leaves the home directory.
+
+        Args:
+            name: The account name.
+            timeout: Linux: seconds each shadow-utils command may run before it is killed
+                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+
+        Raises:
+            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+                ``NativeCallError`` subclass, so catch it first to tell it apart.
+            NativeCallError: The account could not be deleted; on Linux also a name that is not a valid POSIX account name (checked before
+                any command runs).
+
         Example:
             >>> callable(build_ps().remove_local_user)
             True
@@ -1234,6 +1277,23 @@ class Ps:
 
     def enable_local_user(self, name: str, *, timeout: float = 30.0) -> LocalUser:
         """Enable a local user; return its new state (native, **mutating**; Linux bounds by ``timeout`` s).
+
+        On Windows this toggles ``UF_ACCOUNTDISABLE``; on Linux ``usermod`` unlocks the password.
+
+        Args:
+            name: The account name.
+            timeout: Linux: seconds each shadow-utils command may run before it is killed
+                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+
+        Returns:
+            The :class:`LocalUser`: on Windows read back, on Linux read from ``pwd`` with
+            ``enabled`` set to the state just applied.
+
+        Raises:
+            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+                ``NativeCallError`` subclass, so catch it first to tell it apart.
+            NativeCallError: The change was refused or the account does not exist; on Linux also a name that is not a valid POSIX account name (checked before
+                any command runs).
 
         Example:
             >>> callable(build_ps().enable_local_user)
@@ -1244,6 +1304,23 @@ class Ps:
     def disable_local_user(self, name: str, *, timeout: float = 30.0) -> LocalUser:
         """Disable a local user; return its new state (native, **mutating**; Linux bounds by ``timeout`` s).
 
+        On Windows this toggles ``UF_ACCOUNTDISABLE``; on Linux ``usermod`` locks the password.
+
+        Args:
+            name: The account name.
+            timeout: Linux: seconds each shadow-utils command may run before it is killed
+                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+
+        Returns:
+            The :class:`LocalUser`: on Windows read back, on Linux read from ``pwd`` with
+            ``enabled`` set to the state just applied.
+
+        Raises:
+            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+                ``NativeCallError`` subclass, so catch it first to tell it apart.
+            NativeCallError: The change was refused or the account does not exist; on Linux also a name that is not a valid POSIX account name (checked before
+                any command runs).
+
         Example:
             >>> callable(build_ps().disable_local_user)
             True
@@ -1252,6 +1329,24 @@ class Ps:
 
     def new_local_group(self, name: str, *, description: str = "", timeout: float = 30.0) -> LocalGroup:
         """Create a local group; return the created record (native, **mutating**; Linux bounds by ``timeout`` s).
+
+        Win32 ``NetLocalGroupAdd`` on Windows; ``groupadd`` on Linux.
+
+        Args:
+            name: The group name.
+            description: The group description; ignored on Linux, where groups have none.
+            timeout: Linux: seconds each shadow-utils command may run before it is killed
+                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+
+        Returns:
+            The created :class:`LocalGroup` (on Linux read from ``grp``, with an empty
+            ``description``).
+
+        Raises:
+            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+                ``NativeCallError`` subclass, so catch it first to tell it apart.
+            NativeCallError: The group could not be created; on Linux also a name that is not a valid POSIX account name (checked before
+                any command runs).
 
         Example:
             >>> callable(build_ps().new_local_group)
@@ -1262,6 +1357,17 @@ class Ps:
     def remove_local_group(self, name: str, *, timeout: float = 30.0) -> None:
         """Delete a local group (native, **mutating**; Linux bounds the command by ``timeout`` s).
 
+        Args:
+            name: The group name.
+            timeout: Linux: seconds each shadow-utils command may run before it is killed
+                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+
+        Raises:
+            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+                ``NativeCallError`` subclass, so catch it first to tell it apart.
+            NativeCallError: The group could not be deleted; on Linux also a name that is not a valid POSIX account name (checked before
+                any command runs).
+
         Example:
             >>> callable(build_ps().remove_local_group)
             True
@@ -1271,6 +1377,20 @@ class Ps:
     def add_local_group_member(self, group: str, member: str, *, timeout: float = 30.0) -> None:
         """Add a user/group to a local group (native, **mutating**; Linux bounds by ``timeout`` s).
 
+        Win32 ``NetLocalGroupAddMembers`` on Windows; ``gpasswd --add`` on Linux.
+
+        Args:
+            group: The local group to add to.
+            member: The user (or, on Windows, group) name to add.
+            timeout: Linux: seconds each shadow-utils command may run before it is killed
+                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+
+        Raises:
+            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+                ``NativeCallError`` subclass, so catch it first to tell it apart.
+            NativeCallError: The member could not be added; on Linux also a name that is not a valid POSIX account name (checked before
+                any command runs).
+
         Example:
             >>> callable(build_ps().add_local_group_member)
             True
@@ -1279,6 +1399,20 @@ class Ps:
 
     def remove_local_group_member(self, group: str, member: str, *, timeout: float = 30.0) -> None:
         """Remove a member from a local group (native, **mutating**; Linux bounds by ``timeout`` s).
+
+        Win32 ``NetLocalGroupDelMembers`` on Windows; ``gpasswd --delete`` on Linux.
+
+        Args:
+            group: The local group to remove from.
+            member: The member name to remove.
+            timeout: Linux: seconds each shadow-utils command may run before it is killed
+                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+
+        Raises:
+            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+                ``NativeCallError`` subclass, so catch it first to tell it apart.
+            NativeCallError: The member could not be removed; on Linux also a name that is not a valid POSIX account name (checked before
+                any command runs).
 
         Example:
             >>> callable(build_ps().remove_local_group_member)
@@ -1292,6 +1426,20 @@ class Ps:
         One AclEntry per entry - a Windows DACL ACE, or a POSIX ACL entry (owner / named user /
         owning group / named group / mask / other, in ``kind``). Filter with e.g.
         ``ps.get_acl(path).where(lambda e: e.access_type == AceType.DENY)``.
+
+        On Windows a NULL DACL (an unprotected object) yields one Everyone/Allow entry, while
+        an empty DACL yields none. On POSIX a file with no extended ACL yields its three base
+        entries from the mode. Nothing is read until the pipeline is iterated.
+
+        Args:
+            path: The file or directory whose ACL to read.
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`AclEntry` records.
+
+        Raises:
+            NativeCallError: The path or its ACL cannot be read (raised on iteration; a
+                :class:`NativeAccessDeniedError` when access is denied).
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
@@ -1307,6 +1455,22 @@ class Ps:
         or deny). On Linux ``trustee`` is ``user:NAME`` / ``group:NAME`` (bare = user), ``rights``
         uses the low three bits as POSIX ``rwx``, and only allow entries exist (deny is rejected).
 
+        On Windows the ACE is appended to the DACL; on Linux an existing entry for the same
+        trustee is replaced and the ACL mask is recomputed.
+
+        Args:
+            path: The file or directory to change.
+            trustee: On Windows a SID string (``"S-1-..."``) or an account name; on Linux
+                ``user:NAME`` or ``group:NAME`` (a bare name is a user; a numeric name is the id).
+            rights: A Win32 access mask on Windows; on Linux only the low three bits count
+                (``4`` read, ``2`` write, ``1`` execute).
+            access_type: ``AceType.ALLOW`` (default) or ``AceType.DENY``; deny is Windows only.
+
+        Raises:
+            NativeCallError: The trustee cannot be resolved, the ACL cannot be read or written,
+                or (Linux) ``access_type`` is ``DENY``; a :class:`NativeAccessDeniedError` when
+                access is denied.
+
         Example:
             >>> callable(build_ps().add_acl_ace)
             True
@@ -1316,6 +1480,20 @@ class Ps:
     def remove_acl_ace(self, path: str, trustee: str, *, access_type: AceType | None = None) -> None:
         """Remove a trustee's entries from a path's ACL (native, portable, **mutating**).
 
+        On Linux the ACL mask is recomputed afterwards (and dropped when no named entry is
+        left); POSIX has no deny entries, so ``access_type=AceType.DENY`` changes nothing there.
+
+        Args:
+            path: The file or directory to change.
+            trustee: On Windows a SID string (``"S-1-..."``) or an account name; on Linux
+                ``user:NAME`` or ``group:NAME`` (a bare name is a user; a numeric name is the id).
+            access_type: Remove only the trustee's entries of this type; None (default) removes
+                all of them.
+
+        Raises:
+            NativeCallError: The trustee cannot be resolved, or the ACL cannot be read or
+                written (a :class:`NativeAccessDeniedError` when access is denied).
+
         Example:
             >>> callable(build_ps().remove_acl_ace)
             True
@@ -1324,6 +1502,18 @@ class Ps:
 
     def set_owner(self, path: str, owner: str) -> None:
         """Set the owner of a filesystem path (native, portable, **mutating**; ``chown`` on POSIX).
+
+        Making another principal the owner needs privilege (SeRestorePrivilege on Windows, root
+        on POSIX). On POSIX the owning group is left unchanged.
+
+        Args:
+            path: The file or directory to change.
+            owner: The new owner: on Windows a SID string (``"S-1-..."``) or an account name; on
+                POSIX a user name or a numeric uid.
+
+        Raises:
+            NativeCallError: The owner cannot be resolved, or the owner cannot be set (a
+                :class:`NativeAccessDeniedError` when access is denied).
 
         Example:
             >>> callable(build_ps().set_owner)

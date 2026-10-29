@@ -66,17 +66,40 @@ def _run_cli(argv: Sequence[str] | None, *, services_factory: Callable[[], AppSe
         )
         return exit_code if isinstance(exit_code, int) else 0
     except click.ClickException as exc:
+        _drain_log_queue()
         exc.show()
         return exc.exit_code
     except BaseException as exc:
         # Catch BaseException (not just Exception) to handle SystemExit, KeyboardInterrupt,
         # and all errors at the CLI boundary. This ensures consistent error formatting via
         # lib_cli_exit_tools regardless of exception type. Intentional, not a bug.
+        _drain_log_queue()
         tracebacks_enabled = bool(getattr(lib_cli_exit_tools.config, "traceback", False))
         apply_traceback_preferences(tracebacks_enabled)
         length_limit = TRACEBACK_VERBOSE_LIMIT if tracebacks_enabled else TRACEBACK_SUMMARY_LIMIT
         lib_cli_exit_tools.print_exception_message(trace_back=tracebacks_enabled, length_limit=length_limit)
         return _exit_code_for(exc)
+
+
+#: Upper bound on waiting for queued log lines before the error is printed; the error prints anyway.
+_LOG_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+def _drain_log_queue() -> None:
+    """Render every log line still queued before the CLI prints the error that ends the command.
+
+    lib_log_rich renders console lines on a queue worker thread, and the error is printed on this
+    one. Printed with a line still queued, both threads write to stderr at once and the two lines
+    interleave into one (measured on Windows). Draining first keeps each line whole and in the
+    order it was logged. A drain that times out or cannot run is not reported: the command's own
+    error is the one the user needs, and it still prints.
+    """
+    if not lib_log_rich.runtime.is_initialised():
+        return
+    try:
+        lib_log_rich.runtime.flush(timeout=_LOG_DRAIN_TIMEOUT_SECONDS)
+    except (TimeoutError, RuntimeError):
+        return
 
 
 def _exit_code_for(exc: BaseException) -> int:

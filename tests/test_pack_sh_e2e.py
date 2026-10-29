@@ -2518,6 +2518,51 @@ def test_an_old_git_is_neither_asked_nor_refused_without_root_and_a_git_source(
     assert "run" in record.read_text(encoding="utf-8").splitlines(), "uv never ran the script"
 
 
+#: The start of the refusal a root run prints for a git another account can modify ([157]).
+_GIT_TRUST_REFUSED = "pwshpy pack: refusing git at "
+#: The remedy that refusal names.
+_GIT_TRUST_REMEDY = "or run the script without root"
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize("plant", ["world-writable-file", "link-into-an-open-directory", "private-control"])
+def test_as_root_a_git_source_runs_only_a_git_no_other_account_can_modify(
+    tmp_path: Path, shell_id: str, shell: list[str], plant: str
+) -> None:
+    """[157] (user decision: judge the git file): the PATH uv sees holds only directories no other
+    account can modify, but the git found there was never judged itself, so a git file another account
+    can write, or a link to one in a directory it can write, ran as root when uv fetched a git source. A
+    root run of a script with a git source now judges that git the way it judges uv (the walk from /,
+    every link, the file) and exits 127 before git or uv run; the private control runs."""
+    runner, uv, record, marker, environment = _git_version_setup(
+        tmp_path, as_root=True, git_source=True, version_output="git version 2.45.0"
+    )
+    git = uv.parent / "git"
+    if plant == "world-writable-file":
+        git.chmod(0o777)
+    elif plant == "link-into-an-open-directory":
+        open_bin = tmp_path / "open-bin"
+        open_bin.mkdir()
+        open_bin.chmod(0o777)
+        git.rename(open_bin / "git")
+        git.symlink_to(open_bin / "git")
+    result = _run_in(shell, runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    refusals = [line for line in result.stderr.splitlines() if line.startswith(_GIT_TRUST_REFUSED)]
+    if plant == "private-control":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert refusals == [], result.stderr
+        assert "run" in record.read_text(encoding="utf-8").splitlines(), "uv never ran the script"
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert not marker.exists(), "the runner ran the git it refused"
+    assert not record.exists(), "uv ran the script: " + record.read_text(encoding="utf-8")
+    assert len(refusals) == 1, result.stderr
+    (refusal,) = refusals
+    assert refusal.startswith(f"{_GIT_TRUST_REFUSED}{git}: "), refusal
+    assert "writable by every account" in refusal, refusal
+    assert refusal.endswith(_GIT_TRUST_REMEDY), refusal
+
+
 @pytest.mark.parametrize("git_source", [True, False], ids=["git-source", "none"])
 def test_info_names_whether_the_script_has_a_git_source(tmp_path: Path, git_source: bool) -> None:
     """[116]: --pwshpy-info shows what the pack recorded, so a refused root run can be explained."""

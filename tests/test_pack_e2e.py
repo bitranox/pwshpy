@@ -4446,6 +4446,125 @@ def test_an_elevated_windows_run_of_a_git_source_needs_git_2_32(
     assert "python:" not in result.stdout, result.stdout
 
 
+#: The remedy an elevated run names when it refuses a git another account can modify ([157]).
+_GIT_TRUST_REMEDY = "or run the script without elevation"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("plant", ["world-writable-file", "link-into-an-open-directory", "private-control"])
+def test_an_elevated_posix_run_of_a_git_source_runs_only_a_git_no_other_account_can_modify(
+    tmp_path: Path, plant: str
+) -> None:
+    """[157], as the .sh root run: the git found on the trusted PATH is judged itself (the walk from /,
+    every link, the file) before it is asked its version; one another account can modify exits 127 and
+    neither git nor uv runs. The private control runs."""
+    runner, uv, record = _recording_runner(tmp_path, elevated="$true", with_packages=[_GIT_SOURCE_PACKAGE])
+    marker = tmp_path / "git-ran.txt"
+    git = _posix_git_double(uv.parent, marker, version_output="git version 2.45.0", git_exit=0)
+    if plant == "world-writable-file":
+        git.chmod(0o777)
+    elif plant == "link-into-an-open-directory":
+        open_bin = tmp_path / "open-bin"
+        open_bin.mkdir()
+        open_bin.chmod(0o777)
+        git.rename(open_bin / "git")
+        git.symlink_to(open_bin / "git")
+    result = _run_with_path(
+        tmp_path, runner, "-PwshPyUv", str(uv), path_first=[uv.parent], env={}, cwd=_clean_cwd(tmp_path)
+    )
+    refusals = [line for line in result.stderr.splitlines() if line.startswith(_OLD_GIT_REFUSED)]
+    if plant == "private-control":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert refusals == [], result.stderr
+        assert "run" in record.read_text(encoding="utf-8").splitlines(), "uv never ran the script"
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert not marker.exists(), "the runner ran the git it refused"
+    assert not record.exists(), "uv ran the script"
+    assert len(refusals) == 1, result.stderr
+    (refusal,) = refusals
+    assert refusal.startswith(f"{_OLD_GIT_REFUSED}{git}: "), refusal
+    assert "writable by every account" in refusal, refusal
+    assert refusal.endswith(_GIT_TRUST_REMEDY), refusal
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.skipif(not _CSC.is_file(), reason="needs the .NET Framework C# compiler to build a git.exe double")
+@pytest.mark.parametrize("users_can_modify", [True, False], ids=["users-can-modify-refused", "private-control"])
+def test_an_elevated_windows_run_of_a_git_source_runs_only_a_git_no_other_account_can_modify(
+    tmp_path: Path, users_can_modify: bool
+) -> None:
+    """[157] on Windows (pwsh 7 and Windows PowerShell 5.1): a git.exe in a directory only this account
+    and the administrators can modify, whose own ACL lets Users modify it, ran elevated when uv fetched a
+    git source. It is judged like uv.exe now and refused with 127 before it runs; the private one passes
+    the check (uv then fails to fetch the source from the double, which is not under test)."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated="$true", with_packages=[_GIT_SOURCE_PACKAGE])
+    marker = tmp_path / "git-ran.txt"
+    git = _windows_git_double(_private_dir(tmp_path / "git-bin"), marker, version_output="git version 2.45.0.windows.1")
+    if users_can_modify:
+        _icacls(git, "/grant", f"{_SID_USERS}:M")
+    environment = interpreter_probe_env(tmp_path, managed=managed)
+    result = _run_with_path(tmp_path, runner, path_first=[git.parent, *head], env=environment, cwd=_clean_cwd(tmp_path))
+    refusals = [line for line in result.stderr.splitlines() if line.startswith(_OLD_GIT_REFUSED)]
+    if not users_can_modify:
+        assert marker.exists(), "the runner never asked git for its version: " + result.stderr
+        assert refusals == [], result.stderr
+        assert result.returncode != 127, result.stdout + result.stderr
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert not marker.exists(), "the runner ran the git it refused"
+    assert len(refusals) == 1, result.stderr
+    assert refusals[0].startswith(f"{_OLD_GIT_REFUSED}{git}: "), refusals
+    assert refusals[0].endswith(_GIT_TRUST_REMEDY), refusals
+    assert "python:" not in result.stdout, result.stdout
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.skipif(not _CSC.is_file(), reason="needs the .NET Framework C# compiler to build a git.exe double")
+@pytest.mark.parametrize("earlier", ["git.cmd", "git.bat", "git"])
+def test_an_elevated_windows_run_judges_the_git_uv_would_run_not_the_first_git_exe(
+    tmp_path: Path, earlier: str
+) -> None:
+    """[R2]: uv finds git as Windows does (each PATH directory in turn, there each PATHEXT extension in
+    order, then the bare name; measured with uv 0.13.6), so a git.cmd in an earlier directory is the git
+    it runs, while the runner looked for git.exe only and judged the good one behind it. The runner now
+    resolves git the same way and judges that file: an old git.cmd or git.bat is refused for its version,
+    a bare extensionless git, which is no program the runner asks for a version, is refused as such; the
+    good git.exe further down is never asked."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated="$true", with_packages=[_GIT_SOURCE_PACKAGE])
+    first, second = _private_dir(tmp_path / "first-bin"), _private_dir(tmp_path / "second-bin")
+    good_marker, planted_marker = tmp_path / "good-git-ran.txt", tmp_path / "planted-git-ran.txt"
+    _windows_git_double(second, good_marker, version_output="git version 2.45.0.windows.1")
+    planted = first / earlier
+    planted.write_bytes(
+        f'@echo off\r\necho ran>>"{planted_marker}"\r\necho git version 2.31.1.windows.1\r\n'.encode("ascii")
+    )
+    environment = {**interpreter_probe_env(tmp_path, managed=managed), "PATHEXT": ".COM;.EXE;.BAT;.CMD"}
+    result = _run_with_path(
+        tmp_path, runner, path_first=[first, second, *head], env=environment, cwd=_clean_cwd(tmp_path)
+    )
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert not good_marker.exists(), "the runner asked a git uv would not run"
+    refusals = [line for line in result.stderr.splitlines() if line.startswith(_OLD_GIT_REFUSED)]
+    assert len(refusals) == 1, result.stderr
+    assert refusals[0].startswith(f"{_OLD_GIT_REFUSED}{planted}: "), refusals
+    if earlier == "git":
+        assert not planted_marker.exists(), "the runner ran a file that is no program"
+        assert "is not a program" in refusals[0], refusals
+    else:
+        assert planted_marker.exists(), "the runner never asked the planted git for its version"
+        assert ": git 2.31.1.windows.1 ignores GIT_CONFIG_GLOBAL" in refusals[0], refusals
+    assert "python:" not in result.stdout, result.stdout
+
+
 @pytest.mark.parametrize("git_source", [True, False], ids=["git-source", "none"])
 def test_info_names_whether_the_script_has_a_git_source(tmp_path: Path, git_source: bool) -> None:
     """[156]: -PwshPyInfo shows what the pack recorded, so a refused elevated run can be explained."""

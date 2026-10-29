@@ -1229,6 +1229,16 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # The git uv will run, asked only for a script that needs one; with none, uv fails on its own.
     # Before uv is asked for a managed Python, which it may download: a run refused here calls no uv.
     if [ "$PWSHPY_GIT_SOURCE" = "1" ] && [ -n "$PWSHPY_UV_GIT" ]; then
+        # The directories on uv's PATH were judged, the git file found there was not: one another account
+        # can modify, or a link to one, runs as root when uv fetches a git source ([157], user decision:
+        # judge the git file). Judged like uv, and before it is run for its version.
+        PWSHPY_GIT_TRUST_WHY=$(pwshpy_uv_distrust "$PWSHPY_UV_GIT")
+        if [ -n "$PWSHPY_GIT_TRUST_WHY" ]; then
+            PWSHPY_GIT_TRUST_WHY="$PWSHPY_GIT_TRUST_WHY (as root uv runs only a git no other account can modify):"
+            PWSHPY_GIT_TRUST_WHY="$PWSHPY_GIT_TRUST_WHY make the path named above root's alone (chown root, then"
+            PWSHPY_GIT_TRUST_WHY="$PWSHPY_GIT_TRUST_WHY chmod go-w on it), or run the script without root"
+            pwshpy_die "refusing git at $PWSHPY_UV_GIT: $PWSHPY_GIT_TRUST_WHY" 127
+        fi
         pwshpy_require_git_config_global "$PWSHPY_UV_GIT"
     fi
     pwshpy_resolve_managed_python

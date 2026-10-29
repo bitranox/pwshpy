@@ -696,22 +696,76 @@ function Get-PwshPyTrustedPath {
 function Get-PwshPyGitOn {
     param([string] $Path)
 
-    # The git the PATH $Path finds, or ''. Looked up by name in each directory and never run;
-    # Get-Command would also answer with an alias or function of this session, and read '[', '*' and
-    # '?' in an entry as wildcards. POSIX: an executable 'git', its mode read with the fixed-PATH ls.
-    $name = if ($PwshPyOnWindows) { 'git.exe' } else { 'git' }
+    # The git the PATH $Path finds, the file uv would run, or ''. Looked up by name in each directory
+    # and never run; Get-Command would also answer with an alias or function of this session, and read
+    # '[', '*' and '?' in an entry as wildcards. POSIX: an executable 'git', its mode read with the
+    # fixed-PATH ls. Windows: the names uv tries (Get-PwshPyWindowsGitName), in each directory in turn.
+    $names = if ($PwshPyOnWindows) { Get-PwshPyWindowsGitName } else { @('git') }
     foreach ($directory in ($Path -split [IO.Path]::PathSeparator)) {
         if (-not $directory) { continue }
-        $candidate = $directory + [IO.Path]::DirectorySeparatorChar + $name
-        try {
-            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
-        } catch {
-            continue
+        foreach ($name in $names) {
+            $candidate = $directory + [IO.Path]::DirectorySeparatorChar + $name
+            try {
+                if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+            } catch {
+                continue
+            }
+            if (-not $PwshPyOnWindows -and -not (Test-PwshPyExecutable -Path $candidate)) { continue }
+            if ($PwshPyOnWindows) { return (Get-PwshPyOnDiskSpelling -Path $candidate) }
+            return $candidate
         }
-        if (-not $PwshPyOnWindows -and -not (Test-PwshPyExecutable -Path $candidate)) { continue }
-        return $candidate
     }
     return ''
+}
+
+function Get-PwshPyOnDiskSpelling {
+    param([string] $Path)
+
+    # Windows: the existing file $Path with its name spelled as the directory holds it ('git.exe' for a
+    # lookup of git.EXE, which PATHEXT spells upper-case), so a message names the file as a listing
+    # shows it. A name with a wildcard character is no file name on Windows and never gets here.
+    $directory = [IO.Path]::GetDirectoryName($Path)
+    $name = [IO.Path]::GetFileName($Path)
+    if ($name.IndexOfAny([char[]]'*?') -ge 0) { return $Path }
+    try {
+        foreach ($entry in [IO.Directory]::GetFiles($directory, $name)) {
+            if ([string]::Equals([IO.Path]::GetFileName($entry), $name, [StringComparison]::OrdinalIgnoreCase)) {
+                return (Join-Path $directory ([IO.Path]::GetFileName($entry)))
+            }
+        }
+    } catch {
+        return $Path
+    }
+    return $Path
+}
+
+function Get-PwshPyWindowsGitName {
+    # The file names, in order, under which uv finds git in one PATH directory on Windows (measured with
+    # uv 0.13.6, [R2]): 'git' with each PATHEXT entry appended as written, in PATHEXT order (an entry
+    # without its dot names a file nobody has), then the bare 'git'. With PATHEXT unset or empty only
+    # the bare name. So a git.cmd ahead of git.exe in PATHEXT, or in an earlier directory, is the git uv
+    # runs, and the one judged here.
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($extension in ([string]$env:PATHEXT).Split(';')) {
+        if ($extension) { $names.Add('git' + $extension) }
+    }
+    $names.Add('git')
+    return $names.ToArray()
+}
+
+function Get-PwshPyGitKindDistrust {
+    param([string] $Git)
+
+    # Why the git file $Git is not one an elevated run may ask for its version, or ''. Windows: only a
+    # program or a batch file (.exe, .com, .cmd, .bat) is run for its version; anything else PATHEXT
+    # makes uv find (a bare file, a .js or .vbs a script host would open) is refused, which fails closed
+    # ([R2]). POSIX: any executable file.
+    if (-not $PwshPyOnWindows) { return '' }
+    $extension = [IO.Path]::GetExtension($Git)
+    foreach ($known in @('.exe', '.com', '.cmd', '.bat')) {
+        if ([string]::Equals($extension, $known, [StringComparison]::OrdinalIgnoreCase)) { return '' }
+    }
+    return 'it is not a program an elevated run asks for its version (a .exe, .com, .cmd or .bat), and uv would run it for a git source: install git as a program, or run the script without elevation'
 }
 
 function New-PwshPyStderrFile {
@@ -1916,6 +1970,20 @@ $PwshPyPrepare = {
         if ($PwshPyGitSource) {
             $PwshPyUvGit = Get-PwshPyGitOn -Path $script:PwshPyTrustedUvPath
             if ($PwshPyUvGit) {
+                # The directories on uv's PATH were judged, the git file found there was not: one another
+                # account can modify, or a link to one, runs elevated when uv fetches a git source ([157],
+                # user decision: judge the git file). Judged like uv, and before it is run for its version.
+                $PwshPyGitWhy = Get-PwshPyUvDistrust -Path $PwshPyUvGit
+                if ($PwshPyGitWhy) {
+                    $PwshPyGitRemedy = if ($PwshPyOnWindows) { 'take every other account''s write access off the path named above (only the running account, SYSTEM and Administrators may change it), or run the script without elevation' } else { 'make the path named above root''s alone (chown root, then chmod go-w on it), or run the script without elevation' }
+                    Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy (an elevated run lets uv run only a git no other account can modify): $PwshPyGitRemedy"
+                    exit 127
+                }
+                $PwshPyGitWhy = Get-PwshPyGitKindDistrust -Git $PwshPyUvGit
+                if ($PwshPyGitWhy) {
+                    Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy"
+                    exit 127
+                }
                 $PwshPyGitWhy = Get-PwshPyGitVersionDistrust -Git $PwshPyUvGit
                 if ($PwshPyGitWhy) {
                     Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy"

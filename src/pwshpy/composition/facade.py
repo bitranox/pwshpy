@@ -2186,16 +2186,16 @@ class Ps:
             headers: Request headers; None (default) sends none of the caller's own.
             body: The request body, sent UTF-8 encoded; None (default) sends none.
             timeout: Seconds for the connection and each blocking read (default 30.0), passed
-                to ``urllib``; running out is a ``NativeCallError``, not an
-                ``OperationTimeoutError``.
+                to ``urllib``; running out raises ``OperationTimeoutError``.
 
         Returns:
             A :class:`WebResponse` with ``status_code``, ``headers`` and ``text`` (the body
             decoded as UTF-8, undecodable bytes replaced).
 
         Raises:
+            OperationTimeoutError: The connection or a read did not finish within ``timeout``.
             NativeCallError: The scheme is not http/https, or the request failed below HTTP
-                (DNS, connection, TLS, timeout).
+                (DNS, connection, TLS).
 
         Example:
             >>> callable(build_ps().invoke_web_request)
@@ -2225,13 +2225,13 @@ class Ps:
                 ``Content-Type: application/json`` unless ``headers`` sets one; None (default)
                 sends no body.
             timeout: Seconds for the connection and each blocking read (default 30.0), passed
-                to ``urllib``; running out is a ``NativeCallError``, not an
-                ``OperationTimeoutError``.
+                to ``urllib``; running out raises ``OperationTimeoutError``.
 
         Returns:
             The response body parsed as JSON.
 
         Raises:
+            OperationTimeoutError: The connection or a read did not finish within ``timeout``.
             NativeCallError: The scheme is not http/https, the request failed below HTTP, or
                 the response body is not JSON.
             TypeError: ``json_body`` holds a value orjson cannot serialize
@@ -2254,13 +2254,14 @@ class Ps:
             dest: The file to write; an existing file is overwritten.
             chunk_size: Bytes copied per read (default 65536).
             timeout: Seconds for the connection and each blocking read (default 30.0), passed
-                to ``urllib``; running out is a ``NativeCallError``, not an
-                ``OperationTimeoutError``.
+                to ``urllib``; running out raises ``OperationTimeoutError``.
 
         Returns:
             ``dest`` as a :class:`~pathlib.Path`.
 
         Raises:
+            OperationTimeoutError: The connection or a read did not finish within ``timeout``;
+                ``dest`` is deleted.
             NativeCallError: The scheme is not http/https, the server answered 4xx or 5xx, or
                 the transfer failed; ``dest`` is deleted in the last two cases.
 

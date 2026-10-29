@@ -21,7 +21,7 @@ from typing import Any
 
 import orjson
 
-from ...domain.errors import NativeCallError
+from ...domain.errors import NativeCallError, OperationTimeoutError
 from ...domain.records import WebResponse
 from .marshal import native_error
 
@@ -31,6 +31,24 @@ def _require_http_scheme(url: str) -> None:
     scheme = urllib.parse.urlsplit(url).scheme.lower()
     if scheme not in ("http", "https"):
         raise NativeCallError(f"unsupported URL scheme {scheme!r}; only http/https are allowed")
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """Whether a urllib failure is the socket timeout running out.
+
+    A read timeout arrives as a bare ``TimeoutError`` (``socket.timeout`` is its alias
+    since Python 3.10); a connect timeout arrives wrapped, as ``URLError.reason``.
+    """
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError)
+
+
+def _transport_error(what: str, exc: BaseException, timeout: float) -> NativeCallError:
+    """Map a transport failure: a timeout to OperationTimeoutError, anything else through native_error."""
+    if _is_timeout(exc):
+        return OperationTimeoutError(f"{what} timed out after {timeout}s", timeout=timeout)
+    return native_error(f"{what} failed: {exc}", exc)
 
 
 def invoke_web_request(
@@ -75,7 +93,7 @@ def invoke_web_request(
             headers=dict(exc.headers),
         )
     except (urllib.error.URLError, OSError) as exc:
-        raise native_error(f"web request to {url!r} failed: {exc}", exc) from exc
+        raise _transport_error(f"web request to {url!r}", exc, timeout) from exc
 
 
 def invoke_rest_method(
@@ -114,7 +132,8 @@ def download_file(url: str, dest: str | Path, *, chunk_size: int = 65536, timeou
     Unlike :func:`invoke_web_request` (which returns the body as data), this copies the
     response to a file in fixed-size chunks via :func:`shutil.copyfileobj`, so a multi-
     gigabyte download stays flat in memory.  A 4xx/5xx or transport failure raises
-    :class:`~pwshpy.domain.errors.NativeCallError` (no partial file is left as a "success").
+    :class:`~pwshpy.domain.errors.NativeCallError`, a timeout its subclass
+    :class:`~pwshpy.domain.errors.OperationTimeoutError` (no partial file is left as a "success").
 
     Example:
         >>> callable(download_file)
@@ -134,7 +153,7 @@ def download_file(url: str, dest: str | Path, *, chunk_size: int = 65536, timeou
         raise native_error(f"download of {url!r} failed: HTTP {exc.code}", exc) from exc
     except (urllib.error.URLError, OSError) as exc:
         destination.unlink(missing_ok=True)
-        raise native_error(f"download of {url!r} failed: {exc}", exc) from exc
+        raise _transport_error(f"download of {url!r}", exc, timeout) from exc
     return destination
 
 

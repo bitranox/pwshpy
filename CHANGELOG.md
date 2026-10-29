@@ -19,6 +19,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- A timeout in `invoke_web_request`, `invoke_rest_method` or `download_file` raises
+  `OperationTimeoutError` (a `NativeCallError` with `.timeout`) and the `pwshpy` CLI exits 110, as
+  for every other timeout; it raised a plain `NativeCallError` and exited 1 before. Both a connect
+  timeout and a read that stalls mid-response count.
 - `get_cim_instance` refuses a class name followed by a line break (`"Win32_Process\n"`) with
   `NativeCallError`, as it refuses any other name that is not letters, digits and underscores; the
   check accepted one trailing newline before.

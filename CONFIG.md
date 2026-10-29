@@ -16,15 +16,15 @@ This project uses [`lib_layered_config`](https://github.com/bitranox/lib_layered
 
 Configuration is loaded and merged in the following order (lowest to highest precedence):
 
-| Priority | Layer        | Description                                      |
-|:--------:|--------------|--------------------------------------------------|
-| 1        | **defaults** | Bundled with the package (`defaultconfig.toml`)  |
-| 2        | **app**      | System-wide settings for all machines            |
-| 3        | **host**     | Machine-specific overrides                       |
-| 4        | **user**     | User's personal settings                         |
-| 5        | **.env**     | Project directory dotenv file                    |
-| 6        | **env vars** | Environment variables                            |
-| 7        | **CLI**      | Command-line `--set` flags (highest priority)    |
+| Priority | Layer        | Description                                     |
+|:--------:|--------------|-------------------------------------------------|
+| 1        | **defaults** | Bundled with the package (`defaultconfig.toml`) |
+| 2        | **app**      | System-wide settings for all machines           |
+| 3        | **host**     | Machine-specific overrides                      |
+| 4        | **user**     | User's personal settings                        |
+| 5        | **.env**     | Project directory dotenv file                   |
+| 6        | **env vars** | Environment variables                           |
+| 7        | **CLI**      | Command-line `--set` flags (highest priority)   |
 
 **Merge behavior**: Each layer only needs to specify values it wants to override. Unspecified values inherit from lower layers.
 
@@ -34,21 +34,21 @@ Configuration is loaded and merged in the following order (lowest to highest pre
 
 ### Platform-Specific Paths
 
-| Layer    | Linux                                   | macOS                                                              | Windows                                                      |
-|----------|-----------------------------------------|--------------------------------------------------------------------|--------------------------------------------------------------|
-| defaults | (bundled with package)                  | (bundled with package)                                             | (bundled with package)                                       |
-| app      | `/etc/xdg/{slug}/config.toml`           | `/Library/Application Support/{vendor}/{app}/config.toml`          | `C:\ProgramData\{vendor}\{app}\config.toml`                  |
-| host     | `/etc/xdg/{slug}/hosts/{hostname}.toml` | `/Library/Application Support/{vendor}/{app}/hosts/{hostname}.toml`| `C:\ProgramData\{vendor}\{app}\hosts\{hostname}.toml`        |
-| user     | `~/.config/{slug}/config.toml`          | `~/Library/Application Support/{vendor}/{app}/config.toml`         | `%APPDATA%\{vendor}\{app}\config.toml`                       |
+| Layer    | Linux                                   | macOS                                                               | Windows                                               |
+|----------|-----------------------------------------|---------------------------------------------------------------------|-------------------------------------------------------|
+| defaults | (bundled with package)                  | (bundled with package)                                              | (bundled with package)                                |
+| app      | `/etc/xdg/{slug}/config.toml`           | `/Library/Application Support/{vendor}/{app}/config.toml`           | `C:\ProgramData\{vendor}\{app}\config.toml`           |
+| host     | `/etc/xdg/{slug}/hosts/{hostname}.toml` | `/Library/Application Support/{vendor}/{app}/hosts/{hostname}.toml` | `C:\ProgramData\{vendor}\{app}\hosts\{hostname}.toml` |
+| user     | `~/.config/{slug}/config.toml`          | `~/Library/Application Support/{vendor}/{app}/config.toml`          | `%APPDATA%\{vendor}\{app}\config.toml`                |
 
 ### Path Placeholders
 
-| Placeholder  | Linux                        | macOS / Windows              |
-|--------------|------------------------------|------------------------------|
-| `{slug}`     | `pwshpy`                     | -                            |
-| `{vendor}`   | -                            | `bitranox`                   |
-| `{app}`      | -                            | `pwshpy`                     |
-| `{hostname}` | System hostname              | System hostname              |
+| Placeholder  | Linux           | macOS / Windows |
+|--------------|-----------------|-----------------|
+| `{slug}`     | `pwshpy`        | -               |
+| `{vendor}`   | -               | `bitranox`      |
+| `{app}`      | -               | `pwshpy`        |
+| `{hostname}` | System hostname | System hostname |
 
 ### Concrete Examples
 
@@ -71,14 +71,14 @@ Configuration is loaded and merged in the following order (lowest to highest pre
 
 These options apply to all commands and must be specified **before** the command name:
 
-| Option | Description |
-|--------|-------------|
-| `--version` | Show version and exit. |
-| `--profile NAME` | Load configuration from a named profile (e.g., `production`, `test`). |
+| Option                    | Description                                                               |
+|---------------------------|---------------------------------------------------------------------------|
+| `--version`               | Show version and exit.                                                    |
+| `--profile NAME`          | Load configuration from a named profile (e.g., `production`, `test`).     |
 | `--set SECTION.KEY=VALUE` | Override a configuration setting. Can be repeated for multiple overrides. |
-| `--env-file PATH` | Explicit `.env` file path. Skips the default upward directory search. |
-| `--traceback` | Show full Python traceback on errors (useful for debugging). |
-| `--no-traceback` | Hide traceback, show only error message (default). |
+| `--env-file PATH`         | Explicit `.env` file path. Skips the default upward directory search.     |
+| `--traceback`             | Show full Python traceback on errors (useful for debugging).              |
+| `--no-traceback`          | Hide traceback, show only error message (default).                        |
 
 **Example usage:**
 
@@ -106,11 +106,11 @@ Display the merged configuration from all sources (defaults → app → host →
 
 #### Options Reference
 
-| Option | Required | Description |
-|--------|:--------:|-------------|
-| `--format` | No | Output format: `human` (default) or `json`. |
-| `--section NAME` | No | Show only a specific section (e.g., `lib_log_rich`). |
-| `--profile NAME` | No | Load configuration for a specific profile. |
+| Option           | Required | Description                                          |
+|------------------|:--------:|------------------------------------------------------|
+| `--format`       | No       | Output format: `human` (default) or `json`.          |
+| `--section NAME` | No       | Show only a specific section (e.g., `lib_log_rich`). |
+| `--profile NAME` | No       | Load configuration for a specific profile.           |
 
 #### Examples
 
@@ -137,15 +137,15 @@ Deploy bundled default configuration to platform-specific directories.
 
 #### Options Reference
 
-| Option | Required | Description |
-|--------|:--------:|-------------|
-| `--target` | Yes | Target layer: `app`, `host`, or `user`. Can be specified multiple times. |
-| `--force` | No | Replace existing files whose content differs; the old file is kept as `<name>.bak`. Without this, existing files are skipped. |
-| `--profile NAME` | No | Deploy to a profile-specific subdirectory (e.g., `profile/production/`). |
-| `--permissions` | No | Set Unix permissions even when the configured `enabled` is false. |
-| `--no-permissions` | No | Disable permission setting; use system umask instead. Not combinable with a mode option. |
-| `--dir-mode MODE` | No | Override directory permissions (octal: `750` or `0o750`). |
-| `--file-mode MODE` | No | Override file permissions (octal: `640` or `0o640`). |
+| Option             | Required | Description                                                                                                                   |
+|--------------------|:--------:|-------------------------------------------------------------------------------------------------------------------------------|
+| `--target`         | Yes      | Target layer: `app`, `host`, or `user`. Can be specified multiple times.                                                      |
+| `--force`          | No       | Replace existing files whose content differs; the old file is kept as `<name>.bak`. Without this, existing files are skipped. |
+| `--profile NAME`   | No       | Deploy to a profile-specific subdirectory (e.g., `profile/production/`).                                                      |
+| `--permissions`    | No       | Set Unix permissions even when the configured `enabled` is false.                                                             |
+| `--no-permissions` | No       | Disable permission setting; use system umask instead. Not combinable with a mode option.                                      |
+| `--dir-mode MODE`  | No       | Override directory permissions (octal: `750` or `0o750`).                                                                     |
+| `--file-mode MODE` | No       | Override file permissions (octal: `640` or `0o640`).                                                                          |
 
 #### Basic Examples
 
@@ -221,11 +221,11 @@ pwshpy config-deploy --target user
 
 On Linux and macOS, `config-deploy` sets Unix file permissions based on the target layer. Windows uses ACLs and ignores these settings.
 
-| Target | Directory Mode | File Mode | Description |
-|--------|:--------------:|:---------:|-------------|
-| `app`  | `0o755` (rwxr-xr-x) | `0o644` (rw-r--r--) | World-readable for system-wide config |
+| Target | Directory Mode      | File Mode           | Description                             |
+|--------|:-------------------:|:-------------------:|-----------------------------------------|
+| `app`  | `0o755` (rwxr-xr-x) | `0o644` (rw-r--r--) | World-readable for system-wide config   |
 | `host` | `0o755` (rwxr-xr-x) | `0o644` (rw-r--r--) | World-readable for host-specific config |
-| `user` | `0o700` (rwx------) | `0o600` (rw-------)  | Private to user only |
+| `user` | `0o700` (rwx------) | `0o600` (rw-------) | Private to user only                    |
 
 **Permission options:**
 
@@ -311,10 +311,10 @@ Create example TOML files showing all available options with default values and 
 
 #### Options Reference
 
-| Option | Required | Description |
-|--------|:--------:|-------------|
-| `--destination DIR` | Yes | Directory to write example files. |
-| `--force` | No | Overwrite existing files. Without this, existing files are skipped. |
+| Option              | Required | Description                                                         |
+|---------------------|:--------:|---------------------------------------------------------------------|
+| `--destination DIR` | Yes      | Directory to write example files.                                   |
+| `--force`           | No       | Overwrite existing files. Without this, existing files are skipped. |
 
 #### Examples
 
@@ -331,9 +331,9 @@ pwshpy config-generate-examples --destination .
 
 #### Generated Files
 
-| File | Description |
-|------|-------------|
-| `config.toml` | Main configuration file with all sections |
+| File              | Description                                 |
+|-------------------|---------------------------------------------|
+| `config.toml`     | Main configuration file with all sections   |
 | `config.d/*.toml` | Modular configuration files (logging, etc.) |
 
 Each file contains commented documentation explaining available options and their default values.
@@ -373,14 +373,14 @@ pwshpy --profile production --set lib_log_rich.console_level=DEBUG config
 
 #### Supported Value Types
 
-| Type | Example |
-|------|---------|
-| String | `--set section.key=value` |
-| Integer | `--set section.timeout=30` |
-| Float | `--set section.ratio=0.5` |
-| Boolean | `--set section.enabled=true` or `--set section.enabled=false` |
-| JSON Array | `--set section.hosts='["a.com", "b.com"]'` |
-| JSON Object | `--set section.metadata='{"key": "value"}'` |
+| Type        | Example                                                       |
+|-------------|---------------------------------------------------------------|
+| String      | `--set section.key=value`                                     |
+| Integer     | `--set section.timeout=30`                                    |
+| Float       | `--set section.ratio=0.5`                                     |
+| Boolean     | `--set section.enabled=true` or `--set section.enabled=false` |
+| JSON Array  | `--set section.hosts='["a.com", "b.com"]'`                    |
+| JSON Object | `--set section.metadata='{"key": "value"}'`                   |
 
 ---
 
@@ -392,13 +392,13 @@ Profiles provide isolated configuration namespaces for different environments (e
 
 Profile names are validated for security and cross-platform compatibility:
 
-| Rule | Description |
-|------|-------------|
-| **Maximum length** | 64 characters |
-| **Allowed characters** | ASCII letters (`a-z`, `A-Z`), digits (`0-9`), hyphens (`-`), underscores (`_`) |
-| **Start character** | Must start with a letter or digit (not `-` or `_`) |
-| **Reserved names** | Windows reserved names rejected: `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9` |
-| **Path safety** | No path separators (`/`, `\`) or traversal sequences (`..`) |
+| Rule                   | Description                                                                               |
+|------------------------|-------------------------------------------------------------------------------------------|
+| **Maximum length**     | 64 characters                                                                             |
+| **Allowed characters** | ASCII letters (`a-z`, `A-Z`), digits (`0-9`), hyphens (`-`), underscores (`_`)            |
+| **Start character**    | Must start with a letter or digit (not `-` or `_`)                                        |
+| **Reserved names**     | Windows reserved names rejected: `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9` |
+| **Path safety**        | No path separators (`/`, `\`) or traversal sequences (`..`)                               |
 
 **Valid examples:** `production`, `staging-v2`, `test_env`, `dev01`
 
@@ -428,10 +428,10 @@ Profile names are validated for security and cross-platform compatibility:
 
 Profile directories are **separate namespaces**. Configuration deployed with a profile is only visible when reading with that same profile.
 
-| Command                         | Sees `app` layer?                  | Sees `user` layer?                 |
-|---------------------------------|------------------------------------|------------------------------------|
-| `config` (no profile)           | Only if deployed without profile   | Only if deployed without profile   |
-| `config --profile production`   | Only if deployed with `production` | Only if deployed with `production` |
+| Command                       | Sees `app` layer?                  | Sees `user` layer?                 |
+|-------------------------------|------------------------------------|------------------------------------|
+| `config` (no profile)         | Only if deployed without profile   | Only if deployed without profile   |
+| `config --profile production` | Only if deployed with `production` | Only if deployed with `production` |
 
 **Example**: If you deploy `app` with `--profile production` but `user` without a profile:
 

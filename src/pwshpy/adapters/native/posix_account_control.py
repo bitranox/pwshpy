@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import importlib
 import re
+import time
 from typing import Any
 
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
 from ...domain.records import LocalGroup, LocalUser
 from .marshal import native_error
 from .process_exec import run_process as _run_process
@@ -30,8 +31,8 @@ from .process_exec import run_process as _run_process
 #: which would otherwise inject a second chpasswd entry or be parsed as a shadow-utils option.
 _NAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}\$?")
 
-#: Default seconds a shadow-utils command may run before it is killed (guards a wedged /etc/passwd lock);
-#: overridable per call via each verb's ``timeout`` parameter.
+#: Default seconds a verb's shadow-utils commands may run, together, before the running one is killed
+#: (guards a wedged /etc/passwd lock); overridable per call via each verb's ``timeout`` parameter.
 _DEFAULT_TIMEOUT = 30.0
 
 
@@ -88,6 +89,18 @@ def _read_group(name: str) -> LocalGroup:
     return LocalGroup(name=str(entry.gr_name), sid=str(entry.gr_gid), description="")
 
 
+class _Deadline:
+    """A verb's overall time limit: ``limit`` seconds from creation, on the monotonic clock."""
+
+    def __init__(self, limit: float) -> None:
+        self.limit = limit
+        self._ends_at = time.monotonic() + limit
+
+    def remaining(self) -> float:
+        """Seconds left before the deadline (zero or negative once it has passed)."""
+        return self._ends_at - time.monotonic()
+
+
 class PosixLocalAccountController:
     """Mutating local-account control over shadow-utils (Linux, **mutating**; needs root).
 
@@ -117,42 +130,62 @@ class PosixLocalAccountController:
         if comment:
             argv += ["--comment", comment]
         argv.append(name)
-        self._run(argv, timeout=timeout)
+        # One deadline for the verb: each command gets what is left of ``timeout``, so useradd +
+        # chpasswd + usermod together never run longer than the caller asked for.
+        deadline = _Deadline(timeout)
+        self._run(argv, deadline=deadline)
         if password:
-            self._run(["chpasswd"], input_text=f"{name}:{password}\n", timeout=timeout)
+            self._run(["chpasswd"], input_text=f"{name}:{password}\n", deadline=deadline)
         if disabled:
-            self._run(["usermod", "--lock", name], timeout=timeout)
+            self._run(["usermod", "--lock", name], deadline=deadline)
         return _read_user(name, enabled=not disabled)
 
     def remove_user(self, name: str, *, timeout: float = _DEFAULT_TIMEOUT) -> None:
         """Delete a user (``userdel``; the home directory is left in place)."""
-        self._run(["userdel", _valid_name(name)], timeout=timeout)
+        self._run(["userdel", _valid_name(name)], deadline=_Deadline(timeout))
 
     def set_user_enabled(self, name: str, *, enabled: bool, timeout: float = _DEFAULT_TIMEOUT) -> LocalUser:
         """Unlock (``usermod --unlock``) or lock (``--lock``) a user's password; return its state."""
-        self._run(["usermod", "--unlock" if enabled else "--lock", _valid_name(name)], timeout=timeout)
+        self._run(["usermod", "--unlock" if enabled else "--lock", _valid_name(name)], deadline=_Deadline(timeout))
         return _read_user(name, enabled=enabled)
 
     def new_group(self, name: str, *, description: str = "", timeout: float = _DEFAULT_TIMEOUT) -> LocalGroup:
         """Create a group (``groupadd``). POSIX groups have no description, so ``description`` is ignored."""
-        self._run(["groupadd", _valid_name(name)], timeout=timeout)
+        self._run(["groupadd", _valid_name(name)], deadline=_Deadline(timeout))
         return _read_group(name)
 
     def remove_group(self, name: str, *, timeout: float = _DEFAULT_TIMEOUT) -> None:
         """Delete a group (``groupdel``)."""
-        self._run(["groupdel", _valid_name(name)], timeout=timeout)
+        self._run(["groupdel", _valid_name(name)], deadline=_Deadline(timeout))
 
     def add_group_member(self, group: str, member: str, *, timeout: float = _DEFAULT_TIMEOUT) -> None:
         """Add a user to a group (``gpasswd --add``)."""
-        self._run(["gpasswd", "--add", _valid_name(member), _valid_name(group)], timeout=timeout)
+        self._run(["gpasswd", "--add", _valid_name(member), _valid_name(group)], deadline=_Deadline(timeout))
 
     def remove_group_member(self, group: str, member: str, *, timeout: float = _DEFAULT_TIMEOUT) -> None:
         """Remove a user from a group (``gpasswd --delete``)."""
-        self._run(["gpasswd", "--delete", _valid_name(member), _valid_name(group)], timeout=timeout)
+        self._run(["gpasswd", "--delete", _valid_name(member), _valid_name(group)], deadline=_Deadline(timeout))
 
-    def _run(self, argv: list[str], *, input_text: str | None = None, timeout: float) -> None:
-        """Run a shadow-utils command shell-free (bounded); raise NativeCallError on nonzero exit or timeout."""
-        result = _run_process(argv, input_text=input_text, timeout=timeout)
+    def _run(self, argv: list[str], *, input_text: str | None = None, deadline: _Deadline) -> None:
+        """Run a shadow-utils command shell-free within what is left of ``deadline``.
+
+        Raises:
+            OperationTimeoutError: The verb's deadline passed, before this command or during it
+                (it is killed); ``.timeout`` is the verb's whole limit.
+            NativeCallError: The command exited non-zero.
+        """
+        remaining = deadline.remaining()
+        if remaining <= 0:
+            raise OperationTimeoutError(
+                f"{argv[0]} was not started: the verb's {deadline.limit}s timeout had passed", timeout=deadline.limit
+            )
+        try:
+            result = _run_process(argv, input_text=input_text, timeout=remaining)
+        except OperationTimeoutError as exc:
+            raise OperationTimeoutError(
+                f"{argv[0]} was killed: the verb's {deadline.limit}s timeout passed while it ran",
+                timeout=deadline.limit,
+            ) from exc
         if result.exit_code != 0:
             detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.exit_code}"
             raise NativeCallError(f"{argv[0]} failed: {detail}")

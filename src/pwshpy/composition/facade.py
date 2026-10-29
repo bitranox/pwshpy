@@ -1216,7 +1216,7 @@ class Ps:
     ) -> LocalUser:
         """Create a local user; return the created record (native, **mutating**).
 
-        On Linux the shadow-utils command is bounded by ``timeout`` seconds.
+        On Linux ``timeout`` bounds all of its shadow-utils commands together.
 
         Win32 ``NetUserAdd`` on Windows; ``useradd`` (then ``chpasswd`` and ``usermod --lock``
         as needed) on Linux, which needs root.
@@ -1228,15 +1228,16 @@ class Ps:
                 or ``description`` when ``full_name`` is empty.
             description: The account description (on Linux see ``full_name``).
             disabled: Create the account disabled (on Linux its password is locked).
-            timeout: Linux: seconds each shadow-utils command may run before it is killed
-                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+            timeout: Linux: seconds the verb's shadow-utils commands may run together; the one
+                running when it passes is killed (default 30.0). Ignored on Windows, where the
+                win32net call is synchronous.
 
         Returns:
             The created :class:`LocalUser`: on Windows read back, on Linux read from ``pwd``
             with ``enabled`` set from ``disabled`` and an empty ``description``.
 
         Raises:
-            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+            OperationTimeoutError: Linux: the shadow-utils commands outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
             NativeCallError: The account could not be created; on Linux also a name that is not a
                 valid POSIX account name (checked before any command runs), or a CR, LF (or, in the
@@ -1262,11 +1263,12 @@ class Ps:
 
         Args:
             name: The account name.
-            timeout: Linux: seconds each shadow-utils command may run before it is killed
-                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+            timeout: Linux: seconds the verb's shadow-utils commands may run together; the one
+                running when it passes is killed (default 30.0). Ignored on Windows, where the
+                win32net call is synchronous.
 
         Raises:
-            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+            OperationTimeoutError: Linux: the shadow-utils commands outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
             NativeCallError: The account could not be deleted; on Linux also a name that is not a
                 valid POSIX account name (checked before any command runs).
@@ -1284,15 +1286,16 @@ class Ps:
 
         Args:
             name: The account name.
-            timeout: Linux: seconds each shadow-utils command may run before it is killed
-                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+            timeout: Linux: seconds the verb's shadow-utils commands may run together; the one
+                running when it passes is killed (default 30.0). Ignored on Windows, where the
+                win32net call is synchronous.
 
         Returns:
             The :class:`LocalUser`: on Windows read back, on Linux read from ``pwd`` with
             ``enabled`` set to the state just applied.
 
         Raises:
-            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+            OperationTimeoutError: Linux: the shadow-utils commands outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
             NativeCallError: The change was refused or the account does not exist; on Linux also a
                 name that is not a valid POSIX account name (checked before any command runs).
@@ -1310,15 +1313,16 @@ class Ps:
 
         Args:
             name: The account name.
-            timeout: Linux: seconds each shadow-utils command may run before it is killed
-                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+            timeout: Linux: seconds the verb's shadow-utils commands may run together; the one
+                running when it passes is killed (default 30.0). Ignored on Windows, where the
+                win32net call is synchronous.
 
         Returns:
             The :class:`LocalUser`: on Windows read back, on Linux read from ``pwd`` with
             ``enabled`` set to the state just applied.
 
         Raises:
-            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+            OperationTimeoutError: Linux: the shadow-utils commands outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
             NativeCallError: The change was refused or the account does not exist; on Linux also a
                 name that is not a valid POSIX account name (checked before any command runs).
@@ -1337,15 +1341,16 @@ class Ps:
         Args:
             name: The group name.
             description: The group description; ignored on Linux, where groups have none.
-            timeout: Linux: seconds each shadow-utils command may run before it is killed
-                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+            timeout: Linux: seconds the verb's shadow-utils commands may run together; the one
+                running when it passes is killed (default 30.0). Ignored on Windows, where the
+                win32net call is synchronous.
 
         Returns:
             The created :class:`LocalGroup` (on Linux read from ``grp``, with an empty
             ``description``).
 
         Raises:
-            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+            OperationTimeoutError: Linux: the shadow-utils commands outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
             NativeCallError: The group could not be created; on Linux also a name that is not a
                 valid POSIX account name (checked before any command runs).
@@ -1361,11 +1366,12 @@ class Ps:
 
         Args:
             name: The group name.
-            timeout: Linux: seconds each shadow-utils command may run before it is killed
-                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+            timeout: Linux: seconds the verb's shadow-utils commands may run together; the one
+                running when it passes is killed (default 30.0). Ignored on Windows, where the
+                win32net call is synchronous.
 
         Raises:
-            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+            OperationTimeoutError: Linux: the shadow-utils commands outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
             NativeCallError: The group could not be deleted; on Linux also a name that is not a
                 valid POSIX account name (checked before any command runs).
@@ -1384,11 +1390,12 @@ class Ps:
         Args:
             group: The local group to add to.
             member: The user (or, on Windows, group) name to add.
-            timeout: Linux: seconds each shadow-utils command may run before it is killed
-                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+            timeout: Linux: seconds the verb's shadow-utils commands may run together; the one
+                running when it passes is killed (default 30.0). Ignored on Windows, where the
+                win32net call is synchronous.
 
         Raises:
-            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+            OperationTimeoutError: Linux: the shadow-utils commands outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
             NativeCallError: The member could not be added; on Linux also a name that is not a valid
                 POSIX account name (checked before any command runs).
@@ -1407,11 +1414,12 @@ class Ps:
         Args:
             group: The local group to remove from.
             member: The member name to remove.
-            timeout: Linux: seconds each shadow-utils command may run before it is killed
-                (default 30.0). Ignored on Windows, where the win32net call is synchronous.
+            timeout: Linux: seconds the verb's shadow-utils commands may run together; the one
+                running when it passes is killed (default 30.0). Ignored on Windows, where the
+                win32net call is synchronous.
 
         Raises:
-            OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
+            OperationTimeoutError: Linux: the shadow-utils commands outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
             NativeCallError: The member could not be removed; on Linux also a name that is not a
                 valid POSIX account name (checked before any command runs).

@@ -74,7 +74,10 @@ def test_nonzero_exit_raises() -> None:
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(("kwargs", "expected"), [({}, 30.0), ({"timeout": 5.0}, 5.0)])
 def test_timeout_is_forwarded(kwargs: dict[str, float], expected: float) -> None:
-    """The per-verb ``timeout`` (default 30s) reaches run_process, so a wedged command is bounded."""
+    """The per-verb ``timeout`` (default 30s) bounds run_process, so a wedged command is bounded.
+
+    The command gets what is left of the verb's one deadline, so a hair under ``timeout``.
+    """
     seen: list[float | None] = []
 
     def fake(argv: list[str], *, input_text: str | None = None, timeout: float | None = None) -> ProcessResult:
@@ -84,7 +87,9 @@ def test_timeout_is_forwarded(kwargs: dict[str, float], expected: float) -> None
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(pac, "_run_process", fake)
         PosixLocalAccountController().remove_group("devs", **kwargs)
-    assert seen == [expected]
+    assert len(seen) == 1
+    assert seen[0] is not None
+    assert expected - 1.0 < seen[0] <= expected
 
 
 @pytest.mark.os_agnostic

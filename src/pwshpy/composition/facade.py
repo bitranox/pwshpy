@@ -1531,6 +1531,21 @@ class Ps:
         extra or the .NET 10 / PowerShell 7.6 host is absent, and
         :class:`~pwshpy.domain.errors.PowerShellError` on a script error or timeout.
 
+        Args:
+            script: The PowerShell source to run. It executes with the caller's privileges, so
+                never build it from untrusted input (use :meth:`cmdlet` for data).
+            timeout: Seconds before the host stops (cancels) the pipeline; None (default) waits
+                without a limit.
+
+        Returns:
+            One marshaled item per output object.
+
+        Raises:
+            FeatureUnavailableError: The ``[full]`` extra or the .NET 10 / PowerShell 7.6 host is
+                absent.
+            PowerShellError: The script wrote to the error stream (the first error is the
+                message), raised a terminating error, or exceeded ``timeout``.
+
         Example:
             >>> build_ps().run("$PSVersionTable.PSVersion.Major")  # doctest: +SKIP
             [7]
@@ -1548,6 +1563,23 @@ class Ps:
         (output plus the error/warning/verbose/debug/information streams); unlike
         :meth:`run`, it does NOT raise on the error stream.
 
+        Args:
+            name: The cmdlet or command name (``"Get-Service"``).
+            *args: Positional arguments, bound in order with ``AddArgument``.
+            timeout: Seconds before the host stops (cancels) the pipeline; None (default) waits
+                without a limit.
+            **params: Named parameters (PowerShell's own names), bound with ``AddParameter``; a
+                ``bool`` binds to a ``[switch]`` and a list becomes an array.
+
+        Returns:
+            The :class:`~pwshpy.domain.records.PSInvocationResult`; check its ``had_errors`` and
+            ``errors``.
+
+        Raises:
+            FeatureUnavailableError: The ``[full]`` extra or the .NET 10 / PowerShell 7.6 host is
+                absent.
+            PowerShellError: The invocation raised a terminating error or exceeded ``timeout``.
+
         Example:
             >>> callable(build_ps().cmdlet)
             True
@@ -1561,6 +1593,18 @@ class Ps:
         from the SDK's ``CommandInfo`` - real discoverability instead of guessing at
         PowerShell's inconsistent cmdlet surface.  Pairs with :meth:`cmdlet`: read the
         parameter names here, bind them safely there.
+
+        Args:
+            name: The command name; it is bound as a script parameter, never interpolated.
+
+        Returns:
+            A :class:`CommandInfo`: name, command type, module and each parameter's name, .NET
+            type, mandatory flag and aliases.
+
+        Raises:
+            FeatureUnavailableError: The ``[full]`` extra or the .NET 10 / PowerShell 7.6 host is
+                absent.
+            PowerShellError: The command does not exist, or ``Get-Command`` failed.
 
         Example:
             >>> callable(build_ps().get_command)
@@ -1578,6 +1622,21 @@ class Ps:
     def get_ad_user(self, *, timeout: float | None = None, **params: Any) -> PSInvocationResult:
         """Query Active Directory users (.NET; Get-ADUser, needs [full] + the ActiveDirectory module).
 
+        A thin wrapper over :meth:`cmdlet`.
+
+        Args:
+            timeout: Seconds before the host stops (cancels) the pipeline; None (default) waits
+                without a limit.
+            **params: ``Get-ADUser``'s parameters by their PowerShell names, bound safely.
+
+        Returns:
+            The :class:`~pwshpy.domain.records.PSInvocationResult` of ``Get-ADUser``.
+
+        Raises:
+            FeatureUnavailableError: The ``[full]`` extra or the .NET 10 / PowerShell 7.6 host is
+                absent.
+            PowerShellError: The invocation raised a terminating error or exceeded ``timeout``.
+
         Example:
             >>> callable(build_ps().get_ad_user)
             True
@@ -1586,6 +1645,21 @@ class Ps:
 
     def get_ad_group(self, *, timeout: float | None = None, **params: Any) -> PSInvocationResult:
         """Query Active Directory groups (.NET; Get-ADGroup, needs [full] + ActiveDirectory).
+
+        A thin wrapper over :meth:`cmdlet`.
+
+        Args:
+            timeout: Seconds before the host stops (cancels) the pipeline; None (default) waits
+                without a limit.
+            **params: ``Get-ADGroup``'s parameters by their PowerShell names, bound safely.
+
+        Returns:
+            The :class:`~pwshpy.domain.records.PSInvocationResult` of ``Get-ADGroup``.
+
+        Raises:
+            FeatureUnavailableError: The ``[full]`` extra or the .NET 10 / PowerShell 7.6 host is
+                absent.
+            PowerShellError: The invocation raised a terminating error or exceeded ``timeout``.
 
         Example:
             >>> callable(build_ps().get_ad_group)
@@ -1596,6 +1670,21 @@ class Ps:
     def get_ad_computer(self, *, timeout: float | None = None, **params: Any) -> PSInvocationResult:
         """Query Active Directory computers (.NET; Get-ADComputer, needs [full] + ActiveDirectory).
 
+        A thin wrapper over :meth:`cmdlet`.
+
+        Args:
+            timeout: Seconds before the host stops (cancels) the pipeline; None (default) waits
+                without a limit.
+            **params: ``Get-ADComputer``'s parameters by their PowerShell names, bound safely.
+
+        Returns:
+            The :class:`~pwshpy.domain.records.PSInvocationResult` of ``Get-ADComputer``.
+
+        Raises:
+            FeatureUnavailableError: The ``[full]`` extra or the .NET 10 / PowerShell 7.6 host is
+                absent.
+            PowerShellError: The invocation raised a terminating error or exceeded ``timeout``.
+
         Example:
             >>> callable(build_ps().get_ad_computer)
             True
@@ -1604,6 +1693,21 @@ class Ps:
 
     def get_mailbox(self, *, timeout: float | None = None, **params: Any) -> PSInvocationResult:
         """Query Exchange mailboxes (.NET; Get-Mailbox, needs [full] + the Exchange module).
+
+        A thin wrapper over :meth:`cmdlet`.
+
+        Args:
+            timeout: Seconds before the host stops (cancels) the pipeline; None (default) waits
+                without a limit.
+            **params: ``Get-Mailbox``'s parameters by their PowerShell names, bound safely.
+
+        Returns:
+            The :class:`~pwshpy.domain.records.PSInvocationResult` of ``Get-Mailbox``.
+
+        Raises:
+            FeatureUnavailableError: The ``[full]`` extra or the .NET 10 / PowerShell 7.6 host is
+                absent.
+            PowerShellError: The invocation raised a terminating error or exceeded ``timeout``.
 
         Example:
             >>> callable(build_ps().get_mailbox)
@@ -1614,6 +1718,21 @@ class Ps:
     def get_az_vm(self, *, timeout: float | None = None, **params: Any) -> PSInvocationResult:
         """Query Azure virtual machines (.NET; Get-AzVM, needs [full] + the Az.Compute module).
 
+        A thin wrapper over :meth:`cmdlet`.
+
+        Args:
+            timeout: Seconds before the host stops (cancels) the pipeline; None (default) waits
+                without a limit.
+            **params: ``Get-AzVM``'s parameters by their PowerShell names, bound safely.
+
+        Returns:
+            The :class:`~pwshpy.domain.records.PSInvocationResult` of ``Get-AzVM``.
+
+        Raises:
+            FeatureUnavailableError: The ``[full]`` extra or the .NET 10 / PowerShell 7.6 host is
+                absent.
+            PowerShellError: The invocation raised a terminating error or exceeded ``timeout``.
+
         Example:
             >>> callable(build_ps().get_az_vm)
             True
@@ -1622,6 +1741,21 @@ class Ps:
 
     def get_az_resource_group(self, *, timeout: float | None = None, **params: Any) -> PSInvocationResult:
         """Query Azure resource groups (.NET; Get-AzResourceGroup, needs [full] + Az.Resources).
+
+        A thin wrapper over :meth:`cmdlet`.
+
+        Args:
+            timeout: Seconds before the host stops (cancels) the pipeline; None (default) waits
+                without a limit.
+            **params: ``Get-AzResourceGroup``'s parameters by their PowerShell names, bound safely.
+
+        Returns:
+            The :class:`~pwshpy.domain.records.PSInvocationResult` of ``Get-AzResourceGroup``.
+
+        Raises:
+            FeatureUnavailableError: The ``[full]`` extra or the .NET 10 / PowerShell 7.6 host is
+                absent.
+            PowerShellError: The invocation raised a terminating error or exceeded ``timeout``.
 
         Example:
             >>> callable(build_ps().get_az_resource_group)

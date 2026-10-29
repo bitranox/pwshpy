@@ -1236,9 +1236,9 @@ class Ps:
         Raises:
             OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
-            NativeCallError: The account could not be created; on Linux also a name that is not a valid POSIX account name (checked before
-                any command runs), or a CR, LF (or, in
-                the comment, a colon) that would corrupt the account entry.
+            NativeCallError: The account could not be created; on Linux also a name that is not a
+                valid POSIX account name (checked before any command runs), or a CR, LF (or, in the
+                comment, a colon) that would corrupt the account entry.
 
         Example:
             >>> callable(build_ps().new_local_user)
@@ -1266,8 +1266,8 @@ class Ps:
         Raises:
             OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
-            NativeCallError: The account could not be deleted; on Linux also a name that is not a valid POSIX account name (checked before
-                any command runs).
+            NativeCallError: The account could not be deleted; on Linux also a name that is not a
+                valid POSIX account name (checked before any command runs).
 
         Example:
             >>> callable(build_ps().remove_local_user)
@@ -1292,8 +1292,8 @@ class Ps:
         Raises:
             OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
-            NativeCallError: The change was refused or the account does not exist; on Linux also a name that is not a valid POSIX account name (checked before
-                any command runs).
+            NativeCallError: The change was refused or the account does not exist; on Linux also a
+                name that is not a valid POSIX account name (checked before any command runs).
 
         Example:
             >>> callable(build_ps().enable_local_user)
@@ -1318,8 +1318,8 @@ class Ps:
         Raises:
             OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
-            NativeCallError: The change was refused or the account does not exist; on Linux also a name that is not a valid POSIX account name (checked before
-                any command runs).
+            NativeCallError: The change was refused or the account does not exist; on Linux also a
+                name that is not a valid POSIX account name (checked before any command runs).
 
         Example:
             >>> callable(build_ps().disable_local_user)
@@ -1345,8 +1345,8 @@ class Ps:
         Raises:
             OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
-            NativeCallError: The group could not be created; on Linux also a name that is not a valid POSIX account name (checked before
-                any command runs).
+            NativeCallError: The group could not be created; on Linux also a name that is not a
+                valid POSIX account name (checked before any command runs).
 
         Example:
             >>> callable(build_ps().new_local_group)
@@ -1365,8 +1365,8 @@ class Ps:
         Raises:
             OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
-            NativeCallError: The group could not be deleted; on Linux also a name that is not a valid POSIX account name (checked before
-                any command runs).
+            NativeCallError: The group could not be deleted; on Linux also a name that is not a
+                valid POSIX account name (checked before any command runs).
 
         Example:
             >>> callable(build_ps().remove_local_group)
@@ -1388,8 +1388,8 @@ class Ps:
         Raises:
             OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
-            NativeCallError: The member could not be added; on Linux also a name that is not a valid POSIX account name (checked before
-                any command runs).
+            NativeCallError: The member could not be added; on Linux also a name that is not a valid
+                POSIX account name (checked before any command runs).
 
         Example:
             >>> callable(build_ps().add_local_group_member)
@@ -1411,8 +1411,8 @@ class Ps:
         Raises:
             OperationTimeoutError: Linux: a shadow-utils command outlived ``timeout``. A
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
-            NativeCallError: The member could not be removed; on Linux also a name that is not a valid POSIX account name (checked before
-                any command runs).
+            NativeCallError: The member could not be removed; on Linux also a name that is not a
+                valid POSIX account name (checked before any command runs).
 
         Example:
             >>> callable(build_ps().remove_local_group_member)
@@ -1881,6 +1881,23 @@ class Ps:
         Default is UTF-8, **no BOM**, LF newlines - the same bytes on every OS and
         Python version, unlike PowerShell's version- and host-dependent ``Out-File``.
 
+        Args:
+            path: The file to write; an existing file is overwritten.
+            text: The text to write.
+            encoding: The text encoding (default ``"utf-8"``); a BOM is written only with
+                ``bom``, whichever spelling of a UTF-16/32 codec is named.
+            newline: The line terminator every CRLF, CR and LF is turned into (default ``"\\n"``;
+                ``"\\r\\n"`` for CRLF).
+            bom: Prepend the encoding's byte-order mark (default False).
+
+        Returns:
+            The :class:`~pathlib.Path` written.
+
+        Raises:
+            LookupError: ``encoding`` names no text encoding.
+            UnicodeEncodeError: The text cannot be written in ``encoding``.
+            OSError: The file cannot be written (not wrapped in a pwshpy error).
+
         Example:
             >>> callable(build_ps().write_text)
             True
@@ -1902,6 +1919,25 @@ class Ps:
         or unbounded source - e.g. ``ps.write_text_stream(path, sys.stdin)`` - stays flat
         in memory, the same discipline as :meth:`write_records`.
 
+        Args:
+            path: The file to write; it is opened (and truncated) before the first chunk.
+            chunks: The text pieces, consumed lazily; a CRLF split across two chunks still
+                becomes one line end.
+            encoding: The text encoding (default ``"utf-8"``); a BOM is written only with
+                ``bom``, whichever spelling of a UTF-16/32 codec is named.
+            newline: The line terminator every CRLF, CR and LF is turned into (default ``"\\n"``;
+                ``"\\r\\n"`` for CRLF).
+            bom: Prepend the encoding's byte-order mark (default False).
+
+        Returns:
+            The :class:`~pathlib.Path` written.
+
+        Raises:
+            LookupError: ``encoding`` names no text encoding.
+            UnicodeEncodeError: The text cannot be written in ``encoding``.
+            OSError: The file cannot be written (not wrapped in a pwshpy error); the chunks
+                before a failure stay written.
+
         Example:
             >>> callable(build_ps().write_text_stream)
             True
@@ -1915,6 +1951,19 @@ class Ps:
         holding a byte that is not valid UTF-8 is written with U+FFFD for that byte and logged as
         one WARNING per record (``pwshpy.adapters.native.fileio``); every record is written.
 
+        Args:
+            path: The file to write; an existing file is overwritten.
+            records: The records to serialize, consumed one at a time (a lazy pipeline is fine).
+            jsonl: One JSON object per line (default); False writes a single JSON array.
+
+        Returns:
+            The :class:`~pathlib.Path` written.
+
+        Raises:
+            orjson.JSONEncodeError: A record holds a value orjson cannot write (an integer
+                outside the 64-bit range); the records before it are written.
+            OSError: The file cannot be written (not wrapped in a pwshpy error).
+
         Example:
             >>> callable(build_ps().write_records)
             True
@@ -1926,6 +1975,18 @@ class Ps:
 
         ``recurse`` walks the whole tree, lazily.
 
+        Args:
+            path: The directory to list.
+            recurse: Walk every level below ``path``; False (default) lists its entries only.
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`FileSystemItem` records
+            (``size`` None for a directory).
+
+        Raises:
+            NativeCallError: The directory or an entry cannot be read (raised on iteration; a
+                :class:`NativeAccessDeniedError` when access is denied).
+
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().get_child_item("."), Pipeline)
@@ -1935,6 +1996,15 @@ class Ps:
 
     def get_item(self, path: str) -> FileSystemItem:
         """Return one file/directory as a typed record (native, portable; like Get-Item).
+
+        Args:
+            path: The file or directory.
+
+        Returns:
+            Its :class:`FileSystemItem` (``size`` None for a directory).
+
+        Raises:
+            NativeCallError: ``path`` does not exist or cannot be read.
 
         Example:
             >>> callable(build_ps().get_item)
@@ -1946,6 +2016,19 @@ class Ps:
         """Return a file's whole text content (native, portable; like ``Get-Content -Raw``).
 
         Materializes the file; for a large/unbounded file use :meth:`get_content_lines`.
+
+        Args:
+            path: The file to read.
+            encoding: The text encoding (default ``"utf-8"``).
+
+        Returns:
+            The whole text, newlines translated to ``"\\n"`` (Python's universal newlines).
+
+        Raises:
+            NativeCallError: The file cannot be read (a :class:`NativeAccessDeniedError` when
+                access is denied).
+            LookupError: ``encoding`` names no codec.
+            UnicodeDecodeError: The file is not valid ``encoding``.
 
         Example:
             >>> callable(build_ps().get_content)
@@ -1959,6 +2042,22 @@ class Ps:
         Streams one line at a time, so ``ps.get_content_lines(huge).take(10)`` reads only
         the first lines - the same laziness as the record pipelines.
 
+        The file is opened by this call, so a missing or unreadable path raises here, not on
+        iteration; it is closed when the lines run out.
+
+        Args:
+            path: The file to read.
+            encoding: The text encoding (default ``"utf-8"``).
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of the lines, each with its line
+            end (``"\\n"`` after Python's universal-newline translation).
+
+        Raises:
+            NativeCallError: The file cannot be opened, or a read fails during iteration.
+            LookupError: ``encoding`` names no codec.
+            UnicodeDecodeError: A line is not valid ``encoding`` (raised on iteration).
+
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().get_content_lines(__file__), Pipeline)
@@ -1969,6 +2068,13 @@ class Ps:
     def test_path(self, path: str) -> bool:
         """Return whether ``path`` exists (native, portable; like Test-Path).
 
+        Args:
+            path: The path to check.
+
+        Returns:
+            True when it exists (a broken symlink reads False, as :meth:`pathlib.Path.exists`
+            follows links).
+
         Example:
             >>> isinstance(build_ps().test_path("."), bool)
             True
@@ -1977,6 +2083,21 @@ class Ps:
 
     def new_item(self, path: str, *, item_type: FileItemType = FileItemType.FILE) -> FileSystemItem:
         """Create a file or directory (per ``item_type``); return it (native, **mutating**).
+
+        Missing parent directories are created. An existing directory is kept; an existing
+        file is kept too, with its modification time set to now.
+
+        Args:
+            path: The file or directory to create.
+            item_type: ``FileItemType.FILE`` (default, an empty file) or
+                ``FileItemType.DIRECTORY``.
+
+        Returns:
+            The created item's :class:`FileSystemItem`.
+
+        Raises:
+            NativeCallError: The item could not be created (a :class:`NativeAccessDeniedError`
+                when access is denied).
 
         Example:
             >>> callable(build_ps().new_item)
@@ -1987,6 +2108,19 @@ class Ps:
     def copy_item(self, source: str, destination: str, *, recurse: bool = False) -> None:
         """Copy a file, or a directory tree when ``recurse`` (native, **mutating**; like Copy-Item).
 
+        A file is copied with its metadata (``shutil.copy2``); a directory with ``recurse`` is
+        merged into ``destination`` (``shutil.copytree`` with ``dirs_exist_ok``).
+
+        Args:
+            source: The file or directory to copy.
+            destination: The target path (for a file, an existing directory receives it).
+            recurse: Copy a directory and everything below it; without it a directory is
+                refused.
+
+        Raises:
+            NativeCallError: The copy failed, including a directory ``source`` without
+                ``recurse``.
+
         Example:
             >>> callable(build_ps().copy_item)
             True
@@ -1996,6 +2130,14 @@ class Ps:
     def move_item(self, source: str, destination: str) -> None:
         """Move or rename a file/directory (native, **mutating**; like Move-Item).
 
+        Args:
+            source: The file or directory to move.
+            destination: The new path; an existing directory receives ``source`` inside it
+                (``shutil.move``).
+
+        Raises:
+            NativeCallError: The move failed.
+
         Example:
             >>> callable(build_ps().move_item)
             True
@@ -2004,6 +2146,15 @@ class Ps:
 
     def remove_item(self, path: str, *, recurse: bool = False) -> None:
         """Delete a file, or a directory (``recurse`` for its contents) (native, **mutating**).
+
+        Args:
+            path: The file or directory to delete.
+            recurse: Delete a directory with everything in it; without it only an empty
+                directory is deleted.
+
+        Raises:
+            NativeCallError: The deletion failed (a missing path, a non-empty directory without
+                ``recurse``, or a :class:`NativeAccessDeniedError` when access is denied).
 
         Example:
             >>> callable(build_ps().remove_item)
@@ -2022,6 +2173,25 @@ class Ps:
     ) -> WebResponse:
         """Perform an HTTP request; return a typed WebResponse (native, portable; like Invoke-WebRequest).
 
+        A 4xx or 5xx answer is returned with its status and body, not raised.
+
+        Args:
+            url: An ``http://`` or ``https://`` URL; any other scheme is refused.
+            method: The HTTP method (default ``"GET"``).
+            headers: Request headers; None (default) sends none of the caller's own.
+            body: The request body, sent UTF-8 encoded; None (default) sends none.
+            timeout: Seconds for the connection and each blocking read (default 30.0), passed
+                to ``urllib``; running out is a ``NativeCallError``, not an
+                ``OperationTimeoutError``.
+
+        Returns:
+            A :class:`WebResponse` with ``status_code``, ``headers`` and ``text`` (the body
+            decoded as UTF-8, undecodable bytes replaced).
+
+        Raises:
+            NativeCallError: The scheme is not http/https, or the request failed below HTTP
+                (DNS, connection, TLS, timeout).
+
         Example:
             >>> callable(build_ps().invoke_web_request)
             True
@@ -2039,6 +2209,29 @@ class Ps:
     ) -> Any:
         """Perform an HTTP request; return the parsed JSON (native, portable; like Invoke-RestMethod).
 
+        Built on :meth:`invoke_web_request`, so a 4xx or 5xx answer is not raised: its body is
+        parsed like any other.
+
+        Args:
+            url: An ``http://`` or ``https://`` URL; any other scheme is refused.
+            method: The HTTP method (default ``"GET"``).
+            headers: Request headers; None (default) sends none of the caller's own.
+            json_body: A value serialized as the JSON request body, with
+                ``Content-Type: application/json`` unless ``headers`` sets one; None (default)
+                sends no body.
+            timeout: Seconds for the connection and each blocking read (default 30.0), passed
+                to ``urllib``; running out is a ``NativeCallError``, not an
+                ``OperationTimeoutError``.
+
+        Returns:
+            The response body parsed as JSON.
+
+        Raises:
+            NativeCallError: The scheme is not http/https, the request failed below HTTP, or
+                the response body is not JSON.
+            TypeError: ``json_body`` holds a value orjson cannot serialize
+                (``orjson.JSONEncodeError``).
+
         Example:
             >>> callable(build_ps().invoke_rest_method)
             True
@@ -2051,6 +2244,21 @@ class Ps:
         Unlike :meth:`invoke_web_request` (which returns the body as data), this copies the
         response to a file in fixed-size chunks, so a huge download never buffers in memory.
 
+        Args:
+            url: An ``http://`` or ``https://`` URL; any other scheme is refused.
+            dest: The file to write; an existing file is overwritten.
+            chunk_size: Bytes copied per read (default 65536).
+            timeout: Seconds for the connection and each blocking read (default 30.0), passed
+                to ``urllib``; running out is a ``NativeCallError``, not an
+                ``OperationTimeoutError``.
+
+        Returns:
+            ``dest`` as a :class:`~pathlib.Path`.
+
+        Raises:
+            NativeCallError: The scheme is not http/https, the server answered 4xx or 5xx, or
+                the transfer failed; ``dest`` is deleted in the last two cases.
+
         Example:
             >>> callable(build_ps().download_file)
             True
@@ -2059,6 +2267,17 @@ class Ps:
 
     def stop_process(self, pid: int, *, force: bool = False) -> None:
         """Terminate a process by PID (``force`` hard-kills) (native, portable, **mutating**; like Stop-Process).
+
+        Returns once the signal is sent; use :meth:`wait_process` to wait for the exit.
+
+        Args:
+            pid: The process id.
+            force: Kill the process (``SIGKILL`` on POSIX) instead of asking it to end
+                (``SIGTERM``); on Windows psutil terminates the process either way.
+
+        Raises:
+            NativeCallError: No process has ``pid``, or it could not be stopped (a
+                :class:`NativeAccessDeniedError` when access is denied).
 
         Example:
             >>> callable(build_ps().stop_process)
@@ -2069,6 +2288,21 @@ class Ps:
     def wait_process(self, pid: int, *, timeout: float | None = None) -> int | None:
         """Wait for a process to exit; return its exit code (native, portable; like Wait-Process).
 
+        A PID that is already gone counts as exited, so calling this right after
+        :meth:`stop_process` cannot fail on the race.
+
+        Args:
+            pid: The process id.
+            timeout: Seconds to wait; None (default) waits without a limit.
+
+        Returns:
+            The exit code, or None when the process was already gone, vanished during the wait,
+            or psutil cannot report its code.
+
+        Raises:
+            OperationTimeoutError: The process was still running after ``timeout`` seconds;
+                ``.timeout`` holds the limit.
+
         Example:
             >>> callable(build_ps().wait_process)
             True
@@ -2077,6 +2311,16 @@ class Ps:
 
     def restart_computer(self, *, delay_seconds: int = 0, force: bool = True) -> None:
         """Restart the computer (native, Windows, **destructive**; like Restart-Computer).
+
+        Runs Windows ``shutdown /r``.
+
+        Args:
+            delay_seconds: Seconds before it happens, passed as ``shutdown /t`` (default 0).
+            force: Close running applications without warning (``shutdown /f``; default True).
+
+        Raises:
+            PlatformUnsupportedError: Not Windows (use ``sudo`` on POSIX).
+            NativeCallError: ``shutdown`` could not be started or exited nonzero.
 
         Example:
             >>> callable(build_ps().restart_computer)
@@ -2087,6 +2331,16 @@ class Ps:
     def stop_computer(self, *, delay_seconds: int = 0, force: bool = True) -> None:
         """Shut the computer down (native, Windows, **destructive**; like Stop-Computer).
 
+        Runs Windows ``shutdown /s``.
+
+        Args:
+            delay_seconds: Seconds before it happens, passed as ``shutdown /t`` (default 0).
+            force: Close running applications without warning (``shutdown /f``; default True).
+
+        Raises:
+            PlatformUnsupportedError: Not Windows (use ``sudo`` on POSIX).
+            NativeCallError: ``shutdown`` could not be started or exited nonzero.
+
         Example:
             >>> callable(build_ps().stop_computer)
             True
@@ -2095,6 +2349,16 @@ class Ps:
 
     def get_hotfix(self) -> Pipeline[Hotfix]:
         """Return a lazy pipeline over installed Windows updates (native, Windows; like Get-Hotfix).
+
+        Read from ``Win32_QuickFixEngineering`` through the CIM source; nothing is queried until
+        the pipeline is iterated, so every error below is raised then.
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`Hotfix` records.
+
+        Raises:
+            PlatformUnsupportedError: pywin32 is not installed (any OS but Windows).
+            NativeCallError: The WMI query failed.
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
@@ -2178,6 +2442,13 @@ class Ps:
 
     def get_computer_info(self) -> ComputerInfo:
         """Return a summary of the local computer (native, portable; like Get-ComputerInfo).
+
+        Hostname, OS, architecture, CPU count and memory come from the stdlib and psutil. On
+        Windows the manufacturer and model are read from ``Win32_ComputerSystem``, best effort:
+        a WMI failure leaves them empty instead of failing the call.
+
+        Returns:
+            A :class:`ComputerInfo` (``manufacturer`` and ``model`` empty off Windows).
 
         Example:
             >>> from pwshpy.domain.records import ComputerInfo
@@ -2357,6 +2628,14 @@ class Ps:
         :class:`~pwshpy.domain.records.Credential` masks its secret in repr/JSON
         (retrieve it with ``.secret.get_secret_value()``).
 
+        Args:
+            username: The account name; None (default) asks for it on stdin (``Username: ``).
+            prompt: The password prompt text (default ``"Password: "``).
+            target: A label stored on the record (e.g. the resource it unlocks); default ``""``.
+
+        Returns:
+            A :class:`~pwshpy.domain.records.Credential` with the secret masked.
+
         Example:
             >>> callable(build_ps().get_credential)
             True
@@ -2370,6 +2649,22 @@ class Ps:
         Linux. The unattended-friendly alternative to a DPAPI file (which will not
         decrypt under another account).
 
+        A credential already stored under ``target`` is overwritten.
+
+        Args:
+            target: The name the credential is stored and looked up under.
+            username: The account name stored with it.
+            secret: The password or token; it is masked on the returned record.
+
+        Returns:
+            The stored :class:`~pwshpy.domain.records.Credential` (built from the arguments).
+
+        Raises:
+            PlatformUnsupportedError: No credential vault on this OS (macOS, which has no
+                Secret Service).
+            NativeCallError: The vault call failed; on Linux also no session D-Bus, no Secret
+                Service, no default collection, or a locked keyring (no headless unlock prompt).
+
         Example:
             >>> callable(build_ps().save_credential)
             True
@@ -2379,6 +2674,19 @@ class Ps:
     def load_credential(self, target: str) -> Credential | None:
         """Read a stored credential by target; ``None`` if absent (native, portable).
 
+        Args:
+            target: The name the credential was stored under.
+
+        Returns:
+            The :class:`~pwshpy.domain.records.Credential`, or None when nothing is stored under
+            ``target``.
+
+        Raises:
+            PlatformUnsupportedError: No credential vault on this OS (macOS, which has no
+                Secret Service).
+            NativeCallError: The vault call failed; on Linux also no session D-Bus, no Secret
+                Service, no default collection, or a locked keyring (no headless unlock prompt).
+
         Example:
             >>> callable(build_ps().load_credential)
             True
@@ -2387,6 +2695,19 @@ class Ps:
 
     def delete_credential(self, target: str) -> None:
         """Delete a stored credential by target (native, portable, **mutating**).
+
+        On Linux every keyring item pwshpy stored under ``target`` is deleted, and nothing
+        stored is not an error.
+
+        Args:
+            target: The name the credential was stored under.
+
+        Raises:
+            PlatformUnsupportedError: No credential vault on this OS (macOS, which has no
+                Secret Service).
+            NativeCallError: The vault call failed; on Linux also no session D-Bus, no Secret
+                Service, no default collection, or a locked keyring (no headless unlock prompt);
+                on Windows also nothing stored under ``target``.
 
         Example:
             >>> callable(build_ps().delete_credential)
@@ -2399,6 +2720,12 @@ class Ps:
 
         Cross-platform: Windows token elevation, or POSIX ``euid == 0`` - none of
         PowerShell's ``WindowsPrincipal``/``IsInRole`` boilerplate.
+
+        Returns:
+            True when elevated: the token's elevation flag on Windows, ``euid == 0`` on POSIX.
+
+        Raises:
+            NativeCallError: Windows: the process token could not be read.
 
         Example:
             >>> isinstance(build_ps().is_elevated(), bool)
@@ -2436,6 +2763,21 @@ class Ps:
         working directory - no ``System32`` surprise); POSIX (Linux/macOS) asks for the
         password with ``sudo -v`` and then re-execs the command under ``sudo``. ``argv``
         is forwarded in both cases.
+
+        Args:
+            argv: The arguments for the relaunched program, after the executable. None, with
+                no ``executable`` either, reproduces this invocation (a frozen or console-script
+                executable, ``python -m package`` or ``python script.py``); with only
+                ``executable`` given, the current ``sys.argv`` is passed to it.
+            executable: The program to run elevated; None uses the detected one, or the current
+                interpreter when only ``argv`` is given.
+            cwd: The child's working directory; None (default) keeps the current one.
+            wait: Wait for the child and return its exit code (default); False returns None
+                right after the launch.
+
+        Returns:
+            ``0`` when already elevated (nothing is launched); the child's exit code when
+            ``wait``; None when not ``wait``.
 
         Raises:
             ElevationDeclinedError: The UAC prompt was refused, or sudo did not grant root.

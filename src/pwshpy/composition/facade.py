@@ -2803,8 +2803,8 @@ class Ps:
         A no-op returning ``0`` when already elevated. Windows uses UAC (and, unlike
         PowerShell's ``Start-Process -Verb RunAs``, the elevated child keeps the current
         working directory - no ``System32`` surprise); POSIX (Linux/macOS) asks for the
-        password with ``sudo -v`` and then re-execs the command under ``sudo``. ``argv``
-        is forwarded in both cases.
+        password with ``sudo -v`` and then re-execs the command under ``sudo -n``, which
+        never asks a second time. ``argv`` is forwarded in both cases.
 
         Args:
             argv: The arguments for the relaunched program, after the executable. None, with
@@ -2822,7 +2822,8 @@ class Ps:
             ``wait``; None when not ``wait``.
 
         Raises:
-            ElevationDeclinedError: The UAC prompt was refused, or sudo did not grant root.
+            ElevationDeclinedError: The UAC prompt was refused, or sudo did not grant root or
+                cached no credential for the command (sudoers ``timestamp_timeout=0``).
             NativeCallError: The relaunch could not be started.
 
         Example:

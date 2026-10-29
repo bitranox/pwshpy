@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,9 @@ def test_elevate_is_noop_when_already_elevated(monkeypatch: pytest.MonkeyPatch) 
 #: ``FAKE_SUDO_VALIDATE=interrupt`` plays a Ctrl+C at the prompt: a terminal sends
 #: SIGINT to the whole foreground group, so the caller receives it as well as sudo
 #: (measured with real sudo 1.9.15p5 in a pty on Ubuntu 24.04).
+#: ``FAKE_SUDO_CACHES=0`` plays sudoers ``timestamp_timeout=0``: ``-v`` still asks and
+#: succeeds, but caches nothing, so ``-n`` (never prompt) fails with sudo's exit 1 and a
+#: call without ``-n`` would prompt again - the stand-in refuses that second prompt.
 _FAKE_SUDO = """#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_SUDO_LOG"
 if [ "$1" = "-v" ]; then
@@ -74,11 +78,27 @@ if [ "$1" = "-v" ]; then
     fi
     exit "${FAKE_SUDO_VALIDATE:-0}"
 fi
+if [ "$1" = "-n" ]; then
+    shift
+    if [ "${FAKE_SUDO_CACHES:-1}" = "0" ]; then
+        echo "sudo: a password is required" >&2
+        exit 1
+    fi
+    if [ "$1" = "-v" ]; then
+        exit 0
+    fi
+    exec "$@"
+fi
+if [ "${FAKE_SUDO_CACHES:-1}" = "0" ]; then
+    exit 1
+fi
 exec "$@"
 """
 
 
-def _sudo_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, validate: int | str = 0) -> Path:
+def _sudo_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, validate: int | str = 0, caches: bool = True
+) -> Path:
     """Put the stand-in sudo first on PATH and return the log it writes."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -89,6 +109,7 @@ def _sudo_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, validate: 
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("FAKE_SUDO_LOG", str(log))
     monkeypatch.setenv("FAKE_SUDO_VALIDATE", str(validate))
+    monkeypatch.setenv("FAKE_SUDO_CACHES", "1" if caches else "0")
     return log
 
 
@@ -110,7 +131,46 @@ def test_sudo_asks_for_the_password_before_it_runs_the_command(tmp_path: Path, m
     code = _sudo_relaunch()(sys.executable, _exits_with(7), str(work), wait=True)
 
     assert code == 7
-    assert log.read_text(encoding="utf-8").splitlines() == ["-v", f"{sys.executable} {' '.join(_exits_with(7))}"]
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "-v",
+        "-n -v",
+        f"-n {sys.executable} {' '.join(_exits_with(7))}",
+    ]
+
+
+@pytest.mark.os_posix
+def test_a_sudo_that_caches_no_credential_is_declined_before_the_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sudoers ``timestamp_timeout=0``: ``-v`` succeeds but caches nothing, so the command would prompt again.
+
+    A refusal at that second prompt came back as the command's exit 1. The cache is checked
+    with ``sudo -n -v`` instead, and a sudo that kept nothing is a declined elevation.
+    """
+    from pwshpy import ElevationDeclinedError
+
+    log = _sudo_on_path(tmp_path, monkeypatch, caches=False)
+
+    with pytest.raises(ElevationDeclinedError, match="cached no credential"):
+        _sudo_relaunch()(sys.executable, _exits_with(0), str(tmp_path), wait=True)
+    assert log.read_text(encoding="utf-8").splitlines() == ["-v", "-n -v"], "the command ran or prompted again"
+
+
+@pytest.mark.os_posix
+def test_the_command_never_prompts_a_second_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The command runs under ``sudo -n``, so even a credential lost after the check cannot prompt again."""
+    log = _sudo_on_path(tmp_path, monkeypatch)
+
+    _sudo_relaunch()(sys.executable, _exits_with(0), str(tmp_path), wait=False)
+
+    lines: list[str] = []
+    for _ in range(50):  # the detached command logs itself as soon as the stand-in starts it
+        lines = log.read_text(encoding="utf-8").splitlines()
+        if len(lines) == 3:
+            break
+        time.sleep(0.05)
+    assert len(lines) == 3, lines
+    assert lines[2].startswith("-n "), lines
 
 
 @pytest.mark.os_posix

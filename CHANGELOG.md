@@ -37,6 +37,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- `elevate` on Linux and macOS raises `ElevationDeclinedError` (CLI exit 77) when `sudo -v` grants
+  root but caches no credential (sudoers `timestamp_timeout=0`), and runs the command under
+  `sudo -n`, so it never asks for the password a second time. Such a sudo prompted again for the
+  command, and a refusal there came back as the command's own exit 1.
 - On Linux, `new_local_user`'s `timeout` bounds all of its shadow-utils commands together
   (`useradd`, then `chpasswd` and `usermod --lock` as needed), as documented; each command got the
   whole `timeout` before, so the verb could run for about three times as long. The

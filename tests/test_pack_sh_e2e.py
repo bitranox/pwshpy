@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -37,6 +38,7 @@ from elevation_doubles import (
     OTHER_UID,
     RUNNING_AS_ROOT,
     UV_SOURCE_VARIABLES,
+    data_home,
     default_uv_cache_dir,
     default_uv_cache_env,
     fetched_git_source,
@@ -1714,6 +1716,44 @@ def test_as_root_an_untrusted_managed_python_dir_is_refused_before_uv_runs_a_pyt
     assert result.returncode == 0, result.stdout + result.stderr
     assert marker.is_file(), "the control never ran the planted .pth: " + result.stderr
     assert _reported_python(result) is not None, result.stdout
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_a_relative_managed_python_dir_is_refused_not_climbed_forever(
+    tmp_path: Path, shell_id: str, shell: list[str]
+) -> None:
+    """[R7]: the managed-Python check climbs from a missing directory towards / by stripping the last
+    component, which never ends on a relative path (no slash left to strip). The data home a root run
+    names comes from the passwd database and is absolute, so this takes the lookup's answer as a
+    relative one: the check refuses it with 127 at once instead of looping until the test times out."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=True)
+    text = runner.read_text(encoding="utf-8")
+    answered = "'" + str(data_home(runner.parent)) + "'"
+    assert text.count(answered) == 1
+    runner.write_text(text.replace(answered, "'rel-data-home'"), encoding="utf-8", newline="\n")
+    # A session of its own: on a timeout the whole group goes, the looping command substitution included,
+    # which killing the shell alone would leave running.
+    process = subprocess.Popen(  # noqa: S603 - fixed argv from resolved shell + our own artefact
+        [*shell, str(runner), "--pwshpy-uv", str(uv)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+        env=_trust_env(tmp_path),
+        cwd=_work_dir(tmp_path),
+        start_new_session=True,
+    )
+    try:
+        _, stderr = process.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        if sys.platform != "win32":  # always true here (a POSIX-only module); narrows the POSIX-only calls
+            os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        pytest.fail("the managed-Python check never returned on a relative directory")
+    assert process.returncode == 127, stderr
+    expected = f"{_PYTHON_DIR_REFUSED} rel-data-home/uv/python: rel-data-home/uv/python is not an absolute path"
+    assert expected in stderr, stderr
+    assert not record.exists(), "uv ran the script"
 
 
 def _open_below(planted: Path, where: str) -> Path:

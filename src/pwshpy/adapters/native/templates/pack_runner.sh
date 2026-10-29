@@ -824,8 +824,17 @@ pwshpy_python_tree_distrust() {
 # site-packages would run as root before any check of the path uv answers (measured with uv 0.13):
 # the directory is judged before uv starts, as a uv is, itself and every directory above it, and then
 # everything below it (pwshpy_python_tree_distrust). One that does not exist yet is judged by the
-# nearest one that does, where `uv python install` will create it; it holds no install yet.
+# nearest one that does, where `uv python install` will create it; it holds no install yet. A relative
+# path is refused first: the climb towards / strips components up to the last slash, so it would never
+# end on a path that has none (and the path would name whatever the working directory holds).
 pwshpy_python_dir_distrust() {
+    case $1 in
+        /*) ;;
+        *)
+            printf '%s' "$1 is not an absolute path"
+            return 0
+            ;;
+    esac
     _pd_dir=$1
     while [ ! -e "$_pd_dir" ] && [ ! -L "$_pd_dir" ]; do
         _pd_dir=${_pd_dir%/*}

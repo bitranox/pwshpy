@@ -26,7 +26,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   on one line. They returned the answer (and `invoke_rest_method` its parsed error body) before, so
   a caller that reads such answers (an error body, a 304 to a conditional request) now passes the
   new keyword `skip_http_error_check=True` (CLI `--skip-http-error-check`, pwsh's
-  `-SkipHttpErrorCheck`) to get the answer back.
+  `-SkipHttpErrorCheck`) to get the answer back. `invoke_rest_method` returns None for an answer
+  whose body is empty or only whitespace (a skipped 304, a 204), where `Invoke-RestMethod` returns
+  the body text (`""`); it raised "not JSON" on such a body before. Any other body that is not JSON
+  still raises.
 - Every public method of the `ps` facade documents each parameter (`Args:`) and its result
   (`Returns:`, or `Yields:` for a generator), and, where traced, the errors it raises (`Raises:`),
   so `help(ps.<method>)` says what a value means and what can fail. A test fails when a method

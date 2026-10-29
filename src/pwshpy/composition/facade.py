@@ -2253,6 +2253,8 @@ class Ps:
         Built on :meth:`invoke_web_request`, so any status urllib does not follow (a refused
         3xx, 304, 4xx, 5xx) raises, as ``Invoke-RestMethod`` does, unless
         ``skip_http_error_check`` is True; then that answer's body is parsed like any other.
+        An empty or whitespace-only body (a skipped 304, a 204) returns None, where
+        ``Invoke-RestMethod`` returns the body text (``""``).
 
         Args:
             url: An ``http://`` or ``https://`` URL; any other scheme is refused.
@@ -2268,13 +2270,14 @@ class Ps:
                 ``-SkipHttpErrorCheck``); default False.
 
         Returns:
-            The response body parsed as JSON.
+            The response body parsed as JSON; None when the body is empty or only whitespace.
 
         Raises:
             OperationTimeoutError: The connection or a read did not finish within ``timeout``.
             NativeCallError: The scheme (of ``url`` or of a redirect) is not http/https, the
                 request failed below HTTP, the server answered with a status urllib does not
-                follow and ``skip_http_error_check`` is False, or the response body is not JSON.
+                follow and ``skip_http_error_check`` is False, or a non-blank response body is not
+                JSON.
             TypeError: ``json_body`` holds a value orjson cannot serialize
                 (``orjson.JSONEncodeError``).
 

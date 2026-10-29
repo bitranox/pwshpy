@@ -48,6 +48,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             "/multiline": (400, b"line one\r\nline two\n\x1b[31mred"),
             "/ok": (200, b'{"ok": true}'),
             "/empty-error": (503, b""),
+            "/empty": (200, b""),
+            "/blank": (200, b" \r\n\t "),
         }
         status, body = routes.get(self.path, (200, b"{}"))
         self.send_response(status)
@@ -199,6 +201,27 @@ def test_a_304_is_returned_when_the_check_is_skipped(base_url: str) -> None:
     """With skip_http_error_check the 304 answer itself comes back, empty body included."""
     response = invoke_web_request(base_url + "/etag", headers={"If-None-Match": _ETAG}, skip_http_error_check=True)
     assert (response.status_code, response.text) == (304, "")
+
+
+@pytest.mark.os_agnostic
+def test_invoke_rest_method_returns_none_for_a_skipped_304(base_url: str) -> None:
+    """A 304 has no body; with the check skipped there is nothing to parse, as with Invoke-RestMethod."""
+    parsed = invoke_rest_method(base_url + "/etag", headers={"If-None-Match": _ETAG}, skip_http_error_check=True)
+    assert parsed is None
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("path", "skip"), [("/empty", False), ("/blank", False), ("/empty-error", True)])
+def test_invoke_rest_method_returns_none_for_an_empty_or_blank_body(base_url: str, path: str, skip: bool) -> None:
+    """An empty or whitespace-only body parses to None, whatever the status that carried it."""
+    assert invoke_rest_method(base_url + path, skip_http_error_check=skip) is None
+
+
+@pytest.mark.os_agnostic
+def test_invoke_rest_method_still_refuses_a_body_that_is_not_json(base_url: str) -> None:
+    """Control: a non-empty body that is not JSON keeps raising."""
+    with pytest.raises(NativeCallError, match="not JSON"):
+        invoke_rest_method(base_url + "/teapot", skip_http_error_check=True)
 
 
 @pytest.mark.os_agnostic

@@ -202,8 +202,10 @@ def invoke_rest_method(  # noqa: PLR0913 - mirrors the RestInvoker port: Invoke-
     ``json_body`` is serialized and sent with a ``Content-Type: application/json``
     header.  Any status urllib does not follow (a refused 3xx, 304, 4xx, 5xx) raises
     :class:`~pwshpy.domain.errors.NativeCallError` unless ``skip_http_error_check`` is
-    True, in which case the error body is parsed like any other.  Raises
-    ``NativeCallError`` too if the response body is not valid JSON.
+    True, in which case the error body is parsed like any other.  An empty or
+    whitespace-only body (a 304, a 204, an empty error answer) returns None, where
+    ``Invoke-RestMethod`` returns the body text (``""``); any other body that is not
+    valid JSON raises ``NativeCallError``.
 
     Example:
         >>> callable(invoke_rest_method)
@@ -222,6 +224,10 @@ def invoke_rest_method(  # noqa: PLR0913 - mirrors the RestInvoker port: Invoke-
         timeout=timeout,
         skip_http_error_check=skip_http_error_check,
     )
+    if not response.text.strip():
+        # Nothing to parse: pwsh hands back the body text here, pwshpy returns no value rather
+        # than adopt pwsh's text fallback (every other non-JSON body still raises).
+        return None
     try:
         return orjson.loads(response.text)
     except orjson.JSONDecodeError as exc:

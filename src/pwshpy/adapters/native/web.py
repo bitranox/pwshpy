@@ -204,8 +204,8 @@ def invoke_rest_method(  # noqa: PLR0913 - mirrors the RestInvoker port: Invoke-
     :class:`~pwshpy.domain.errors.NativeCallError` unless ``skip_http_error_check`` is
     True, in which case the error body is parsed like any other.  An empty or
     whitespace-only body (a 304, a 204, an empty error answer) returns None, where
-    ``Invoke-RestMethod`` returns the body text (``""``); any other body that is not
-    valid JSON raises ``NativeCallError``.
+    ``Invoke-RestMethod`` returns the body text (a whitespace-only body verbatim); any
+    other body that is not valid JSON raises ``NativeCallError``.
 
     Example:
         >>> callable(invoke_rest_method)

@@ -2254,7 +2254,7 @@ class Ps:
         3xx, 304, 4xx, 5xx) raises, as ``Invoke-RestMethod`` does, unless
         ``skip_http_error_check`` is True; then that answer's body is parsed like any other.
         An empty or whitespace-only body (a skipped 304, a 204) returns None, where
-        ``Invoke-RestMethod`` returns the body text (``""``).
+        ``Invoke-RestMethod`` returns the body text (a whitespace-only body verbatim).
 
         Args:
             url: An ``http://`` or ``https://`` URL; any other scheme is refused.

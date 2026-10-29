@@ -230,9 +230,10 @@ catch a subclass before its parent:
 - An HTTP answer urllib does not follow (a refused 3xx such as a redirect loop, 304, 4xx, 5xx)
   makes `invoke_web_request` and `invoke_rest_method` raise `NativeCallError` naming the status and
   the start of the body, as the cmdlets do; pass `skip_http_error_check=True` (CLI
-  `--skip-http-error-check`, pwsh's `-SkipHttpErrorCheck`) to read such an answer. `download_file`
-  always raises for one. A redirect to a scheme other than `http`/`https` raises before anything
-  connects to it.
+  `--skip-http-error-check`, pwsh's `-SkipHttpErrorCheck`) to read such an answer; there
+  `invoke_rest_method` gives None (CLI: `null`) for an empty or whitespace-only body, where
+  `Invoke-RestMethod` returns the body text. `download_file` always raises for one. A redirect to a
+  scheme other than `http`/`https` raises before anything connects to it.
 
 `get_service()` and `get_scheduled_task()` skip, with a logged WARNING, an item the caller cannot
 read; pass `strict=True` (CLI `--strict`) when "not listed" must mean "does not exist" (a raise

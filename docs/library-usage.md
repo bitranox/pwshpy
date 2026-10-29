@@ -621,9 +621,10 @@ Every failure across both backends raises a subclass of `PwshPyError`, all expor
     `NativeCallError` for any status urllib does not follow (a refused 3xx such as a redirect
     loop, 304, 4xx, 5xx), as `Invoke-WebRequest` does, naming the status and the first 200
     characters of the body; pass `skip_http_error_check=True` (pwsh's `-SkipHttpErrorCheck`) to get
-    such an answer back (`invoke_rest_method` parses its body). `download_file` always raises for
-    one. A redirect to a scheme other than `http`/`https` raises before anything connects to it,
-    whatever `skip_http_error_check` says.
+    such an answer back (`invoke_rest_method` parses its body; an empty or whitespace-only body,
+    such as a 304's, gives None, where `Invoke-RestMethod` returns the body text). `download_file`
+    always raises for one. A redirect to a scheme other than `http`/`https` raises before anything
+    connects to it, whatever `skip_http_error_check` says.
   - `ElevationDeclinedError` - the UAC prompt or sudo's password was refused by `ps.elevate()`,
     or sudo granted root but cached no credential for the command (sudoers `timestamp_timeout=0`):
     on POSIX `ps.elevate()` asks once with `sudo -v`, checks with `sudo -n -v` and runs the command

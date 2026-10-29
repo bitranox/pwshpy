@@ -376,7 +376,9 @@ the module shortcuts (`get_ad_user`, ...) with `--timeout` raise `PowerShellErro
 urllib does not follow - a refused 3xx such as a redirect loop, 304, 4xx and 5xx - as
 `Invoke-WebRequest` and `Invoke-RestMethod` do; the error line names the status and the first 200
 characters of the body, on one line. `--skip-http-error-check` (pwsh's `-SkipHttpErrorCheck`)
-prints such an answer instead, and `invoke_rest_method` then parses its body like any other.
+prints such an answer instead, and `invoke_rest_method` then parses its body like any other; an
+empty or whitespace-only body (a 304) prints `null`, where `Invoke-RestMethod` returns the body
+text.
 `download_file` has no such flag: it always fails on such a status. It removes `DEST` only when
 it had opened that file itself (a transfer that breaks off, or a body that ends before its
 `Content-Length`); a refused connect or an HTTP error leaves an existing file of that name

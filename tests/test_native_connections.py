@@ -63,3 +63,26 @@ def test_iter_connections_observes_a_listening_socket() -> None:
         bound_port = srv.getsockname()[1]
         ports = {conn.local_port for conn in iter_connections() if conn.status is ConnectionState.LISTEN}
     assert bound_port in ports
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="psutil.net_connections needs root on macOS; a non-root runner enumerates no sockets",
+)
+def test_iter_connections_lists_tcp_only_like_get_nettcpconnection() -> None:
+    """A bound UDP socket is not listed: Get-NetTCPConnection lists TCP only (get_net_udp_endpoint has UDP)."""
+    with (
+        socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp,
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp,
+    ):
+        udp.bind(("127.0.0.1", 0))
+        tcp.bind(("127.0.0.1", 0))
+        tcp.listen()
+        udp_port = udp.getsockname()[1]
+        tcp_port = tcp.getsockname()[1]
+        connections = list(iter_connections())
+    # Liveness: the same enumeration does see our TCP listener, so an empty list cannot pass.
+    assert tcp_port in {conn.local_port for conn in connections if conn.protocol is TransportProtocol.TCP}
+    assert {conn.protocol for conn in connections} == {TransportProtocol.TCP}
+    assert udp_port not in {conn.local_port for conn in connections if conn.protocol is TransportProtocol.UDP}

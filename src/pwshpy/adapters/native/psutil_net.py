@@ -1,12 +1,12 @@
 """native network-connection source over ``psutil`` (portable, cross-platform).
 
-Typed facade over the untyped ``psutil`` surface — the single ``# pyright: ignore``
+Typed facade over the untyped ``psutil`` surface - the single ``# pyright: ignore``
 for its missing stubs is confined here.  Mirrors ``Get-NetTCPConnection``: each
 socket marshals into a :class:`NetConnection` via ``model_construct`` on the hot
 path.
 
 Contents:
-    * :func:`iter_connections` — yield one :class:`NetConnection` per open socket.
+    * :func:`iter_connections` - yield one :class:`NetConnection` per open TCP socket.
 """
 
 from __future__ import annotations
@@ -49,7 +49,10 @@ def _to_net_connection(conn: Any) -> NetConnection:
 
 
 def iter_connections() -> Iterator[NetConnection]:
-    """Yield a :class:`NetConnection` for every open inet socket visible to the caller.
+    """Yield a :class:`NetConnection` for every open TCP socket visible to the caller.
+
+    TCP only (IPv4 and IPv6), like ``Get-NetTCPConnection``; UDP sockets are listed by the
+    UDP endpoint source instead.
 
     Some sockets owned by other users expose no PID without elevation; those
     records simply carry ``pid=None`` rather than being dropped.  On a platform
@@ -62,7 +65,7 @@ def iter_connections() -> Iterator[NetConnection]:
         True
     """
     try:
-        connections = _psutil.net_connections(kind="inet")
+        connections = _psutil.net_connections(kind="tcp")
     except (_ACCESS_DENIED, PermissionError):
         return
     for conn in connections:

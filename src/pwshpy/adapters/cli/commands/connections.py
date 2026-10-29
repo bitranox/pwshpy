@@ -1,4 +1,4 @@
-"""``pwshpy get_net_tcp_connection`` - list open TCP and UDP connections through the pipeline.
+"""``pwshpy get_net_tcp_connection`` - list open TCP connections through the pipeline.
 
 A thin front end over the ``ps`` facade (native / psutil), mirroring
 ``get_process``: it parses options, picks an output format, and streams
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 @option("--limit", "-n", "limit", type=int, default=None, help="Emit at most N connections.")
 @click.pass_context
 def cli_connections(ctx: click.Context, as_json: bool, as_jsonl: bool, limit: int | None) -> None:
-    """List open TCP and UDP connections as typed records (native).
+    """List open TCP connections as typed records (native).
 
     The ``ps`` facade is injected via the CLI context (wired at the composition
     root), so this adapter never imports the composition layer.

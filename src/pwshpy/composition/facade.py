@@ -409,11 +409,11 @@ class Ps:
         return Pipeline(self._process_source())
 
     def get_net_tcp_connection(self) -> Pipeline[NetConnection]:
-        """Return a lazy pipeline over the open network connections (native).
+        """Return a lazy pipeline over the open TCP connections (native; like Get-NetTCPConnection).
 
-        psutil's ``inet`` listing, so UDP sockets are included alongside TCP; filter on
-        ``protocol`` for TCP only. A socket owned by another user can carry ``pid=None``. Where
-        listing needs elevation (macOS non-root) the pipeline is empty rather than an error.
+        TCP only, IPv4 and IPv6 (psutil's ``tcp`` listing); UDP sockets are on
+        :meth:`get_net_udp_endpoint`. A socket owned by another user can carry ``pid=None``.
+        Where listing needs elevation (macOS non-root) the pipeline is empty rather than an error.
 
         Returns:
             A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`NetConnection` records.

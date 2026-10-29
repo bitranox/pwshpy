@@ -72,6 +72,33 @@ def test_two_candidates_naming_one_directory_are_both_named(tmp_path: Path) -> N
     assert label == f"the passwd entry ({passwd}) or HOME ({passwd})"
 
 
+@pytest.mark.os_agnostic
+def test_answers_split_over_two_homes_at_different_depths_name_both(tmp_path: Path) -> None:
+    """A split answer names every home some answer sits under, not only the deepest one overall."""
+    decoy = tmp_path / "decoy"
+    passwd = tmp_path / "users" / "deeper" / "passwd"
+    for home in (decoy, passwd):
+        (home / "Desktop").mkdir(parents=True)
+
+    label = home_followed([decoy / "Desktop", passwd / "Documents"], {"HOME": decoy, "the passwd entry": passwd})
+
+    assert label == f"HOME ({decoy}) or the passwd entry ({passwd})"
+
+
+@pytest.mark.os_agnostic
+def test_answers_split_between_a_home_and_one_nested_inside_it_name_both(tmp_path: Path) -> None:
+    """One answer under the inner home, one only under the outer: each answer's deepest home is named."""
+    passwd = tmp_path / "passwd"
+    fixed = passwd / "scratch" / "fixed"
+    (fixed / "Desktop").mkdir(parents=True)
+
+    label = home_followed(
+        [fixed / "Desktop", passwd / "Documents"], {"CFFIXED_USER_HOME": fixed, "the passwd entry": passwd}
+    )
+
+    assert label == f"CFFIXED_USER_HOME ({fixed}) or the passwd entry ({passwd})"
+
+
 @pytest.mark.os_posix
 @pytest.mark.skipif(sys.platform == "win32", reason="a directory symlink needs a privilege on Windows")
 def test_a_symlinked_spelling_is_matched_and_marked(tmp_path: Path) -> None:

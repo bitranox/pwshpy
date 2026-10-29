@@ -822,6 +822,25 @@ function Get-PwshPyGitKindDistrust {
     return 'it is not a program an elevated run asks for its version (a .exe, .com, .cmd or .bat), and uv may run it for a git source: remove it, install git as a program, or run the script without elevation'
 }
 
+function Initialize-PwshPyPrivateTemp {
+    # Elevated POSIX: the account's private temporary directory (<account cache>/pwshpy-tmp), created
+    # and its path returned, or the run stops with 127. Only root can enter it, judged like the pack
+    # cache (Get-PwshPyCacheDistrust): before it is created (the nearest directory that exists), and
+    # after. As the .sh's pwshpy_private_tmp.
+    $temp = Join-Path (Get-PwshPyAccountCacheHome) 'pwshpy-tmp'
+    $why = Get-PwshPyCacheDistrust -Path $temp
+    if (-not $why) {
+        Initialize-PwshPyDirectory -Path $temp -Private $true
+        Invoke-PwshPyChmod -Arguments @('700', '--', $temp)
+        $why = Get-PwshPyCacheDistrust -Path $temp
+    }
+    if ($why) {
+        Write-PwshPyFailure "pwshpy: refusing the temporary directory ${temp}: $why (an elevated run lets uv and git keep temporary files only in a directory no other account can modify): make the path named above root's alone (chown -R root, chmod -R go-w on it)"
+        exit 127
+    }
+    return $temp
+}
+
 function Initialize-PwshPyStderrFile {
     # A new empty file for a native program's stderr, its path returned. [IO.Path]::GetTempFileName()
     # places it in TMPDIR, which an elevated POSIX run got from the caller (sudo -E, env_keep): in a
@@ -944,6 +963,77 @@ function Get-PwshPyUvPath {
     return $null
 }
 
+function Get-PwshPyPosixUvInstaller {
+    param([string] $Url, [string] $UvHome)
+
+    # POSIX: uv's installer downloaded from $Url to a file in a private directory, its path returned, or
+    # the run stops with 127 naming the download failure. Downloaded first rather than piped into sh:
+    # "curl | sh" ends with sh's status, 0 for the empty input a failed download leaves, and the run then
+    # failed later with the trust remedy, never trying wget. As root the download runs with nothing of
+    # the caller's environment, which sudo -E or env_keep hand over: under the caller's HOME the
+    # installer put a root-owned uv in the caller's ~/.local/bin and edited the caller's shell files,
+    # and it honours UV_INSTALL_DIR, XDG_BIN_HOME, CARGO_HOME and its own download-URL variables, curl
+    # and wget their proxy and certificate variables and their rc files below HOME, so the caller would
+    # choose what lands in a directory root then runs uv from. Only the account's own HOME and the fixed
+    # helper PATH go in (a proxy is root's own ~/.curlrc, /etc/wgetrc or ~/.wgetrc), into the account's
+    # private temporary directory, not the caller's TMPDIR. As the .sh's pwshpy_install_uv.
+    if ($PwshPyRootPath) {
+        $directory = Initialize-PwshPyPrivateTemp
+    } else {
+        $directory = Join-Path ([IO.Path]::GetTempPath()) ('pwshpy-uv-' + [Guid]::NewGuid().ToString('N'))
+        Initialize-PwshPyDirectory -Path $directory -Private $true
+        Invoke-PwshPyChmod -Arguments @('700', '--', $directory)
+    }
+    $file = Join-Path $directory 'uv-installer.sh'
+    Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+    $homeValue = if ($UvHome) { $UvHome } else { '/' }
+    $tried = New-Object System.Collections.Generic.List[string]
+    foreach ($downloader in @('curl -LsSf -o', 'wget -q -O')) {
+        $words = @($downloader -split ' ')
+        $tool = $words[0]
+        $present = if ([IO.Path]::IsPathRooted($tool)) {
+            Test-Path -LiteralPath $tool -PathType Leaf
+        } else {
+            [bool](Get-Command -Name $tool -CommandType Application -ErrorAction SilentlyContinue)
+        }
+        if (-not $present) { continue }
+        # Assigned away: anything a downloader prints must not become part of the path returned.
+        if ($PwshPyRootPath) {
+            $null = & env -i "HOME=$homeValue" "PATH=$env:PATH" @words $file $Url
+        } else {
+            $null = & $tool @($words | Select-Object -Skip 1) $file $Url
+        }
+        $code = $LASTEXITCODE
+        $size = if (Test-Path -LiteralPath $file -PathType Leaf) { (Get-Item -LiteralPath $file).Length } else { 0 }
+        if ($code -eq 0 -and $size -gt 0) { return $file }
+        $tried.Add($(if ($code -eq 0) { "$tool exited 0 with nothing downloaded" } else { "$tool exited $code" }))
+        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+    }
+    Clear-PwshPyUvInstaller -Path $file -Directory $directory
+    if ($tried.Count -eq 0) {
+        Write-PwshPyFailure 'pwshpy: need curl or wget to install uv'
+        exit 127
+    }
+    $why = "pwshpy: could not download uv's installer from $Url ($($tried -join ', ')): check the network connection"
+    if ($PwshPyRootPath) {
+        $why += '; an elevated run does not apply a proxy or certificate setting of the caller''s environment: install uv for root beforehand, or set the proxy in root''s own ~/.curlrc (curl) or /etc/wgetrc or ~/.wgetrc (wget)'
+    } else {
+        $why += ' and any proxy setting (https_proxy), or install uv yourself'
+    }
+    Write-PwshPyFailure $why
+    exit 127
+}
+
+function Clear-PwshPyUvInstaller {
+    param([string] $Path, [string] $Directory)
+
+    # Removes the downloaded installer, and the directory it was put in unless that is root's private
+    # temporary directory, which the run goes on using.
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($PwshPyRootPath) { return }
+    try { [IO.Directory]::Delete($Directory) } catch { Write-Verbose "left $Directory behind: $_" }
+}
+
 function Install-PwshPyUv {
     Write-Host 'uv was not found; installing it for the current user from https://astral.sh/uv ...'
     if ($PwshPyOnWindows) {
@@ -966,23 +1056,23 @@ function Install-PwshPyUv {
         $script:PwshPyCallerPath = (Join-Path $env:USERPROFILE '.local\bin') + [IO.Path]::PathSeparator + $script:PwshPyCallerPath
         $env:PATH = $script:PwshPyCallerPath
     } else {
-        $installCommand = 'curl -LsSf https://astral.sh/uv/install.sh | sh || wget -qO- https://astral.sh/uv/install.sh | sh'
+        $url = 'https://astral.sh/uv/install.sh'
         $uvHome = Get-PwshPyUvHome
+        $installerFile = Get-PwshPyPosixUvInstaller -Url $url -UvHome $uvHome
+        $directory = Split-Path -Parent $installerFile
+        # As the download: as root with nothing of the caller's environment, under umask 022.
         if ($PwshPyRootPath) {
-            # As root the installer and the download run with nothing of the caller's environment, which
-            # sudo -E or env_keep hand over: under the caller's HOME it put a root-owned uv in the caller's
-            # ~/.local/bin and edited the caller's shell files, and it honours UV_INSTALL_DIR, XDG_BIN_HOME,
-            # CARGO_HOME and its own download-URL variables, curl and wget their proxy and certificate
-            # variables and their rc files below HOME, so the caller would choose what lands in a
-            # directory root then runs uv from. Only the account's own HOME and the fixed helper PATH go
-            # in, under umask 022 as for the unpack ([R6]), or a caller's 002 would leave the new
-            # directories group-writable and the search would refuse the uv it just installed. As the .sh.
             $homeValue = if ($uvHome) { $uvHome } else { '/' }
-            & env -i "HOME=$homeValue" "PATH=$env:PATH" /bin/sh -c "umask 022 && { $installCommand; }"
+            & env -i "HOME=$homeValue" "PATH=$env:PATH" /bin/sh -c 'umask 022 && exec /bin/sh "$1"' sh $installerFile
         } else {
-            & /bin/sh -c $installCommand
+            & /bin/sh $installerFile
         }
-        if ($LASTEXITCODE -ne 0) { throw "the uv installer failed with exit code $LASTEXITCODE" }
+        $installed = $LASTEXITCODE
+        Clear-PwshPyUvInstaller -Path $installerFile -Directory $directory
+        if ($installed -ne 0) {
+            Write-PwshPyFailure "pwshpy: uv's installer (from $url) failed with exit code $installed"
+            exit 127
+        }
         # A root run keeps its fixed PATH for helpers; the new uv's directory joins the caller's PATH,
         # which the uv search walks and the packed script gets back.
         $script:PwshPyCallerPath = "$uvHome/.local/bin" + [IO.Path]::PathSeparator + $script:PwshPyCallerPath
@@ -2077,21 +2167,9 @@ $PwshPyPrepare = {
             # The temporary directory too (handed over above), as the .sh root run: uv, git and the build
             # backends uv runs create files and directories below TMPDIR (Python's tempfile also reads
             # TEMP and TMP), the caller's under sudo -E or env_keep, where the caller could swap a
-            # directory root made for a link to anywhere. All three name the directory below the account's
-            # own cache directory that only root can enter (the one Initialize-PwshPyStderrFile uses),
-            # judged like the pack cache (Get-PwshPyCacheDistrust): before it is created (the nearest
-            # directory that exists), and after.
-            $PwshPyTemp = Join-Path $PwshPyAccountCache 'pwshpy-tmp'
-            $PwshPyTempWhy = Get-PwshPyCacheDistrust -Path $PwshPyTemp
-            if (-not $PwshPyTempWhy) {
-                Initialize-PwshPyDirectory -Path $PwshPyTemp -Private $true
-                Invoke-PwshPyChmod -Arguments @('700', '--', $PwshPyTemp)
-                $PwshPyTempWhy = Get-PwshPyCacheDistrust -Path $PwshPyTemp
-            }
-            if ($PwshPyTempWhy) {
-                Write-PwshPyFailure "pwshpy: refusing the temporary directory ${PwshPyTemp}: $PwshPyTempWhy (an elevated run lets uv and git keep temporary files only in a directory no other account can modify): make the path named above root's alone (chown -R root, chmod -R go-w on it)"
-                exit 127
-            }
+            # directory root made for a link to anywhere. All three name the account's private temporary
+            # directory (Initialize-PwshPyPrivateTemp).
+            $PwshPyTemp = Initialize-PwshPyPrivateTemp
             foreach ($name in @('TMPDIR', 'TMP', 'TEMP')) { Set-Item -LiteralPath "Env:$name" -Value $PwshPyTemp }
             Write-PwshPyNotice "pwshpy: setting TMPDIR=${PwshPyTemp}: an elevated run lets uv and git keep temporary files in the account's own directory"
         }

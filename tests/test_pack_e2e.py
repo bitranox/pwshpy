@@ -67,7 +67,9 @@ from elevation_doubles import (
     trusted_managed_python,
     with_account_cache_home,
     with_data_home,
+    with_download_doubles,
     without_python_dir_check,
+    write_download_double,
     write_fake_sudo,
     write_git_source,
     write_local_wheel,
@@ -4561,11 +4563,16 @@ def test_an_elevated_posix_run_refuses_a_temporary_directory_another_account_can
     assert not record.exists(), "uv ran"
 
 
-#: The POSIX installer command of the .ps1 runner, the one string a test of the installation replaces.
-_POSIX_UV_INSTALL_COMMAND = (
-    "$installCommand = 'curl -LsSf https://astral.sh/uv/install.sh | sh"
-    " || wget -qO- https://astral.sh/uv/install.sh | sh'"
-)
+def _with_posix_download_doubles(tmp_path: Path, runner: Path, *, curl: Path, wget: Path) -> None:
+    """``runner`` (POSIX) with its installer downloaders replaced by ``curl`` and ``wget`` and no
+    system-wide uv to find, each one counted substitution; the rest of the installation is shipped code."""
+    with_download_doubles(runner, curl=curl, wget=wget, powershell=True)
+    text = runner.read_text(encoding="utf-8")
+    old = f"'{_SYSTEM_WIDE_UV}'"
+    assert text.count(old) == 1, old
+    runner.write_text(text.replace(old, f"'{tmp_path / 'no-system-uv'}'"), encoding="utf-8")
+
+
 #: What uv's installer reads besides HOME, and what curl and wget read: each the caller's choice for root.
 _INSTALLER_STEERING = (
     "UV_INSTALL_DIR",
@@ -4602,18 +4609,18 @@ def test_an_elevated_posix_run_installs_uv_into_the_accounts_own_home(tmp_path: 
         f'env > "{installer_env}"\nmkdir -p "$HOME/.local/bin"\ncp -p "{uv.parent}"/* "$HOME/.local/bin/"\n',
         encoding="utf-8",
     )
-    text = runner.read_text(encoding="utf-8")
-    for old, new in (
-        (_POSIX_UV_INSTALL_COMMAND, f"$installCommand = 'cat {installer} | sh'"),
-        (f"'{_SYSTEM_WIDE_UV}'", f"'{tmp_path / 'no-system-uv'}'"),
-    ):
-        assert text.count(old) == 1, old
-        text = text.replace(old, new)
-    runner.write_text(text, encoding="utf-8")
+    doubles = tmp_path / "download-bin"
+    doubles.mkdir()
+    log = tmp_path / "downloads.txt"
+    curl = write_download_double(doubles, "curl", log=log, serve=installer)
+    wget = write_download_double(doubles, "wget", log=log, serve=None, exit_code=4)
+    _with_posix_download_doubles(tmp_path, runner, curl=curl, wget=wget)
     caller_home = tmp_path / "caller-home"
     caller_home.mkdir()
     caller_home.chmod(0o777)
     env = {name: str(tmp_path / ("steer-" + name.lower())) for name in _INSTALLER_STEERING}
+    # The caller's TMPDIR exists, as a real one does: a run that is not elevated downloads the installer there.
+    Path(env["TMPDIR"]).mkdir()
     env["HOME"] = str(caller_home)
     result = _run_with_path(
         tmp_path,
@@ -4628,6 +4635,7 @@ def test_an_elevated_posix_run_installs_uv_into_the_accounts_own_home(tmp_path: 
     if elevated == "$false":
         assert got["HOME"] == str(caller_home), got
         assert (caller_home / ".local" / "bin" / "uv").is_file(), result.stderr
+        assert list(Path(env["TMPDIR"]).iterdir()) == [], "the downloaded installer was left behind"
         return
     assert result.returncode == 0, result.stdout + result.stderr
     assert got["HOME"] == str(tmp_path), got
@@ -4635,6 +4643,62 @@ def test_an_elevated_posix_run_installs_uv_into_the_accounts_own_home(tmp_path: 
     assert record.is_file(), result.stderr
     assert (tmp_path / ".local" / "bin" / "uv").is_file(), result.stderr
     assert list(caller_home.iterdir()) == [], result.stderr
+
+
+#: The start of the failure a run prints when neither downloader delivered uv's installer.
+_INSTALLER_NOT_DOWNLOADED = "pwshpy: could not download uv's installer from https://astral.sh/uv/install.sh ("
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated"])
+@pytest.mark.parametrize("wget_serves", [False, True], ids=["both-fail", "wget-fallback-serves"])
+def test_a_failed_posix_installer_download_is_named_and_wget_is_tried(
+    tmp_path: Path, elevated: str, wget_serves: bool
+) -> None:
+    """[R3] round 4, as the .sh: the installer was piped into sh ("curl ... | sh || wget ... | sh"), whose
+    status is sh's, 0 for the empty input a failed download leaves, so the wget fallback never ran and a
+    run that could not download it (elevated, behind a proxy the caller's environment named, which an
+    elevated run drops) ended in the uv trust remedy. The download now goes to a file first: curl failing
+    (exit 6) falls back to wget, and when wget fails too (exit 4) the run stops with 127 naming the
+    download, each exit status and, elevated, how to give root a proxy or a uv; when wget delivers, the
+    installation runs."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
+    installer = tmp_path / "local-uv-install.sh"
+    installer.write_text(f'mkdir -p "$HOME/.local/bin"\ncp -p "{uv.parent}"/* "$HOME/.local/bin/"\n')
+    doubles = tmp_path / "download-bin"
+    doubles.mkdir()
+    log = tmp_path / "downloads.txt"
+    curl = write_download_double(doubles, "curl", log=log, serve=None, exit_code=6)
+    wget = write_download_double(
+        doubles, "wget", log=log, serve=installer if wget_serves else None, exit_code=0 if wget_serves else 4
+    )
+    _with_posix_download_doubles(tmp_path, runner, curl=curl, wget=wget)
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    result = _run_with_path(
+        tmp_path,
+        runner,
+        path_first=["/usr/bin", "/bin"],
+        env={"HOME": str(caller_home)},
+        cwd=_clean_cwd(tmp_path),
+        inherit_path=False,
+        install_uv=True,
+    )
+    url = "https://astral.sh/uv/install.sh"
+    assert log.read_text(encoding="utf-8").splitlines() == [f"curl {url}", f"wget {url}"], result.stderr
+    if wget_serves:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert record.is_file(), result.stderr
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    failure = next((line for line in result.stderr.splitlines() if _INSTALLER_NOT_DOWNLOADED in line), "")
+    # The runner names each downloader as it ran it, here the doubles' paths.
+    assert f"{_INSTALLER_NOT_DOWNLOADED}{curl} exited 6, {wget} exited 4)" in failure, result.stderr
+    assert ("install uv for root beforehand" in failure) is (elevated == "$true"), failure
+    assert "after installation" not in result.stderr and "chmod go-w" not in result.stderr, result.stderr
+    assert not record.exists(), "uv ran"
 
 
 # --- [156] elevated .ps1 runs of a script with a git source refuse a git older than 2.32 ----------------

@@ -949,31 +949,99 @@ pwshpy_caller_cwd() {
     PWSHPY_CALLER_CWD=${_cwd%?}
 }
 
+# Root only: sets PWSHPY_TMP to the account's private temporary directory (<account cache>/pwshpy-tmp),
+# creating it, or stops the run. Only root can enter it, judged like the pack cache
+# (pwshpy_cache_distrust): before it is created (the nearest directory that exists), and after.
+pwshpy_private_tmp() {
+    PWSHPY_TMP=$PWSHPY_CACHE_HOME/pwshpy-tmp
+    _pt_why=$(pwshpy_cache_distrust "$PWSHPY_TMP")
+    if [ -z "$_pt_why" ]; then
+        (umask 077 && mkdir -p "$PWSHPY_TMP") || pwshpy_die "cannot create the directory $PWSHPY_TMP" 70
+        chmod 700 "$PWSHPY_TMP" || pwshpy_die "cannot make $PWSHPY_TMP private (chmod 700)" 70
+        _pt_why=$(pwshpy_cache_distrust "$PWSHPY_TMP")
+    fi
+    if [ -n "$_pt_why" ]; then
+        _pt_why="$_pt_why (as root uv and git keep temporary files only in a directory no other"
+        _pt_why="$_pt_why account can modify): make the path named above root's alone (chown -R root,"
+        _pt_why="$_pt_why chmod -R go-w on it)"
+        pwshpy_die "refusing the temporary directory $PWSHPY_TMP: $_pt_why" 127
+    fi
+}
+
+# Runs "$@" as the uv installation does: as root with nothing of the caller's environment (see
+# pwshpy_install_uv) and under umask 022, otherwise as it is.
+pwshpy_installer_env() {
+    if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+        (umask 022 && env -i HOME="${_iu_home:-/}" PATH="$PATH" "$@")
+    else
+        "$@"
+    fi
+}
+
+# Removes the downloaded installer, and the directory it was put in unless that is root's private
+# temporary directory, which the run goes on using.
+pwshpy_installer_cleanup() {
+    rm -f "$_iu_file"
+    if [ "$_iu_dir" != "${PWSHPY_TMP:-}" ]; then rmdir "$_iu_dir" 2>/dev/null || :; fi
+}
+
 pwshpy_install_uv() {
     printf '%s\n' "uv was not found; installing it for the current user from https://astral.sh/uv ..." >&2
-    if command -v curl >/dev/null 2>&1; then
-        _iu_fetch='curl -LsSf https://astral.sh/uv/install.sh'
-    elif command -v wget >/dev/null 2>&1; then
-        _iu_fetch='wget -qO- https://astral.sh/uv/install.sh'
-    else
-        pwshpy_die "need curl or wget to install uv" 127
-    fi
+    _iu_url=https://astral.sh/uv/install.sh
     _iu_home=$(pwshpy_uv_home)
+    # As root the download and the installer run with nothing of the caller's environment, which sudo -E
+    # or env_keep hand over: under the caller's HOME the installer put a root-owned uv in the caller's
+    # ~/.local/bin and edited the caller's shell files, and it honours UV_INSTALL_DIR, XDG_BIN_HOME,
+    # CARGO_HOME and its own download-URL variables, curl and wget their proxy and certificate variables
+    # and their rc files below HOME, so the caller would choose what lands in a directory root then
+    # runs uv from. Only the account's own HOME and the fixed helper PATH go in (a proxy is root's own
+    # ~/.curlrc, /etc/wgetrc or ~/.wgetrc), under umask 022 as for the unpack ([R6]): a caller's 002
+    # would leave the new directories group-writable, and the search would refuse the uv just installed.
+    # The installer is downloaded to a file first, so a failed download is told apart from a failed
+    # installation: "curl | sh" ends with sh's status, 0 for the empty input a failed download leaves.
+    # As root into the account's private temporary directory, not the caller's TMPDIR.
     if [ "$PWSHPY_AS_ROOT" = "1" ]; then
-        # As root the installer and the download run with nothing of the caller's environment, which
-        # sudo -E or env_keep hand over: under the caller's HOME it put a root-owned uv in the caller's
-        # ~/.local/bin and edited the caller's shell files, and it honours UV_INSTALL_DIR, XDG_BIN_HOME,
-        # CARGO_HOME and its own download-URL variables, curl and wget their proxy and certificate
-        # variables and their rc files below HOME, so the caller would choose what lands in a directory
-        # root then runs uv from. Only the account's own HOME and the fixed helper PATH go in, under
-        # umask 022 as for the unpack ([R6]): a caller's 002 would leave the new directories
-        # group-writable, and the search below would refuse the uv it just installed.
-        (umask 022 && env -i HOME="${_iu_home:-/}" PATH="$PATH" /bin/sh -c "$_iu_fetch | sh")
+        pwshpy_private_tmp
+        _iu_dir=$PWSHPY_TMP
+    else
+        if ! _iu_dir=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/pwshpy-uv.XXXXXX"); then
+            pwshpy_die "cannot create a temporary directory for uv's installer" 70
+        fi
+    fi
+    _iu_file=$_iu_dir/uv-installer.sh
+    rm -f "$_iu_file"
+    _iu_tried=
+    for _iu_get in 'curl -LsSf -o' 'wget -q -O'; do
+        command -v "${_iu_get%% *}" >/dev/null 2>&1 || continue
+        # Word splitting of $_iu_get is intended: the downloader and its flags.
+        # shellcheck disable=SC2086
+        if pwshpy_installer_env $_iu_get "$_iu_file" "$_iu_url"; then _iu_rc=0; else _iu_rc=$?; fi
+        [ "$_iu_rc" -eq 0 ] && [ -s "$_iu_file" ] && break
+        [ "$_iu_rc" -eq 0 ] && _iu_rc="0 with nothing downloaded"
+        _iu_tried="$_iu_tried${_iu_tried:+, }${_iu_get%% *} exited $_iu_rc"
+        rm -f "$_iu_file"
+    done
+    if [ ! -s "$_iu_file" ]; then
+        pwshpy_installer_cleanup
+        [ -n "$_iu_tried" ] || pwshpy_die "need curl or wget to install uv" 127
+        _iu_why="could not download uv's installer from $_iu_url ($_iu_tried): check the network connection"
+        if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+            _iu_why="$_iu_why; as root a proxy or certificate setting of the caller's environment does not apply:"
+            _iu_why="$_iu_why install uv for root beforehand, or set the proxy in root's own ~/.curlrc (curl) or"
+            _iu_why="$_iu_why /etc/wgetrc or ~/.wgetrc (wget)"
+        else
+            _iu_why="$_iu_why and any proxy setting (https_proxy), or install uv yourself"
+        fi
+        pwshpy_die "$_iu_why" 127
+    fi
+    if pwshpy_installer_env /bin/sh "$_iu_file"; then _iu_rc=0; else _iu_rc=$?; fi
+    pwshpy_installer_cleanup
+    [ "$_iu_rc" -eq 0 ] || pwshpy_die "uv's installer (from $_iu_url) failed with exit code $_iu_rc" 127
+    if [ "$PWSHPY_AS_ROOT" = "1" ]; then
         # The helpers keep their fixed PATH; the new uv's directory joins the caller's PATH, which the
         # uv search walks and the packed script gets back.
         PWSHPY_CALLER_PATH="$_iu_home/.local/bin:$PWSHPY_CALLER_PATH"
     else
-        /bin/sh -c "$_iu_fetch | sh"
         PATH="$_iu_home/.local/bin:$PATH"
         export PATH
     fi
@@ -1265,22 +1333,8 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # The temporary directory too (handed over above): uv, git and the build backends uv runs create
     # files and directories below TMPDIR (Python's tempfile also reads TEMP and TMP), the caller's under
     # sudo -E or env_keep, where the caller could swap a directory root made for a link to anywhere. All
-    # three name a directory below the account's own cache directory that only root can enter, judged
-    # like the pack cache (pwshpy_cache_distrust): before it is created (the nearest directory that
-    # exists), and after.
-    PWSHPY_TMP=$PWSHPY_CACHE_HOME/pwshpy-tmp
-    PWSHPY_TMP_WHY=$(pwshpy_cache_distrust "$PWSHPY_TMP")
-    if [ -z "$PWSHPY_TMP_WHY" ]; then
-        (umask 077 && mkdir -p "$PWSHPY_TMP") || pwshpy_die "cannot create the directory $PWSHPY_TMP" 70
-        chmod 700 "$PWSHPY_TMP" || pwshpy_die "cannot make $PWSHPY_TMP private (chmod 700)" 70
-        PWSHPY_TMP_WHY=$(pwshpy_cache_distrust "$PWSHPY_TMP")
-    fi
-    if [ -n "$PWSHPY_TMP_WHY" ]; then
-        PWSHPY_TMP_WHY="$PWSHPY_TMP_WHY (as root uv and git keep temporary files only in a directory no other"
-        PWSHPY_TMP_WHY="$PWSHPY_TMP_WHY account can modify): make the path named above root's alone (chown -R root,"
-        PWSHPY_TMP_WHY="$PWSHPY_TMP_WHY chmod -R go-w on it)"
-        pwshpy_die "refusing the temporary directory $PWSHPY_TMP: $PWSHPY_TMP_WHY" 127
-    fi
+    # three name the account's private temporary directory (pwshpy_private_tmp).
+    pwshpy_private_tmp
     TMPDIR=$PWSHPY_TMP
     TMP=$PWSHPY_TMP
     TEMP=$PWSHPY_TMP

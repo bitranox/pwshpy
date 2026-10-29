@@ -245,6 +245,11 @@ markers = [
 ]
 testpaths = ["src", "tests"]
 
+# Keep a test's tmp_path only when the test failed [118]. The pack suites leave tens of thousands
+# of inodes in each basetemp and pytest keeps the last three, which can fill an inode-capped /tmp
+# tmpfs when several suites run at once. A failing test's directory is still kept for debugging.
+tmp_path_retention_policy = "failed"
+
 [tool.coverage.run]
 branch = true
 parallel = false

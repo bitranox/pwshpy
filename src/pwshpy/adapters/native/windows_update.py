@@ -49,6 +49,11 @@ def _strings(collection: Any) -> list[str]:
     return [str(collection.Item(i)) for i in range(int(collection.Count))]
 
 
+def _text(value: object) -> str:
+    """A COM string property as str; a VT_NULL/VT_EMPTY (None) is "", never the word "None"."""
+    return "" if value is None else str(value)
+
+
 def _category(category: Any) -> UpdateCategory:
     """One ICategory as a record; trusted native data, so validation is skipped.
 
@@ -57,7 +62,7 @@ def _category(category: Any) -> UpdateCategory:
     lower case, and a caller filtering on either must match.
     """
     return UpdateCategory.model_construct(
-        category_id=str(category.CategoryID).lower(), type=str(category.Type), name=str(category.Name)
+        category_id=_text(category.CategoryID).lower(), type=_text(category.Type), name=_text(category.Name)
     )
 
 
@@ -71,13 +76,13 @@ def _to_update(update: Any) -> WindowsUpdate:
     return WindowsUpdate.model_construct(
         update_id=str(update.Identity.UpdateID),
         revision_number=int(update.Identity.RevisionNumber),
-        title=str(update.Title),
+        title=_text(update.Title),
         kb_article_ids=tuple(_strings(update.KBArticleIDs)),
         is_installed=bool(update.IsInstalled),
         is_downloaded=bool(update.IsDownloaded),
         is_hidden=bool(update.IsHidden),
         is_mandatory=bool(update.IsMandatory),
-        msrc_severity=str(update.MsrcSeverity or ""),
+        msrc_severity=_text(update.MsrcSeverity),
         # MaxDownloadSize is a COM DECIMAL, which pywin32 hands over as decimal.Decimal.
         max_download_size=int(update.MaxDownloadSize),
         categories=tuple(detail.name for detail in details),

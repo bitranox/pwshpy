@@ -31,6 +31,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- `get_windows_update` records an update category's `type`, `name` or `category_id`, and an
+  update's `title`, that the agent leaves empty as `""`; they read as the text `"None"` before.
 - `get_acl` on Linux raises `NativeCallError` (a `NativeAccessDeniedError` for a refusal) when the
   extended ACL cannot be read; it read such an ACL silently as the three mode-bit entries, and
   `add_acl_ace` / `remove_acl_ace` then rewrote the ACL from those bits. Only "no extended ACL"

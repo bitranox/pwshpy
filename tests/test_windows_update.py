@@ -63,15 +63,15 @@ class _Identity:
 
 @dataclass
 class _Category:
-    Name: str
-    CategoryID: str
-    Type: str
+    Name: str | None
+    CategoryID: str | None
+    Type: str | None
 
 
 @dataclass
 class _FakeUpdate:
     Identity: _Identity
-    Title: str
+    Title: str | None
     KBArticleIDs: _Collection
     Categories: _Collection
     MsrcSeverity: str | None
@@ -128,6 +128,18 @@ def test_to_update_reads_every_iupdate_field_into_a_record_of_plain_values() -> 
     assert type(update.kb_article_ids) is tuple
     assert type(update.categories) is tuple
     assert type(update.category_details) is tuple
+
+
+@pytest.mark.os_agnostic
+def test_a_com_none_in_a_category_or_title_becomes_an_empty_string_not_the_text_none() -> None:
+    """A COM VT_NULL/VT_EMPTY arrives as None; str(None) would record the word "None"."""
+    fake = _fake_update()
+    fake.Title = None
+    fake.Categories = _Collection([_Category(Name=None, CategoryID=None, Type=None)])
+    update = _to_update(fake)
+    assert update.title == ""
+    assert update.categories == ("",)
+    assert update.category_details == (UpdateCategory(category_id="", type="", name=""),)
 
 
 @pytest.mark.os_agnostic

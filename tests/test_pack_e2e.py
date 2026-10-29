@@ -1260,6 +1260,17 @@ def _trusting_the_cache(text: str) -> str:
     return text.replace(_CACHE_CHECK, f"{_CACHE_CHECK}\n    return ''\n}}\n\nfunction Get-PwshPyCacheDistrustOnHost {{")
 
 
+#: Where the elevated .ps1 run judges the empty file it points GIT_CONFIG_GLOBAL at (Windows).
+_GIT_CONFIG_CHECK = "$PwshPyGitGlobalWhy = Get-PwshPyEmptyFileDistrust -Path $PwshPyGitGlobal"
+
+
+def _trusting_the_git_config(text: str) -> str:
+    """``text`` with the elevated run's check of its empty git configuration file answering "trusted",
+    for a test whose subject is something else (one counted substitution; nothing is created)."""
+    assert text.count(_GIT_CONFIG_CHECK) == 1
+    return text.replace(_GIT_CONFIG_CHECK, "$PwshPyGitGlobalWhy = ''")
+
+
 #: The runner's POSIX trusted owners (root alone); a test widens it so its own files stand in for
 #: root-owned ones, which no unprivileged test can create.
 _TRUSTED_UIDS = "$PwshPyTrustedUids = @('0')"
@@ -1492,8 +1503,10 @@ def test_as_system_the_strict_rule_is_unchanged(tmp_path: Path) -> None:
     host); since SYSTEM is already trusted, the running account adds nothing to the trusted set.
     Everything under this account's profile is therefore refused (the account owns the profile), so
     the positive case pins a system binary: whoami.exe stands in for uv, is accepted, and fails on
-    the argument ``run`` with its own exit code 1. The managed-Python directory this test hands the
-    run sits in the same profile, so its check is taken as passed (the uv is the subject).
+    the argument ``run`` with its own exit code 1. The managed-Python directory and the empty git
+    configuration file this test hands the run sit in the same profile, so their checks are taken as
+    passed (the uv is the subject; [138]: the git file's check refused the run with 127 before uv was
+    looked for, rightly, since SYSTEM trusts no account's profile).
     """
     user_sid = _current_user_sid()
     own = _private_dir(tmp_path / "own-bin")
@@ -1506,7 +1519,8 @@ def test_as_system_the_strict_rule_is_unchanged(tmp_path: Path) -> None:
     runner = _elevation_stand_in(
         Path(manifest.output_path), tmp_path / "system_stand_in.ps1", elevated="$true", running_sid="S-1-5-18"
     )
-    runner.write_text(without_python_dir_check(runner.read_text(encoding="utf-8"), powershell=True), encoding="utf-8")
+    text = without_python_dir_check(runner.read_text(encoding="utf-8"), powershell=True)
+    runner.write_text(_trusting_the_git_config(text), encoding="utf-8")
     searched = _run_with_path(tmp_path, runner, path_first=[own])
     assert f"its directory {own} is owned by {user_sid}" in _skip_line(searched, own_uv), searched.stderr
     assert not _skip_line(searched, own_uv).endswith("not root"), searched.stderr

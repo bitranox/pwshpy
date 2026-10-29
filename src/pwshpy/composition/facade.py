@@ -411,6 +411,13 @@ class Ps:
     def get_net_tcp_connection(self) -> Pipeline[NetConnection]:
         """Return a lazy pipeline over the open network connections (native).
 
+        psutil's ``inet`` listing, so UDP sockets are included alongside TCP; filter on
+        ``protocol`` for TCP only. A socket owned by another user can carry ``pid=None``. Where
+        listing needs elevation (macOS non-root) the pipeline is empty rather than an error.
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`NetConnection` records.
+
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().get_net_tcp_connection(), Pipeline)
@@ -420,6 +427,10 @@ class Ps:
 
     def get_net_adapter(self) -> Pipeline[NetAdapter]:
         """Return a lazy pipeline over the network interfaces (native, portable; like Get-NetAdapter).
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`NetAdapter` records, one
+            per interface psutil reports (``speed_mbps`` is None where psutil reports 0).
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
@@ -431,6 +442,10 @@ class Ps:
     def get_net_ip_address(self) -> Pipeline[NetIpAddress]:
         """Return a lazy pipeline over the bound IP addresses (native, portable; like Get-NetIPAddress).
 
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`NetIpAddress` records,
+            IPv4 and IPv6 only (link-layer addresses are on :meth:`get_net_adapter`).
+
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().get_net_ip_address(), Pipeline)
@@ -440,6 +455,12 @@ class Ps:
 
     def get_net_udp_endpoint(self) -> Pipeline[NetConnection]:
         """Return a lazy pipeline over the UDP sockets (native, portable; like Get-NetUDPEndpoint).
+
+        UDP is connectionless, so ``status`` is always ``NONE`` and the remote fields are None.
+        Where listing needs elevation (macOS non-root) the pipeline is empty rather than an error.
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`NetConnection` records.
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
@@ -451,6 +472,12 @@ class Ps:
     def get_volume(self) -> Pipeline[DiskUsage]:
         """Return a lazy pipeline over the mounted filesystems (native).
 
+        A partition whose usage cannot be read (an empty removable drive, a permission error)
+        is skipped rather than ending the listing.
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`DiskUsage` records.
+
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().get_volume(), Pipeline)
@@ -460,6 +487,10 @@ class Ps:
 
     def get_uptime(self) -> SystemUptime:
         """Return the system boot time and elapsed uptime (native).
+
+        Returns:
+            A :class:`SystemUptime` with ``boot_time`` (timezone-aware UTC) and
+            ``uptime_seconds`` (never negative).
 
         Example:
             >>> from pwshpy.domain.records import SystemUptime
@@ -471,6 +502,23 @@ class Ps:
     def resolve_dns_name(self, name: str, *, timeout: float | None = None) -> Pipeline[DnsRecord]:
         """Return a lazy pipeline over the addresses ``name`` resolves to (native).
 
+        The lookup runs when the pipeline is first iterated, not by this call.
+
+        Args:
+            name: The host name to resolve.
+            timeout: Seconds to wait for the lookup; None (default) leaves it to the OS
+                resolver's own timeout. A timed-out lookup's thread is abandoned and ends when
+                the OS resolver returns.
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`DnsRecord` records, one
+            per unique (family, address) pair.
+
+        Raises:
+            OperationTimeoutError: ``timeout`` elapsed first (raised on iteration). A
+                ``NativeCallError`` subclass, so catch it first to tell it apart.
+            NativeCallError: The name could not be resolved (raised on iteration).
+
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().resolve_dns_name("localhost"), Pipeline)
@@ -480,6 +528,19 @@ class Ps:
 
     def test_connection(self, host: str, *, port: int = 443, timeout: float = 5.0) -> ConnectionTest:
         """Probe TCP reachability of ``host:port`` within ``timeout`` seconds (native).
+
+        A failed connect is a result, not an error: the record says ``reachable=False`` and
+        carries the error text.
+
+        Args:
+            host: The host name or address to connect to.
+            port: The TCP port (default 443).
+            timeout: Seconds to wait for the connection (default 5.0; a negative value is
+                treated as 0).
+
+        Returns:
+            A :class:`ConnectionTest` with ``reachable``, ``latency_ms`` (None when
+            unreachable) and ``error`` (None when reachable).
 
         Example:
             >>> from pwshpy.domain.records import ConnectionTest
@@ -491,6 +552,10 @@ class Ps:
     def environment(self) -> Pipeline[EnvVar]:
         """Return a lazy pipeline over the process environment variables (native).
 
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`EnvVar` records, read
+            from ``os.environ`` when iterated.
+
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().environment(), Pipeline)
@@ -501,6 +566,21 @@ class Ps:
     def get_item_property(self, key: str) -> Pipeline[RegistryValue]:
         """Return a lazy pipeline over the values under registry ``key`` (native, Windows).
 
+        Nothing is read until the pipeline is iterated, so every error below is raised then.
+
+        Args:
+            key: A hive-prefixed key path (``"HKLM/SOFTWARE/..."``); ``/`` and ``\\``
+                separators and short or long hive names are accepted.
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`RegistryValue` records.
+
+        Raises:
+            PlatformUnsupportedError: ``lib_registry`` is not installed (it is a Windows-only
+                dependency).
+            NativeCallError: The hive is unknown, or the registry call failed (a
+                :class:`NativeAccessDeniedError` when access is denied).
+
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().get_item_property("HKLM/SOFTWARE"), Pipeline)
@@ -510,6 +590,21 @@ class Ps:
 
     def registry_keys(self, key: str) -> Pipeline[RegistryKey]:
         """Return a lazy pipeline over the immediate subkeys of registry ``key`` (native, Windows).
+
+        Nothing is read until the pipeline is iterated, so every error below is raised then.
+
+        Args:
+            key: A hive-prefixed key path (``"HKLM/SOFTWARE/..."``); ``/`` and ``\\``
+                separators and short or long hive names are accepted.
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`RegistryKey` records.
+
+        Raises:
+            PlatformUnsupportedError: ``lib_registry`` is not installed (it is a Windows-only
+                dependency).
+            NativeCallError: The hive is unknown, or the registry call failed (a
+                :class:`NativeAccessDeniedError` when access is denied).
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
@@ -523,6 +618,23 @@ class Ps:
     ) -> RegistryValue:
         """Create or overwrite a registry value; return the written record (native, **mutating**).
 
+        Args:
+            key: A hive-prefixed key path (``"HKLM/SOFTWARE/..."``); ``/`` and ``\\``
+                separators and short or long hive names are accepted.
+            name: The value name.
+            data: The data to store, shaped for ``value_type`` (a ``str``, an ``int``, a
+                ``list[str]`` for a multi-string, or None).
+            value_type: The registry type to write the value as.
+
+        Returns:
+            A :class:`RegistryValue` built from the arguments (not read back from the registry).
+
+        Raises:
+            PlatformUnsupportedError: ``lib_registry`` is not installed (it is a Windows-only
+                dependency).
+            NativeCallError: The hive is unknown, or the registry call failed (a
+                :class:`NativeAccessDeniedError` when access is denied).
+
         Example:
             >>> callable(build_ps().set_item_property)
             True
@@ -531,6 +643,17 @@ class Ps:
 
     def remove_item_property(self, key: str, name: str) -> None:
         """Delete a registry value (native, **mutating**).
+
+        Args:
+            key: A hive-prefixed key path (``"HKLM/SOFTWARE/..."``); ``/`` and ``\\``
+                separators and short or long hive names are accepted.
+            name: The value name to delete.
+
+        Raises:
+            PlatformUnsupportedError: ``lib_registry`` is not installed (it is a Windows-only
+                dependency).
+            NativeCallError: The hive is unknown, or the registry call failed (a
+                :class:`NativeAccessDeniedError` when access is denied).
 
         Example:
             >>> callable(build_ps().remove_item_property)
@@ -541,6 +664,19 @@ class Ps:
     def new_registry_key(self, key: str) -> RegistryKey:
         """Create a registry key (with missing parents); return it (native, **mutating**).
 
+        Args:
+            key: A hive-prefixed key path (``"HKLM/SOFTWARE/..."``); ``/`` and ``\\``
+                separators and short or long hive names are accepted.
+
+        Returns:
+            A :class:`RegistryKey` naming the created key (built from ``key``, not read back).
+
+        Raises:
+            PlatformUnsupportedError: ``lib_registry`` is not installed (it is a Windows-only
+                dependency).
+            NativeCallError: The hive is unknown, or the registry call failed (a
+                :class:`NativeAccessDeniedError` when access is denied).
+
         Example:
             >>> callable(build_ps().new_registry_key)
             True
@@ -549,6 +685,17 @@ class Ps:
 
     def remove_registry_key(self, key: str, *, recursive: bool = False) -> None:
         """Delete a registry key (``recursive`` removes subkeys too) (native, **mutating**).
+
+        Args:
+            key: A hive-prefixed key path (``"HKLM/SOFTWARE/..."``); ``/`` and ``\\``
+                separators and short or long hive names are accepted.
+            recursive: Also delete the key's subkeys; False (default) deletes the key only.
+
+        Raises:
+            PlatformUnsupportedError: ``lib_registry`` is not installed (it is a Windows-only
+                dependency).
+            NativeCallError: The hive is unknown, or the registry call failed (a
+                :class:`NativeAccessDeniedError` when access is denied).
 
         Example:
             >>> callable(build_ps().remove_registry_key)

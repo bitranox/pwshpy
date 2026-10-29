@@ -8,6 +8,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Changed
 
+- `invoke_web_request` and `invoke_rest_method` raise `NativeCallError` on an HTTP status of 400 or
+  above, as `Invoke-WebRequest` and `Invoke-RestMethod` do; the message names the status and the
+  first 200 characters of the body on one line. They returned the answer (and `invoke_rest_method`
+  its parsed error body) before, so a caller that reads 4xx or 5xx bodies now passes the new keyword
+  `skip_http_error_check=True` (CLI `--skip-http-error-check`, pwsh's `-SkipHttpErrorCheck`) to get
+  the answer back.
 - Every public method of the `ps` facade documents each parameter (`Args:`) and its result
   (`Returns:`, or `Yields:` for a generator), and, where traced, the errors it raises (`Raises:`),
   so `help(ps.<method>)` says what a value means and what can fail. A test fails when a method

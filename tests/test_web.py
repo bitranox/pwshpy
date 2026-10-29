@@ -65,9 +65,9 @@ def test_invoke_web_request_returns_typed_response(base_url: str) -> None:
 
 
 @pytest.mark.os_agnostic
-def test_invoke_web_request_http_error_is_returned_not_raised(base_url: str) -> None:
-    """A 404 comes back as a WebResponse (status + body), not an exception."""
-    result = invoke_web_request(f"{base_url}/notfound")
+def test_invoke_web_request_http_error_is_returned_when_the_check_is_skipped(base_url: str) -> None:
+    """With skip_http_error_check a 404 comes back as a WebResponse (status + body), not an exception."""
+    result = invoke_web_request(f"{base_url}/notfound", skip_http_error_check=True)
     assert result.status_code == 404
     assert "missing" in result.text
 

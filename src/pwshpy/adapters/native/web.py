@@ -51,6 +51,52 @@ def _transport_error(what: str, exc: BaseException, timeout: float) -> NativeCal
     return native_error(f"{what} failed: {exc}", exc)
 
 
+#: The lowest status the cmdlets treat as an error (Invoke-WebRequest raises on 4xx and 5xx).
+_HTTP_ERROR_FLOOR = 400
+#: How much of an error body is read for the message excerpt; the rest is never read.
+_EXCERPT_BYTES = 1024
+#: How many characters of that body the error message carries at most.
+_EXCERPT_CHARS = 200
+
+
+def _body_excerpt(raw: bytes) -> str:
+    """A short, single-line, printable start of an error body, or "" for an empty body.
+
+    The message is read on a console and in logs, so line breaks and control characters
+    (an escape sequence included) become spaces, and the length is bounded: an error page
+    can be megabytes and can echo request data the caller would not want repeated in full.
+    """
+    text = raw.decode("utf-8", errors="replace")
+    one_line = " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
+    if not one_line:
+        return ""
+    truncated = len(one_line) > _EXCERPT_CHARS or len(raw) > _EXCERPT_BYTES
+    return f": {one_line[:_EXCERPT_CHARS]}{'...' if truncated else ''}"
+
+
+def _http_error_response(
+    url: str, exc: urllib.error.HTTPError, *, skip_http_error_check: bool, timeout: float
+) -> WebResponse:
+    """Return the answer urllib raised as HTTPError, or raise it as the cmdlets do for >= 400."""
+    is_error = exc.code >= _HTTP_ERROR_FLOOR and not skip_http_error_check
+    try:
+        # A raised error needs only the excerpt, so a huge error page is never read in full.
+        raw = exc.read(_EXCERPT_BYTES + 1) if is_error else exc.read()
+    except OSError as read_exc:  # the error body itself can stall or break off
+        raise _transport_error(f"web request to {url!r}", read_exc, timeout) from read_exc
+    finally:
+        exc.close()
+    if is_error:
+        excerpt = _body_excerpt(raw)
+        raise native_error(f"web request to {url!r} failed: HTTP {exc.code} {exc.reason}{excerpt}", exc) from exc
+    return WebResponse(
+        url=url,
+        status_code=int(exc.code),
+        text=raw.decode("utf-8", errors="replace"),
+        headers=dict(exc.headers),
+    )
+
+
 def invoke_web_request(
     url: str,
     *,
@@ -58,11 +104,15 @@ def invoke_web_request(
     headers: Mapping[str, str] | None = None,
     body: str | None = None,
     timeout: float = 30.0,
+    skip_http_error_check: bool = False,
 ) -> WebResponse:
     """Perform an HTTP request and return a typed :class:`WebResponse` (like Invoke-WebRequest).
 
-    A 4xx/5xx response is returned (with its body/status), not raised - only a
-    transport-level failure raises :class:`~pwshpy.domain.errors.NativeCallError`.
+    A status of 400 or above raises :class:`~pwshpy.domain.errors.NativeCallError` naming the
+    status and a short excerpt of the body, as ``Invoke-WebRequest`` does; with
+    ``skip_http_error_check=True`` (pwsh's ``-SkipHttpErrorCheck``) the answer is returned
+    with its status and full body instead. A transport failure raises ``NativeCallError``, a
+    timeout its subclass :class:`~pwshpy.domain.errors.OperationTimeoutError`.
 
     Example:
         >>> callable(invoke_web_request)
@@ -85,13 +135,7 @@ def invoke_web_request(
                 headers=dict(response.headers),
             )
     except urllib.error.HTTPError as exc:
-        raw = exc.read()
-        return WebResponse(
-            url=url,
-            status_code=int(exc.code),
-            text=raw.decode("utf-8", errors="replace"),
-            headers=dict(exc.headers),
-        )
+        return _http_error_response(url, exc, skip_http_error_check=skip_http_error_check, timeout=timeout)
     except (urllib.error.URLError, OSError) as exc:
         raise _transport_error(f"web request to {url!r}", exc, timeout) from exc
 
@@ -103,12 +147,15 @@ def invoke_rest_method(
     headers: Mapping[str, str] | None = None,
     json_body: Any = None,
     timeout: float = 30.0,
+    skip_http_error_check: bool = False,
 ) -> Any:
     """Perform an HTTP request and return the parsed JSON body (like Invoke-RestMethod).
 
     ``json_body`` is serialized and sent with a ``Content-Type: application/json``
-    header.  Raises :class:`~pwshpy.domain.errors.NativeCallError` if the response
-    body is not valid JSON.
+    header.  A status of 400 or above raises
+    :class:`~pwshpy.domain.errors.NativeCallError` unless ``skip_http_error_check`` is
+    True, in which case the error body is parsed like any other.  Raises
+    ``NativeCallError`` too if the response body is not valid JSON.
 
     Example:
         >>> callable(invoke_rest_method)
@@ -119,7 +166,14 @@ def invoke_rest_method(
     if json_body is not None:
         body = orjson.dumps(json_body).decode("utf-8")
         outgoing.setdefault("Content-Type", "application/json")
-    response = invoke_web_request(url, method=method, headers=outgoing, body=body, timeout=timeout)
+    response = invoke_web_request(
+        url,
+        method=method,
+        headers=outgoing,
+        body=body,
+        timeout=timeout,
+        skip_http_error_check=skip_http_error_check,
+    )
     try:
         return orjson.loads(response.text)
     except orjson.JSONDecodeError as exc:

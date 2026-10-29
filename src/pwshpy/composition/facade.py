@@ -2175,10 +2175,12 @@ class Ps:
         headers: Mapping[str, str] | None = None,
         body: str | None = None,
         timeout: float = 30.0,
+        skip_http_error_check: bool = False,
     ) -> WebResponse:
         """Perform an HTTP request; return a typed WebResponse (native, portable; like Invoke-WebRequest).
 
-        A 4xx or 5xx answer is returned with its status and body, not raised.
+        A status of 400 or above raises, as ``Invoke-WebRequest`` does, unless
+        ``skip_http_error_check`` is True.
 
         Args:
             url: An ``http://`` or ``https://`` URL; any other scheme is refused.
@@ -2187,6 +2189,8 @@ class Ps:
             body: The request body, sent UTF-8 encoded; None (default) sends none.
             timeout: Seconds for the connection and each blocking read (default 30.0), passed
                 to ``urllib``; running out raises ``OperationTimeoutError``.
+            skip_http_error_check: True returns a 4xx or 5xx answer with its status and full
+                body instead of raising (pwsh's ``-SkipHttpErrorCheck``); default False.
 
         Returns:
             A :class:`WebResponse` with ``status_code``, ``headers`` and ``text`` (the body
@@ -2194,14 +2198,23 @@ class Ps:
 
         Raises:
             OperationTimeoutError: The connection or a read did not finish within ``timeout``.
-            NativeCallError: The scheme is not http/https, or the request failed below HTTP
-                (DNS, connection, TLS).
+            NativeCallError: The scheme is not http/https, the request failed below HTTP
+                (DNS, connection, TLS), or the server answered 400 or above and
+                ``skip_http_error_check`` is False; the message names the status and the
+                start of the body (at most 200 characters, on one line).
 
         Example:
             >>> callable(build_ps().invoke_web_request)
             True
         """
-        return self._web_requester(url, method=method, headers=headers, body=body, timeout=timeout)
+        return self._web_requester(
+            url,
+            method=method,
+            headers=headers,
+            body=body,
+            timeout=timeout,
+            skip_http_error_check=skip_http_error_check,
+        )
 
     def invoke_rest_method(
         self,
@@ -2211,11 +2224,13 @@ class Ps:
         headers: Mapping[str, str] | None = None,
         json_body: Any = None,
         timeout: float = 30.0,
+        skip_http_error_check: bool = False,
     ) -> Any:
         """Perform an HTTP request; return the parsed JSON (native, portable; like Invoke-RestMethod).
 
-        Built on :meth:`invoke_web_request`, so a 4xx or 5xx answer is not raised: its body is
-        parsed like any other.
+        Built on :meth:`invoke_web_request`, so a status of 400 or above raises, as
+        ``Invoke-RestMethod`` does, unless ``skip_http_error_check`` is True; then the error
+        body is parsed like any other.
 
         Args:
             url: An ``http://`` or ``https://`` URL; any other scheme is refused.
@@ -2226,14 +2241,17 @@ class Ps:
                 sends no body.
             timeout: Seconds for the connection and each blocking read (default 30.0), passed
                 to ``urllib``; running out raises ``OperationTimeoutError``.
+            skip_http_error_check: True parses a 4xx or 5xx answer's body instead of raising
+                (pwsh's ``-SkipHttpErrorCheck``); default False.
 
         Returns:
             The response body parsed as JSON.
 
         Raises:
             OperationTimeoutError: The connection or a read did not finish within ``timeout``.
-            NativeCallError: The scheme is not http/https, the request failed below HTTP, or
-                the response body is not JSON.
+            NativeCallError: The scheme is not http/https, the request failed below HTTP, the
+                server answered 400 or above and ``skip_http_error_check`` is False, or the
+                response body is not JSON.
             TypeError: ``json_body`` holds a value orjson cannot serialize
                 (``orjson.JSONEncodeError``).
 
@@ -2241,7 +2259,14 @@ class Ps:
             >>> callable(build_ps().invoke_rest_method)
             True
         """
-        return self._rest_invoker(url, method=method, headers=headers, json_body=json_body, timeout=timeout)
+        return self._rest_invoker(
+            url,
+            method=method,
+            headers=headers,
+            json_body=json_body,
+            timeout=timeout,
+            skip_http_error_check=skip_http_error_check,
+        )
 
     def download_file(self, url: str, dest: str | Path, *, chunk_size: int = 65536, timeout: float = 30.0) -> Path:
         """Stream an HTTP download to ``dest``, **memory-bounded** (native, portable).

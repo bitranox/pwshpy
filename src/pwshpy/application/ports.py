@@ -217,6 +217,7 @@ class WebRequester(Protocol):
         headers: Mapping[str, str] | None = ...,
         body: str | None = ...,
         timeout: float = ...,
+        skip_http_error_check: bool = ...,
     ) -> WebResponse: ...
 
 
@@ -231,6 +232,7 @@ class RestInvoker(Protocol):
         headers: Mapping[str, str] | None = ...,
         json_body: Any = ...,
         timeout: float = ...,
+        skip_http_error_check: bool = ...,
     ) -> Any: ...
 
 

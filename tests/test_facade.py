@@ -260,8 +260,9 @@ def _fake_web_request(
     headers: Mapping[str, str] | None = None,
     body: str | None = None,
     timeout: float = 30.0,
+    skip_http_error_check: bool = False,
 ) -> WebResponse:
-    return WebResponse(url=url, status_code=200, text=f"{method} {body}")
+    return WebResponse(url=url, status_code=200, text=f"{method} {body} skip={skip_http_error_check}")
 
 
 def _fake_rest_method(
@@ -271,8 +272,9 @@ def _fake_rest_method(
     headers: Mapping[str, str] | None = None,
     json_body: object = None,
     timeout: float = 30.0,
+    skip_http_error_check: bool = False,
 ) -> object:
-    return {"url": url, "echo": json_body}
+    return {"url": url, "echo": json_body, "skip": skip_http_error_check}
 
 
 class _FakeProcessControl:
@@ -1084,8 +1086,18 @@ def test_injected_web_adapters(injected: _InjectedPs) -> None:
     write_calls = injected.writers.calls
     web = facade.invoke_web_request("http://x/", method="POST", body="hi")
     assert web.status_code == 200
-    assert web.text == "POST hi"
-    assert facade.invoke_rest_method("http://api/", json_body={"k": 1}) == {"url": "http://api/", "echo": {"k": 1}}
+    assert web.text == "POST hi skip=False"
+    assert facade.invoke_web_request("http://x/", skip_http_error_check=True).text == "GET None skip=True"
+    assert facade.invoke_rest_method("http://api/", json_body={"k": 1}) == {
+        "url": "http://api/",
+        "echo": {"k": 1},
+        "skip": False,
+    }
+    assert facade.invoke_rest_method("http://api/", skip_http_error_check=True) == {
+        "url": "http://api/",
+        "echo": None,
+        "skip": True,
+    }
     assert facade.download_file("http://x/f.bin", "out.bin") == Path("out.bin")
     assert ("download", "http://x/f.bin", "out.bin") in write_calls
 

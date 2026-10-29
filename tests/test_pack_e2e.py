@@ -4701,6 +4701,53 @@ def test_a_failed_posix_installer_download_is_named_and_wget_is_tried(
     assert not record.exists(), "uv ran"
 
 
+#: The start of the refusal a run that is not elevated prints when its TMPDIR cannot take uv's installer.
+_NO_INSTALLER_TEMP = "pwshpy: cannot create a temporary directory for uv's installer in "
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated-control", "not-elevated"])
+def test_a_missing_posix_tmpdir_is_refused_for_the_installer_never_created(tmp_path: Path, elevated: str) -> None:
+    """[R3] round 5, as the .sh: a POSIX run that is not elevated made the directory for uv's installer
+    with New-Item -Force below [IO.Path]::GetTempPath(), which creates every missing parent, so a
+    TMPDIR naming a directory that does not exist was created (where the caller could write) and left
+    behind, where the .sh's mktemp -d refuses it. The directory is now made as mktemp -d makes it: the
+    run stops with 70 before any download, naming the directory, and nothing is created there.
+    Elevated the account's private temporary directory is used instead and the installation runs."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
+    installer = tmp_path / "local-uv-install.sh"
+    installer.write_text(f'mkdir -p "$HOME/.local/bin"\ncp -p "{uv.parent}"/* "$HOME/.local/bin/"\n')
+    doubles = tmp_path / "download-bin"
+    doubles.mkdir()
+    log = tmp_path / "downloads.txt"
+    curl = write_download_double(doubles, "curl", log=log, serve=installer)
+    wget = write_download_double(doubles, "wget", log=log, serve=None, exit_code=4)
+    _with_posix_download_doubles(tmp_path, runner, curl=curl, wget=wget)
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    missing = tmp_path / "missing"
+    result = _run_with_path(
+        tmp_path,
+        runner,
+        path_first=["/usr/bin", "/bin"],
+        env={"HOME": str(caller_home), "TMPDIR": str(missing / "tmp")},
+        cwd=_clean_cwd(tmp_path),
+        inherit_path=False,
+        install_uv=True,
+    )
+    assert not missing.exists(), "the missing TMPDIR was created"
+    if elevated == "$true":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert record.is_file(), result.stderr
+        return
+    assert result.returncode == 70, result.stdout + result.stderr
+    assert f"{_NO_INSTALLER_TEMP}{missing / 'tmp'}" in result.stderr, result.stderr
+    assert not log.exists(), "a download ran"
+    assert not record.exists(), "uv ran"
+
+
 # --- [156] elevated .ps1 runs of a script with a git source refuse a git older than 2.32 ----------------
 
 #: The start of the refusal an elevated run prints for a git that may ignore GIT_CONFIG_GLOBAL.

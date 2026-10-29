@@ -100,9 +100,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   refused that uv with exit code 127. Behind a proxy a root run therefore needs uv installed for
   root beforehand, or the proxy in root's own `~/.curlrc`, `/etc/wgetrc` or `~/.wgetrc`.
 - Packed runners on Linux and macOS: uv's installer is downloaded to a file before it runs (as root
-  into the account's private temporary directory), with `curl` and then `wget` when `curl` fails, and
-  a failed download stops the run with exit code 127 and `could not download uv's installer from
-  ... (<downloader> exited <code>, ...)`; a failed installer stops it with its own exit code named.
+  into the account's private temporary directory, otherwise into a new directory in an existing
+  writable `TMPDIR`, default `/tmp`), with `curl` and then `wget` when `curl` fails, and a failed
+  download stops the run with exit code 127 and `could not download uv's installer from ...
+  (<downloader> exited <code>, ...)`; a failed installer stops it with its own exit code named. A run
+  that is not root (not elevated) refuses a `TMPDIR` that does not exist with exit code 70 and
+  `cannot create a temporary directory for uv's installer in <TMPDIR>`; the `.ps1` created it, with
+  every missing parent, and left it behind.
   Before, the installer was piped into `sh`, whose status for the empty input of a failed download
   is 0, so `wget` was never tried and the run ended in the uv trust remedy.
 - Packed `.sh` runner, `--pwshpy-elevate`: the sudo relaunch runs as a child of the runner's shell

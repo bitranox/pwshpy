@@ -412,9 +412,13 @@ Details worth knowing:
   runs uv's installer with only that home and the fixed `PATH` above in its environment, under umask
   022, so the caller's installer, proxy and certificate variables choose neither what is downloaded
   nor where it lands. Every run downloads the installer to a file first (with `curl`, then `wget`
-  when `curl` fails; as root into the account's private temporary directory) and runs it only when
-  the download succeeded: when neither downloads it, the run stops with exit code 127 and `could not
-  download uv's installer from https://astral.sh/uv/install.sh (<each downloader> exited <code>)`.
+  when `curl` fails; as root into the account's private temporary directory, otherwise into a new
+  directory in `TMPDIR`, default `/tmp`, which must already exist and be writable by the caller: a
+  missing one is never created, the run stops with exit code 70 and `cannot create a temporary
+  directory for uv's installer in <TMPDIR>`) and runs it only when the download succeeded: when
+  neither downloads it, the run stops with exit code 127 and `could not download uv's installer from
+  https://astral.sh/uv/install.sh (<each downloader> exited <code>)`, a downloader that exits 0
+  without delivering a file counted as failed (`exited 0 with nothing downloaded`).
   Behind a proxy, a root run therefore needs uv installed for root beforehand, or the proxy set in
   root's own `~/.curlrc` (curl) or `/etc/wgetrc` or `~/.wgetrc` (wget); the caller's
   `https_proxy`, `SSL_CERT_FILE`, `SSL_CERT_DIR` and `CURL_CA_BUNDLE` do not apply, the system's CA

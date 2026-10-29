@@ -1006,8 +1006,10 @@ pwshpy_install_uv() {
         pwshpy_private_tmp
         _iu_dir=$PWSHPY_TMP
     else
+        # mktemp -d creates no missing parent: a TMPDIR that does not exist is refused, never created.
         if ! _iu_dir=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/pwshpy-uv.XXXXXX"); then
-            pwshpy_die "cannot create a temporary directory for uv's installer" 70
+            _iu_why="cannot create a temporary directory for uv's installer in ${TMPDIR:-/tmp}"
+            pwshpy_die "$_iu_why: TMPDIR must name an existing directory this account can write" 70
         fi
     fi
     _iu_file=$_iu_dir/uv-installer.sh

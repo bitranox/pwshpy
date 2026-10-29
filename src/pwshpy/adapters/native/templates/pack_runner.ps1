@@ -980,9 +980,24 @@ function Get-PwshPyPosixUvInstaller {
     if ($PwshPyRootPath) {
         $directory = Initialize-PwshPyPrivateTemp
     } else {
-        $directory = Join-Path ([IO.Path]::GetTempPath()) ('pwshpy-uv-' + [Guid]::NewGuid().ToString('N'))
-        Initialize-PwshPyDirectory -Path $directory -Private $true
-        Invoke-PwshPyChmod -Arguments @('700', '--', $directory)
+        # Made as the .sh's mktemp -d makes it, by mkdir without -p: a TMPDIR that does not exist is
+        # refused, never created with every missing parent and left behind, as New-Item -Force would.
+        # The mkdir program, not PowerShell's mkdir function, which is New-Item.
+        $parent = [IO.Path]::GetTempPath().TrimEnd('/')
+        if (-not $parent) { $parent = '/' }
+        $directory = Join-Path $parent ('pwshpy-uv-' + [Guid]::NewGuid().ToString('N'))
+        $made = $false
+        try {
+            $mkdir = Get-Command -Name mkdir -CommandType Application -TotalCount 1 -ErrorAction Stop
+            & $mkdir.Source -m 700 -- $directory
+            $made = $LASTEXITCODE -eq 0
+        } catch {
+            Write-Verbose "mkdir $directory failed: $_"
+        }
+        if (-not $made) {
+            Write-PwshPyFailure "pwshpy: cannot create a temporary directory for uv's installer in ${parent}: TMPDIR must name an existing directory this account can write"
+            exit 70
+        }
     }
     $file = Join-Path $directory 'uv-installer.sh'
     Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue

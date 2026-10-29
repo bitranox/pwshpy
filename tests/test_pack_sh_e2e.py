@@ -1802,6 +1802,38 @@ def test_a_failed_installer_download_is_named_and_wget_is_tried(
     assert not record.exists(), "uv ran"
 
 
+#: The start of the refusal a run that is not root prints when its TMPDIR cannot take uv's installer.
+_NO_INSTALLER_TEMP = "cannot create a temporary directory for uv's installer in "
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root-control", "not-root"])
+def test_a_missing_tmpdir_is_refused_for_the_installer_never_created(tmp_path: Path, as_root: bool) -> None:
+    """[R3] round 5, the twin of the .ps1's: a run that is not root downloads uv's installer into a new
+    directory in its TMPDIR, made as mktemp -d makes it, so a TMPDIR naming a directory that does not
+    exist stops the run with 70 before any download, naming the directory, and nothing is created
+    there. As root the account's private temporary directory is used instead, so the caller's TMPDIR
+    plays no part and the installation runs."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root)
+    installer = tmp_path / "local-uv-install.sh"
+    installer.write_text(f'mkdir -p "$HOME/.local/bin"\ncp -p "{uv.parent}"/* "$HOME/.local/bin/"\n')
+    log = _with_local_uv_installer(runner, installer)
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    missing = tmp_path / "missing"
+    environment = {**_trust_env(tmp_path), "HOME": str(caller_home), "PATH": "/usr/bin:/bin"}
+    environment["TMPDIR"] = str(missing / "tmp")
+    result = _run_in(["sh"], runner, env=environment, cwd=_work_dir(tmp_path))
+    assert not missing.exists(), "the missing TMPDIR was created"
+    if as_root:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert record.is_file(), result.stderr
+        return
+    assert result.returncode == 70, result.stdout + result.stderr
+    assert f"{_NO_INSTALLER_TEMP}{missing / 'tmp'}" in result.stderr, result.stderr
+    assert not log.exists(), "a download ran"
+    assert not record.exists(), "uv ran"
+
+
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
 def test_as_root_the_python_is_found_for_the_scripts_requires_python(tmp_path: Path, as_root: bool) -> None:
     """[A1]: uv run only warns when --python names an interpreter outside the script's requires-python,

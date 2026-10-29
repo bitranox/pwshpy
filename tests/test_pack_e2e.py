@@ -585,11 +585,16 @@ def test_elevate_switch_forwards_the_clean_switch(tmp_path: Path) -> None:
 @pytest.mark.os_posix
 @pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
 @pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
-@pytest.mark.parametrize("cached", [True, False], ids=["credential-cached", "timestamp-timeout-0"])
-def test_elevate_switch_never_lets_sudo_prompt_twice(tmp_path: Path, cached: bool) -> None:
+@pytest.mark.parametrize(
+    ("cached", "per_parent"),
+    [(True, False), (False, False), (True, True)],
+    ids=["credential-cached", "timestamp-timeout-0", "timestamp-type-ppid"],
+)
+def test_elevate_switch_never_lets_sudo_prompt_twice(tmp_path: Path, cached: bool, per_parent: bool) -> None:
     """[136-sh]: the .ps1 relaunch on POSIX asks once (``sudo -v``), checks with ``sudo -n -v`` that a
     credential was cached and relaunches with ``sudo -n``: sudo never prompts again. Where it caches
-    nothing (``timestamp_timeout=0``) the run is declined (exit 77) and the script never runs."""
+    nothing (``timestamp_timeout=0``) the run is declined (exit 77) and the script never runs. [R8]:
+    under ``timestamp_type=ppid`` the relaunch is a child of the pwsh that ran ``-v``, so it runs."""
     entry = tmp_path / "who.py"
     marker = tmp_path / "ran.marker"
     entry.write_text(f'open({str(marker)!r}, "w").close()\n')
@@ -597,7 +602,7 @@ def test_elevate_switch_never_lets_sudo_prompt_twice(tmp_path: Path, cached: boo
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
     calls = tmp_path / "sudo-calls.txt"
-    write_fake_sudo(bin_dir, grant=True, cached=cached, calls=calls)
+    write_fake_sudo(bin_dir, grant=True, cached=cached, per_parent=per_parent, calls=calls)
     environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
     result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment)
     assert second_prompts(calls) == [], calls.read_text(encoding="utf-8")

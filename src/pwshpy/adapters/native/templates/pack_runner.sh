@@ -1064,8 +1064,13 @@ if [ "$PWSHPY_WANT_ELEVATE" = "1" ] && [ "$PWSHPY_AS_ROOT" != "1" ]; then
     else
         set -- -- "$@"
     fi
+    # Not exec'd: sudo keeps a credential per terminal by default, but per parent process under
+    # timestamp_type=ppid, and the -v calls above ran with this shell as their parent. Exec'd, the
+    # relaunch's parent would be this shell's own parent, which holds no credential, so sudo -n would
+    # refuse with 1, an exit code the script could have returned too ([R8]).
     # shellcheck disable=SC2086
-    exec sudo -n /bin/sh "$0" $PWSHPY_FWD "$@"
+    sudo -n /bin/sh "$0" $PWSHPY_FWD "$@"
+    exit $?
 fi
 
 # --- unpack -----------------------------------------------------------------------------

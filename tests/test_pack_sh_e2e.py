@@ -418,10 +418,13 @@ sys.exit(9)
 """
 
 
-def _elevate_setup(tmp_path: Path, *, grant: bool, cached: bool = True) -> tuple[Path, Path, dict[str, str]]:
+def _elevate_setup(
+    tmp_path: Path, *, grant: bool, cached: bool = True, per_parent: bool = False
+) -> tuple[Path, Path, dict[str, str]]:
     """A packed marker-writing script, a sudo double on PATH, and the marker the script writes.
 
-    The double logs every call to ``sudo-calls.txt`` in ``tmp_path``.
+    The double logs every call to ``sudo-calls.txt`` in ``tmp_path``; ``cached`` and ``per_parent`` as
+    for :func:`elevation_doubles.write_fake_sudo`.
     """
     entry = tmp_path / "who.py"
     entry.write_text(_ELEVATE_ENTRY)
@@ -430,7 +433,7 @@ def _elevate_setup(tmp_path: Path, *, grant: bool, cached: bool = True) -> tuple
     runner.chmod(0o755)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_fake_sudo(bin_dir, grant=grant, cached=cached, calls=tmp_path / "sudo-calls.txt")
+    write_fake_sudo(bin_dir, grant=grant, cached=cached, per_parent=per_parent, calls=tmp_path / "sudo-calls.txt")
     marker = tmp_path / "ran.marker"
     environment = _env(tmp_path)
     environment["PATH"] = os.pathsep.join([str(bin_dir), environment["PATH"]])
@@ -488,6 +491,19 @@ def test_elevate_never_lets_sudo_prompt_twice(tmp_path: Path, cached: bool) -> N
     assert result.returncode == 77, result.stdout + result.stderr
     assert "pwshpy: elevation declined" in result.stderr, result.stderr
     assert not marker.exists(), "the packed script ran although sudo kept no credential"
+
+
+@_needs_non_root
+def test_elevate_runs_where_sudo_keeps_the_credential_per_parent_process(tmp_path: Path) -> None:
+    """[R8]: under ``timestamp_type=ppid`` sudo keeps the credential ``sudo -v`` cached for the process
+    that ran it, this runner's shell. The relaunch must run as that shell's child: exec'd, its parent
+    was the shell's own parent, ``sudo -n`` found no credential and exited 1, which reads as the
+    script's exit code. Run as a child, the script runs elevated and its own code comes back."""
+    runner, marker, environment = _elevate_setup(tmp_path, grant=True, per_parent=True)
+    result = _run(["sh"], runner, "--pwshpy-elevate", env=environment)
+    assert second_prompts(tmp_path / "sudo-calls.txt") == [], (tmp_path / "sudo-calls.txt").read_text()
+    assert result.returncode == 9, result.stdout + result.stderr
+    assert marker.exists(), "the packed script never ran: " + result.stderr
 
 
 @_needs_non_root

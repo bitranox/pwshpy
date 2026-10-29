@@ -1636,6 +1636,44 @@ def test_an_elevated_run_follows_a_symlinked_uv_to_its_target(tmp_path: Path) ->
 
 @pytest.mark.local_only
 @pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows symbolic links, junctions and ACLs")
+@pytest.mark.parametrize("where", ["rooted-file", "volume-guid-file", "volume-guid-junction", "drive-path-control"])
+def test_an_elevated_run_skips_a_uv_reached_through_a_link_it_cannot_place(tmp_path: Path, where: str) -> None:
+    """[R1] on uv's own path (Get-PwshPyUvDistrust): a link on the way to a uv.exe whose target is rooted
+    on the current drive (\\Users\\...) or spelled through the volume's GUID name (a file symlink, and a
+    directory junction) is skipped with "names no drive or share path", though it leads to a uv the run
+    would trust, and the next uv on PATH runs. The control, the same link with a drive-path target, is
+    followed and its uv runs."""
+    trusted = _trusted_uv(tmp_path)
+    if trusted is None:
+        pytest.skip(_needs_a_trusted_uv)
+    fallback = _copy_uv(_private_dir(tmp_path / "fallback-bin"))
+    links = _private_dir(tmp_path / "links-bin")
+    if where == "volume-guid-junction":
+        _junction(links / "via", _volume_guid_path(trusted.parent))
+        found = links / "via" / trusted.name
+    else:
+        found = links / "uv.exe"
+        found.symlink_to(
+            {
+                "rooted-file": str(trusted)[len(trusted.drive) :],
+                "volume-guid-file": _volume_guid_path(trusted),
+            }.get(where, str(trusted))
+        )
+    runner = _trust_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[found.parent, fallback.parent])
+    assert result.returncode == 0, result.stdout + result.stderr
+    if where == "drive-path-control":
+        assert _same(_reported_uv(result), trusted), result.stdout + result.stderr
+        assert not _skip_line(result, found), result.stderr
+        return
+    assert _same(_reported_uv(result), fallback), result.stdout + result.stderr
+    skipped = _skip_line(result, found)
+    assert "which names no drive or share path" in skipped, result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
 @pytest.mark.skipif(sys.platform != "win32", reason="the UAC relay exists only on Windows")
 def test_the_elevated_child_keeps_the_pin_and_relays_what_it_skipped(tmp_path: Path) -> None:
     """-PwshPyUv survives the UAC relaunch, and the child's skip lines reach the parent's stderr.

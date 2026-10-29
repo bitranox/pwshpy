@@ -8,6 +8,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Changed
 
+- A refusal systemd sends over D-Bus (`org.freedesktop.DBus.Error.AccessDenied`, or
+  `org.freedesktop.DBus.Error.InteractiveAuthorizationRequired`, which a non-root caller gets where
+  polkit is installed) raises `NativeAccessDeniedError` and the `pwshpy` CLI exits 13, as for every
+  other refused native call: `pwshpy stop_service sshd.service` as non-root exited 1 with a plain
+  `NativeCallError` before. Any other D-Bus error reply stays a plain `NativeCallError`, whose
+  message now names the D-Bus error.
 - `get_content`, `get_content_lines`, `write_text`, `write_text_stream` and `write_records` raise
   `NativeCallError` (a `NativeAccessDeniedError` for a refusal) for an unknown encoding, text that
   is not valid in the encoding, and a file that cannot be read or written, as every other pwshpy

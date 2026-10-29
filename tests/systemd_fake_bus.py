@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fnmatch
 from collections.abc import Callable
+from enum import IntEnum
 from typing import Any, ClassVar, NamedTuple
 
 import pytest
@@ -27,10 +28,37 @@ class Message(NamedTuple):
     body: tuple[Any, ...]
 
 
+class HeaderFields(IntEnum):
+    """jeepney's header-field codes, the one the adapter reads (jeepney itself is Linux-only)."""
+
+    error_name = 4
+
+
+#: The D-Bus error names systemd answers a refusal with: no polkit or a bus policy refusal, and a
+#: polkit check that would have to ask (measured on a polkit host as a non-root caller).
+ACCESS_DENIED = "org.freedesktop.DBus.Error.AccessDenied"
+INTERACTIVE_AUTHORIZATION_REQUIRED = "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired"
+
+
 class Reply:
-    def __init__(self, body: tuple[Any, ...], *, error: bool = False) -> None:
+    """A jeepney reply: the error NAME is a header field, the body holds systemd's message text."""
+
+    def __init__(self, body: tuple[Any, ...], *, error: bool = False, error_name: str = "") -> None:
         self.body = body
-        self.header = type("H", (), {"message_type": type("T", (), {"name": "error" if error else "method_return"})})
+        fields: dict[HeaderFields, str] = {HeaderFields.error_name: error_name} if error_name else {}
+        self.header = type(
+            "H",
+            (),
+            {
+                "message_type": type("T", (), {"name": "error" if error else "method_return"}),
+                "fields": fields,
+            },
+        )
+
+
+def denied_reply() -> Reply:
+    """systemd's answer to a call the caller has no right to make (bus policy, or no polkit)."""
+    return Reply(("Access denied",), error=True, error_name=ACCESS_DENIED)
 
 
 class FakeCore:
@@ -51,7 +79,8 @@ class FakeConn:
     ``unit_files`` are the units with a unit file (GetUnitFileState answers ``enabled`` for them
     only, unless ``file_states`` names another state; ListUnitFiles[ByPatterns] lists them); the
     Manager verbs a controller sends (Reload, StopUnit, ...) are recorded and succeed, except
-    those listed in ``failing`` (which also fails ``ListUnits`` and the unit-file listings).
+    those listed in ``failing`` (which also fails ``ListUnits`` and the unit-file listings), and
+    those in ``denied``, refused with the D-Bus error name it maps them to (a refusal).
 
     A unit holding properties is LOADED unless it is in ``unloaded``: like systemd, GetUnit and
     property reads fail for an unloaded unit until ``LoadUnit`` loads it from its file. A
@@ -117,6 +146,7 @@ class FakeConn:
         refused_reads: frozenset[tuple[str, str]] = frozenset(),
         pending: frozenset[str] = frozenset(),
         aliases: dict[str, str] | None = None,
+        denied: dict[str, str] | None = None,
     ) -> None:
         self._units = units  # (name, description, active_state)
         self._props = props
@@ -135,6 +165,7 @@ class FakeConn:
         self._not_found: set[str] = set()  # names LoadUnit answered with a not-found object
         self._pending = set(pending)  # unknown to systemd until the first Reload
         self._aliases = aliases or {}
+        self._denied = denied or {}  # verb -> the D-Bus error name systemd refuses it with
         self.verbs: list[str] = []
         self.reads: list[tuple[str, str]] = []  # every property read as (unit, property), in order
         self.calls: list[tuple[str, tuple[Any, ...]]] = []  # each verb with its body (the unit names sent)
@@ -146,7 +177,7 @@ class FakeConn:
 
     def _list_units(self, msg: Message) -> Reply:
         if msg.method in self._failing:
-            return Reply(("org.freedesktop.DBus.Error.AccessDenied",), error=True)
+            return denied_reply()
         rows = [(n, d, self._load_states.get(n, "loaded"), a, "", "", f"/u/{n}", 0, "", "/") for n, d, a in self._units]
         return Reply((rows,))
 
@@ -167,7 +198,7 @@ class FakeConn:
     def _load_unit(self, msg: Message) -> Reply:
         (name,) = msg.body
         if name in self._refused_loads:
-            return Reply(("org.freedesktop.DBus.Error.AccessDenied",), error=True)
+            return denied_reply()
         if name in self._aliases:  # systemd resolves an alias to the unit it names
             name = self._aliases[name]
         self._unloaded.discard(name)  # loaded from its unit file
@@ -191,6 +222,8 @@ class FakeConn:
             self._pending.clear()
         if msg.method in self._failing:
             return Reply(("failed",), error=True)
+        if msg.method in self._denied:
+            return Reply(("Access denied",), error=True, error_name=self._denied[msg.method])
         if msg.method in self._walks:
             self._walking[str(msg.body[0])] = list(self._walks[msg.method])
         return Reply(())
@@ -273,7 +306,7 @@ class FakeConn:
             **dict.fromkeys(self._VERBS, self._verb),
         }
         if msg.method == "Get" and (msg.path[len("/u/") :], msg.body[1]) in self._refused_reads:
-            return Reply(("org.freedesktop.DBus.Error.AccessDenied",), error=True)
+            return denied_reply()
         handler = handlers.get(msg.method)
         return Reply(("unexpected",), error=True) if handler is None else handler(msg)
 
@@ -287,4 +320,15 @@ def use_bus(monkeypatch: pytest.MonkeyPatch, conn: FakeConn) -> None:
     monkeypatch.setattr(systemd_dbus, "open_bus", lambda: bus)
 
 
-__all__ = ["Address", "FakeConn", "FakeCore", "Message", "Reply", "use_bus"]
+__all__ = [
+    "ACCESS_DENIED",
+    "INTERACTIVE_AUTHORIZATION_REQUIRED",
+    "Address",
+    "FakeConn",
+    "FakeCore",
+    "HeaderFields",
+    "Message",
+    "Reply",
+    "denied_reply",
+    "use_bus",
+]

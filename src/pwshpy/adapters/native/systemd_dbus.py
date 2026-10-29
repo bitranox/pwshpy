@@ -38,7 +38,7 @@ import importlib
 from enum import Enum
 from typing import Any, NamedTuple, cast
 
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import NativeAccessDeniedError, NativeCallError, PlatformUnsupportedError
 from .marshal import native_error
 
 MANAGER_PATH = "/org/freedesktop/systemd1"
@@ -210,11 +210,59 @@ def is_error(reply: Any) -> bool:
     return str(reply.header.message_type.name).lower() == "error"
 
 
+#: The D-Bus error names systemd answers a refusal with: ``AccessDenied`` (a bus policy refusal,
+#: or a host without polkit) and ``InteractiveAuthorizationRequired`` (polkit would have to ask
+#: and the call did not allow it; what a non-root StopUnit gets on a polkit host, measured).
+_DENIED_ERROR_NAMES = frozenset(
+    {
+        "org.freedesktop.DBus.Error.AccessDenied",
+        "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired",
+    }
+)
+
+
+def error_name(reply: Any) -> str:
+    """The D-Bus error name of an error ``reply`` (jeepney keeps it in a header field), or "".
+
+    Matched by the field's name, so the adapter needs no jeepney import to read it.
+
+    Example:
+        >>> class _Header:
+        ...     fields: dict[object, str] = {}
+        >>> class _Reply:
+        ...     header = _Header()
+        >>> error_name(_Reply())
+        ''
+    """
+    fields: dict[Any, Any] = getattr(reply.header, "fields", {}) or {}
+    for field, value in fields.items():
+        if getattr(field, "name", None) == "error_name":
+            return str(value)
+    return ""
+
+
+def reply_error(what: str, reply: Any) -> NativeCallError:
+    """The typed error for an error ``reply``: a refusal is a NativeAccessDeniedError.
+
+    The decision reads the error NAME, never systemd's (translatable) message text.
+    """
+    name = error_name(reply)
+    text = " ".join(str(part) for part in reply.body) if reply.body else ""
+    message = f"{what} failed: {name}: {text}" if name else f"{what} failed: {text}"
+    if name in _DENIED_ERROR_NAMES:
+        return NativeAccessDeniedError(message)
+    return NativeCallError(message)
+
+
 def call(bus: Bus, method: str, signature: str = "", body: tuple[Any, ...] = ()) -> Any:
-    """Send one Manager method call and return its body, mapping a D-Bus error to NativeCallError."""
+    """Send one Manager method call and return its body, mapping a D-Bus error to NativeCallError.
+
+    A refusal (:data:`_DENIED_ERROR_NAMES`) is a :class:`NativeAccessDeniedError`, so the CLI exits
+    as for a ``PermissionError`` (13 on POSIX), like every other refused native call.
+    """
     reply = bus.conn.send_and_get_reply(bus.core.new_method_call(bus.mgr, method, signature, body))
     if is_error(reply):
-        raise NativeCallError(f"systemd {method} failed: {reply.body}")
+        raise reply_error(f"systemd {method}", reply)
     return reply.body
 
 
@@ -456,6 +504,8 @@ __all__ = [
     "has_pending_job",
     "is_error",
     "is_unlisted_unit",
+    "error_name",
+    "reply_error",
     "ListedUnit",
     "LoadState",
     "LoadedUnit",

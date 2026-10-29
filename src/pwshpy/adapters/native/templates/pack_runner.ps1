@@ -982,7 +982,8 @@ function Get-PwshPyPosixUvInstaller {
     } else {
         # Made as the .sh's mktemp -d makes it, by mkdir without -p: a TMPDIR that does not exist is
         # refused, never created with every missing parent and left behind, as New-Item -Force would.
-        # The mkdir program, not PowerShell's mkdir function, which is New-Item.
+        # Looked up as an Application, so a mkdir function or alias a profile or module defines
+        # is never what runs.
         $parent = [IO.Path]::GetTempPath().TrimEnd('/')
         if (-not $parent) { $parent = '/' }
         $directory = Join-Path $parent ('pwshpy-uv-' + [Guid]::NewGuid().ToString('N'))
@@ -995,7 +996,7 @@ function Get-PwshPyPosixUvInstaller {
             Write-Verbose "mkdir $directory failed: $_"
         }
         if (-not $made) {
-            Write-PwshPyFailure "pwshpy: cannot create a temporary directory for uv's installer in ${parent}: TMPDIR must name an existing directory this account can write"
+            Write-PwshPyFailure "pwshpy: cannot create a temporary directory for uv's installer in ${parent} (an existing directory this account can write is needed)"
             exit 70
         }
     }

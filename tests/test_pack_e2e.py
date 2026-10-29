@@ -4804,6 +4804,8 @@ def test_an_elevated_posix_download_runs_under_umask_022(tmp_path: Path, elevate
     assert log.read_text(encoding="utf-8").split() == [expected, expected], result.stderr
 
 
+#: What the TMPDIR refusal below says is needed, without claiming why the directory could not be made.
+_TEMP_NEEDED = " (an existing directory this account can write is needed)"
 #: The start of the refusal a run that is not elevated prints when its TMPDIR cannot take uv's installer.
 _NO_INSTALLER_TEMP = "pwshpy: cannot create a temporary directory for uv's installer in "
 
@@ -4846,7 +4848,7 @@ def test_a_missing_posix_tmpdir_is_refused_for_the_installer_never_created(tmp_p
         assert record.is_file(), result.stderr
         return
     assert result.returncode == 70, result.stdout + result.stderr
-    assert f"{_NO_INSTALLER_TEMP}{missing / 'tmp'}" in result.stderr, result.stderr
+    assert f"{_NO_INSTALLER_TEMP}{missing / 'tmp'}{_TEMP_NEEDED}" in result.stderr, result.stderr
     assert not log.exists(), "a download ran"
     assert not record.exists(), "uv ran"
 

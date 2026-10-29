@@ -4385,11 +4385,19 @@ def _caller_home_env(tmp_path: Path) -> dict[str, str]:
 def test_an_elevated_posix_run_gives_uv_and_git_the_accounts_own_home(tmp_path: Path, elevated: str) -> None:
     """[159], as the .sh root run: an elevated POSIX run hands uv the account's own HOME (its passwd home,
     answered inside tmp_path here), XDG directories and the netrc and credentials defaults below it, and
-    each caller value to the shim under PWSHPY_PACK_CALLER_<NAME>. The control hands uv the caller's."""
+    each caller value to the shim under PWSHPY_PACK_CALLER_<NAME>. The control hands uv the caller's, and
+    not the hand-over marker the caller preset, which the shim would act on."""
     runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
     caller = _caller_home_env(tmp_path)
+    preset = {CALLER_ENV_VAR: "HOME"}
     result = _run_with_path(
-        tmp_path, runner, "-PwshPyUv", str(uv), path_first=[uv.parent], env=caller, cwd=_clean_cwd(tmp_path)
+        tmp_path,
+        runner,
+        "-PwshPyUv",
+        str(uv),
+        path_first=[uv.parent],
+        env={**caller, **preset},
+        cwd=_clean_cwd(tmp_path),
     )
     assert result.returncode == 0, result.stdout + result.stderr
     lines = record.read_text(encoding="utf-8").splitlines()

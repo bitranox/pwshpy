@@ -2084,6 +2084,11 @@ $PwshPyPrepareRun = {
     }
     $env:PwshPyArgvPlaceholder = $null
     Set-Item -Path ('Env:' + $PwshPyArgvEnv) -Value ($PwshPyEncoded -join '|')
+    # Only a POSIX root run hands the caller's home variables over to the shim ([159]); in any other run
+    # a hand-over marker came with the caller's environment, and the shim would act on it.
+    if (-not ($PwshPyElevatedRun -and -not $PwshPyOnWindows)) {
+        Remove-Item -LiteralPath "Env:$PwshPyCallerEnv" -ErrorAction SilentlyContinue
+    }
 
     $PwshPyTarget = Join-Path $PwshPyCacheDir $PwshPyShim
     # Elevated (Windows or POSIX root), uv sees only the caller's PATH directories no other account can

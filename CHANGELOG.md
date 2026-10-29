@@ -81,7 +81,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `XDG_DATA_HOME`, with `XDG_STATE_HOME`, `NETRC` and `UV_CREDENTIALS_DIR` unset. Before, they used
   the caller's, which `sudo -E` or `env_keep` hand over, so uv read the caller's netrc and
   credentials and created root-owned directories in the caller's home. The packed script still sees
-  the caller's values.
+  the caller's values; the shim gives back only these variables, whatever the hand-over names, and a
+  run that hands nothing over removes a hand-over the caller's environment preset.
 - Packed `.sh` runner, `--pwshpy-elevate`: the sudo relaunch runs as a child of the runner's shell
   and exits with its status. Before, it replaced the shell (`exec`), so under sudo's
   `timestamp_type=ppid` the relaunch found no cached credential and exited 1.

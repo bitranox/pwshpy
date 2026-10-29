@@ -366,6 +366,35 @@ function Test-PwshPyAbsolutePath {
     return $Path.StartsWith('/')
 }
 
+function Get-PwshPyLinkTargetKind {
+    param([string] $Target, [string] $LinkType)
+
+    # What the link target $Target (as read off .Target, the \??\ prefix gone) names: 'absolute' (a
+    # drive path or a UNC path, Test-PwshPyAbsolutePath), 'relative' (to the link's own directory) or
+    # 'unplaceable'. POSIX: absolute or relative. Windows: relative only when plainly so - no leading \
+    # or /, no ':', and not a device name .Target spells without its \??\ (Volume{GUID}\..., GLOBALROOT\...,
+    # UNC\...). Anything else names a place relative to the current drive (\Users\...), or one the
+    # object manager resolves (a volume GUID, a device), which no walk here can judge, so it is
+    # refused rather than joined below the link as before ([R1], spellings measured with mklink on a
+    # Windows 11 VM, identical under pwsh 7.6 and Windows PowerShell 5.1). A junction's target is always
+    # absolute; a junction with any other is refused too.
+    if (Test-PwshPyAbsolutePath -Path $Target) { return 'absolute' }
+    if (-not $PwshPyOnWindows) { return 'relative' }
+    if ($LinkType -eq 'Junction') { return 'unplaceable' }
+    if ($Target.StartsWith('\') -or $Target.StartsWith('/') -or $Target.Contains(':')) { return 'unplaceable' }
+    foreach ($device in @('Volume{', 'GLOBALROOT\', 'GLOBALROOT/', 'UNC\', 'UNC/')) {
+        if ($Target.StartsWith($device, [StringComparison]::OrdinalIgnoreCase)) { return 'unplaceable' }
+    }
+    return 'relative'
+}
+
+function Get-PwshPyUnplaceableReason {
+    param([string] $Link, [string] $Target)
+
+    # The reason a link whose target Get-PwshPyLinkTargetKind calls unplaceable is refused for.
+    return "the link $Link points to $Target, which names no drive or share path (an elevated run follows only a link whose target is a drive path, a UNC path or relative to the link)"
+}
+
 function Get-PwshPyNetworkDistrust {
     param([string] $Path)
 
@@ -622,7 +651,9 @@ function Get-PwshPyUvDistrust {
             $target = ([string](@($item.Target)[0])) -replace '^\\\?\?\\', ''
             if ($PSVersionTable.PSEdition -ne 'Core') { $target = $target -replace '^UNC\\', '\\' }
             if (-not $target) { return "the symlink $next cannot be read" }
-            if (Test-PwshPyAbsolutePath -Path $target) {
+            $kind = Get-PwshPyLinkTargetKind -Target $target -LinkType $linkType
+            if ($kind -eq 'unplaceable') { return (Get-PwshPyUnplaceableReason -Link $next -Target $target) }
+            if ($kind -eq 'absolute') {
                 $network = Get-PwshPyNetworkDistrust -Path $target
                 if ($network) { return "the link $next points to ${target}: $network" }
                 if ($PwshPyOnWindows) { $target = ConvertFrom-PwshPyDriveLongPath -Path $target.Replace('/', '\') }
@@ -1187,7 +1218,10 @@ function Resolve-PwshPyLinkedPath {
         $target = ([string](@($item.Target)[0])) -replace '^\\\?\?\\', ''
         if ($PSVersionTable.PSEdition -ne 'Core') { $target = $target -replace '^UNC\\', '\\' }
         if (-not $target) { return '' }
-        if (Test-PwshPyAbsolutePath -Path $target) {
+        $kind = Get-PwshPyLinkTargetKind -Target $target -LinkType $linkType
+        # A target no walk can place leaves the path unresolved, as an unreadable link does.
+        if ($kind -eq 'unplaceable') { return '' }
+        if ($kind -eq 'absolute') {
             $target = ConvertFrom-PwshPyDriveLongPath -Path $target.Replace('/', '\')
             $current = [IO.Path]::GetPathRoot($target)
         }
@@ -1216,7 +1250,9 @@ function Get-PwshPyTreeLinkDistrust {
     $target = ([string](@($Link.Target)[0])) -replace '^\\\?\?\\', ''
     if ($PSVersionTable.PSEdition -ne 'Core') { $target = $target -replace '^UNC\\', '\\' }
     if (-not $target) { return "the link $Shown cannot be read" }
-    if (Test-PwshPyAbsolutePath -Path $target) {
+    $kind = Get-PwshPyLinkTargetKind -Target $target -LinkType $linkType
+    if ($kind -eq 'unplaceable') { return (Get-PwshPyUnplaceableReason -Link $Shown -Target $target) }
+    if ($kind -eq 'absolute') {
         $network = Get-PwshPyNetworkDistrust -Path $target
         if ($network) { return "the link $Shown points to ${target}: $network" }
         $resolved = $target

@@ -3493,8 +3493,33 @@ def test_an_elevated_run_still_judges_the_found_python_after_the_directory_check
 
 #: Where a link below the managed-Python directory points ([149]): out of the tree to a directory Users
 #: may modify, out of it to a private one, to this host's own administrative share, and the control, a
-#: sibling inside the tree.
-_TREE_LINK_TARGETS = ("outside-open-file", "outside-private-file", "outside-directory", "share-file", "inside-control")
+#: sibling inside the tree. [R1]: out of it spelled rooted on the current drive (\Users\...), and through
+#: the volume's GUID name (a file symlink, and a directory junction), which the runner read as relative.
+_TREE_LINK_TARGETS = (
+    "outside-open-file",
+    "outside-private-file",
+    "outside-directory",
+    "share-file",
+    "rooted-file",
+    "volume-guid-file",
+    "volume-guid-junction",
+    "inside-control",
+)
+
+
+def _volume_guid_path(path: Path) -> str:
+    """``path`` spelled through its volume's GUID name (``\\\\?\\Volume{...}\\rest``), as mountvol names it."""
+    result = subprocess.run(  # noqa: S603 - fixed argv; mountvol is a system tool
+        ["mountvol", path.drive + "\\", "/L"],  # noqa: S607 - resolved from System32
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+    volume = result.stdout.strip()
+    assert result.returncode == 0 and volume.startswith("\\\\?\\Volume{"), result.stdout + result.stderr
+    return volume.rstrip("\\") + str(path)[len(path.drive) :]
 
 
 def _link_out_of_tree(tmp_path: Path, planted: Path, where: str) -> Path:
@@ -3507,16 +3532,23 @@ def _link_out_of_tree(tmp_path: Path, planted: Path, where: str) -> Path:
         (site_packages / "pwshpy_planted.real").write_bytes(text)
         plant.symlink_to("pwshpy_planted.real")
         return plant
-    if where == "outside-directory":
+    if where in ("outside-directory", "volume-guid-junction"):
         outside = _user_writable_dir(tmp_path / "outside-dir")
         (outside / "pwshpy_planted.pth").write_bytes(text)
         link = site_packages / "pwshpy_outside"
-        link.symlink_to(outside, target_is_directory=True)
+        if where == "volume-guid-junction":
+            _junction(link, _volume_guid_path(outside))
+        else:
+            link.symlink_to(outside, target_is_directory=True)
         return link
-    opened = where == "outside-open-file"
+    opened = where in ("outside-open-file", "rooted-file", "volume-guid-file")
     holder = _user_writable_dir(tmp_path / "outside") if opened else _private_dir(tmp_path / "outside")
     (holder / "pwshpy_planted.pth").write_bytes(text)
-    reached = _admin_share(holder) if where == "share-file" else str(holder)
+    reached = {
+        "share-file": lambda: _admin_share(holder),
+        "rooted-file": lambda: str(holder)[len(holder.drive) :],
+        "volume-guid-file": lambda: _volume_guid_path(holder),
+    }.get(where, lambda: str(holder))()
     plant.symlink_to(reached + "\\pwshpy_planted.pth")
     return plant
 
@@ -4068,8 +4100,11 @@ def test_an_elevated_run_on_windows_refuses_a_git_config_file_it_cannot_trust(tm
     assert _reported_git_global(result) is None, result.stdout
 
 
-def _junction(link: Path, target: Path) -> None:
-    """Make ``link`` a directory junction to ``target`` (no privilege needed, unlike a symlink)."""
+def _junction(link: Path, target: Path | str) -> None:
+    """Make ``link`` a directory junction to ``target`` (no privilege needed, unlike a symlink).
+
+    A ``str`` reaches mklink exactly as spelled (a ``\\\\?\\Volume{...}`` name among them).
+    """
     result = subprocess.run(  # noqa: S603 - fixed argv; cmd is a system tool
         ["cmd", "/c", "mklink", "/J", str(link), str(target)],  # noqa: S607 - resolved from System32
         capture_output=True,

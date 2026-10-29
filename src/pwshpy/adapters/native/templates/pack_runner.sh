@@ -954,17 +954,17 @@ pwshpy_caller_cwd() {
 # (pwshpy_cache_distrust): before it is created (the nearest directory that exists), and after.
 pwshpy_private_tmp() {
     PWSHPY_TMP=$PWSHPY_CACHE_HOME/pwshpy-tmp
-    _pt_why=$(pwshpy_cache_distrust "$PWSHPY_TMP")
-    if [ -z "$_pt_why" ]; then
+    _ptmp_why=$(pwshpy_cache_distrust "$PWSHPY_TMP")
+    if [ -z "$_ptmp_why" ]; then
         (umask 077 && mkdir -p "$PWSHPY_TMP") || pwshpy_die "cannot create the directory $PWSHPY_TMP" 70
         chmod 700 "$PWSHPY_TMP" || pwshpy_die "cannot make $PWSHPY_TMP private (chmod 700)" 70
-        _pt_why=$(pwshpy_cache_distrust "$PWSHPY_TMP")
+        _ptmp_why=$(pwshpy_cache_distrust "$PWSHPY_TMP")
     fi
-    if [ -n "$_pt_why" ]; then
-        _pt_why="$_pt_why (as root uv and git keep temporary files only in a directory no other"
-        _pt_why="$_pt_why account can modify): make the path named above root's alone (chown -R root,"
-        _pt_why="$_pt_why chmod -R go-w on it)"
-        pwshpy_die "refusing the temporary directory $PWSHPY_TMP: $_pt_why" 127
+    if [ -n "$_ptmp_why" ]; then
+        _ptmp_why="$_ptmp_why (as root uv and git keep temporary files only in a directory no other"
+        _ptmp_why="$_ptmp_why account can modify): make the path named above root's alone (chown -R root,"
+        _ptmp_why="$_ptmp_why chmod -R go-w on it)"
+        pwshpy_die "refusing the temporary directory $PWSHPY_TMP: $_ptmp_why" 127
     fi
 }
 
@@ -1006,8 +1006,10 @@ pwshpy_install_uv() {
         pwshpy_private_tmp
         _iu_dir=$PWSHPY_TMP
     else
+        # mktemp -d creates no missing parent: a TMPDIR that does not exist is refused, never created.
         if ! _iu_dir=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/pwshpy-uv.XXXXXX"); then
-            pwshpy_die "cannot create a temporary directory for uv's installer" 70
+            _iu_why="cannot create a temporary directory for uv's installer in ${TMPDIR:-/tmp}"
+            pwshpy_die "$_iu_why (an existing directory this account can write is needed)" 70
         fi
     fi
     _iu_file=$_iu_dir/uv-installer.sh
@@ -1162,17 +1164,24 @@ if [ "$PWSHPY_WANT_ELEVATE" = "1" ] && [ "$PWSHPY_AS_ROOT" != "1" ]; then
         printf '%s\n' "pwshpy: sudo not found; cannot elevate" >&2
         exit 127
     fi
-    if ! sudo -v; then
-        printf '%s\n' "pwshpy: elevation declined (sudo did not grant root)" >&2
-        exit 77
-    fi
-    # Only the -v prompts ([136-sh]): the relaunch runs as sudo -n, which never asks, so a sudo that
-    # keeps no credential after -v (timestamp_timeout=0) would prompt a second time without -n. Such a
-    # setup is told by sudo -n -v failing, and declined like a refused prompt.
-    if ! sudo -n -v; then
-        _el_why="sudo keeps no credential after the password prompt, so it would ask again (timestamp_timeout=0)"
-        printf '%s\n' "pwshpy: elevation declined ($_el_why)" >&2
-        exit 77
+    # A user sudo lets run /bin/sh, the relaunch's own program, without a password (a NOPASSWD rule) is
+    # asked nothing ([280]): under sudo's default verifypw=all, -v wants a password unless EVERY rule of
+    # the user is NOPASSWD, so beside Ubuntu's %sudo rule it asked for one the command does not need,
+    # and without a terminal (or any password) the run was declined. The probe runs the same program
+    # as the relaunch, so a rule for some other program only cannot pass it; it prints nothing.
+    if ! sudo -n /bin/sh -c : </dev/null >/dev/null 2>&1; then
+        if ! sudo -v; then
+            printf '%s\n' "pwshpy: elevation declined (sudo did not grant root)" >&2
+            exit 77
+        fi
+        # Only the -v prompts ([136-sh]): the relaunch runs as sudo -n, which never asks, so a sudo that
+        # keeps no credential after -v (timestamp_timeout=0) would prompt a second time without -n.
+        # Such a setup is told by sudo -n -v failing, and declined like a refused prompt.
+        if ! sudo -n -v; then
+            _el_why="sudo keeps no credential after the password prompt, so it would ask again"
+            printf '%s\n' "pwshpy: elevation declined ($_el_why (timestamp_timeout=0))" >&2
+            exit 77
+        fi
     fi
     # A sudo that grants -v but then refuses the command itself (sudoers allowing only -v) exits with
     # that sudo's own code, which no wrapper can tell from the script's.

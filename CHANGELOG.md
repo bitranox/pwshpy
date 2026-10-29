@@ -115,6 +115,14 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - The `pwshpy` CLI prints a command's error after the log lines the command already wrote, each
   on its own line. Before, an error printed while a log line was still queued could run into it
   on one line (seen on Windows, e.g. `pwshpy get_scheduled_task --task-name 'a\b'`).
+- `ps.elevate`, `pwshpy --elevate`, `--pwshpy-elevate` and `-PwshPyElevate` on Linux and macOS: a
+  user who needs no password for the relaunch (a `NOPASSWD` sudoers rule) is no longer asked for one
+  or refused. Before, `sudo -v` ran first, and under sudo's default `verifypw=all` it wants a password
+  unless every sudoers rule of the user is `NOPASSWD`: beside Ubuntu's `%sudo` rule the user was
+  asked for a password the command does not need, and without a terminal (or without any password,
+  as on stock cloud images) elevation was declined with exit code 77. `sudo -n` is now first asked,
+  silently, to run the program the relaunch runs (the current Python, `/bin/sh`, or the running
+  `pwsh`); when it may, the relaunch runs under `sudo -n` without a prompt.
 
 - Packed runners (`pwshpy pack`): an elevated run (`.ps1` with an administrator token or as
   SYSTEM, either runner as root) now judges its pack cache before it removes or writes anything
@@ -198,9 +206,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   refused that uv with exit code 127. Behind a proxy a root run therefore needs uv installed for
   root beforehand, or the proxy in root's own `~/.curlrc`, `/etc/wgetrc` or `~/.wgetrc`.
 - Packed runners on Linux and macOS: uv's installer is downloaded to a file before it runs (as root
-  into the account's private temporary directory), with `curl` and then `wget` when `curl` fails, and
-  a failed download stops the run with exit code 127 and `could not download uv's installer from
-  ... (<downloader> exited <code>, ...)`; a failed installer stops it with its own exit code named.
+  into the account's private temporary directory, otherwise into a new directory in an existing
+  writable `TMPDIR`, default `/tmp`), with `curl` and then `wget` when `curl` fails, and a failed
+  download stops the run with exit code 127 and `could not download uv's installer from ...
+  (<downloader> exited <code>, ...)`; a failed installer stops it with its own exit code named. A run
+  that is not root (not elevated) now needs an existing `TMPDIR` it can write (default `/tmp`) to
+  install uv, and otherwise stops with exit code 70 and `cannot create a temporary directory for uv's
+  installer in <TMPDIR>`, where before, the piped installer needed none.
   Before, the installer was piped into `sh`, whose status for the empty input of a failed download
   is 0, so `wget` was never tried and the run ended in the uv trust remedy.
 - Packed `.sh` runner, `--pwshpy-elevate`: the sudo relaunch runs as a child of the runner's shell

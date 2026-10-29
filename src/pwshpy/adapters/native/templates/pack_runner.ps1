@@ -980,9 +980,25 @@ function Get-PwshPyPosixUvInstaller {
     if ($PwshPyRootPath) {
         $directory = Initialize-PwshPyPrivateTemp
     } else {
-        $directory = Join-Path ([IO.Path]::GetTempPath()) ('pwshpy-uv-' + [Guid]::NewGuid().ToString('N'))
-        Initialize-PwshPyDirectory -Path $directory -Private $true
-        Invoke-PwshPyChmod -Arguments @('700', '--', $directory)
+        # Made as the .sh's mktemp -d makes it, by mkdir without -p: a TMPDIR that does not exist is
+        # refused, never created with every missing parent and left behind, as New-Item -Force would.
+        # Looked up as an Application, so a mkdir function or alias a profile or module defines
+        # is never what runs.
+        $parent = [IO.Path]::GetTempPath().TrimEnd('/')
+        if (-not $parent) { $parent = '/' }
+        $directory = Join-Path $parent ('pwshpy-uv-' + [Guid]::NewGuid().ToString('N'))
+        $made = $false
+        try {
+            $mkdir = Get-Command -Name mkdir -CommandType Application -TotalCount 1 -ErrorAction Stop
+            & $mkdir.Source -m 700 -- $directory
+            $made = $LASTEXITCODE -eq 0
+        } catch {
+            Write-Verbose "mkdir $directory failed: $_"
+        }
+        if (-not $made) {
+            Write-PwshPyFailure "pwshpy: cannot create a temporary directory for uv's installer in ${parent} (an existing directory this account can write is needed)"
+            exit 70
+        }
     }
     $file = Join-Path $directory 'uv-installer.sh'
     Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
@@ -997,9 +1013,10 @@ function Get-PwshPyPosixUvInstaller {
             [bool](Get-Command -Name $tool -CommandType Application -ErrorAction SilentlyContinue)
         }
         if (-not $present) { continue }
-        # Assigned away: anything a downloader prints must not become part of the path returned.
+        # Assigned away: anything a downloader prints must not become part of the path returned. As root
+        # under umask 022, as the installer after it and the .sh's download.
         if ($PwshPyRootPath) {
-            $null = & env -i "HOME=$homeValue" "PATH=$env:PATH" @words $file $Url
+            $null = & env -i "HOME=$homeValue" "PATH=$env:PATH" /bin/sh -c 'umask 022 && exec "$@"' sh @words $file $Url
         } else {
             $null = & $tool @($words | Select-Object -Skip 1) $file $Url
         }
@@ -1800,20 +1817,29 @@ function Invoke-PwshPyElevated {
             [Console]::Error.WriteLine('pwshpy: sudo not found; cannot elevate')
             exit 127
         }
-        # Ask for the password with `sudo -v` first: sudo exits 1 when it refuses, which is also
-        # an ordinary exit code of the script, so only asking separately tells the two apart.
-        & sudo -v
+        # A user sudo lets run this pwsh, the relaunch's own program, without a password (a NOPASSWD
+        # rule) is asked nothing ([280]): under sudo's default verifypw=all, -v wants a password unless
+        # EVERY rule of the user is NOPASSWD, so beside Ubuntu's %sudo rule it asked for one the
+        # command does not need, and without a terminal (or any password) the run was declined. The
+        # probe runs the same program as the relaunch, so a rule for some other program only cannot
+        # pass it; it prints nothing, and its refusal is not an error of this run.
+        $null = & sudo -n (Get-PwshPyHostPath) -NoProfile -NonInteractive -Command 'exit 0' 2>$null
         if ($LASTEXITCODE -ne 0) {
-            [Console]::Error.WriteLine('pwshpy: elevation declined (sudo did not grant root)')
-            exit 77
-        }
-        # Only the -v prompts ([136-sh]): the relaunch runs as sudo -n, which never asks, so a sudo
-        # that keeps no credential after -v (timestamp_timeout=0) would prompt a second time without
-        # -n. Such a setup is told by sudo -n -v failing, and declined like a refused prompt.
-        & sudo -n -v
-        if ($LASTEXITCODE -ne 0) {
-            [Console]::Error.WriteLine('pwshpy: elevation declined (sudo keeps no credential after the password prompt, so it would ask again (timestamp_timeout=0))')
-            exit 77
+            # Ask for the password with `sudo -v` first: sudo exits 1 when it refuses, which is also
+            # an ordinary exit code of the script, so only asking separately tells the two apart.
+            & sudo -v
+            if ($LASTEXITCODE -ne 0) {
+                [Console]::Error.WriteLine('pwshpy: elevation declined (sudo did not grant root)')
+                exit 77
+            }
+            # Only the -v prompts ([136-sh]): the relaunch runs as sudo -n, which never asks, so a
+            # sudo that keeps no credential after -v (timestamp_timeout=0) would prompt a second time
+            # without -n. Such a setup is told by sudo -n -v failing, and declined like a refused prompt.
+            & sudo -n -v
+            if ($LASTEXITCODE -ne 0) {
+                [Console]::Error.WriteLine('pwshpy: elevation declined (sudo keeps no credential after the password prompt, so it would ask again (timestamp_timeout=0))')
+                exit 77
+            }
         }
         # sudo keeps the console, so output and exit code flow back without a relay. A sudo that
         # grants -v but then refuses the command itself (sudoers allowing only -v) exits with that

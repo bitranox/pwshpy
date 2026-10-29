@@ -48,6 +48,7 @@ from elevation_doubles import (
     NOT_A_GCM_VARIABLE,
     NOT_A_GIT_VARIABLE,
     OTHER_UID,
+    PS1_INSTALLER_DOWNLOADERS,
     REAL_ACCOUNT_CACHE_GROUP,
     RUNNING_AS_ROOT,
     UV_SOURCE_VARIABLES,
@@ -618,6 +619,46 @@ def test_elevate_switch_never_lets_sudo_prompt_twice(tmp_path: Path, cached: boo
     assert result.returncode == 77, result.stdout + result.stderr
     assert "pwshpy: elevation declined" in result.stderr, result.stderr
     assert not marker.exists(), "the packed script ran although sudo kept no credential"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
+@pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+@pytest.mark.parametrize(
+    "nopasswd", ["ALL", "relaunch", "/bin/true"], ids=["nopasswd-all", "nopasswd-the-relaunch", "nopasswd-another"]
+)
+def test_elevate_switch_asks_no_password_of_a_user_who_needs_none(tmp_path: Path, nopasswd: str) -> None:
+    """[280], as the .sh: a user with a NOPASSWD sudoers rule beside one that wants a password was asked
+    for a password by ``sudo -v`` (``verifypw=all``), and declined with 77 without a terminal or a
+    password. The POSIX relaunch now first asks ``sudo -n`` to run the pwsh it relaunches: when that
+    needs no password, nothing is asked and the script runs. A rule for another program only passes no
+    probe, so the old flow asks and declines, quietly."""
+    assert _PWSH is not None
+    entry = tmp_path / "who.py"
+    marker = tmp_path / "ran.marker"
+    entry.write_text(f'open({str(marker)!r}, "w").close()\n')
+    manifest = pack_script(entry)
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "sudo-calls.txt"
+    # The relaunch runs the pwsh this process is, by its resolved path ((Get-Process -Id $PID).Path).
+    program = str(Path(_PWSH).resolve()) if nopasswd == "relaunch" else nopasswd
+    write_fake_sudo(bin_dir, grant=False, cached=False, calls=calls, nopasswd=program)
+    environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
+    result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment)
+    logged = calls.read_text(encoding="utf-8").splitlines()
+    assert second_prompts(calls) == [], logged
+    assert "a password is required" not in result.stderr, result.stderr
+    if nopasswd == "/bin/true":
+        assert result.returncode == 77, result.stdout + result.stderr
+        assert "pwshpy: elevation declined" in result.stderr, result.stderr
+        assert "-v" in logged, logged
+        assert not marker.exists(), "the packed script ran although sudo wanted a password"
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.exists(), "the packed script never ran: " + result.stderr
+    assert [call for call in logged if call in ("-v", "-n -v")] == [], logged
 
 
 @pytest.mark.local_only
@@ -4567,6 +4608,11 @@ def _with_posix_download_doubles(tmp_path: Path, runner: Path, *, curl: Path, wg
     """``runner`` (POSIX) with its installer downloaders replaced by ``curl`` and ``wget`` and no
     system-wide uv to find, each one counted substitution; the rest of the installation is shipped code."""
     with_download_doubles(runner, curl=curl, wget=wget, powershell=True)
+    _without_system_wide_uv(tmp_path, runner)
+
+
+def _without_system_wide_uv(tmp_path: Path, runner: Path) -> None:
+    """``runner`` (POSIX) with no system-wide uv to find, one counted substitution."""
     text = runner.read_text(encoding="utf-8")
     old = f"'{_SYSTEM_WIDE_UV}'"
     assert text.count(old) == 1, old
@@ -4653,9 +4699,9 @@ _INSTALLER_NOT_DOWNLOADED = "pwshpy: could not download uv's installer from http
 @pytest.mark.os_posix
 @_POSIX_ONLY
 @pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated"])
-@pytest.mark.parametrize("wget_serves", [False, True], ids=["both-fail", "wget-fallback-serves"])
+@pytest.mark.parametrize("downloads", ["both-fail", "both-empty", "wget-fallback-serves"])
 def test_a_failed_posix_installer_download_is_named_and_wget_is_tried(
-    tmp_path: Path, elevated: str, wget_serves: bool
+    tmp_path: Path, elevated: str, downloads: str
 ) -> None:
     """[R3] round 4, as the .sh: the installer was piped into sh ("curl ... | sh || wget ... | sh"), whose
     status is sh's, 0 for the empty input a failed download leaves, so the wget fallback never ran and a
@@ -4663,24 +4709,176 @@ def test_a_failed_posix_installer_download_is_named_and_wget_is_tried(
     elevated run drops) ended in the uv trust remedy. The download now goes to a file first: curl failing
     (exit 6) falls back to wget, and when wget fails too (exit 4) the run stops with 127 naming the
     download, each exit status and, elevated, how to give root a proxy or a uv; when wget delivers, the
-    installation runs."""
+    installation runs. Round 5: a downloader that exits 0 without delivering a file counts as failed,
+    and when neither delivers, the installer's directory is gone (not elevated) or keeps nothing of the
+    failed downloads, a partial or an empty file wget left (the account's private one)."""
     runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
     installer = tmp_path / "local-uv-install.sh"
     installer.write_text(f'mkdir -p "$HOME/.local/bin"\ncp -p "{uv.parent}"/* "$HOME/.local/bin/"\n')
     doubles = tmp_path / "download-bin"
     doubles.mkdir()
     log = tmp_path / "downloads.txt"
-    curl = write_download_double(doubles, "curl", log=log, serve=None, exit_code=6)
-    wget = write_download_double(
-        doubles, "wget", log=log, serve=installer if wget_serves else None, exit_code=0 if wget_serves else 4
-    )
+    empty = downloads == "both-empty"
+    curl = write_download_double(doubles, "curl", log=log, serve=None, exit_code=0 if empty else 6)
+    serves = installer if downloads == "wget-fallback-serves" else None
+    # wget leaves a file behind when it fails: part of one (exit 4), or an empty one (exit 0).
+    left = tmp_path / "left-by-wget"
+    left.write_text("" if empty else "#!/bin/sh\n# cut off", encoding="utf-8")
+    wget_exit = 4 if downloads == "both-fail" else 0
+    wget = write_download_double(doubles, "wget", log=log, serve=serves or left, exit_code=wget_exit)
     _with_posix_download_doubles(tmp_path, runner, curl=curl, wget=wget)
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    caller_temp = tmp_path / "caller-temp"
+    caller_temp.mkdir()
+    result = _run_with_path(
+        tmp_path,
+        runner,
+        path_first=["/usr/bin", "/bin"],
+        env={"HOME": str(caller_home), "TMPDIR": str(caller_temp)},
+        cwd=_clean_cwd(tmp_path),
+        inherit_path=False,
+        install_uv=True,
+    )
+    url = "https://astral.sh/uv/install.sh"
+    assert log.read_text(encoding="utf-8").splitlines() == [f"curl {url}", f"wget {url}"], result.stderr
+    if serves is not None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert record.is_file(), result.stderr
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    failure = next((line for line in result.stderr.splitlines() if _INSTALLER_NOT_DOWNLOADED in line), "")
+    # The runner names each downloader as it ran it, here the doubles' paths.
+    if empty:
+        tried = f"{curl} exited 0 with nothing downloaded, {wget} exited 0 with nothing downloaded"
+    else:
+        tried = f"{curl} exited 6, {wget} exited 4"
+    assert f"{_INSTALLER_NOT_DOWNLOADED}{tried})" in failure, result.stderr
+    if elevated == "$true":
+        private = default_uv_cache_dir(tmp_path).parent / "pwshpy-tmp"
+        assert private.is_dir() and list(private.iterdir()) == [], "the installer was left behind"
+    assert list(caller_temp.iterdir()) == [], "the installer's directory was left behind"
+    assert ("install uv for root beforehand" in failure) is (elevated == "$true"), failure
+    assert "after installation" not in result.stderr and "chmod go-w" not in result.stderr, result.stderr
+    assert not record.exists(), "uv ran"
+
+
+def _write_umask_double(directory: Path, name: str, log: Path) -> Path:
+    """A downloader double that records the umask it runs under in ``log`` and fails (exit 6)."""
+    double = directory / name
+    double.write_text(f"#!/bin/sh\numask >> '{log}'\nexit 6\n", encoding="utf-8", newline="\n")
+    double.chmod(0o755)
+    return double
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated", "not-elevated-control"])
+def test_an_elevated_posix_download_runs_under_umask_022(tmp_path: Path, elevated: str) -> None:
+    """[R3] round 5, as the .sh: an elevated run downloaded uv's installer under the caller's umask while
+    it ran the installer under 022. Both downloaders now run under 022 when elevated; not elevated they
+    keep the caller's (077 here)."""
+    runner, _uv, _record = _recording_runner(tmp_path, elevated=elevated)
+    doubles = tmp_path / "download-bin"
+    doubles.mkdir()
+    log = tmp_path / "umask.txt"
+    curl = _write_umask_double(doubles, "curl", log)
+    wget = _write_umask_double(doubles, "wget", log)
+    _with_posix_download_doubles(tmp_path, runner, curl=curl, wget=wget)
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    previous = os.umask(0o077)
+    try:
+        result = _run_with_path(
+            tmp_path,
+            runner,
+            path_first=["/usr/bin", "/bin"],
+            env={"HOME": str(caller_home)},
+            cwd=_clean_cwd(tmp_path),
+            inherit_path=False,
+            install_uv=True,
+        )
+    finally:
+        os.umask(previous)
+    assert result.returncode == 127, result.stdout + result.stderr
+    expected = "0022" if elevated == "$true" else "0077"
+    assert log.read_text(encoding="utf-8").split() == [expected, expected], result.stderr
+
+
+#: What the TMPDIR refusal below says is needed, without claiming why the directory could not be made.
+_TEMP_NEEDED = " (an existing directory this account can write is needed)"
+#: The start of the refusal a run that is not elevated prints when its TMPDIR cannot take uv's installer.
+_NO_INSTALLER_TEMP = "pwshpy: cannot create a temporary directory for uv's installer in "
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize("elevated", ["$true", "$false"], ids=["elevated-control", "not-elevated"])
+def test_a_missing_posix_tmpdir_is_refused_for_the_installer_never_created(tmp_path: Path, elevated: str) -> None:
+    """[R3] round 5, as the .sh: a POSIX run that is not elevated made the directory for uv's installer
+    with New-Item -Force below [IO.Path]::GetTempPath(), which creates every missing parent, so a
+    TMPDIR naming a directory that does not exist was created (where the caller could write) and left
+    behind, where the .sh's mktemp -d refuses it. The directory is now made as mktemp -d makes it: the
+    run stops with 70 before any download, naming the directory, and nothing is created there.
+    Elevated the account's private temporary directory is used instead and the installation runs."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
+    installer = tmp_path / "local-uv-install.sh"
+    installer.write_text(f'mkdir -p "$HOME/.local/bin"\ncp -p "{uv.parent}"/* "$HOME/.local/bin/"\n')
+    doubles = tmp_path / "download-bin"
+    doubles.mkdir()
+    log = tmp_path / "downloads.txt"
+    curl = write_download_double(doubles, "curl", log=log, serve=installer)
+    wget = write_download_double(doubles, "wget", log=log, serve=None, exit_code=4)
+    _with_posix_download_doubles(tmp_path, runner, curl=curl, wget=wget)
+    caller_home = tmp_path / "caller-home"
+    caller_home.mkdir()
+    missing = tmp_path / "missing"
+    result = _run_with_path(
+        tmp_path,
+        runner,
+        path_first=["/usr/bin", "/bin"],
+        env={"HOME": str(caller_home), "TMPDIR": str(missing / "tmp")},
+        cwd=_clean_cwd(tmp_path),
+        inherit_path=False,
+        install_uv=True,
+    )
+    assert not missing.exists(), "the missing TMPDIR was created"
+    if elevated == "$true":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert record.is_file(), result.stderr
+        return
+    assert result.returncode == 70, result.stdout + result.stderr
+    assert f"{_NO_INSTALLER_TEMP}{missing / 'tmp'}{_TEMP_NEEDED}" in result.stderr, result.stderr
+    assert not log.exists(), "a download ran"
+    assert not record.exists(), "uv ran"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_a_posix_run_finds_its_installer_downloaders_by_name_on_path(tmp_path: Path) -> None:
+    """[R3] round 5: every other installer test replaces the downloaders with doubles named by absolute
+    path, so only the rooted branch of the lookup ran, never the Get-Command one a real run takes. Here
+    the shipped list ('curl -LsSf -o', 'wget -q -O') stays and doubles named curl and wget lead PATH:
+    both are found by name and called with the shipped flags, curl failing and wget delivering."""
+    runner, uv, record = _recording_runner(tmp_path, elevated="$false")
+    assert runner.read_text(encoding="utf-8").count(PS1_INSTALLER_DOWNLOADERS) == 1
+    installer = tmp_path / "local-uv-install.sh"
+    installer.write_text(f'mkdir -p "$HOME/.local/bin"\ncp -p "{uv.parent}"/* "$HOME/.local/bin/"\n')
+    doubles = tmp_path / "download-bin"
+    doubles.mkdir()
+    log = tmp_path / "downloads.txt"
+    write_download_double(doubles, "curl", log=log, serve=None, exit_code=6)
+    write_download_double(doubles, "wget", log=log, serve=installer)
+    _without_system_wide_uv(tmp_path, runner)
     caller_home = tmp_path / "caller-home"
     caller_home.mkdir()
     result = _run_with_path(
         tmp_path,
         runner,
-        path_first=["/usr/bin", "/bin"],
+        path_first=[str(doubles), "/usr/bin", "/bin"],
         env={"HOME": str(caller_home)},
         cwd=_clean_cwd(tmp_path),
         inherit_path=False,
@@ -4688,17 +4886,8 @@ def test_a_failed_posix_installer_download_is_named_and_wget_is_tried(
     )
     url = "https://astral.sh/uv/install.sh"
     assert log.read_text(encoding="utf-8").splitlines() == [f"curl {url}", f"wget {url}"], result.stderr
-    if wget_serves:
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert record.is_file(), result.stderr
-        return
-    assert result.returncode == 127, result.stdout + result.stderr
-    failure = next((line for line in result.stderr.splitlines() if _INSTALLER_NOT_DOWNLOADED in line), "")
-    # The runner names each downloader as it ran it, here the doubles' paths.
-    assert f"{_INSTALLER_NOT_DOWNLOADED}{curl} exited 6, {wget} exited 4)" in failure, result.stderr
-    assert ("install uv for root beforehand" in failure) is (elevated == "$true"), failure
-    assert "after installation" not in result.stderr and "chmod go-w" not in result.stderr, result.stderr
-    assert not record.exists(), "uv ran"
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert record.is_file(), result.stderr
 
 
 # --- [156] elevated .ps1 runs of a script with a git source refuse a git older than 2.32 ----------------

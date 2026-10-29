@@ -413,10 +413,14 @@ script with a git source also refuses that git (exit 127) when it is older than 
 Exit code 77 (`EX_NOPERM`) means an elevation was refused or declined: `pwshpy --elevate`, a `.sh`
 runner's `--pwshpy-elevate` and a `.ps1` runner's `-PwshPyElevate` all exit 77 and write a line
 starting `pwshpy: elevation declined` to stderr, without running the command or the packed script.
-On Linux and macOS `pwshpy --elevate` asks for the password once (`sudo -v`), checks with
+On Linux and macOS `pwshpy --elevate` first asks `sudo -n` to run the program the relaunch runs
+(pwshpy's Python); when that needs no password (a `NOPASSWD` sudoers rule), the command runs under
+`sudo -n` without any prompt. Otherwise it asks for the password once (`sudo -v`), checks with
 `sudo -n -v` that sudo cached a credential, and runs the command under `sudo -n`, so sudo never
 prompts a second time; a sudo that caches nothing (sudoers `timestamp_timeout=0`) is declined with
-77 too. Run the command under `sudo` yourself on such a system.
+77 too. Run the command under `sudo` yourself on such a system. The packed runners make the same
+first check with the program their relaunch runs (`/bin/sh` for a `.sh`, the running `pwsh` for a
+`.ps1`).
 
 The `.NET` commands need the `[full]` extra (else a clear `FeatureUnavailableError`). `run` executes
 an arbitrary script; `cmdlet NAME -p KEY=VALUE` runs one cmdlet with safely-bound params; and the

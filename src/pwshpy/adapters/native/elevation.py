@@ -11,8 +11,8 @@ call.
 - :func:`elevate` relaunches the current process elevated, **preserving the working
   directory and forwarding argv**.  It is a no-op when already elevated.  Windows uses
   UAC (``ShellExecuteEx`` ``"runas"``, fixing PowerShell's ``System32`` gotcha); POSIX
-  (Linux/macOS) asks for the password once with ``sudo -v`` and re-execs the command under
-  ``sudo -n``.
+  (Linux/macOS) re-execs the command under ``sudo -n``: at once when sudo runs the current
+  interpreter without a password, otherwise after asking for the password once with ``sudo -v``.
 
 ``win32`` modules are imported lazily so a portable install stays clean.
 
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
 import subprocess  # nosec B404 - argv quoting (list2cmdline) + the sudo re-exec on POSIX; always a fixed argv, no shell
 import sys
 from collections.abc import Callable, Sequence
@@ -79,9 +80,10 @@ def elevate(
 
     A no-op returning ``0`` when already elevated.  Windows triggers a UAC prompt via
     ``ShellExecuteEx`` ``"runas"`` (the elevated child inherits the given/current working
-    directory - fixing PowerShell's ``System32`` gotcha).  POSIX (Linux/macOS) asks for the
-    password with ``sudo -v`` on the TTY, checks with ``sudo -n -v`` that a credential was
-    cached, then re-execs the command under ``sudo -n``, which never prompts again.  ``argv``
+    directory - fixing PowerShell's ``System32`` gotcha).  POSIX (Linux/macOS) re-execs the
+    command under ``sudo -n``, which never prompts: at once when sudo runs the current interpreter
+    without a password (a NOPASSWD sudoers rule), otherwise after asking for the password with
+    ``sudo -v`` on the TTY and checking with ``sudo -n -v`` that a credential was cached.  ``argv``
     defaults to the current process's.
 
     Args:
@@ -117,7 +119,9 @@ def elevate(
 def _sudo_relaunch(executable: str, argv: Sequence[str], cwd: str, *, wait: bool) -> int | None:
     """Re-exec ``executable`` elevated via ``sudo`` (POSIX), forwarding argv and cwd.
 
-    The password is asked by ``sudo -v`` on its own, before the command: sudo exits
+    A user sudo lets run the interpreter without a password (a NOPASSWD rule) is
+    asked nothing ([280], :func:`_sudo_runs_without_a_password`). Otherwise the
+    password is asked by ``sudo -v`` on its own, before the command: sudo exits
     1 when authentication fails (``man sudo``), which is a code the command itself
     may return, so only a separate step can tell a refusal from a result. The
     command then runs on the credential ``-v`` cached, under ``sudo -n`` so it can
@@ -133,7 +137,8 @@ def _sudo_relaunch(executable: str, argv: Sequence[str], cwd: str, *, wait: bool
     """
     command = ["sudo", "-n", executable, *argv]
     try:
-        _ask_sudo_for_root(cwd)
+        if not _sudo_runs_without_a_password(executable, cwd):
+            _ask_sudo_for_root(cwd)
         if wait:
             completed = subprocess.run(command, cwd=cwd, check=False)  # noqa: S603  # nosec B603 - fixed argv, no shell
             return completed.returncode
@@ -141,6 +146,45 @@ def _sudo_relaunch(executable: str, argv: Sequence[str], cwd: str, *, wait: bool
     except OSError as exc:
         raise native_error(f"elevated relaunch via sudo failed: {exc}", exc) from exc
     return None
+
+
+#: What the probe runs the relaunch's interpreter with: Python started to do nothing.
+_PROBE_ARGS = ("-c", "pass")
+#: How long the probe may take; ``sudo -n`` never waits for a person.
+_PROBE_TIMEOUT_SECONDS = 60
+
+
+def _sudo_runs_without_a_password(executable: str, cwd: str) -> bool:
+    """Whether ``sudo -n`` runs the relaunch's own program without asking for a password ([280]).
+
+    Under sudo's default ``verifypw=all``, ``sudo -v`` wants a password unless EVERY sudoers rule of
+    the user is NOPASSWD, so a user with a NOPASSWD rule beside Ubuntu's ``%sudo ALL`` was asked for
+    a password the command does not need (and refused without a terminal, or without any password).
+    The probe runs the same program the relaunch runs, so a rule allowing some other program only
+    cannot pass it and then refuse the relaunch. Only the current interpreter can be run to do
+    nothing; any other program (an explicit ``executable``, a frozen build) is never probed, and the
+    ``sudo -v`` flow decides as before. Silent: its output and refusal are not the user's business.
+    """
+    if executable != sys.executable or bool(getattr(sys, "frozen", False)):
+        return False
+    # The sudo the relaunch's PATH lookup finds, by its path; none is reported by the flow below.
+    sudo = shutil.which("sudo")
+    if sudo is None:
+        return False
+    try:
+        probe = subprocess.run(  # noqa: S603  # nosec B603 - fixed argv, no shell
+            [sudo, "-n", executable, *_PROBE_ARGS],
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        # A sudo that cannot start, or a hung probe, proves nothing: the flow below decides.
+        return False
+    return probe.returncode == 0
 
 
 def _ask_sudo_for_root(cwd: str) -> None:

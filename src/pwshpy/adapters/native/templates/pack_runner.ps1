@@ -1853,6 +1853,15 @@ $PwshPyPrepare = {
     if ($PwshPyHelp) { Write-PwshPyHelp; exit 0 }
 
     $PwshPyCacheDir = Join-Path (Get-PwshPyCacheRoot) $PwshPySha.Substring(0, 16)
+    # As root the pack cache's default is below the running account's own cache directory (from the
+    # passwd database, as uv's cache below), never XDG_CACHE_HOME or HOME: sudo -E or env_keep hand those
+    # over from the caller, whose directory the cache check would then refuse ([R3]), and the caller would
+    # choose where root unpacks. PWSHPY_PACK_CACHE stays the caller's to set, and is judged like any other.
+    # Before -PwshPyInfo, which names the directory this run uses; a run that relaunches itself under sudo
+    # gets here again as root.
+    if (-not $PwshPyOnWindows -and -not $env:PWSHPY_PACK_CACHE -and (Test-PwshPyElevated)) {
+        $PwshPyCacheDir = Join-Path (Join-Path (Get-PwshPyAccountCacheHome) 'pwshpy-pack') $PwshPySha.Substring(0, 16)
+    }
 
     if ($PwshPyInfo) { Write-PwshPyManifest -CacheDir $PwshPyCacheDir; exit 0 }
 
@@ -1872,13 +1881,6 @@ $PwshPyPrepare = {
     $script:PwshPyCallerPath = $env:PATH
     $PwshPyRootPath = $PwshPyElevatedRun -and -not $PwshPyOnWindows
     if ($PwshPyRootPath) { $env:PATH = $PwshPyFixedPath }
-    # As root the pack cache's default is below the running account's own cache directory (from the
-    # passwd database, as uv's cache below), never XDG_CACHE_HOME or HOME: sudo -E or env_keep hand those
-    # over from the caller, whose directory the cache check would then refuse ([R3]), and the caller would
-    # choose where root unpacks. PWSHPY_PACK_CACHE stays the caller's to set, and is judged like any other.
-    if ($PwshPyRootPath -and -not $env:PWSHPY_PACK_CACHE) {
-        $PwshPyCacheDir = Join-Path (Join-Path (Get-PwshPyAccountCacheHome) 'pwshpy-pack') $PwshPySha.Substring(0, 16)
-    }
 
     # --- unpack -----------------------------------------------------------------------------
 

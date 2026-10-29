@@ -4321,6 +4321,20 @@ def test_an_elevated_posix_run_takes_its_default_pack_cache_from_the_account(tmp
     assert [path.name for path in caller.rglob("pwshpy-pack")] == []
 
 
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_pwshpy_info_names_the_cache_an_elevated_posix_run_uses(tmp_path: Path) -> None:
+    """[R3]: -PwshPyInfo printed the cache directory before the root run's default was applied, so an
+    elevated POSIX run showed the caller's XDG_CACHE_HOME while it used the account's own."""
+    caller = tmp_path / "caller-cache"
+    runner, _, key = _cache_trust_runner(tmp_path)
+    env = {"PWSHPY_PACK_CACHE": "", "XDG_CACHE_HOME": str(caller), **managed_python_env(tmp_path, managed=None)}
+    result = _run_with_path(tmp_path, runner, "-PwshPyInfo", path_first=[_UvLocation.directory], env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    own = tmp_path / "default-cache" / "pwshpy-pack" / key
+    assert f"cache dir  : {own}" in result.stdout, result.stdout
+
+
 @pytest.mark.local_only
 @pytest.mark.os_posix
 @_POSIX_ONLY

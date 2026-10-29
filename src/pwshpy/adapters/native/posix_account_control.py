@@ -164,7 +164,10 @@ class PosixLocalAccountController:
             argv += ["--comment", comment]
         argv.append(name)
         # One deadline for the verb: each command gets what is left of ``timeout``, so useradd +
-        # chpasswd + usermod together never run longer than the caller asked for.
+        # chpasswd + usermod together never run longer than the caller asked for. The one exception
+        # is a disabled account whose later step failed: its lock then gets its own
+        # _LOCK_GRACE_SECONDS on top (see _after_partial_create), so an account meant to be
+        # disabled is not left usable.
         deadline = _Deadline(timeout)
         self._run(argv, deadline=deadline)
         progress = _NewUserProgress(name, password_requested=bool(password), lock_requested=disabled)

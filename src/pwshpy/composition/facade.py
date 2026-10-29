@@ -1216,7 +1216,8 @@ class Ps:
     ) -> LocalUser:
         """Create a local user; return the created record (native, **mutating**).
 
-        On Linux ``timeout`` bounds all of its shadow-utils commands together.
+        On Linux ``timeout`` bounds all of its shadow-utils commands together, except the lock of
+        a ``disabled`` account after a later step failed, which gets a fixed 5 s grace on top.
 
         Win32 ``NetUserAdd`` on Windows; ``useradd`` (then ``chpasswd`` and ``usermod --lock``
         as needed) on Linux, which needs root.
@@ -1229,8 +1230,10 @@ class Ps:
             description: The account description (on Linux see ``full_name``).
             disabled: Create the account disabled (on Linux its password is locked).
             timeout: Linux: seconds the verb's shadow-utils commands may run together; the one
-                running when it passes is killed (default 30.0). Ignored on Windows, where the
-                win32net call is synchronous.
+                running when it passes is killed (default 30.0). With ``disabled``, a failed or
+                timed-out step is followed by the lock within its own 5 s, so the call can last
+                up to ``timeout`` plus 5 s. Ignored on Windows, where the win32net call is
+                synchronous.
 
         Returns:
             The created :class:`LocalUser`: on Windows read back, on Linux read from ``pwd``

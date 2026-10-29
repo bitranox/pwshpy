@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
 import subprocess  # nosec B404 - argv quoting (list2cmdline) + the sudo re-exec on POSIX; always a fixed argv, no shell
 import sys
 from collections.abc import Callable, Sequence
@@ -166,9 +167,13 @@ def _sudo_runs_without_a_password(executable: str, cwd: str) -> bool:
     """
     if executable != sys.executable or bool(getattr(sys, "frozen", False)):
         return False
+    # The sudo the relaunch's PATH lookup finds, by its path; none is reported by the flow below.
+    sudo = shutil.which("sudo")
+    if sudo is None:
+        return False
     try:
-        probe = subprocess.run(  # noqa: S603, S607  # nosec B603 B607 - fixed argv, no shell; sudo resolved from PATH like the relaunch
-            ["sudo", "-n", executable, *_PROBE_ARGS],
+        probe = subprocess.run(  # noqa: S603  # nosec B603 - fixed argv, no shell
+            [sudo, "-n", executable, *_PROBE_ARGS],
             cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -177,7 +182,7 @@ def _sudo_runs_without_a_password(executable: str, cwd: str) -> bool:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        # No sudo is reported by the flow below, which names it; a hung probe proves nothing.
+        # A sudo that cannot start, or a hung probe, proves nothing: the flow below decides.
         return False
     return probe.returncode == 0
 

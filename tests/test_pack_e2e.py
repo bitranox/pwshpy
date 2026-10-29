@@ -625,7 +625,9 @@ def test_elevate_switch_never_lets_sudo_prompt_twice(tmp_path: Path, cached: boo
 @pytest.mark.os_posix
 @pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
 @pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
-@pytest.mark.parametrize("nopasswd", ["ALL", "relaunch", "/bin/true"], ids=["nopasswd-all", "nopasswd-the-relaunch", "nopasswd-another"])
+@pytest.mark.parametrize(
+    "nopasswd", ["ALL", "relaunch", "/bin/true"], ids=["nopasswd-all", "nopasswd-the-relaunch", "nopasswd-another"]
+)
 def test_elevate_switch_asks_no_password_of_a_user_who_needs_none(tmp_path: Path, nopasswd: str) -> None:
     """[280], as the .sh: a user with a NOPASSWD sudoers rule beside one that wants a password was asked
     for a password by ``sudo -v`` (``verifypw=all``), and declined with 77 without a terminal or a

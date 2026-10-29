@@ -5,7 +5,9 @@ typed :class:`~pwshpy.domain.records.FileSystemItem` records instead of the
 ``PSCustomObject`` grab-bag ``Get-ChildItem`` yields.  Read (``get_child_item`` /
 ``get_item`` / ``get_content`` / ``test_path``) and mutate (``new_item`` / ``copy_item``
 / ``move_item`` / ``remove_item``); every fallible call maps to
-:class:`~pwshpy.domain.errors.NativeCallError`.
+:class:`~pwshpy.domain.errors.NativeCallError`: an ``OSError``, an unknown encoding
+(``LookupError``) and text that is not valid in the encoding (``UnicodeDecodeError``).
+A ``ValueError`` that is a usage error (a NUL in a path) stays a ``ValueError``.
 
 Contents:
     * :class:`NativeFileSystem` - the filesystem operations (read + mutating).
@@ -79,7 +81,8 @@ class NativeFileSystem:
         """
         try:
             return Path(path).read_text(encoding=encoding)
-        except OSError as exc:
+        # UnicodeDecodeError is a ValueError, named here so a NUL-in-path ValueError stays raw.
+        except (OSError, LookupError, UnicodeDecodeError) as exc:
             raise native_error(f"cannot read {path!r}: {exc}", exc) from exc
 
     def get_content_lines(self, path: str, *, encoding: str = "utf-8") -> Iterator[str]:
@@ -92,14 +95,14 @@ class NativeFileSystem:
             # Open eagerly so a bad path raises here, not on first iteration; the generator
             # below closes it via `with handle` (SIM115's context-manager requirement is met there).
             handle = Path(path).open(encoding=encoding)  # noqa: SIM115
-        except OSError as exc:
+        except (OSError, LookupError) as exc:
             raise native_error(f"cannot read {path!r}: {exc}", exc) from exc
 
         def _lines() -> Iterator[str]:
             with handle:
                 try:
                     yield from handle
-                except OSError as exc:
+                except (OSError, UnicodeDecodeError) as exc:
                     raise native_error(f"error while reading {path!r}: {exc}", exc) from exc
 
         return _lines()

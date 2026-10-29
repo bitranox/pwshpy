@@ -1899,9 +1899,9 @@ class Ps:
             The :class:`~pathlib.Path` written.
 
         Raises:
-            LookupError: ``encoding`` names no text encoding.
-            UnicodeEncodeError: The text cannot be written in ``encoding``.
-            OSError: The file cannot be written (not wrapped in a pwshpy error).
+            NativeCallError: ``encoding`` names no text encoding, the text cannot be written in
+                it (nothing is written then), or the file cannot be written (a
+                :class:`NativeAccessDeniedError` when access is denied).
 
         Example:
             >>> callable(build_ps().write_text)
@@ -1938,10 +1938,11 @@ class Ps:
             The :class:`~pathlib.Path` written.
 
         Raises:
-            LookupError: ``encoding`` names no text encoding.
-            UnicodeEncodeError: The text cannot be written in ``encoding``.
-            OSError: The file cannot be written (not wrapped in a pwshpy error); the chunks
-                before a failure stay written.
+            NativeCallError: ``encoding`` names no text encoding, a chunk cannot be written in
+                it, or the file cannot be opened or written (a :class:`NativeAccessDeniedError`
+                when access is denied); the chunks before a failure stay written. An error the
+                ``chunks`` iterable raises itself passes through (an ``OSError`` from it is
+                reported as a write failure).
 
         Example:
             >>> callable(build_ps().write_text_stream)
@@ -1967,7 +1968,9 @@ class Ps:
         Raises:
             orjson.JSONEncodeError: A record holds a value orjson cannot write (an integer
                 outside the 64-bit range); the records before it are written.
-            OSError: The file cannot be written (not wrapped in a pwshpy error).
+            NativeCallError: The file cannot be opened or written (a
+                :class:`NativeAccessDeniedError` when access is denied); a pwshpy error the
+                ``records`` source raises passes through unchanged.
 
         Example:
             >>> callable(build_ps().write_records)
@@ -2031,9 +2034,8 @@ class Ps:
 
         Raises:
             NativeCallError: The file cannot be read (a :class:`NativeAccessDeniedError` when
-                access is denied).
-            LookupError: ``encoding`` names no codec.
-            UnicodeDecodeError: The file is not valid ``encoding``.
+                access is denied), ``encoding`` names no codec, or the file is not valid
+                ``encoding``.
 
         Example:
             >>> callable(build_ps().get_content)
@@ -2059,9 +2061,9 @@ class Ps:
             end (``"\\n"`` after Python's universal-newline translation).
 
         Raises:
-            NativeCallError: The file cannot be opened, or a read fails during iteration.
-            LookupError: ``encoding`` names no codec.
-            UnicodeDecodeError: A line is not valid ``encoding`` (raised on iteration).
+            NativeCallError: The file cannot be opened or ``encoding`` names no codec (raised by
+                this call), or a read fails or a line is not valid ``encoding`` (raised on
+                iteration).
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline

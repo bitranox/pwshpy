@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from pwshpy.adapters.native.fileio import write_records, write_text, write_text_stream
+from pwshpy.domain.errors import NativeCallError
 from pwshpy.domain.records import EnvVar
 
 
@@ -101,8 +102,9 @@ def test_write_text_writes_no_bom_for_a_codec_alias(tmp_path: Path, alias: str, 
 def test_write_text_stream_refuses_a_codec_that_is_not_a_text_encoding(tmp_path: Path, name: str) -> None:
     """A bytes-to-bytes or text-transform codec is refused before PATH is opened, even with no chunks."""
     target = tmp_path / "out.txt"
-    with pytest.raises(LookupError):
+    with pytest.raises(NativeCallError) as caught:
         write_text_stream(target, [], encoding=name)
+    assert isinstance(caught.value.__cause__, LookupError)
     assert not target.exists()
 
 

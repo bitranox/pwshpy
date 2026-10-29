@@ -8,6 +8,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Changed
 
+- `get_content`, `get_content_lines`, `write_text`, `write_text_stream` and `write_records` raise
+  `NativeCallError` (a `NativeAccessDeniedError` for a refusal) for an unknown encoding, text that
+  is not valid in the encoding, and a file that cannot be read or written, as every other pwshpy
+  call does; they let `LookupError`, `UnicodeDecodeError`, `UnicodeEncodeError` and `OSError`
+  through raw before. The original error is the `__cause__`. A `ValueError` that is a usage error
+  (a NUL in a path) is still raised as is.
 - `invoke_web_request` and `invoke_rest_method` raise `NativeCallError` on an HTTP status of 400 or
   above, as `Invoke-WebRequest` and `Invoke-RestMethod` do; the message names the status and the
   first 200 characters of the body on one line. They returned the answer (and `invoke_rest_method`

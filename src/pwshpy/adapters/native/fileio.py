@@ -7,7 +7,10 @@ bytes on different machines.  These helpers fix the encoding to a stable invaria
 UTF-8, no BOM, LF newlines, on every OS and Python version, unless you explicitly
 ask otherwise.
 
-Portable (stdlib + ``orjson``); works on every OS.
+Portable (stdlib + ``orjson``); works on every OS.  Every native failure maps to
+:class:`~pwshpy.domain.errors.NativeCallError`: an unknown or non-text encoding
+(``LookupError``), text the encoding cannot represent (``UnicodeEncodeError``) and an
+``OSError`` from opening or writing the file (a refusal is a ``NativeAccessDeniedError``).
 
 Contents:
     * :func:`write_text` - write text with a predictable encoding/BOM/newline.
@@ -21,8 +24,11 @@ import io
 import logging
 from collections.abc import Iterable
 from pathlib import Path
+from typing import BinaryIO
 
+from ...domain.errors import NativeCallError
 from ...domain.records import PSRecord
+from .marshal import native_error
 from .record_json import describe_replacements, record_json_bytes
 
 logger = logging.getLogger(__name__)
@@ -74,6 +80,10 @@ def write_text(
     Returns:
         The :class:`~pathlib.Path` written.
 
+    Raises:
+        NativeCallError: ``encoding`` names no text encoding, ``text`` cannot be encoded in
+            it (nothing is written then), or the file cannot be written.
+
     Example:
         >>> import tempfile, os
         >>> p = os.path.join(tempfile.mkdtemp(), "out.txt")
@@ -81,12 +91,15 @@ def write_text(
         >>> Path(p).read_bytes()
         b'hi'
     """
-    codec = _bomless_codec(encoding)
-    data = _normalize_newlines(text, newline).encode(codec)
+    destination = Path(path)
+    codec = _codec_for(encoding, destination)
+    data = _encode(_normalize_newlines(text, newline), codec, destination)
     if bom:
         data = _BOM_BYTES.get(codec, b"") + data
-    destination = Path(path)
-    destination.write_bytes(data)
+    try:
+        destination.write_bytes(data)
+    except OSError as exc:
+        raise native_error(f"cannot write {str(destination)!r}: {exc}", exc) from exc
     return destination
 
 
@@ -115,6 +128,13 @@ def write_text_stream(
     Returns:
         The :class:`~pathlib.Path` written.
 
+    Raises:
+        NativeCallError: ``encoding`` names no text encoding (nothing is opened), a chunk
+            cannot be encoded in it, or the file cannot be opened or written; the chunks
+            before a failure stay written. An exception the ``chunks`` iterable itself raises
+            (a ``UnicodeDecodeError`` reading stdin) passes through unchanged, except an
+            ``OSError``, which is reported like a write failure.
+
     Example:
         >>> import tempfile, os
         >>> p = os.path.join(tempfile.mkdtemp(), "stream.txt")
@@ -122,22 +142,44 @@ def write_text_stream(
         >>> Path(p).read_bytes()
         b'line1\\nline2\\n'
     """
-    codec = _bomless_codec(encoding)
     destination = Path(path)
-    with destination.open("wb") as handle:
-        if bom:
-            handle.write(_BOM_BYTES.get(codec, b""))
-        # A chunk ending in CR is held back by one character: its LF may start the next chunk, and
-        # normalizing the two halves apart wrote one line end twice (POSIX stdin does no newline
-        # translation, so write_text's fixed-size blocks split a CRLF wherever it falls).
-        pending = ""
-        for chunk in chunks:
-            text = pending + chunk
-            pending = "\r" if text.endswith("\r") else ""
-            handle.write(_normalize_newlines(text[: len(text) - len(pending)], newline).encode(codec))
-        if pending:
-            handle.write(_normalize_newlines(pending, newline).encode(codec))
+    codec = _codec_for(encoding, destination)
+    try:
+        with destination.open("wb") as handle:
+            if bom:
+                handle.write(_BOM_BYTES.get(codec, b""))
+            # A chunk ending in CR is held back by one character: its LF may start the next chunk, and
+            # normalizing the two halves apart wrote one line end twice (POSIX stdin does no newline
+            # translation, so write_text's fixed-size blocks split a CRLF wherever it falls).
+            pending = ""
+            for chunk in chunks:
+                text = pending + chunk
+                pending = "\r" if text.endswith("\r") else ""
+                complete = _normalize_newlines(text[: len(text) - len(pending)], newline)
+                handle.write(_encode(complete, codec, destination))
+            if pending:
+                handle.write(_encode(_normalize_newlines(pending, newline), codec, destination))
+    except NativeCallError:
+        raise  # already typed (an encode failure, or a refusal that is a PermissionError too)
+    except OSError as exc:
+        raise native_error(f"cannot write {str(destination)!r}: {exc}", exc) from exc
     return destination
+
+
+def _codec_for(encoding: str, destination: Path) -> str:
+    """:func:`_bomless_codec`, with an unknown or non-text encoding raised as NativeCallError."""
+    try:
+        return _bomless_codec(encoding)
+    except LookupError as exc:
+        raise native_error(f"cannot write {str(destination)!r}: {exc}", exc) from exc
+
+
+def _encode(text: str, codec: str, destination: Path) -> bytes:
+    """``text`` encoded with ``codec``; a character the codec cannot represent raises NativeCallError."""
+    try:
+        return text.encode(codec)
+    except UnicodeEncodeError as exc:
+        raise native_error(f"cannot write {str(destination)!r} as {codec}: {exc}", exc) from exc
 
 
 def _bomless_codec(encoding: str) -> str:
@@ -198,6 +240,8 @@ def write_records(path: str | Path, records: Iterable[PSRecord], *, jsonl: bool 
     Raises:
         orjson.JSONEncodeError: A record holds a value orjson cannot write other than a lone
             surrogate (an integer outside the 64-bit range); the records before it are written.
+        NativeCallError: The file cannot be opened or written. A pwshpy error the ``records``
+            source raises passes through unchanged.
 
     Example:
         >>> import tempfile, os
@@ -211,19 +255,29 @@ def write_records(path: str | Path, records: Iterable[PSRecord], *, jsonl: bool 
     # but the two disagree on integers beyond 64 bits, lone surrogates and non-UTF-8 bytes
     # (tests/test_record_json_bytes.py), and the CLI's --json/--jsonl use this serialiser too.
     destination = Path(path)
-    with destination.open("wb") as handle:
-        if jsonl:
-            for position, record in enumerate(records, start=1):
-                handle.write(_record_bytes(record, position))
-                handle.write(b"\n")
-        else:
-            handle.write(b"[")
-            for position, record in enumerate(records, start=1):
-                if position > 1:
-                    handle.write(b",")
-                handle.write(_record_bytes(record, position))
-            handle.write(b"]")
+    try:
+        with destination.open("wb") as handle:
+            _write_record_stream(handle, records, jsonl=jsonl)
+    except NativeCallError:
+        raise  # the record source's own pwshpy error (a PermissionError too when it is a refusal)
+    except OSError as exc:
+        raise native_error(f"cannot write {str(destination)!r}: {exc}", exc) from exc
     return destination
+
+
+def _write_record_stream(handle: BinaryIO, records: Iterable[PSRecord], *, jsonl: bool) -> None:
+    """Write ``records`` to ``handle`` as JSONL, or as one JSON array when ``jsonl`` is False."""
+    if jsonl:
+        for position, record in enumerate(records, start=1):
+            handle.write(_record_bytes(record, position))
+            handle.write(b"\n")
+        return
+    handle.write(b"[")
+    for position, record in enumerate(records, start=1):
+        if position > 1:
+            handle.write(b",")
+        handle.write(_record_bytes(record, position))
+    handle.write(b"]")
 
 
 def _record_bytes(record: PSRecord, position: int) -> bytes:

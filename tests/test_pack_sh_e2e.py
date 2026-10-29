@@ -45,11 +45,13 @@ from elevation_doubles import (
     owned_by_another_account,
     plant_library_path,
     planted_managed_python,
+    second_prompts,
     session_uv_cache,
     trusted_managed_python,
     with_account_cache_home,
     with_data_home,
     without_python_dir_check,
+    write_fake_sudo,
     write_git_source,
     write_local_wheel,
     write_planted_environment,
@@ -57,7 +59,6 @@ from elevation_doubles import (
     write_planted_venv,
     write_recording_uv,
 )
-from test_pack_sudo_double import second_prompts, write_sudo_double
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.enums import RunnerFormat
@@ -427,7 +428,7 @@ def _elevate_setup(tmp_path: Path, *, grant: bool, cached: bool = True) -> tuple
     runner.chmod(0o755)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_sudo_double(bin_dir, grant=grant, cached=cached, calls=tmp_path / "sudo-calls.txt")
+    write_fake_sudo(bin_dir, grant=grant, cached=cached, calls=tmp_path / "sudo-calls.txt")
     marker = tmp_path / "ran.marker"
     environment = _env(tmp_path)
     environment["PATH"] = os.pathsep.join([str(bin_dir), environment["PATH"]])
@@ -813,7 +814,7 @@ def test_elevate_forwards_the_pinned_uv(tmp_path: Path) -> None:
     runner = _trust_runner(tmp_path, hide_system_uv=True)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_sudo_double(bin_dir, grant=True, calls=tmp_path / "sudo-calls.txt")
+    write_fake_sudo(bin_dir, grant=True, calls=tmp_path / "sudo-calls.txt")
     environment = _trust_env(tmp_path, bin_dir, Path(_UV or "uv").parent)
     result = _run(["sh"], runner, "--pwshpy-elevate", "--pwshpy-uv", str(planted), "--", "a b", env=environment)
     assert result.returncode == 0, result.stdout + result.stderr

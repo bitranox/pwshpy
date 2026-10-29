@@ -59,11 +59,13 @@ from elevation_doubles import (
     owned_by_another_account,
     plant_library_path,
     planted_managed_python,
+    second_prompts,
     session_uv_cache,
     trusted_managed_python,
     with_account_cache_home,
     with_data_home,
     without_python_dir_check,
+    write_fake_sudo,
     write_git_source,
     write_local_wheel,
     write_planted_environment,
@@ -71,7 +73,6 @@ from elevation_doubles import (
     write_planted_venv,
     write_recording_uv,
 )
-from test_pack_sudo_double import second_prompts, write_sudo_double
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.packing import PackOptions
@@ -547,7 +548,7 @@ def test_elevate_switch_exits_77_when_sudo_refuses(tmp_path: Path) -> None:
     manifest = pack_script(entry)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_sudo_double(bin_dir, grant=False)
+    write_fake_sudo(bin_dir, grant=False)
     environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
     result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment)
     assert result.returncode == 77, result.stderr
@@ -565,7 +566,7 @@ def test_elevate_switch_forwards_the_clean_switch(tmp_path: Path) -> None:
     runner = Path(manifest.output_path)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_sudo_double(bin_dir, grant=True)
+    write_fake_sudo(bin_dir, grant=True)
     environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
     assert _run(runner, env=environment).returncode == 4
     # The .ps1 leaves its lock file beside the extraction; only the directory is the cached tree.
@@ -596,7 +597,7 @@ def test_elevate_switch_never_lets_sudo_prompt_twice(tmp_path: Path, cached: boo
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
     calls = tmp_path / "sudo-calls.txt"
-    write_sudo_double(bin_dir, grant=True, cached=cached, calls=calls)
+    write_fake_sudo(bin_dir, grant=True, cached=cached, calls=calls)
     environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
     result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment)
     assert second_prompts(calls) == [], calls.read_text(encoding="utf-8")
@@ -2680,7 +2681,7 @@ def test_the_sudo_relaunch_forwards_wildcards_and_tildes_literally(tmp_path: Pat
     manifest = pack_script(_project(tmp_path))
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_sudo_double(bin_dir, grant=True)
+    write_fake_sudo(bin_dir, grant=True)
     arguments = ["*", "*.log", "~", "~/x", "[ab].log"]
     result = _run_with_path(
         tmp_path,

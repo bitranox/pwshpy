@@ -1763,41 +1763,57 @@ _INSTALLER_NOT_DOWNLOADED = "could not download uv's installer from https://astr
 
 
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root"])
-@pytest.mark.parametrize("wget_serves", [False, True], ids=["both-fail", "wget-fallback-serves"])
-def test_a_failed_installer_download_is_named_and_wget_is_tried(
-    tmp_path: Path, as_root: bool, wget_serves: bool
-) -> None:
+@pytest.mark.parametrize("downloads", ["both-fail", "both-empty", "wget-fallback-serves"])
+def test_a_failed_installer_download_is_named_and_wget_is_tried(tmp_path: Path, as_root: bool, downloads: str) -> None:
     """[R3] round 4: the installer was piped into sh ("curl | sh"), whose status is sh's, 0 for the
     empty input a failed download leaves, so a run that could not download it (as root behind a
     proxy the caller's environment named, which a root run drops) ended in the uv trust remedy, and
     wget was never tried. The download now goes to a file first: curl failing (exit 6) falls back to
     wget, and when wget fails too (exit 4) the run stops with 127 naming the download, each exit
-    status and, as root, how to give root a proxy or a uv; when wget delivers, the installation runs."""
+    status and, as root, how to give root a proxy or a uv; when wget delivers, the installation runs.
+    Round 5: a downloader that exits 0 without delivering a file counts as failed, and when neither
+    delivers, the installer's directory is gone (not root) or keeps nothing of the failed downloads, a
+    partial or an empty file wget left (root's private one)."""
     runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root)
     installer = tmp_path / "local-uv-install.sh"
     installer.write_text(f'mkdir -p "$HOME/.local/bin"\ncp -p "{uv.parent}"/* "$HOME/.local/bin/"\n')
     doubles = tmp_path / "download-bin"
     doubles.mkdir()
     log = tmp_path / "downloads.txt"
-    curl = write_download_double(doubles, "curl", log=log, serve=None, exit_code=6)
-    wget = write_download_double(
-        doubles, "wget", log=log, serve=installer if wget_serves else None, exit_code=0 if wget_serves else 4
-    )
+    empty = downloads == "both-empty"
+    curl = write_download_double(doubles, "curl", log=log, serve=None, exit_code=0 if empty else 6)
+    serves = installer if downloads == "wget-fallback-serves" else None
+    # wget leaves a file behind when it fails: part of one (exit 4), or an empty one (exit 0).
+    left = tmp_path / "left-by-wget"
+    left.write_text("" if empty else "#!/bin/sh\n# cut off", encoding="utf-8")
+    wget_exit = 4 if downloads == "both-fail" else 0
+    wget = write_download_double(doubles, "wget", log=log, serve=serves or left, exit_code=wget_exit)
     with_download_doubles(runner, curl=curl, wget=wget, powershell=False)
     caller_home = tmp_path / "caller-home"
     caller_home.mkdir()
+    caller_temp = tmp_path / "caller-temp"
+    caller_temp.mkdir()
     environment = {**_trust_env(tmp_path), "HOME": str(caller_home), "PATH": "/usr/bin:/bin"}
+    environment["TMPDIR"] = str(caller_temp)
     result = _run_in(["sh"], runner, env=environment, cwd=_work_dir(tmp_path))
     url = "https://astral.sh/uv/install.sh"
     assert log.read_text(encoding="utf-8").splitlines() == [f"curl {url}", f"wget {url}"], result.stderr
-    if wget_serves:
+    if serves is not None:
         assert result.returncode == 0, result.stdout + result.stderr
         assert record.is_file(), result.stderr
         return
     assert result.returncode == 127, result.stdout + result.stderr
     failure = next((line for line in result.stderr.splitlines() if _INSTALLER_NOT_DOWNLOADED in line), "")
     # The runner names each downloader as it ran it, here the doubles' paths.
-    assert f"{_INSTALLER_NOT_DOWNLOADED}{curl} exited 6, {wget} exited 4)" in failure, result.stderr
+    if empty:
+        tried = f"{curl} exited 0 with nothing downloaded, {wget} exited 0 with nothing downloaded"
+    else:
+        tried = f"{curl} exited 6, {wget} exited 4"
+    assert f"{_INSTALLER_NOT_DOWNLOADED}{tried})" in failure, result.stderr
+    if as_root:
+        private = default_uv_cache_dir(tmp_path).parent / "pwshpy-tmp"
+        assert private.is_dir() and list(private.iterdir()) == [], "the installer was left behind"
+    assert list(caller_temp.iterdir()) == [], "the installer's directory was left behind"
     assert ("install uv for root beforehand" in failure) is as_root, failure
     assert "after installation" not in result.stderr and "chmod go-w" not in result.stderr, result.stderr
     assert not record.exists(), "uv ran"

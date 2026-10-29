@@ -74,7 +74,7 @@ class ProcessSource(Protocol):
 
 
 class NetConnectionSource(Protocol):
-    """Enumerate open sockets as typed :class:`NetConnection` records (native)."""
+    """Enumerate open TCP sockets (IPv4 and IPv6) as typed :class:`NetConnection` records (native)."""
 
     def __call__(self) -> Iterator[NetConnection]: ...
 

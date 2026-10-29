@@ -201,18 +201,22 @@ catch a subclass before its parent:
 - `NativeCallError` - an OS call failed, `.check()` saw a nonzero exit, or a `strict=True` listing
   hit an item it cannot read. Its subclasses: `OperationTimeoutError` (`.timeout` holds the limit:
   `exec(timeout=)`, a service start/stop/restart that did not settle - the control WAS issued -,
-  `get_windows_update`, `wait_process(timeout=)`, `resolve_dns_name(timeout=)` and, on Linux, the
-  local-account verbs (`new_local_user`, `remove_local_user`, `enable_local_user`,
-  `disable_local_user`, `new_local_group`, `remove_local_group`, `add_local_group_member` and
-  `remove_local_group_member`, `timeout=` default 30 s)) and `ElevationDeclinedError` (the UAC
-  prompt or sudo's password refused) and `NativeAccessDeniedError` (a call refused with an
-  access-denied code: `E_ACCESSDENIED`, `EACCES`, `EPERM`, psutil `AccessDenied` - a Windows service stop
-  denied, a file or registry key the caller cannot open). `NativeAccessDeniedError` is also a
-  `PermissionError`, so `except PermissionError` catches it; `errno` holds the POSIX code when the
-  failure carried one. The type follows the code the failure carried, not the reason: any other
-  refusal is the plain `NativeCallError`, which `except PermissionError` does NOT catch - a
-  missing executable, and any error reply from systemd over D-Bus, a polkit rights refusal
-  included, because such a reply carries no errno and no HRESULT. Every `NativeCallError`
+  `get_windows_update`, `wait_process(timeout=)`, `resolve_dns_name(timeout=)`, `download_file`,
+  `invoke_web_request` and `invoke_rest_method` (a connect or read that stalls past `timeout=`,
+  default 30 s) and, on Linux, the local-account verbs (`new_local_user`, `remove_local_user`,
+  `enable_local_user`, `disable_local_user`, `new_local_group`, `remove_local_group`,
+  `add_local_group_member` and `remove_local_group_member`, whose `timeout=`, default 30 s, bounds
+  all of the verb's commands together)) and `ElevationDeclinedError` (the UAC prompt or sudo's
+  password refused, or a sudo that caches no credential, `timestamp_timeout=0`: `elevate()` asks
+  once with `sudo -v` and runs the command under `sudo -n`) and `NativeAccessDeniedError` (a call
+  refused for lack of rights: `E_ACCESSDENIED`, `EACCES`, `EPERM`, psutil `AccessDenied`, a systemd
+  D-Bus `AccessDenied` or `InteractiveAuthorizationRequired` - a Windows service stop denied,
+  `stop_service` as a non-root Linux user, a file or registry key the caller cannot open).
+  `NativeAccessDeniedError` is also a `PermissionError`, so `except PermissionError` catches it;
+  `errno` holds the POSIX code when the failure carried one. Any other refusal is the plain
+  `NativeCallError`, which `except PermissionError` does NOT catch - a missing executable, an error
+  from the Secret Service, a shadow-utils command's non-zero exit, and any other D-Bus error reply
+  from systemd (its message names the D-Bus error). Every `NativeCallError`
   carries `.hresult`, the unsigned 32-bit HRESULT when the native error had one, a Win32 code
   converted with `HRESULT_FROM_WIN32` (so a registry or file open refused with Win32 error 5
   reads `0x80070005`, `E_ACCESSDENIED`), else `None` (always `None` for a Linux or macOS
@@ -222,9 +226,13 @@ catch a subclass before its parent:
   `ConfigurationError`, `PowerShellError` / `FeatureUnavailableError` (.NET, `[full]`; `run`, `cmdlet`
   and the module wrappers `get_ad_user`, `get_ad_group`, `get_ad_computer`, `get_mailbox`, `get_az_vm`
   and `get_az_resource_group` raise `PowerShellError` past their `timeout`, default none), `PackError`.
-  `download_file`, `invoke_web_request` and `invoke_rest_method` raise the plain `NativeCallError`
-  ("timed out") when a connect or read outlasts `timeout`; `test_connection` returns `reachable=False`;
-  `elevate(wait=True)` has no limit.
+  `test_connection` returns `reachable=False` past its `timeout`; `elevate(wait=True)` has no limit.
+- An HTTP answer urllib does not follow (a refused 3xx such as a redirect loop, 304, 4xx, 5xx)
+  makes `invoke_web_request` and `invoke_rest_method` raise `NativeCallError` naming the status and
+  the start of the body, as the cmdlets do; pass `skip_http_error_check=True` (CLI
+  `--skip-http-error-check`, pwsh's `-SkipHttpErrorCheck`) to read such an answer. `download_file`
+  always raises for one. A redirect to a scheme other than `http`/`https` raises before anything
+  connects to it.
 
 `get_service()` and `get_scheduled_task()` skip, with a logged WARNING, an item the caller cannot
 read; pass `strict=True` (CLI `--strict`) when "not listed" must mean "does not exist" (a raise
@@ -245,8 +253,9 @@ call reported), 22 a refused value
 (`ValueError`; 87 on Windows), 64 a relative `-PwshPyUv` / `--pwshpy-uv`, 70 the runner failed before the script ran
 (the elevated `.ps1` child, or an elevated run that cannot return to the caller's directory), 77
 elevation declined (`pwshpy --elevate`, `-PwshPyElevate`, `--pwshpy-elevate`; stderr line `pwshpy:
-elevation declined`), 110 `OperationTimeoutError`, 127 a missing or untrusted `uv`, or no `sudo` for a
-runner's elevation. `pwshpy exec`, `pwshpy --elevate <command>` (a no-op when already elevated) and a
+elevation declined`), 110 `OperationTimeoutError`, 127 a missing or untrusted `uv` (or, run
+elevated, an untrusted managed Python, pack cache or old git), or no `sudo` for a runner's
+elevation. `pwshpy exec`, `pwshpy --elevate <command>` (a no-op when already elevated) and a
 runner otherwise return the program's, command's or script's own code, so check the stderr line too.
 
 ## Still writing a `.ps1`? Nine traps

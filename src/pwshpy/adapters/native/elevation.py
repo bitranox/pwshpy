@@ -11,7 +11,8 @@ call.
 - :func:`elevate` relaunches the current process elevated, **preserving the working
   directory and forwarding argv**.  It is a no-op when already elevated.  Windows uses
   UAC (``ShellExecuteEx`` ``"runas"``, fixing PowerShell's ``System32`` gotcha); POSIX
-  (Linux/macOS) re-execs the command under ``sudo``.
+  (Linux/macOS) asks for the password once with ``sudo -v`` and re-execs the command under
+  ``sudo -n``.
 
 ``win32`` modules are imported lazily so a portable install stays clean.
 
@@ -79,7 +80,8 @@ def elevate(
     A no-op returning ``0`` when already elevated.  Windows triggers a UAC prompt via
     ``ShellExecuteEx`` ``"runas"`` (the elevated child inherits the given/current working
     directory - fixing PowerShell's ``System32`` gotcha).  POSIX (Linux/macOS) asks for the
-    password with ``sudo -v`` on the TTY, then re-execs the command under ``sudo``.  ``argv``
+    password with ``sudo -v`` on the TTY, checks with ``sudo -n -v`` that a credential was
+    cached, then re-execs the command under ``sudo -n``, which never prompts again.  ``argv``
     defaults to the current process's.
 
     Args:
@@ -95,7 +97,8 @@ def elevate(
         ``None`` when ``wait`` is ``False``.
 
     Raises:
-        ElevationDeclinedError: The UAC prompt was refused, or sudo did not grant root.
+        ElevationDeclinedError: The UAC prompt was refused, or sudo did not grant root or
+            cached no credential for the command (sudoers ``timestamp_timeout=0``).
         NativeCallError: If the elevated relaunch (``ShellExecuteEx`` / ``sudo``) fails.
 
     Example:

@@ -35,6 +35,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `get_net_tcp_connection` (and `pwshpy get_net_tcp_connection`) lists TCP sockets only, IPv4 and
   IPv6, like `Get-NetTCPConnection`; it listed UDP sockets too before. UDP sockets are listed by
   `get_net_udp_endpoint`.
+- The `--help` lines of `get_process`, `get_volume`, `get_uptime`, `env`, `resolve_dns_name` and
+  `test_connection` end in `(native)` (`get_process`: `(native, no pwsh subprocess)`) instead of
+  a doubled `(native, native)`, and the package description says "native OS bindings" instead of
+  "native Windows bindings". Module docstrings name the current command names.
 
 ### Fixed
 
@@ -108,8 +112,6 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - The `pwshpy` CLI prints a command's error after the log lines the command already wrote, each
   on its own line. Before, an error printed while a log line was still queued could run into it
   on one line (seen on Windows, e.g. `pwshpy get_scheduled_task --task-name 'a\b'`).
-
-### Fixed
 
 - Packed runners (`pwshpy pack`): an elevated run (`.ps1` with an administrator token or as
   SYSTEM, either runner as root) now judges its pack cache before it removes or writes anything

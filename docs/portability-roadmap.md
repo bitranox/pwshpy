@@ -234,6 +234,13 @@ box (like the Windows mutating tests need a throwaway Windows VM).
   not worth faking.
 - **Hotfixes** (`get_hotfix`) - `dpkg -l` / `rpm -qa` is "installed packages", not "OS patches". Weak
   analog; if wanted, expose a separate `get_package` rather than pretend it is Get-Hotfix.
+- **Windows Update search** (`get_windows_update`) - it asks the Windows Update agent which Microsoft
+  updates apply, with KB ids, MSRC severity and update categories. A Linux package manager's list of
+  upgradable packages is a different source with different identity, so it would be the same weak
+  analog as `get_hotfix`. Raises `PlatformUnsupportedError` off Windows.
+- **Clearing an event log** (`clear_event_log`) - reading is portable (`get_win_event` reads
+  journald), but journald has no per-log clear: `journalctl --vacuum-*` trims archived journal files
+  of the whole journal by age or size. No port.
 - **Shortcuts** (`get_shortcut`, `new_shortcut`) - a `.lnk` is a Windows shell file format. A
   freedesktop `.desktop` launcher is a different format with different fields (no icon index, an
   `Exec` line with its own quoting rules), so writing one under the same verb would be a different

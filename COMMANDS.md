@@ -59,6 +59,9 @@ re-imports it.
 | `Get-NetIPAddress`                           | `ps.get_net_ip_address()`                        | `pwshpy get_net_ip_address`                     |
 | `Get-NetUDPEndpoint`                         | `ps.get_net_udp_endpoint()`                      | `pwshpy get_net_udp_endpoint`                   |
 
+`get_net_tcp_connection` lists TCP sockets only (IPv4 and IPv6), like `Get-NetTCPConnection`; UDP
+sockets come from `get_net_udp_endpoint`.
+
 ## Storage  *(portable)*
 
 | PowerShell                   | pwshpy - Python (API) | pwshpy - CLI        |
@@ -107,7 +110,11 @@ admin (Windows) / polkit or root (Linux).
 
 A start, stop or restart that has not settled by `timeout` raises `OperationTimeoutError` (its
 `.timeout` holds the limit; CLI exit 110): the control was issued and the service is still on its
-way. A control the service or systemd refuses raises the plain `NativeCallError` (CLI exit 1).
+way. A control refused for lack of rights raises `NativeAccessDeniedError` (a `PermissionError`
+too; CLI exit 13, 5 on Windows): an access-denied service control on Windows, and on Linux a
+D-Bus `AccessDenied` or `InteractiveAuthorizationRequired` from systemd (`stop_service` as a
+non-root user). Any other refusal by the service or systemd raises the plain `NativeCallError`
+(CLI exit 1).
 `OperationTimeoutError` subclasses `NativeCallError`, so catch it first to tell the two apart.
 `stop_service(name, wait=False)` (CLI `--no-wait`) issues the stop and returns the state right
 after it, typically `StopPending`, without waiting - for a service that sits in Stop Pending
@@ -192,7 +199,12 @@ Portable: win32net on Windows, stdlib `pwd` / `grp` (read) and shadow-utils (`us
 POSIX uid/gid as a string, so scripts match on the stable id, not a localized name. On Linux the
 mutating verbs need root; a POSIX group has no description (so `new_local_group`'s is ignored), and
 `full_name` maps to the single GECOS comment. Account mutation is the one place pwshpy drives external
-commands (shell-free argv) rather than a native API - there is no stable native account API.
+commands (shell-free argv) rather than a native API - there is no stable native account API. Each
+verb's `timeout` (default 30 s) bounds all of its commands together, and running out raises
+`OperationTimeoutError` (CLI exit 110). When `new_local_user` has created the account and a later
+step (`chpasswd`, `usermod --lock`) fails or times out, `disabled=True` still locks it within a
+fixed 5 s grace, and the error names the partial state (created, password set or not, locked or
+not).
 
 | PowerShell                                                      | pwshpy - Python (API)                                                                   | pwshpy - CLI                                                       |
 |-----------------------------------------------------------------|-----------------------------------------------------------------------------------------|--------------------------------------------------------------------|
@@ -246,8 +258,10 @@ The secret is a `SecretStr`: masked in repr / JSON / logs; read it with `.secret
 ## Elevation  *(portable)*
 
 All three are portable: the admin check is the Windows token / POSIX euid; the relaunch is
-Windows UAC or a POSIX `sudo` re-exec (argv + cwd forwarded, no-op when already elevated). A refused
-prompt raises `ElevationDeclinedError` (a `NativeCallError` subclass); `pwshpy --elevate` and the
+Windows UAC or a POSIX `sudo` re-exec (argv + cwd forwarded, no-op when already elevated): `sudo -v`
+asks for the password once, `sudo -n -v` checks a credential was cached, and the command runs under
+`sudo -n`, so sudo never prompts twice. A refused prompt, or a sudo that caches no credential
+(sudoers `timestamp_timeout=0`), raises `ElevationDeclinedError` (a `NativeCallError` subclass); `pwshpy --elevate` and the
 packed runners' `-PwshPyElevate` / `--pwshpy-elevate` exit 77 with a `pwshpy: elevation declined`
 line on stderr. `ps.get_current_identity()` (`whoami /user`) reads who the process runs as from its
 token.
@@ -285,7 +299,9 @@ The folder is a `KnownFolder` member or its value, the .NET `SpecialFolder` name
 On Windows the answer comes from the shell (`SHGetKnownFolderPath`), so a Desktop or Documents
 folder redirected elsewhere (OneDrive, folder redirection) is returned where a `~/Desktop` guess
 would miss it; Linux follows the XDG user directories and macOS the home's `Desktop`, `Documents`
-and `Library/Application Support`. A folder that is missing or not readable is `None` (pwsh: `""`;
+and `Library/Application Support`, standardized as Foundation does it: a leading `/private`,
+`/private/var/automount` or `/var/automount` component is dropped when the rest still exists (see
+the macOS bullet in [Backends & Platforms](docs/backends-and-platforms.md#known-folders)). A folder that is missing or not readable is `None` (pwsh: `""`;
 the CLI exits 1 with a line on stderr), and `Programs` off Windows raises `PlatformUnsupportedError`.
 The full per-OS mapping is in [Backends & Platforms](docs/backends-and-platforms.md#known-folders).
 
@@ -353,11 +369,18 @@ directories no other account can modify (the packed script still gets the whole 
 | `Invoke-RestMethod -Uri U -Body B`    | `ps.invoke_rest_method("U", method="GET", json_body=B)`  -> JSON  | `pwshpy invoke_rest_method U [-X M] [--body-json J]`      |
 | `Invoke-WebRequest -Uri U -OutFile F` | `ps.download_file("U", "F", chunk_size=65536)`  (streamed)        | `pwshpy download_file U F`                                |
 
-`invoke_web_request` returns a typed `WebResponse` (url/status_code/text/headers); a 4xx/5xx is
-returned, not raised. `invoke_rest_method` sends/receives JSON. `download_file` **streams** a big
+`invoke_web_request` returns a typed `WebResponse` (url/status_code/text/headers).
+`invoke_rest_method` sends/receives JSON. Both raise `NativeCallError` for any status urllib does
+not follow (a refused 3xx such as a redirect loop, 304, 4xx, 5xx), as the cmdlets do, naming the
+status and the start of the body; `skip_http_error_check=True` (CLI `--skip-http-error-check`,
+pwsh's `-SkipHttpErrorCheck`) returns such an answer instead. `download_file` **streams** a big
 download straight to disk in fixed-size chunks (memory-bounded - never buffers the whole body),
-raising on a 4xx/5xx and leaving no partial file. Built on stdlib `urllib` + `orjson` (no extra
-dependency); the URL scheme is restricted to http/https.
+always raising on such a status; it removes `dest` only when it had opened that file itself (a
+transfer that breaks off or ends before its `Content-Length`), so a refused connect or an HTTP
+error leaves an existing file untouched. A connect or read that stalls past `timeout` raises
+`OperationTimeoutError` (CLI exit 110). Built on stdlib `urllib` + `orjson` (no extra dependency);
+the URL scheme is restricted to http/https, for a redirect too: one to another scheme raises before
+anything connects to it.
 
 ## Running PowerShell itself  *(.NET - needs `[full]`)*
 

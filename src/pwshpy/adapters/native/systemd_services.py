@@ -236,7 +236,9 @@ class SystemdServiceController:
     The counterpart to the win32 NativeServiceController; needs polkit/root, like the Windows
     verbs need admin. Each verb waits for the unit to settle, then returns its :class:`ServiceInfo`;
     a unit that has not settled by the deadline raises :class:`OperationTimeoutError`, as on
-    Windows, while a job systemd refuses raises a plain :class:`NativeCallError`. Settled means the
+    Windows. A call systemd refuses for lack of rights (the D-Bus error ``AccessDenied`` or
+    ``InteractiveAuthorizationRequired``) raises :class:`~pwshpy.domain.errors.NativeAccessDeniedError`,
+    any other D-Bus error reply a plain :class:`NativeCallError` naming that error. Settled means the
     unit has no pending job (a stop also settles at inactive/failed). A start or restart whose unit
     settles at ``failed`` raises :class:`NativeCallError` naming systemd's ``Service.Result`` (such as
     ``exit-code``), like Start-Service on a service that fails to start; any other settled state is

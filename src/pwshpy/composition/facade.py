@@ -1241,7 +1241,11 @@ class Ps:
                 ``NativeCallError`` subclass, so catch it first to tell it apart.
             NativeCallError: The account could not be created; on Linux also a name that is not a
                 valid POSIX account name (checked before any command runs), or a CR, LF (or, in the
-                comment, a colon) that would corrupt the account entry.
+                comment, a colon) that would corrupt the account entry. On Linux, when a step
+                after ``useradd`` fails or times out, the account exists: with ``disabled`` its
+                lock (``usermod --lock``) still runs within a fixed 5 s grace, and the message
+                (of either error) names the partial state, that is whether the password was set
+                and whether the lock was applied.
 
         Example:
             >>> callable(build_ps().new_local_user)
@@ -2190,8 +2194,10 @@ class Ps:
     ) -> WebResponse:
         """Perform an HTTP request; return a typed WebResponse (native, portable; like Invoke-WebRequest).
 
-        A status of 400 or above raises, as ``Invoke-WebRequest`` does, unless
-        ``skip_http_error_check`` is True.
+        Any status urllib does not follow (a refused 3xx such as a redirect loop, 304, 4xx,
+        5xx) raises, as ``Invoke-WebRequest`` does, unless ``skip_http_error_check`` is True.
+        A redirect is followed only to an ``http``/``https`` URL; one to any other scheme is
+        refused before anything connects to it, whatever ``skip_http_error_check`` says.
 
         Args:
             url: An ``http://`` or ``https://`` URL; any other scheme is refused.
@@ -2200,8 +2206,9 @@ class Ps:
             body: The request body, sent UTF-8 encoded; None (default) sends none.
             timeout: Seconds for the connection and each blocking read (default 30.0), passed
                 to ``urllib``; running out raises ``OperationTimeoutError``.
-            skip_http_error_check: True returns a 4xx or 5xx answer with its status and full
-                body instead of raising (pwsh's ``-SkipHttpErrorCheck``); default False.
+            skip_http_error_check: True returns an answer urllib does not follow (a refused
+                3xx, 304, 4xx, 5xx) with its status and full body instead of raising (pwsh's
+                ``-SkipHttpErrorCheck``); default False.
 
         Returns:
             A :class:`WebResponse` with ``status_code``, ``headers`` and ``text`` (the body
@@ -2209,10 +2216,11 @@ class Ps:
 
         Raises:
             OperationTimeoutError: The connection or a read did not finish within ``timeout``.
-            NativeCallError: The scheme is not http/https, the request failed below HTTP
-                (DNS, connection, TLS), or the server answered 400 or above and
-                ``skip_http_error_check`` is False; the message names the status and the
-                start of the body (at most 200 characters, on one line).
+            NativeCallError: The scheme (of ``url`` or of a redirect) is not http/https, the
+                request failed below HTTP (DNS, connection, TLS, an answer that is not HTTP,
+                a body cut short), or the server answered with a status urllib does not
+                follow and ``skip_http_error_check`` is False; the message names the status
+                and the start of the body (at most 200 characters, on one line).
 
         Example:
             >>> callable(build_ps().invoke_web_request)
@@ -2239,9 +2247,9 @@ class Ps:
     ) -> Any:
         """Perform an HTTP request; return the parsed JSON (native, portable; like Invoke-RestMethod).
 
-        Built on :meth:`invoke_web_request`, so a status of 400 or above raises, as
-        ``Invoke-RestMethod`` does, unless ``skip_http_error_check`` is True; then the error
-        body is parsed like any other.
+        Built on :meth:`invoke_web_request`, so any status urllib does not follow (a refused
+        3xx, 304, 4xx, 5xx) raises, as ``Invoke-RestMethod`` does, unless
+        ``skip_http_error_check`` is True; then that answer's body is parsed like any other.
 
         Args:
             url: An ``http://`` or ``https://`` URL; any other scheme is refused.
@@ -2252,17 +2260,18 @@ class Ps:
                 sends no body.
             timeout: Seconds for the connection and each blocking read (default 30.0), passed
                 to ``urllib``; running out raises ``OperationTimeoutError``.
-            skip_http_error_check: True parses a 4xx or 5xx answer's body instead of raising
-                (pwsh's ``-SkipHttpErrorCheck``); default False.
+            skip_http_error_check: True parses the body of an answer urllib does not follow
+                (a refused 3xx, 304, 4xx, 5xx) instead of raising (pwsh's
+                ``-SkipHttpErrorCheck``); default False.
 
         Returns:
             The response body parsed as JSON.
 
         Raises:
             OperationTimeoutError: The connection or a read did not finish within ``timeout``.
-            NativeCallError: The scheme is not http/https, the request failed below HTTP, the
-                server answered 400 or above and ``skip_http_error_check`` is False, or the
-                response body is not JSON.
+            NativeCallError: The scheme (of ``url`` or of a redirect) is not http/https, the
+                request failed below HTTP, the server answered with a status urllib does not
+                follow and ``skip_http_error_check`` is False, or the response body is not JSON.
             TypeError: ``json_body`` holds a value orjson cannot serialize
                 (``orjson.JSONEncodeError``).
 
@@ -2296,10 +2305,13 @@ class Ps:
             ``dest`` as a :class:`~pathlib.Path`.
 
         Raises:
-            OperationTimeoutError: The connection or a read did not finish within ``timeout``;
-                ``dest`` is deleted.
-            NativeCallError: The scheme is not http/https, the server answered 4xx or 5xx, or
-                the transfer failed; ``dest`` is deleted in the last two cases.
+            OperationTimeoutError: The connection or a read did not finish within ``timeout``.
+            NativeCallError: The scheme (of ``url`` or of a redirect) is not http/https, the
+                server answered with any status urllib does not follow (a refused 3xx, 304,
+                4xx, 5xx), or the transfer failed (a body ending before its
+                ``Content-Length`` included). ``dest`` is removed only when this call had
+                already opened it (a failure during the transfer); a refused connect or an
+                HTTP error leaves an existing file there untouched.
 
         Example:
             >>> callable(build_ps().download_file)
@@ -2583,7 +2595,11 @@ class Ps:
             run_as_administrator: Start ``target`` elevated when the shortcut is opened (one
                 UAC prompt; Explorer's "Run as administrator" box, the link flag
                 ``SLDF_RUNAS_USER``); a bool only.
-            force: Overwrite an existing file at ``path``.
+            force: Overwrite an existing file at ``path``. False (default) refuses a file that
+                exists when the call checks, before any COM call; that is a check before the
+                save, not an atomic create, so a file another process creates at ``path`` in
+                between is overwritten (see ``NativeShortcutController.create``). Callers that
+                race other writers on one path must coordinate.
 
         Returns:
             The shortcut as Windows reads it back (``target`` with environment references expanded).

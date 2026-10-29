@@ -74,7 +74,9 @@ Read commands whose full parameter analysis is still TODO (same table format):
   input), Get-NetTCPConnection, Get-Uptime, Test-Connection.
 - Registry: Get-ItemProperty / Get-ChildItem (note `-Recurse` is INTEGRATE - a
   scope the flat pipeline cannot emulate).
-- Windows-only, no honest Linux analog: Get-CimInstance, Get-HotFix, and the
-  registry verbs. Get-WinEvent, scheduled tasks, local accounts and ACLs are
+- Windows-only, no honest Linux analog: Get-CimInstance, Get-HotFix, the
+  Windows Update search (`get_windows_update`), the shortcut verbs
+  (`get_shortcut`, `new_shortcut`), Clear-EventLog and the registry verbs.
+  Get-WinEvent, scheduled tasks, local accounts and ACLs are
   portable (journald / systemd timers / pwd+grp / POSIX ACL xattr on Linux) -
   see docs/portability-roadmap.md.

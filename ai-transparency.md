@@ -56,8 +56,8 @@ the human directed and approved every action and owns the result.
 ## What's been checked, and what hasn't
 
 The full gate is green on CI across ubuntu / macOS / windows and CPython 3.10 through 3.14: `ruff`,
-`ruff format`, `pyright --strict` (zero errors), `import-linter` (the domain-is-pure and layer-order
-contracts), `bandit`, `pip-audit`, and the `pytest` suite (well over 900 tests, with an 80% coverage
+`ruff format`, `pyright --strict` (zero errors), `import-linter` (the domain-is-pure, layer-order and
+library-never-imports-the-CLI contracts), `bandit`, `pip-audit`, and the `pytest` suite (well over 900 tests, with an 80% coverage
 floor). Every native read command is pinned by an oracle test that runs the equivalent real cmdlet
 (`Get-Service`, `Get-WinEvent`, `Get-CimInstance`, `Get-ScheduledTask`, `Get-LocalUser`, `Get-Acl`,
 ...) and compares pwshpy's typed records against it on locale-invariant fields.
@@ -68,14 +68,15 @@ cross-checked entry-for-entry against `getfacl` and its mutation exercised on a 
 account creation/removal via shadow-utils - each cleaned up afterward.
 
 What has not been checked: the .NET backend needs the `[full]` extra plus a .NET 10 runtime present;
-the registry and CIM/WMI stay Windows-only because there is no honest Linux analog; and the mutating
-Windows verbs are exercised on a disposable VM, not on every host or Windows build.
+the registry, CIM/WMI, hotfixes, the Windows Update search, clearing an event log and `.lnk`
+shortcuts stay Windows-only because there is no honest Linux analog; and the mutating Windows verbs
+are exercised on a disposable VM, not on every host or Windows build.
 
 ## Checking it yourself
 
 The architecture is meant to be legible. The domain layer is pure (no I/O, no frameworks); adapters
 marshal foreign values into the typed records at a single seam; and `import-linter` proves the
-dependencies only point inward - run `lint-imports` to see the two contracts hold. The tests live in
+dependencies only point inward - run `lint-imports` to see the three contracts hold. The tests live in
 `tests/`; run `make test` (it runs the whole gate). The design is documented under [docs/](docs/) -
 the architecture decisions in [docs/adr](docs/adr), and the two backends and the
 one-script-every-machine portability story in
@@ -86,7 +87,8 @@ one-script-every-machine portability story in
 
 It isn't a Microsoft or PowerShell product, and neither Microsoft nor the PowerShell team has reviewed
 or endorsed it. It is a young project. The .NET backend is optional and off by default (`[full]`), and
-a couple of subsystems (the registry, CIM/WMI) are deliberately Windows-only. And it isn't a way to
+a few subsystems (the registry, CIM/WMI, hotfixes, the Windows Update search, clearing an event log,
+`.lnk` shortcuts) are deliberately Windows-only. And it isn't a way to
 avoid understanding the OS you are automating: pwshpy makes the honest call to the native API instead
 of a text-scraped subprocess, but the call it makes is the one you would have had to make yourself.
 

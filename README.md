@@ -308,12 +308,13 @@ if desktop is not None:  # Windows: the arguments are an argv list, stored with 
 A script can branch on the exit code without parsing stderr: **77** means an elevation was declined
 (`pwshpy --elevate`, a packed runner's `-PwshPyElevate` / `--pwshpy-elevate`), **110** means a
 timeout (`exec --timeout`, a service start, stop or restart that did not settle,
-`get_windows_update`, `wait_process --timeout`, `resolve_dns_name --timeout`, and on Linux the
+`get_windows_update`, `wait_process --timeout`, `resolve_dns_name --timeout`, the web commands
+`download_file`, `invoke_web_request` and `invoke_rest_method` past `--timeout`, and on Linux the
 local-account commands `new_local_user`, `remove_local_user`, `enable_local_user`,
 `disable_local_user`, `new_local_group`, `remove_local_group`, `add_local_group_member` and
-`remove_local_group_member` after 30 s), and the packed runners add 64, 70 and 127. A `--timeout` on
-the .NET commands (`run`, `cmdlet`, `get_ad_user`, ...) or the web commands (`download_file`,
-`invoke_web_request`, `invoke_rest_method`) exits 1. The full table is in the [CLI
+`remove_local_group_member` after 30 s), **13** (5 on Windows) means a call refused for lack of
+rights, and the packed runners add 64, 70 and 127. A `--timeout` on the .NET commands (`run`,
+`cmdlet`, `get_ad_user`, ...) exits 1. The full table is in the [CLI
 Reference](docs/cli-reference.md#exit-codes).
 
 ## The costly part: it stays true

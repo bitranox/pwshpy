@@ -112,6 +112,10 @@ class NativeCallError(PwshPyError):
 class NativeAccessDeniedError(NativeCallError, PermissionError):
     """A native call was refused for lack of rights (E_ACCESSDENIED, EACCES, EPERM).
 
+    Also a systemd refusal over D-Bus (``org.freedesktop.DBus.Error.AccessDenied`` or
+    ``InteractiveAuthorizationRequired``). A Secret Service or shadow-utils refusal stays a plain
+    :class:`NativeCallError`.
+
     A :class:`NativeCallError`, so existing handlers keep catching it, and a
     :class:`PermissionError`, so ``except PermissionError`` catches it and the ``pwshpy`` CLI
     exits as for one (13 on POSIX, 5 on Windows, via lib_cli_exit_tools). ``errno`` is the
@@ -163,7 +167,10 @@ class OperationTimeoutError(NativeCallError):
     ``wait_tree`` its whole tree, is killed), ``ps.get_windows_update`` (the search
     child is killed), a service start/stop/restart that has not settled (the
     control WAS issued), ``ps.wait_process(timeout=...)`` (the process keeps
-    running) and ``ps.resolve_dns_name(timeout=...)`` (the lookup is abandoned).
+    running), ``ps.resolve_dns_name(timeout=...)`` (the lookup is abandoned), the web
+    verbs ``ps.invoke_web_request`` / ``ps.invoke_rest_method`` / ``ps.download_file``
+    (a connect or a read that stalls) and, on Linux, a local-account verb whose
+    shadow-utils commands together outlast its ``timeout`` (the running one is killed).
     The ``pwshpy`` CLI exits 110 (``ETIMEDOUT``) for it.
 
     Args:

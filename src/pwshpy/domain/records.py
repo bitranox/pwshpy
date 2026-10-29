@@ -68,7 +68,8 @@ class PSRecord(BaseModel):
 
         A mapping key holding a lone surrogate (a byte that was not valid UTF-8, decoded with
         ``surrogateescape``) is written as one U+FFFD per such byte, a key that then collides with
-        another keeping its entry as ``<key>~2`` (``~3``, ...), so the result always serialises.
+        another keeping its entry as ``<key>~2`` (``~3``, ...), so no key stops the result from
+        serialising.
         pydantic-core alone rewrote a dict field's own key into three U+FFFD (two keys differing
         only in their bad bytes collapsed into one entry) and raised ``UnicodeEncodeError`` for a
         key deeper in an open bag. A surrogate in a VALUE is kept, for the output layer to repair
@@ -99,7 +100,7 @@ def to_dict_keeping_surrogate_keys(record: PSRecord) -> dict[str, Any]:
 
     For the output layer, which repairs such a key itself so that it can name the record and field
     in its warning (the domain prints nothing). A library caller wants :meth:`PSRecord.to_dict`,
-    whose result always serialises. Such keys stand in as placeholders while pydantic dumps and are
+    whose keys always serialise. Such keys stand in as placeholders while pydantic dumps and are
     put back afterwards.
 
     Args:

@@ -720,6 +720,9 @@ class Ps:
                 ``strict`` changes nothing there. A single field that cannot be read keeps its
                 default in both modes on both OSes.
 
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`ServiceInfo` records.
+
         Raises:
             NativeCallError: The service manager cannot be reached, or (with ``strict``) a
                 service cannot be read - raised during iteration.
@@ -824,6 +827,19 @@ class Ps:
 
         win32service on Windows; systemd enable/disable on Linux (Automatic or Disabled only).
 
+        Args:
+            name: The service name (on Linux the unit name, ``"sshd.service"``).
+            start_type: The startup type to set. On Linux ``AUTOMATIC`` enables the unit file and
+                ``DISABLED`` disables it, each followed by a daemon reload; any other member is
+                refused.
+
+        Returns:
+            The service's :class:`ServiceInfo` read back after the change.
+
+        Raises:
+            NativeCallError: The change was refused, the service could not be opened, or (on
+                Linux) ``start_type`` is neither ``AUTOMATIC`` nor ``DISABLED``.
+
         Example:
             >>> callable(build_ps().set_service)
             True
@@ -838,6 +854,24 @@ class Ps:
         streams, so ``.take(n)`` stays memory-bounded even on a log with millions of
         entries.
 
+        Nothing is opened until the pipeline is iterated, so every error below is raised then.
+
+        Args:
+            log_name: On Windows the channel to read (``"System"``, ``"Setup"``,
+                ``"Microsoft-Windows-.../Operational"``). On Linux a unit filter: a name without
+                a dot gets ``.service`` appended, and ``"System"``, ``"*"`` or ``""`` read the
+                whole journal (which needs the ``systemd-journal`` group or root).
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`EventLogEntry` records,
+            newest first.
+
+        Raises:
+            PlatformUnsupportedError: Off Windows, the ``systemd-python`` package of the
+                ``[journald]`` extra is not installed.
+            NativeCallError: The log cannot be opened or read, or (Windows) an event record
+                cannot be rendered.
+
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().get_win_event("System"), Pipeline)
@@ -847,6 +881,16 @@ class Ps:
 
     def clear_event_log(self, log_name: str, *, backup_path: str | None = None) -> None:
         """Clear a Windows event log, optionally backing it up first (native, **mutating**).
+
+        Args:
+            log_name: The channel to clear (``"Application"``, ``"System"``, ...).
+            backup_path: A file to save the log to before it is cleared; None (default) clears
+                without a backup.
+
+        Raises:
+            PlatformUnsupportedError: pywin32 is not installed (any OS but Windows).
+            NativeCallError: ``EvtClearLog`` failed (a :class:`NativeAccessDeniedError` when
+                access is denied).
 
         Example:
             >>> callable(build_ps().clear_event_log)
@@ -861,6 +905,25 @@ class Ps:
 
         ``where`` is an optional WQL filter fragment; the stream is forward-only,
         so ``.take(n)`` stays memory-bounded even on an unbounded class.
+
+        Nothing is checked or queried until the pipeline is iterated, so every error below is
+        raised then.
+
+        Args:
+            class_name: The WMI class (``"Win32_Process"``); letters, digits and underscores
+                only, not starting with a digit.
+            where: A WQL condition placed verbatim after ``WHERE``; None (default) selects every
+                instance. It is not escaped, so never build it from untrusted input.
+            namespace: The WMI namespace to connect to (default ``"root/cimv2"``).
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`CimInstance` records.
+
+        Raises:
+            PlatformUnsupportedError: pywin32 is not installed (any OS but Windows).
+            NativeCallError: ``class_name`` is not a valid class name, the namespace cannot be
+                connected to, or the query failed (the message carries the HRESULT when one is
+                readable).
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
@@ -908,6 +971,9 @@ class Ps:
                 scheduler refuses (0x8007007B), a scheduler error - and a found task that cannot
                 be read; on Linux a refused ``LoadUnit`` or ``LoadState`` read, or a unit file
                 whose ownership marker cannot be read.
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`ScheduledTaskInfo` records.
 
         Raises:
             ConfigurationError: ``task_name`` is empty or names a folder as well as a task
@@ -993,6 +1059,19 @@ class Ps:
     def unregister_scheduled_task(self, task_path: str) -> None:
         """Delete a scheduled task (native, **mutating**).
 
+        On Linux only the units pwshpy wrote are stopped and deleted, so a vendor unit of the
+        same name is left running and enabled.
+
+        Args:
+            task_path: The task (``\\Folder\\Name`` on Windows, ``\\Name`` at the root; the unit
+                base name on Linux).
+
+        Raises:
+            ConfigurationError: Linux: ``task_path`` is no valid systemd unit name.
+            NativeCallError: The scheduler refused the deletion; on Linux also no such task
+                (pwshpy wrote neither unit) or a unit file of that name that pwshpy did not
+                write or cannot read.
+
         Example:
             >>> callable(build_ps().unregister_scheduled_task)
             True
@@ -1001,6 +1080,23 @@ class Ps:
 
     def enable_scheduled_task(self, task_path: str) -> ScheduledTaskInfo:
         """Enable a scheduled task; return its new state (native, **mutating**).
+
+        On Linux this enables the task's ``.timer`` and starts it, except a timer with a
+        boot-relative part (or one whose monotonic timers cannot be read), which is enabled
+        but only arms at the next boot.
+
+        Args:
+            task_path: The task (``\\Folder\\Name`` on Windows, ``\\Name`` at the root; the unit
+                base name on Linux).
+
+        Returns:
+            The task's :class:`ScheduledTaskInfo` after the change.
+
+        Raises:
+            ConfigurationError: Linux: ``task_path`` is no valid systemd unit name, or a bare
+                template.
+            NativeCallError: The scheduler refused the change; on Linux also a task with no
+                ``.timer`` (on demand only) or a static timer (no ``[Install]`` section).
 
         Example:
             >>> callable(build_ps().enable_scheduled_task)
@@ -1011,6 +1107,22 @@ class Ps:
     def disable_scheduled_task(self, task_path: str) -> ScheduledTaskInfo:
         """Disable a scheduled task; return its new state (native, **mutating**).
 
+        On Linux this stops and disables the task's ``.timer``.
+
+        Args:
+            task_path: The task (``\\Folder\\Name`` on Windows, ``\\Name`` at the root; the unit
+                base name on Linux).
+
+        Returns:
+            The task's :class:`ScheduledTaskInfo` after the change.
+
+        Raises:
+            ConfigurationError: Linux: ``task_path`` is no valid systemd unit name, or a bare
+                template.
+            NativeCallError: The scheduler refused the change; on Linux also a task with no
+                ``.timer`` (on demand only) or a static timer (no ``[Install]`` section), refused
+                before anything is stopped.
+
         Example:
             >>> callable(build_ps().disable_scheduled_task)
             True
@@ -1020,6 +1132,18 @@ class Ps:
     def start_scheduled_task(self, task_path: str) -> None:
         """Start a scheduled task now (native, **mutating**).
 
+        On Linux this starts the task's ``.service``.
+
+        Args:
+            task_path: The task (``\\Folder\\Name`` on Windows, ``\\Name`` at the root; the unit
+                base name on Linux).
+
+        Raises:
+            ConfigurationError: Linux: ``task_path`` is no valid systemd unit name, or a bare
+                template.
+            NativeCallError: The scheduler refused the start, e.g. for a task registered with
+                ``allow_demand_start=False``.
+
         Example:
             >>> callable(build_ps().start_scheduled_task)
             True
@@ -1028,6 +1152,17 @@ class Ps:
 
     def stop_scheduled_task(self, task_path: str) -> None:
         """Stop a running scheduled task (native, **mutating**).
+
+        On Linux this stops the task's ``.service``.
+
+        Args:
+            task_path: The task (``\\Folder\\Name`` on Windows, ``\\Name`` at the root; the unit
+                base name on Linux).
+
+        Raises:
+            ConfigurationError: Linux: ``task_path`` is no valid systemd unit name, or a bare
+                template.
+            NativeCallError: The scheduler refused the stop or the task could not be opened.
 
         Example:
             >>> callable(build_ps().stop_scheduled_task)

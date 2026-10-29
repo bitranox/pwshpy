@@ -20,13 +20,16 @@ and the uv-absent test (it blanks ``PATH``/``HOME``, which can break process cre
 
 from __future__ import annotations
 
+import atexit
 import ctypes
+import functools
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
@@ -61,7 +64,6 @@ from elevation_doubles import (
     with_account_cache_home,
     with_data_home,
     without_python_dir_check,
-    write_fake_sudo,
     write_git_source,
     write_local_wheel,
     write_planted_environment,
@@ -69,6 +71,7 @@ from elevation_doubles import (
     write_planted_venv,
     write_recording_uv,
 )
+from test_pack_sudo_double import second_prompts, write_sudo_double
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.packing import PackOptions
@@ -138,6 +141,25 @@ def _process_scoped_execution_policy() -> Iterator[None]:
         return
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("PSExecutionPolicyPreference", "Bypass")
+        yield
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _pwsh_cache_in_a_scratch_directory(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """On POSIX, point XDG_CACHE_HOME at a scratch directory for every process this module starts ([123]).
+
+    pwsh writes its own cache (StartupProfileData-NonInteractive, ModuleAnalysisCache) below
+    $XDG_CACHE_HOME/powershell, else ~/.cache/powershell: the real account's, root's on a root run of
+    the suite, as uv's cache was before [111]. The variable also keeps a runner given no
+    PWSHPY_PACK_CACHE out of the real ~/.cache. A test that sets XDG_CACHE_HOME itself still wins.
+    Windows is left as it is: pwsh caches below LOCALAPPDATA there, which only the tests given
+    :func:`_isolated_cache` point elsewhere, and moving it for every test would move uv's defaults too.
+    """
+    if sys.platform == "win32":
+        yield
+        return
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("xdg-cache")))
         yield
 
 
@@ -238,6 +260,26 @@ def _project(root: Path, *, exit_code: int = 0) -> Path:
     entry = root / "app.py"
     entry.write_text(_ENTRY_WITH_SUBMODULE)
     return entry
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="pwsh caches below XDG_CACHE_HOME only on POSIX")
+def test_pwsh_keeps_its_cache_in_the_modules_scratch_directory(tmp_path: Path) -> None:
+    """[123]: the pwsh a test starts is handed the module's scratch XDG_CACHE_HOME (the fixture above),
+    so it keeps its own cache (StartupProfileData-NonInteractive, ModuleAnalysisCache) there and never
+    in the real account's ~/.cache/powershell. Asked of the child itself: pwsh writes that cache only
+    when its startup profile changed, so the file's presence cannot be the check."""
+    assert _PWSH is not None
+    seen = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.Write($env:XDG_CACHE_HOME)"],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert seen.returncode == 0, seen.stderr
+    assert Path(seen.stdout).is_relative_to(tmp_path.parent), f"pwsh caches below {seen.stdout!r}"
 
 
 def _isolated_cache(tmp_path: Path) -> dict[str, str]:
@@ -505,7 +547,7 @@ def test_elevate_switch_exits_77_when_sudo_refuses(tmp_path: Path) -> None:
     manifest = pack_script(entry)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_fake_sudo(bin_dir, grant=False)
+    write_sudo_double(bin_dir, grant=False)
     environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
     result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment)
     assert result.returncode == 77, result.stderr
@@ -523,7 +565,7 @@ def test_elevate_switch_forwards_the_clean_switch(tmp_path: Path) -> None:
     runner = Path(manifest.output_path)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_fake_sudo(bin_dir, grant=True)
+    write_sudo_double(bin_dir, grant=True)
     environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
     assert _run(runner, env=environment).returncode == 4
     # The .ps1 leaves its lock file beside the extraction; only the directory is the cached tree.
@@ -536,6 +578,35 @@ def test_elevate_switch_forwards_the_clean_switch(tmp_path: Path) -> None:
     assert result.returncode == 4, result.stderr
     assert "greeting:hello from the submodule" in result.stdout
     assert not stray.exists(), "-PwshPyClean was dropped by the elevated relaunch"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
+@pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+@pytest.mark.parametrize("cached", [True, False], ids=["credential-cached", "timestamp-timeout-0"])
+def test_elevate_switch_never_lets_sudo_prompt_twice(tmp_path: Path, cached: bool) -> None:
+    """[136-sh]: the .ps1 relaunch on POSIX asks once (``sudo -v``), checks with ``sudo -n -v`` that a
+    credential was cached and relaunches with ``sudo -n``: sudo never prompts again. Where it caches
+    nothing (``timestamp_timeout=0``) the run is declined (exit 77) and the script never runs."""
+    entry = tmp_path / "who.py"
+    marker = tmp_path / "ran.marker"
+    entry.write_text(f'open({str(marker)!r}, "w").close()\n')
+    manifest = pack_script(entry)
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "sudo-calls.txt"
+    write_sudo_double(bin_dir, grant=True, cached=cached, calls=calls)
+    environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
+    result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment)
+    assert second_prompts(calls) == [], calls.read_text(encoding="utf-8")
+    if cached:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert marker.exists()
+        return
+    assert result.returncode == 77, result.stdout + result.stderr
+    assert "pwshpy: elevation declined" in result.stderr, result.stderr
+    assert not marker.exists(), "the packed script ran although sudo kept no credential"
 
 
 @pytest.mark.local_only
@@ -754,7 +825,7 @@ _WHOLE_RUNNER_SUBSTITUTIONS = (
 )
 
 
-def _whole_runner_stand_in(runner: Path, output: Path, *, elevated: str = "$false") -> Path:
+def _whole_runner_stand_in(runner: Path, output: Path, *, elevated: str = "$false", judge_cache: bool = False) -> Path:
     """Turn a whole packed runner into a Windows-relaunch stand-in that runs its REAL body.
 
     Three exact, counted substitutions and nothing else: the host is declared Windows so the UAC
@@ -764,11 +835,14 @@ def _whole_runner_stand_in(runner: Path, output: Path, *, elevated: str = "$fals
     starts is this same file, so it unpacks, finds uv and fails exactly where the shipped runner
     would. ``[bool]$PwshPyRelay`` answers "elevated" in the relaunched child only, as UAC would. A
     stand-in that can answer "elevated" also names a cache of its own ([X22 C1], see
-    :func:`elevation_doubles.with_account_cache_home`), never the real account's.
+    :func:`elevation_doubles.with_account_cache_home`), never the real account's, and takes its pack
+    cache as trusted (:func:`_trusting_the_cache`) unless ``judge_cache`` keeps that check ([98]).
     """
     text = runner.read_text(encoding="utf-8")
     if elevated != "$false":
         text = with_account_cache_home(text, output.parent, powershell=True)
+        if not judge_cache:
+            text = _trusting_the_cache(text)
     probe = (
         "function Test-PwshPyElevated {",
         f"function Test-PwshPyElevated {{\n    return {elevated}\n}}\n\nfunction Test-PwshPyElevatedOnHost {{",
@@ -1176,6 +1250,30 @@ def _trusted_uv(tmp_path: Path) -> Path | None:
     return None
 
 
+#: Where an elevated run judges its pack cache ([98]). A runner forced elevated answers "trusted" there
+#: unless the test is about that check: a test's cache sits in its temp directory, below one the test's
+#: own account owns, which the POSIX root rule refuses (and a stand-in declared Windows off Windows has
+#: no drive path to judge).
+_CACHE_CHECK = "function Get-PwshPyCacheDistrust {"
+
+
+def _trusting_the_cache(text: str) -> str:
+    """``text`` with the elevated run's cache check answering "trusted" (one counted substitution)."""
+    assert text.count(_CACHE_CHECK) == 1
+    return text.replace(_CACHE_CHECK, f"{_CACHE_CHECK}\n    return ''\n}}\n\nfunction Get-PwshPyCacheDistrustOnHost {{")
+
+
+#: Where the elevated .ps1 run judges the empty file it points GIT_CONFIG_GLOBAL at (Windows).
+_GIT_CONFIG_CHECK = "$PwshPyGitGlobalWhy = Get-PwshPyEmptyFileDistrust -Path $PwshPyGitGlobal"
+
+
+def _trusting_the_git_config(text: str) -> str:
+    """``text`` with the elevated run's check of its empty git configuration file answering "trusted",
+    for a test whose subject is something else (one counted substitution; nothing is created)."""
+    assert text.count(_GIT_CONFIG_CHECK) == 1
+    return text.replace(_GIT_CONFIG_CHECK, "$PwshPyGitGlobalWhy = ''")
+
+
 #: The runner's POSIX trusted owners (root alone); a test widens it so its own files stand in for
 #: root-owned ones, which no unprivileged test can create.
 _TRUSTED_UIDS = "$PwshPyTrustedUids = @('0')"
@@ -1190,6 +1288,7 @@ def _elevation_stand_in(
     trust_my_uid: bool = False,
     real_data_home: bool = False,
     data_scratch: Path | None = None,
+    judge_cache: bool = False,
 ) -> Path:
     """The whole runner with its elevation probe answering ``elevated`` (a PowerShell expression).
 
@@ -1202,9 +1301,13 @@ def _elevation_stand_in(
     for its account's data directory (see :func:`elevation_doubles.with_data_home`) unless
     ``real_data_home`` keeps the passwd or known-folder lookup; that real directory is then taken as
     trusted (see :func:`elevation_doubles.without_python_dir_check`). ``data_scratch`` replaces
-    ``output.parent`` there, for a data directory the runner file cannot sit next to (a share).
+    ``output.parent`` there, for a data directory the runner file cannot sit next to (a share). A runner
+    forced elevated takes its pack cache as trusted (:func:`_trusting_the_cache`) unless ``judge_cache``
+    keeps that check ([98]).
     """
     text = runner.read_text(encoding="utf-8")
+    if elevated != "$false" and not judge_cache:
+        text = _trusting_the_cache(text)
     if elevated != "$false" and not real_data_home:
         text = with_data_home(text, data_scratch or output.parent, powershell=True)
     elif elevated != "$false":
@@ -1403,8 +1506,10 @@ def test_as_system_the_strict_rule_is_unchanged(tmp_path: Path) -> None:
     host); since SYSTEM is already trusted, the running account adds nothing to the trusted set.
     Everything under this account's profile is therefore refused (the account owns the profile), so
     the positive case pins a system binary: whoami.exe stands in for uv, is accepted, and fails on
-    the argument ``run`` with its own exit code 1. The managed-Python directory this test hands the
-    run sits in the same profile, so its check is taken as passed (the uv is the subject).
+    the argument ``run`` with its own exit code 1. The managed-Python directory and the empty git
+    configuration file this test hands the run sit in the same profile, so their checks are taken as
+    passed (the uv is the subject; [138]: the git file's check refused the run with 127 before uv was
+    looked for, rightly, since SYSTEM trusts no account's profile).
     """
     user_sid = _current_user_sid()
     own = _private_dir(tmp_path / "own-bin")
@@ -1417,7 +1522,8 @@ def test_as_system_the_strict_rule_is_unchanged(tmp_path: Path) -> None:
     runner = _elevation_stand_in(
         Path(manifest.output_path), tmp_path / "system_stand_in.ps1", elevated="$true", running_sid="S-1-5-18"
     )
-    runner.write_text(without_python_dir_check(runner.read_text(encoding="utf-8"), powershell=True), encoding="utf-8")
+    text = without_python_dir_check(runner.read_text(encoding="utf-8"), powershell=True)
+    runner.write_text(_trusting_the_git_config(text), encoding="utf-8")
     searched = _run_with_path(tmp_path, runner, path_first=[own])
     assert f"its directory {own} is owned by {user_sid}" in _skip_line(searched, own_uv), searched.stderr
     assert not _skip_line(searched, own_uv).endswith("not root"), searched.stderr
@@ -1994,24 +2100,85 @@ def test_an_elevated_run_leaves_a_link_to_a_network_path_off_uvs_path(tmp_path: 
     assert refused in result.stderr, result.stderr
 
 
+def _net_use(*args: str) -> subprocess.CompletedProcess[str]:
+    """``net use`` with ``args``, its output captured (the text is localised: callers read the exit code)."""
+    net = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / "net.exe"
+    return subprocess.run(  # noqa: S603 - fixed argv from the system directory
+        [str(net), "use", *args],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+
+
+@pytest.fixture
+def mapped_drive(tmp_path: Path) -> Iterator[tuple[str, Path]]:
+    """A free drive letter mapped (``net use``) to this host's administrative share, and a private local
+    directory, as ``("X:\\<rest of the directory>", directory)``: the same directory, spelled through
+    the mapped drive. Removed again afterwards; a skip when no letter is free or the share is refused."""
+    shared = _private_dir(tmp_path / "mapped-bin")
+    share = _admin_share(shared)
+    free = [letter for letter in "PQRSTUVWXYZ" if not Path(f"{letter}:\\").exists()]
+    if not free:
+        pytest.skip("no free drive letter to map")
+    letter = free[-1]
+    rest = os.path.splitdrive(str(shared))[1]
+    root = share[: len(share) - len(rest)]
+    mapped = _net_use(f"{letter}:", root)
+    if mapped.returncode != 0:
+        pytest.skip(f"net use {letter}: {root} failed (exit {mapped.returncode})")
+    try:
+        yield f"{letter}:{rest}", shared
+    finally:
+        _net_use(f"{letter}:", "/delete", "/y")
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+def test_an_elevated_run_leaves_a_mapped_network_drive_off_uvs_path(
+    tmp_path: Path, mapped_drive: tuple[str, Path]
+) -> None:
+    """[147]: a PATH directory on a drive letter mapped to a share is refused as a network path, whatever
+    ACL the server reports. The share is this host's own and the directory private, so the same
+    directory spelled locally passes the walk (the control): only the drive's type refuses it."""
+    entry, shared = mapped_drive
+    runner, uv_dirs = _path_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[entry, shared, *uv_dirs])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"pwshpy: leaving {entry} off uv's PATH: {_NETWORK_PATH} (" in result.stderr, result.stderr
+    assert f"pwshpy: leaving {shared} off" not in result.stderr, result.stderr
+
+
 @pytest.mark.local_only
 @pytest.mark.os_windows
 @_WINDOWS_ONLY
 def test_an_elevated_run_keeps_an_extended_length_local_path_on_uvs_path(tmp_path: Path) -> None:
     """[146] control: ``\\\\?\\C:\\...`` is the long spelling of a local path, so the network rule leaves
-    it to the ACL walk, which keeps a private directory under pwsh 7. Windows PowerShell 5.1 cannot
-    walk that spelling at all (its Join-Path finds no drive in it) and leaves it off for that reason,
-    which fails safe; there the test pins only that the network rule is not what refused it."""
+    it to the ACL walk, which keeps a private directory. [148]: on Windows PowerShell 5.1 too, whose
+    Join-Path finds no drive in that spelling: the walk judges it as ``C:\\...``."""
     entry = "\\\\?\\" + str(_private_dir(tmp_path / "long-bin"))
     runner, uv_dirs = _path_runner(tmp_path, elevated="$true")
     result = _run_with_path(tmp_path, runner, path_first=[entry, *uv_dirs])
     assert result.returncode == 0, result.stdout + result.stderr
+    assert f"pwshpy: leaving {entry} off uv's PATH: " not in result.stderr, result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+def test_an_elevated_run_judges_an_extended_length_path_by_its_acl(tmp_path: Path) -> None:
+    """[148] negative arm: ``\\\\?\\C:\\...`` naming a directory Users may modify is still left off, for its
+    ACL (the reason names the Users grant), on pwsh 7 and Windows PowerShell 5.1 alike."""
+    entry = "\\\\?\\" + str(_user_writable_dir(tmp_path / "long-open-bin"))
+    runner, uv_dirs = _path_runner(tmp_path, elevated="$true")
+    result = _run_with_path(tmp_path, runner, path_first=[entry, *uv_dirs])
+    assert result.returncode == 0, result.stdout + result.stderr
     leaving = f"pwshpy: leaving {entry} off uv's PATH: "
-    if Path(str(_PWSH)).stem.lower() == "powershell":
-        refusal = next(line for line in result.stderr.splitlines() if line.startswith(leaving))
-        assert "cannot be judged" in refusal and _NETWORK_PATH not in refusal and _DEVICE_PATH not in refusal, refusal
-        return
-    assert leaving not in result.stderr, result.stderr
+    refusal = next(line for line in result.stderr.splitlines() if line.startswith(leaving))
+    assert f" lets {_SID_USERS[1:]} change it " in refusal, refusal
 
 
 @pytest.mark.local_only
@@ -2376,7 +2543,8 @@ def test_an_unanswered_posix_euid_probe_applies_the_root_rule(tmp_path: Path, pr
     text = runner.read_text(encoding="utf-8")
     assert text.count(_FIXED_IDS) == 1
     replacement = "@(" + ", ".join(_ps_literal(fixed / f"id{n}") for n in range(6)) + ")"
-    runner.write_text(text.replace(_FIXED_IDS, replacement), encoding="utf-8")
+    # Treated as root, the run would first refuse its cache below this test's own directory ([98]).
+    runner.write_text(_trusting_the_cache(text.replace(_FIXED_IDS, replacement)), encoding="utf-8")
     result = _run_with_path(tmp_path, runner, path_first=[planted.parent], real_probe=True)
     assert not marker.exists(), "the runner asked an id on PATH"
     assert not _same(_reported_uv(result), planted), result.stdout + result.stderr
@@ -2512,7 +2680,7 @@ def test_the_sudo_relaunch_forwards_wildcards_and_tildes_literally(tmp_path: Pat
     manifest = pack_script(_project(tmp_path))
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_fake_sudo(bin_dir, grant=True)
+    write_sudo_double(bin_dir, grant=True)
     arguments = ["*", "*.log", "~", "~/x", "[ab].log"]
     result = _run_with_path(
         tmp_path,
@@ -2636,10 +2804,72 @@ def _clean_cwd(tmp_path: Path) -> Path:
 
 
 def _needs_managed_python() -> Path:
-    managed = trusted_managed_python()
+    managed = _one_install(trusted_managed_python())
     if managed is None:
         pytest.skip("this host has no uv-managed Python (and the test must not download one)")
     return managed
+
+
+@functools.lru_cache(maxsize=1)
+def _one_install(managed: Path | None) -> Path | None:
+    """On Windows, a managed-Python directory holding only the install uv picks from ``managed``.
+
+    [114]: an elevated run walks every entry below the managed-Python directory before uv starts,
+    about 2 to 3.5 s per install (docs/power-tools.md), and the host's own directory, which
+    :func:`trusted_managed_python` answers on Windows, holds every install the developer has: five on
+    the dev VM, paid by each elevated test. The run uses one, so a session copy holds just that one,
+    its files hard links to the host's (read only; their ACLs are the host's, which the walk trusts)
+    and its directories new below this account's temp directory. Elsewhere ``managed`` already is
+    such a copy (one install, made once per session) and is returned as it is.
+    """
+    if managed is None or sys.platform != "win32":
+        return managed
+    picked = _picked_install(managed)
+    if picked is None:
+        return managed
+    root = Path(tempfile.mkdtemp(prefix="pwshpy-one-install-")) / "managed"
+    atexit.register(shutil.rmtree, root.parent, ignore_errors=True)
+    root.mkdir()
+    shutil.copytree(picked, root / picked.name, symlinks=True, copy_function=_hard_link_or_copy)
+    return root
+
+
+def _picked_install(managed: Path) -> Path | None:
+    """The install below ``managed`` that uv picks for an elevated run (only-managed), or None.
+
+    Asked with downloads off, in a cache of its own that is deleted again, as the doubles ask uv.
+    """
+    if _UV is None:
+        return None
+    with tempfile.TemporaryDirectory(prefix="pwshpy-uv-ask-", ignore_cleanup_errors=True) as cache:
+        environment = {k: v for k, v in os.environ.items() if k not in INTERPRETER_VARIABLES}
+        environment.update(
+            {"UV_PYTHON_INSTALL_DIR": str(managed), "UV_PYTHON_DOWNLOADS": "never", "UV_CACHE_DIR": cache}
+        )
+        found = subprocess.run(  # noqa: S603 - fixed argv from a resolved uv
+            [_UV, "python", "find", "--system", "--no-project", "--python-preference", "only-managed"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+            env=environment,
+            cwd=Path(_UV).parent,
+        )
+    if found.returncode != 0:
+        return None
+    root = managed.resolve()
+    executable = Path(found.stdout.strip()).resolve()
+    return next((parent for parent in executable.parents if parent.parent == root), None)
+
+
+def _hard_link_or_copy(source: str, destination: str) -> str:
+    """Hard-link ``source`` to ``destination`` (no second copy of an install), else copy it."""
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+    return destination
 
 
 @pytest.mark.local_only
@@ -3254,6 +3484,67 @@ def test_an_elevated_run_still_judges_the_found_python_after_the_directory_check
     assert _reported_python(result) is None, result.stdout
 
 
+#: Where a link below the managed-Python directory points ([149]): out of the tree to a directory Users
+#: may modify, out of it to a private one, to this host's own administrative share, and the control, a
+#: sibling inside the tree.
+_TREE_LINK_TARGETS = ("outside-open-file", "outside-private-file", "outside-directory", "share-file", "inside-control")
+
+
+def _link_out_of_tree(tmp_path: Path, planted: Path, where: str) -> Path:
+    """Replace the planted .pth below ``planted`` by a link to a copy of it at ``where``; the link."""
+    (site_packages,) = planted.glob("*/Lib/site-packages")
+    plant = site_packages / "pwshpy_planted.pth"
+    text = plant.read_bytes()
+    plant.unlink()
+    if where == "inside-control":
+        (site_packages / "pwshpy_planted.real").write_bytes(text)
+        plant.symlink_to("pwshpy_planted.real")
+        return plant
+    if where == "outside-directory":
+        outside = _user_writable_dir(tmp_path / "outside-dir")
+        (outside / "pwshpy_planted.pth").write_bytes(text)
+        link = site_packages / "pwshpy_outside"
+        link.symlink_to(outside, target_is_directory=True)
+        return link
+    opened = where == "outside-open-file"
+    holder = _user_writable_dir(tmp_path / "outside") if opened else _private_dir(tmp_path / "outside")
+    (holder / "pwshpy_planted.pth").write_bytes(text)
+    reached = _admin_share(holder) if where == "share-file" else str(holder)
+    plant.symlink_to(reached + "\\pwshpy_planted.pth")
+    return plant
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.parametrize("where", _TREE_LINK_TARGETS)
+def test_an_elevated_run_refuses_a_link_below_the_managed_python_dir_leading_out_of_it(
+    tmp_path: Path, where: str
+) -> None:
+    """[149]: a link below the managed-Python directory is judged as the link object it is, and was never
+    followed, so a .pth there linking out of the tree (to a file another account may modify, or on a
+    share) ran elevated. A link whose target leaves the tree, or is a network path, is now refused before
+    uv runs any Python (exit 127, naming the link), whatever the target's ACL. The control, a link to a
+    sibling inside the tree, runs the plant and the script."""
+    runner, head = _python_runner(tmp_path, elevated="$true")
+    marker = tmp_path / "planted-pth-ran.txt"
+    probe, planted = _planted_python_probe(tmp_path, marker)
+    link = _link_out_of_tree(tmp_path, planted, where)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=probe, cwd=_clean_cwd(tmp_path))
+    if where == "inside-control":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert marker.is_file(), "the control never ran the planted .pth: " + result.stderr
+        return
+    assert not marker.exists(), "uv ran a Python through a link out of the tree elevated: " + marker.read_text()
+    assert result.returncode == 127, result.stdout + result.stderr
+    # The run reaches the tree through the data home's link to it, so the link is named by its place
+    # below the tree.
+    named = f"{os.sep}{link.relative_to(planted)} points to "
+    assert _PYTHON_DIR_REFUSED in result.stderr and named in result.stderr, result.stderr
+    if where == "share-file":
+        assert _NETWORK_PATH in result.stderr, result.stderr
+
+
 @pytest.mark.local_only
 @pytest.mark.os_posix
 @_POSIX_ONLY
@@ -3734,6 +4025,8 @@ def test_an_elevated_run_on_windows_points_git_config_global_at_an_empty_file_of
     planted = _global_git_listing(profile, None)
     assert "pwshpy.probe=planted" in planted.stdout, planted.stdout + planted.stderr
     listing = _global_git_listing(profile, empty)
+    # The exit code too ([131]): a git that cannot read the file prints nothing either, and exits 128.
+    assert listing.returncode == 0, listing.stdout + listing.stderr
     assert listing.stdout == "", listing.stdout + listing.stderr
 
 
@@ -3766,3 +4059,318 @@ def test_an_elevated_run_on_windows_refuses_a_git_config_file_it_cannot_trust(tm
     assert result.returncode == 127, result.stdout + result.stderr
     assert _GIT_GLOBAL_REFUSED in result.stderr and str(empty) in result.stderr, result.stderr
     assert _reported_git_global(result) is None, result.stdout
+
+
+def _junction(link: Path, target: Path) -> None:
+    """Make ``link`` a directory junction to ``target`` (no privilege needed, unlike a symlink)."""
+    result = subprocess.run(  # noqa: S603 - fixed argv; cmd is a system tool
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],  # noqa: S607 - resolved from System32
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.parametrize("where", ["pwshpy-is-a-file", "data-home-linked-to-an-open-directory", "dangling-link"])
+def test_an_elevated_run_on_windows_creates_nothing_where_its_git_config_file_cannot_be_trusted(
+    tmp_path: Path, where: str
+) -> None:
+    """[131]: the data directory is judged before the runner creates its ``pwshpy`` directory there, and
+    a create that fails is refused like any other untrusted git configuration file: exit 127 naming the
+    file, never the bare exception's 1 (or 70 in an elevated child). A data directory that is a junction
+    to a directory Users may modify gets nothing created at the junction's target. A dangling link in
+    the file's place, which Get-Item may not see, is refused as well."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated="$true", source=_ENTRY_REPORTING_GIT_GLOBAL)
+    environment = interpreter_probe_env(tmp_path, managed=managed)
+    home = data_home(tmp_path)
+    home.mkdir(parents=True, exist_ok=True)
+    empty = _empty_git_config(tmp_path)
+    opened = tmp_path / "open-data-home"
+    if where == "pwshpy-is-a-file":
+        empty.parent.write_text("", encoding="utf-8")
+    elif where == "dangling-link":
+        empty.parent.mkdir()
+        empty.symlink_to(tmp_path / "no-such-file")
+    else:
+        shutil.move(str(home), str(opened))
+        _icacls(opened, "/grant", f"{_SID_USERS}:(OI)(CI)M")
+        _junction(home, opened)
+    result = _run_with_path(tmp_path, runner, path_first=head, env=environment, cwd=_clean_cwd(tmp_path))
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert _GIT_GLOBAL_REFUSED in result.stderr and str(empty) in result.stderr, result.stderr
+    assert _reported_git_global(result) is None, result.stdout
+    assert not (opened / "pwshpy").exists(), "the runner created its directory at the junction's target"
+
+
+def _cache_root(path: Path, *, others_can_modify: bool) -> Path:
+    """A pack-cache root: one another account can modify, or one only this account (and the admins) can.
+
+    POSIX: mode 0777, or 0755 whatever the umask (an elevated test run counts this account as root).
+    """
+    if others_can_modify:
+        return _user_writable_dir(path)
+    if sys.platform == "win32":
+        return _private_dir(path)
+    path.mkdir(parents=True)
+    path.chmod(0o755)
+    return path
+
+
+def _open_to_others(path: Path) -> None:
+    """Let every account modify the file ``path`` (Users on Windows, world write on POSIX)."""
+    if sys.platform == "win32":
+        _icacls(path, "/grant", f"{_SID_USERS}:M")
+    else:
+        path.chmod(0o666)
+
+
+def _cache_trust_runner(tmp_path: Path) -> tuple[Path, Path, str]:
+    """An elevated stand-in whose cache check is the shipped one, the marker its script writes, its key.
+
+    The packed script writes the marker when it runs. The key is the cache directory's name.
+    """
+    marker = tmp_path / "ran.marker"
+    entry = tmp_path / "mark.py"
+    entry.write_text(f"open({str(marker)!r}, 'w').close()\n")
+    manifest = pack_script(entry)
+    runner = _elevation_stand_in(
+        Path(manifest.output_path),
+        tmp_path / "cache_stand_in.ps1",
+        elevated="$true",
+        trust_my_uid=True,
+        judge_cache=True,
+    )
+    return runner, marker, manifest.payload_sha256[:16]
+
+
+def _cache_trust_run(tmp_path: Path, runner: Path, root: Path) -> subprocess.CompletedProcess[str]:
+    """Run the stand-in from :func:`_cache_trust_runner` with its pack cache below ``root``.
+
+    No managed Python is offered, so a run that gets past the cache check stops later: these tests are
+    about whether the cache was judged, not about the run that follows. Under umask 022, as sudo runs
+    root (its default umask is the union of the caller's and 022): a host's 002 would make the unpacked
+    tree group-writable, which the root rule refuses.
+    """
+    env = {"PWSHPY_PACK_CACHE": str(root), **managed_python_env(tmp_path, managed=None)}
+    saved = os.umask(0o022)
+    try:
+        return _run_with_path(tmp_path, runner, path_first=[_UvLocation.directory], env=env)
+    finally:
+        os.umask(saved)
+
+
+#: What an elevated run says when it refuses its pack cache ([98]).
+_CACHE_REFUSAL = "pwshpy: refusing the cache directory "
+
+
+@pytest.mark.parametrize("others_can_modify", [False, True], ids=["private-root", "root-others-can-modify"])
+def test_an_elevated_run_refuses_a_pack_cache_another_account_can_modify(
+    tmp_path: Path, others_can_modify: bool
+) -> None:
+    """[98]: an elevated run judges the cache root before it writes anything there, and refuses with 127.
+
+    The private root is the liveness arm: the same run gets past the check and unpacks there.
+    """
+    root = _cache_root(tmp_path / "cache-root", others_can_modify=others_can_modify)
+    runner, marker, key = _cache_trust_runner(tmp_path)
+    result = _cache_trust_run(tmp_path, runner, root)
+    cache = root / key
+    if not others_can_modify:
+        assert _CACHE_REFUSAL not in result.stderr, result.stderr
+        assert (cache / "mark.py").is_file(), result.stdout + result.stderr
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert f"{_CACHE_REFUSAL}{cache}: " in result.stderr, result.stderr
+    assert not cache.exists(), "the elevated run unpacked into a cache another account can modify"
+    assert not marker.exists()
+
+
+def test_an_elevated_run_refuses_a_cached_file_another_account_can_modify(tmp_path: Path) -> None:
+    """[98]: a file below the cache directory that another account can modify refuses a warm run too.
+
+    Its content still matches its recorded hash, so the per-file check alone would run it.
+    """
+    root = _cache_root(tmp_path / "cache-root", others_can_modify=False)
+    runner, marker, key = _cache_trust_runner(tmp_path)
+    cache = root / key
+    first = _cache_trust_run(tmp_path, runner, root)
+    assert (cache / "mark.py").is_file(), first.stdout + first.stderr
+    _open_to_others(cache / "mark.py")
+    result = _cache_trust_run(tmp_path, runner, root)
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert _CACHE_REFUSAL in result.stderr and "mark.py" in result.stderr, result.stderr
+    assert not marker.exists()
+
+
+# --- [156] elevated .ps1 runs of a script with a git source refuse a git older than 2.32 ----------------
+
+#: The start of the refusal an elevated run prints for a git that may ignore GIT_CONFIG_GLOBAL.
+_OLD_GIT_REFUSED = "pwshpy: refusing git at "
+#: The remedy that refusal names.
+_OLD_GIT_REMEDY = "upgrade git, or run the script without elevation"
+#: A git source the recording double never fetches (POSIX) and a real uv cannot reach (Windows).
+_GIT_SOURCE_PACKAGE = "pwshpy-git-probe @ git+https://example.invalid/r.git"
+#: Where every Windows host keeps the .NET Framework C# compiler, which builds a git.exe double.
+_CSC = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "csc.exe"
+
+
+def _posix_git_double(directory: Path, marker: Path, *, version_output: str, git_exit: int) -> Path:
+    """A ``git`` (POSIX) that records it ran, prints ``version_output`` and exits ``git_exit``."""
+    _marker_double(directory, "git", marker, f"printf '%s\\n' '{version_output}'\nexit {git_exit}")
+    return directory / "git"
+
+
+def _windows_git_double(directory: Path, marker: Path, *, version_output: str) -> Path:
+    """A ``git.exe`` (Windows) that records it ran and prints ``version_output``, built with csc.
+
+    The runner looks for git.exe by name, so a script double cannot stand in for it.
+    """
+    source = directory / "git_double.cs"
+    source.write_text(
+        "class GitDouble { static int Main() { System.IO.File.AppendAllText("
+        f'@"{marker}", "ran\\n"); System.Console.WriteLine("{version_output}"); return 0; }} }}\n',
+        encoding="utf-8",
+    )
+    target = directory / "git.exe"
+    result = subprocess.run(  # noqa: S603 - fixed argv; csc ships with the .NET Framework on every Windows
+        [str(_CSC), "/nologo", f"/out:{target}", str(source)],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    source.unlink()
+    return target
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize(
+    ("version_output", "git_exit", "refused_version"),
+    [
+        pytest.param("git version 2.31.0", 0, "2.31.0", id="2.31-refused"),
+        pytest.param("git version 1.99.9", 0, "1.99.9", id="older-major-refused"),
+        pytest.param("git version 2.32.0", 0, None, id="2.32-runs"),
+        pytest.param("git version 2.43.1.windows.1", 0, None, id="windows-suffix-runs"),
+        pytest.param("git version 2.39.3 (Apple Git-145)", 0, None, id="apple-suffix-runs"),
+        pytest.param("git version 10.0.0", 0, None, id="two-digit-major-runs"),
+        pytest.param("not git at all", 0, "", id="unparsable-refused"),
+        pytest.param("git version 2", 0, "", id="no-minor-refused"),
+        pytest.param("git version 2.40.0", 1, "", id="failing-git-refused"),
+    ],
+)
+def test_an_elevated_run_of_a_git_source_needs_git_2_32(
+    tmp_path: Path, version_output: str, git_exit: int, refused_version: str | None
+) -> None:
+    """[156]: as the .sh root run ([116]), an elevated .ps1 run of a script with a git source asks the
+    git uv will run for its version and exits 127 when it is older than 2.32, unreadable, or the command
+    fails, before uv is asked for a managed Python or runs the script; 2.32 or later runs."""
+    runner, uv, record = _recording_runner(tmp_path, elevated="$true", with_packages=[_GIT_SOURCE_PACKAGE])
+    marker = tmp_path / "git-ran.txt"
+    git = _posix_git_double(uv.parent, marker, version_output=version_output, git_exit=git_exit)
+    result = _run_with_path(
+        tmp_path, runner, "-PwshPyUv", str(uv), path_first=[uv.parent], env={}, cwd=_clean_cwd(tmp_path)
+    )
+    assert marker.exists(), "the runner never asked git for its version: " + result.stderr
+    refusals = [line for line in result.stderr.splitlines() if line.startswith(_OLD_GIT_REFUSED)]
+    if refused_version is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert refusals == [], result.stderr
+        assert "run" in record.read_text(encoding="utf-8").splitlines(), "uv never ran the script"
+        assert Path(f"{record}.python").exists(), "uv was never asked for a Python"
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert not record.exists(), "uv ran the script"
+    assert not Path(f"{record}.python").exists(), "uv was asked for a Python"
+    assert len(refusals) == 1, result.stderr
+    (refusal,) = refusals
+    assert refusal.startswith(f"{_OLD_GIT_REFUSED}{git}: "), refusal
+    if refused_version:
+        assert f": git {refused_version} ignores GIT_CONFIG_GLOBAL" in refusal, refusal
+    assert "GIT_CONFIG_GLOBAL" in refusal and "2.32 or later" in refusal, refusal
+    assert refusal.endswith(_OLD_GIT_REMEDY), refusal
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+@pytest.mark.parametrize(
+    ("elevated", "git_source"),
+    [("$true", False), ("$false", True)],
+    ids=["elevated-without-git-source", "not-elevated"],
+)
+def test_an_old_git_is_neither_asked_nor_refused_without_elevation_and_a_git_source(
+    tmp_path: Path, elevated: str, git_source: bool
+) -> None:
+    """[156]: only an elevated run of a script with a git source asks git; the others run on an old git."""
+    packages = [_GIT_SOURCE_PACKAGE] if git_source else []
+    runner, uv, record = _recording_runner(tmp_path, elevated=elevated, with_packages=packages)
+    marker = tmp_path / "git-ran.txt"
+    _posix_git_double(uv.parent, marker, version_output="git version 2.25.1", git_exit=0)
+    result = _run_with_path(
+        tmp_path, runner, "-PwshPyUv", str(uv), path_first=[uv.parent], env={}, cwd=_clean_cwd(tmp_path)
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not marker.exists(), "the runner ran git --version"
+    assert _OLD_GIT_REFUSED not in result.stderr, result.stderr
+    assert "run" in record.read_text(encoding="utf-8").splitlines(), "uv never ran the script"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+@pytest.mark.skipif(not _CSC.is_file(), reason="needs the .NET Framework C# compiler to build a git.exe double")
+@pytest.mark.parametrize(
+    ("version_output", "refused"),
+    [
+        pytest.param("git version 2.31.1.windows.1", True, id="2.31-refused"),
+        pytest.param("git version 2.32.0.windows.1", False, id="2.32-passes-the-check"),
+    ],
+)
+def test_an_elevated_windows_run_of_a_git_source_needs_git_2_32(
+    tmp_path: Path, version_output: str, refused: bool
+) -> None:
+    """[156] on Windows (pwsh 7 and, with PWSHPY_TEST_POWERSHELL=powershell, Windows PowerShell 5.1): a
+    git.exe double first on a trusted PATH directory answers the version. Refused, the run exits 127 with
+    the remedy and uv never runs the script; 2.32 passes the check (uv then fails to fetch the source
+    from the double, which is not under test)."""
+    managed = _needs_managed_python()
+    runner, head = _python_runner(tmp_path, elevated="$true", with_packages=[_GIT_SOURCE_PACKAGE])
+    marker = tmp_path / "git-ran.txt"
+    git = _windows_git_double(_private_dir(tmp_path / "git-bin"), marker, version_output=version_output)
+    environment = interpreter_probe_env(tmp_path, managed=managed)
+    result = _run_with_path(tmp_path, runner, path_first=[git.parent, *head], env=environment, cwd=_clean_cwd(tmp_path))
+    assert marker.exists(), "the runner never asked git for its version: " + result.stderr
+    refusals = [line for line in result.stderr.splitlines() if line.startswith(_OLD_GIT_REFUSED)]
+    if not refused:
+        assert refusals == [], result.stderr
+        assert result.returncode != 127, result.stdout + result.stderr
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert len(refusals) == 1, result.stderr
+    assert refusals[0].startswith(f"{_OLD_GIT_REFUSED}{git}: git 2.31.1.windows.1 ignores GIT_CONFIG_GLOBAL"), refusals
+    assert refusals[0].endswith(_OLD_GIT_REMEDY), refusals
+    assert "python:" not in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("git_source", [True, False], ids=["git-source", "none"])
+def test_info_names_whether_the_script_has_a_git_source(tmp_path: Path, git_source: bool) -> None:
+    """[156]: -PwshPyInfo shows what the pack recorded, so a refused elevated run can be explained."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('hi')\n")
+    packages = [_GIT_SOURCE_PACKAGE] if git_source else []
+    manifest = pack_script(entry, options=PackOptions(with_packages=packages))
+    result = _run(Path(manifest.output_path), "-PwshPyInfo", env=_isolated_cache(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected = "git source : yes (an elevated run needs git 2.32 or later)" if git_source else "git source : no"
+    assert expected in result.stdout.splitlines(), result.stdout

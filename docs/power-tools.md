@@ -17,9 +17,12 @@ ps.require_elevation()  # raises ElevationRequiredError if not admin (an honest 
 ps.elevate()  # relaunch THIS process elevated (UAC / sudo), preserving cwd + argv
 ```
 
-On Linux and macOS the password is asked by `sudo -v` first, and only then is the command run under
-`sudo`. sudo exits 1 when it refuses, which is also an ordinary exit code, so asking separately is what
-lets a refusal be told apart from the command's own result.
+On Linux and macOS the password is asked by `sudo -v` first, and only then is the command run, as
+`sudo -n <command>`. sudo exits 1 when it refuses, which is also an ordinary exit code, so asking
+separately is what lets a refusal be told apart from the command's own result. The `-n` means sudo is
+never asked to prompt a second time: after the prompt, `sudo -n -v` checks that sudo cached the
+credential, and a setup that caches nothing (`timestamp_timeout=0` in sudoers) is declined like a
+refused prompt (`ElevationDeclinedError`, exit 77 from `pwshpy --elevate`) instead of asking again.
 
 A refused prompt raises `ElevationDeclinedError`, a `NativeCallError` subclass, so a caller can carry on
 unelevated after a refusal and still treat any other failure as one. On Windows that is a declined UAC
@@ -44,8 +47,9 @@ pwshpy --elevate clear_event_log Application                  # relaunch elevate
 When the prompt is refused, `pwshpy --elevate` exits 77 (`EX_NOPERM` from `sysexits.h`) and writes a
 line starting `pwshpy: elevation declined` to stderr, so a caller can tell a refusal from the
 relaunched command's own failure. The packed runners below do the same for `--pwshpy-elevate` and
-`-PwshPyElevate` (on a POSIX host without `sudo` they exit 127 instead, a missing tool rather than
-a refusal). A command that itself exits 77 still looks the same by exit code alone; the stderr line
+`-PwshPyElevate`, with the same single prompt: `sudo -v`, then `sudo -n -v`, then the relaunch
+under `sudo -n`, so a `timestamp_timeout=0` setup exits 77 rather than prompting twice (on a POSIX
+host without `sudo` they exit 127 instead, a missing tool rather than a refusal). A command that itself exits 77 still looks the same by exit code alone; the stderr line
 is what tells them apart.
 
 ## Who am I: the token, not `USERNAME`
@@ -384,7 +388,9 @@ Details worth knowing:
   `uv` or for a `PATH` directory: `\\server\share\...` in any separator, its `\\?\UNC\` and
   `\\.\UNC\` long forms and a link whose target is one are refused with `it is a network path, and
   an elevated run trusts only local paths`, whatever ACL the server reports, because whoever runs
-  the server decides what the share holds (a drive letter mapped to a share is not detected). Any
+  the server decides what the share holds. A drive letter is judged by its drive type: one mapped to
+  a share (`net use`, a logon script; `[IO.DriveInfo]` reports `Network`) is refused the same way,
+  and so is a drive whose type cannot be read. Any
   other device-namespace path (`\\.\...`, or `\\?\...` other than the long form of a drive path,
   `\\?\C:\...`) is refused with `it is a device path, and an elevated run trusts only local drive
   paths`: the object manager resolves such a name (`\\?\GLOBALROOT\Device\Mup\...` reaches the
@@ -466,7 +472,11 @@ Details worth knowing:
   and a regular file named `.lock` is exempt from the write check (uv creates its lock file mode
   0666 and only ever locks it). On Windows no entry may let an account other than the trusted ones
   change it, with the rights of its kind; a link (symlink or junction) is judged as the link and
-  never followed. One another account can modify stops the run with `refusing uv's managed-Python
+  never followed, so its target must lie inside the directory, where it is judged in turn: a link
+  whose target leaves the directory (as spelled, or where the directory really lies when it is
+  reached through a link), or is a network path, is refused whatever the target's ACL, with `the
+  link <link> points to <target>, outside <dir>`. uv's own minor-version junctions point inside.
+  One another account can modify stops the run with `refusing uv's managed-Python
   directory <dir>: <reason>` (the reason names the entry) and exit code 127, and uv never runs.
   Measured, read only: on a Linux host its two listings took about 0.8 s for 85,640 entries (15
   installs); on a Windows host about 2 to 2.5 s per install under PowerShell 7 and 3 to 3.5 s under
@@ -588,7 +598,13 @@ Details worth knowing:
   on purpose, since a false positive only refuses a root run on a git older than 2.32: a `git+` in
   any other string, a `git` key in another tool's table and a line-ending backslash in a literal
   (`'''`) string, which joins nothing, count too. It reads only the script's own declarations, so a git requirement inside a local
-  wheel or path dependency is not seen. An elevated `.ps1` run does not check the git version. The
+  wheel or path dependency is not seen. An elevated `.ps1` run (an administrator token, SYSTEM, or
+  root) of a script with a git source checks the git version the same way, with the same rule and
+  pack-time flag (`-PwshPyInfo` shows `git source : yes (an elevated run needs git 2.32 or later)`):
+  it stops with `pwshpy: refusing git at <path>: git <version> ignores GIT_CONFIG_GLOBAL, ...` (or
+  `git --version names no version this runner can read, ...`) and exit code 127, naming the remedy
+  to upgrade git or to run the script without elevation; Git for Windows' `2.x.y.windows.n` counts
+  by its major and minor numbers. The
   system file (`/etc/gitconfig`, or the one below Git
   for Windows' install directory) is the administrators' and still applies. The runner cannot tell
   who set a variable, so an elevated run in a network that reaches the internet only through a proxy
@@ -617,9 +633,15 @@ Details worth knowing:
 - **The cache is verified before every run** against per-file hashes embedded in the artefact, and
   re-extracted on any mismatch, so a file changed since an earlier run is replaced before uv starts.
   That check reads each file once; it does not stop an account that can write the cache directory
-  from changing a file between the check and uv reading it, and an elevated run does not judge who
-  can write the cache directory itself. For an elevated run, keep the cache (`PWSHPY_PACK_CACHE`, or
-  the default per-user cache directory) where only the elevated account can write. Both runners
+  from changing a file between the check and uv reading it. So an elevated run (an administrator
+  token, SYSTEM, or root) also judges the cache directory the way it judges uv's managed-Python
+  directory: the directory itself, every directory above it and every entry below it, before it
+  removes or writes anything there (before the first unpack, the nearest directory that exists), and
+  the tree again after an unpack. A cache another account can modify, wherever `PWSHPY_PACK_CACHE`,
+  `LOCALAPPDATA`, `XDG_CACHE_HOME` or `HOME` put it, stops the run with `pwshpy: refusing the cache
+  directory <dir>: <reason>` and exit code 127; a relative `PWSHPY_PACK_CACHE` is judged against
+  the caller's directory. A root run under umask 002 writes a group-writable tree, which the root
+  rule refuses (sudo's default umask is the caller's combined with 022, so a sudo run does not). Both runners
   serialize a cold-cache extraction with an atomic lock (`FileShare.None` on Windows, a lock file
   created under `noclobber` on POSIX), so two concurrent first runs never race.
 - **Packing is deterministic**: identical sources produce identical bytes (the `.sh` tar is built

@@ -109,6 +109,40 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   on its own line. Before, an error printed while a log line was still queued could run into it
   on one line (seen on Windows, e.g. `pwshpy get_scheduled_task --task-name 'a\b'`).
 
+### Fixed
+
+- Packed runners (`pwshpy pack`): an elevated run (`.ps1` with an administrator token or as
+  SYSTEM, either runner as root) now judges its pack cache before it removes or writes anything
+  there, and the unpacked tree again: the cache directory, every directory above it and every
+  entry below it must be unmodifiable by other accounts, or the run stops with
+  `pwshpy: refusing the cache directory <dir>: <reason>` and exit code 127. Before, a cache
+  another account could write (a `PWSHPY_PACK_CACHE`, `LOCALAPPDATA`, `XDG_CACHE_HOME` or `HOME`
+  the caller chose) was verified by hash and then run, leaving that account a window to swap a file.
+- Packed `.ps1` runner, elevated on Windows: the account's data directory is judged before the
+  runner creates `pwshpy\empty.gitconfig` below it, so a link on the way no longer gets a directory
+  created at its target, and a create that fails (a file named `pwshpy` in the way) is refused with
+  exit code 127 and the usual remedy instead of stopping with exit code 1 (70 in an elevated child).
+- Packed `.ps1` runner, elevated (administrator token, SYSTEM, or root): a script with a git source
+  now refuses a git older than 2.32 (or one whose `git --version` it cannot read) with exit code 127,
+  as the `.sh` root run already did. Such a git ignores `GIT_CONFIG_GLOBAL` and read the caller's
+  global git configuration, whose `core.fsmonitor` or `credential.helper` ran a command elevated.
+  `-PwshPyInfo` shows whether the pack recorded a git source.
+- Packed `.ps1` runner, elevated under Windows PowerShell 5.1: a `PATH` directory spelled in its
+  extended-length form (`\\?\C:\...`) is judged by its ACL like `C:\...` and kept on uv's `PATH`
+  when it is private. Before, 5.1 could not walk that spelling and left every such directory off.
+- Packed `.ps1` runner, elevated on Windows: a drive letter mapped to a network share (`net use`, a
+  logon script) is now refused like a UNC path (`it is a network path, and an elevated run trusts
+  only local paths`), for a `uv`, a `PATH` directory and the directories the run judges; before, its
+  ACL, which the share's server reports, was trusted. A drive whose type cannot be read is refused.
+- Packed `.ps1` runner, elevated on Windows: a symlink or junction below uv's managed-Python
+  directory (or the pack cache) whose target leaves that directory, or is a network path, now stops
+  the run with exit code 127 (`the link <link> points to <target>, outside <dir>`). Before, a link
+  was judged only as the link object, so a `.pth` there linking to a file nobody judged ran elevated.
+- Packed runners, `--pwshpy-elevate` / `-PwshPyElevate` on Linux and macOS: sudo is asked for the
+  password once (`sudo -v`), then `sudo -n -v` confirms a credential was cached and the relaunch
+  runs under `sudo -n`, so sudo never prompts a second time. A sudo that caches nothing
+  (`timestamp_timeout=0`) is declined with exit code 77 instead of asking again.
+
 ## [1.11.0] 2026-10-29 00:00:55
 
 ### Added

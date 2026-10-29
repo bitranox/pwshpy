@@ -7,6 +7,7 @@ naive recorder miss.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -64,3 +65,50 @@ def test_asking_uv_for_the_managed_pythons_writes_no_default_cache(
         pytest.skip("no uv-managed Python on this host, so uv runs no interpreter to cache")
     written = sorted(path for path in (tmp_path / "default-cache").rglob("*") if path.is_file())
     assert written == [], written
+
+
+def _recording_uv(directory: Path, record: Path, answer: Path) -> None:
+    """A ``uv`` double (POSIX sh) that records each call's cache and download settings and answers.
+
+    One line per call: ``<arguments>|<UV_CACHE_DIR or unset>|<UV_PYTHON_DOWNLOADS or unset>``. ``python
+    find`` prints a stand-in interpreter path and ``python dir`` prints ``answer``, so the helper asks
+    both questions.
+    """
+    directory.mkdir()
+    double = directory / "uv"
+    double.write_text(
+        "#!/bin/sh\n"
+        f'printf \'%s|%s|%s\\n\' "$*" "${{UV_CACHE_DIR-unset}}" "${{UV_PYTHON_DOWNLOADS-unset}}" >> \'{record}\'\n'
+        f"if [ \"$1 $2\" = \"python find\" ]; then printf '%s\\n' '{answer / 'python'}'; fi\n"
+        f"if [ \"$1 $2\" = \"python dir\" ]; then printf '%s\\n' '{answer}'; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    double.chmod(0o755)
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the uv double is a POSIX sh script")
+def test_every_question_to_uv_names_a_cache_of_its_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """[130]: each call the helpers make to uv names a UV_CACHE_DIR of its own, gone once the answer is
+    in, and turns downloads off; so no question writes the default cache of whoever runs the suite.
+    A recording double stands in for uv, so this runs on every host, CI runners without a uv-managed
+    Python included (where the test above skips)."""
+    record = tmp_path / "uv-calls.txt"
+    answer = tmp_path / "managed"
+    answer.mkdir()
+    _recording_uv(tmp_path / "bin", record, answer)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+    for name, value in default_uv_cache_env(tmp_path).items():
+        monkeypatch.setenv(name, value)
+    assert managed_python_dir.__wrapped__() == answer
+    calls = [line.split("|") for line in record.read_text(encoding="utf-8").splitlines()]
+    assert [arguments.split()[:2] for arguments, _, _ in calls] == [["python", "find"], ["python", "dir"]], calls
+    for arguments, cache, downloads in calls:
+        assert cache != "unset", arguments
+        assert Path(cache).name.startswith("pwshpy-uv-ask-"), (arguments, cache)
+        assert not Path(cache).exists(), f"{arguments}: the cache {cache} outlived the question"
+        assert downloads == "never", (arguments, downloads)
+    assert not (tmp_path / "default-cache").exists()

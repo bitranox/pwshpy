@@ -63,12 +63,15 @@
     stderr; git reads no global config file (GIT_CONFIG_GLOBAL is /dev/null on POSIX and on Windows
     an empty file below the account's data directory, pwshpy\empty.gitconfig, refused with exit 127
     when another account could change it, so not the .gitconfig below the HOME, USERPROFILE or
-    XDG_CONFIG_HOME it was given; git 2.32 or later); the user site-packages is off
+    XDG_CONFIG_HOME it was given; git 2.32 or later, so for a script with a git source a git older
+    than 2.32, which ignores that variable, is refused with exit code 127); the user site-packages is off
     (PYTHONNOUSERSITE=1) and uv run reads no .env file (--no-env-file). In a network that reaches
     the internet only through a proxy, an elevated run can download nothing: the managed Python and
     every package the script needs must already be in the account's directories named above.
 
-    Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir).
+    Set PWSHPY_PACK_CACHE to choose where the payload unpacks (default: a per-user cache dir). An
+    elevated run unpacks and runs only from a cache directory that passes the same check as uv's
+    managed-Python directory (itself, every directory above it and everything below it), or exits 127.
 
     Home: https://github.com/bitranox/pwshpy
 #>
@@ -95,6 +98,9 @@ $PwshPyUvPathEnv = '@@PWSHPY_UV_PATH_ENV@@'
 $PwshPyUvArgsRelative = @(@@PWSHPY_UV_ARGS_RELATIVE@@)
 # The packed script's requires-python ('' for none): the request an elevated run hands `uv python find`.
 $PwshPyPythonRequest = @@PWSHPY_PYTHON_REQUEST@@
+# $true when the packed script has a git source (pack-time detection, which errs towards $true): an
+# elevated run then refuses a git older than 2.32 ([156]).
+$PwshPyGitSource = @@PWSHPY_GIT_SOURCE@@
 
 $PwshPyFileHashes = @'
 @@PWSHPY_FILE_HASHES@@
@@ -319,15 +325,31 @@ function Get-PwshPyNetworkDistrust {
     # namespace (\\?\, \\.\) only \\?\C:\..., the long spelling of a drive path, is left to the ACL
     # walk: any other name there (\\?\GLOBALROOT\Device\Mup\..., a volume GUID, a pipe) is resolved by
     # the object manager, can reach a network redirector, and is never where uv or a PATH directory
-    # lives. A drive letter mapped to a share passes here ([147]).
+    # lives. A drive letter is judged by its drive type ([147]): one mapped to a share (net use, a
+    # logon script) reads DRIVE_REMOTE, [IO.DriveInfo] 'Network', on pwsh 7.6 and Windows PowerShell
+    # 5.1 alike (measured on a Windows 11 test VM), while its ACL is again whatever the server reports.
     if (-not $PwshPyOnWindows) { return '' }
     $spelled = $Path.Replace('/', '\')
+    if ($spelled -match '^(\\\\\?\\)?([A-Za-z]):\\') { return (Get-PwshPyDriveDistrust -Letter $Matches[2]) }
     if (-not $spelled.StartsWith('\\')) { return '' }
-    if ($spelled -match '^\\\\\?\\[A-Za-z]:\\') { return '' }
     if ($spelled -match '^\\\\[?.]\\' -and $spelled -notmatch '^\\\\[?.]\\UNC(\\|$)') {
         return 'it is a device path, and an elevated run trusts only local drive paths'
     }
     return (Get-PwshPyNetworkReason)
+}
+
+function Get-PwshPyDriveDistrust {
+    param([string] $Letter)
+
+    # Windows: the network rule's reason when the drive $Letter is a network drive, else ''. A drive
+    # whose type cannot be read is refused too: the check fails closed.
+    try {
+        $type = (New-Object IO.DriveInfo $Letter).DriveType
+    } catch {
+        return "the type of drive ${Letter}: cannot be read ($($_.Exception.Message))"
+    }
+    if ($type -eq [IO.DriveType]::Network) { return (Get-PwshPyNetworkReason) }
+    return ''
 }
 
 function Get-PwshPyNetworkReason {
@@ -484,6 +506,17 @@ function Test-PwshPyExecutable {
     return (([string]$mode[3] -cin @('x', 's')) -or ([string]$mode[6] -cin @('x', 's')) -or ([string]$mode[9] -cin @('x', 't')))
 }
 
+function ConvertFrom-PwshPyDriveLongPath {
+    param([string] $Path)
+
+    # Windows: $Path (backslashes) with the extended-length prefix of a drive path dropped, \\?\C:\x as
+    # C:\x, the same file ([148]). Windows PowerShell 5.1 finds no drive in the long spelling, so its
+    # Join-Path fails on every component and a trusted directory would be left off; pwsh 7 reads both.
+    # Only the drive form: any other \\?\ or \\.\ name is refused by Get-PwshPyNetworkDistrust first.
+    if ($Path -match '^\\\\\?\\[A-Za-z]:\\') { return $Path.Substring(4) }
+    return $Path
+}
+
 function Split-PwshPyPath {
     param([string] $Path)
 
@@ -507,7 +540,7 @@ function Get-PwshPyUvDistrust {
     # a link target, judged below.
     $network = Get-PwshPyNetworkDistrust -Path $Path
     if ($network) { return $network }
-    if ($PwshPyOnWindows) { $Path = $Path.Replace('/', '\') }
+    if ($PwshPyOnWindows) { $Path = ConvertFrom-PwshPyDriveLongPath -Path $Path.Replace('/', '\') }
     $current = [IO.Path]::GetPathRoot($Path)
     $rest = New-Object System.Collections.Generic.List[string]
     $rest.AddRange([string[]](Split-PwshPyPath -Path $Path))
@@ -542,7 +575,7 @@ function Get-PwshPyUvDistrust {
             if (Test-PwshPyAbsolutePath -Path $target) {
                 $network = Get-PwshPyNetworkDistrust -Path $target
                 if ($network) { return "the link $next points to ${target}: $network" }
-                if ($PwshPyOnWindows) { $target = $target.Replace('/', '\') }
+                if ($PwshPyOnWindows) { $target = ConvertFrom-PwshPyDriveLongPath -Path $target.Replace('/', '\') }
                 $root = [IO.Path]::GetPathRoot($target)
                 if ($root -ne [IO.Path]::GetPathRoot($current) -and -not $ancestor) { $ancestor = Get-PwshPyAncestorDistrust -Path $root }
                 $current = $root
@@ -632,6 +665,42 @@ function Get-PwshPyGitOn {
         return $candidate
     }
     return ''
+}
+
+function Get-PwshPyGitVersionDistrust {
+    param([string] $Git)
+
+    # Why an elevated run of a script with a git source must not let uv run the git $Git, or '' when it
+    # is 2.32 or later ([156], the .sh runner's pwshpy_require_git_config_global): git honours
+    # GIT_CONFIG_GLOBAL from 2.32 on, and an older one reads the caller's global git configuration, whose
+    # core.fsmonitor, core.sshCommand or credential.helper runs a command elevated. A version this cannot
+    # read, or a git --version that fails, is refused too: the check fails closed. The first line only,
+    # as the .sh: a git printing a warning before its "git version" line names no version here.
+    # 'Continue' for the call: with 'Stop', Windows PowerShell 5.1 stops at the first line a native
+    # program writes to a redirected stderr.
+    $stderr = [IO.Path]::GetTempFileName()
+    $saved = $ErrorActionPreference
+    $first = ''
+    try {
+        $ErrorActionPreference = 'Continue'
+        $lines = @(. (ConvertTo-PwshPyNativeCall -FilePath $Git -ArgumentList @('--version') -StderrPath $stderr))
+        if ($LASTEXITCODE -eq 0 -and $lines.Count -gt 0) { $first = [string]$lines[0] }
+    } catch {
+        $first = ''
+    } finally {
+        $ErrorActionPreference = $saved
+        Remove-Item -LiteralPath $stderr -Force -ErrorAction SilentlyContinue
+    }
+    $why = 'elevated it would read the caller''s git configuration (a script with a git source needs git 2.32 or later elevated): upgrade git, or run the script without elevation'
+    # Case-sensitive and ASCII digits only: a version spelled any other way is not one this can read.
+    if (-not ($first -cmatch '^git version ([0-9]{1,6})\.([0-9]{1,6})')) {
+        return "git --version names no version this runner can read, and a git older than 2.32 ignores GIT_CONFIG_GLOBAL, so $why"
+    }
+    $major = [int]$Matches[1]
+    $minor = [int]$Matches[2]
+    if ($major -gt 2 -or ($major -eq 2 -and $minor -ge 32)) { return '' }
+    $version = ($first.Substring('git version '.Length) -split ' ', 2)[0]
+    return "git $version ignores GIT_CONFIG_GLOBAL, so $why"
 }
 
 function Get-PwshPyUvLocation {
@@ -963,19 +1032,104 @@ function ConvertFrom-PwshPyLongPath {
     return $Path
 }
 
+function Resolve-PwshPyLinkedPath {
+    param([string] $Path)
+
+    # Windows: the path the absolute $Path names once every symlink and junction on the way is
+    # followed (up to 40), component by component as Get-PwshPyUvDistrust follows them, or '' when a
+    # link cannot be read. A managed-Python directory reached through a link (a redirected profile, or
+    # the directory itself a link) holds uv's links spelled against where it really lies.
+    $Path = ConvertFrom-PwshPyDriveLongPath -Path $Path.Replace('/', '\')
+    $current = [IO.Path]::GetPathRoot($Path)
+    $rest = New-Object System.Collections.Generic.List[string]
+    $rest.AddRange([string[]](Split-PwshPyPath -Path $Path))
+    $hops = 0
+    while ($rest.Count -gt 0) {
+        $component = $rest[0]
+        $rest.RemoveAt(0)
+        if ($component -eq '.') { continue }
+        if ($component -eq '..') {
+            $parent = [IO.Path]::GetDirectoryName($current)
+            if ($parent) { $current = $parent }
+            continue
+        }
+        $next = Join-Path $current $component
+        $item = Get-Item -LiteralPath $next -Force -ErrorAction SilentlyContinue
+        $linkType = if ($item) { [string]$item.LinkType } else { '' }
+        if ($linkType -ne 'SymbolicLink' -and $linkType -ne 'Junction') {
+            $current = $next
+            continue
+        }
+        $hops++
+        if ($hops -gt 40) { return '' }
+        $target = ([string](@($item.Target)[0])) -replace '^\\\?\?\\', ''
+        if ($PSVersionTable.PSEdition -ne 'Core') { $target = $target -replace '^UNC\\', '\\' }
+        if (-not $target) { return '' }
+        if (Test-PwshPyAbsolutePath -Path $target) {
+            $target = ConvertFrom-PwshPyDriveLongPath -Path $target.Replace('/', '\')
+            $current = [IO.Path]::GetPathRoot($target)
+        }
+        $rest.InsertRange(0, [string[]](Split-PwshPyPath -Path $target))
+    }
+    return $current
+}
+
+function Get-PwshPyTreeLinkDistrust {
+    param([IO.FileSystemInfo] $Link, [string] $Shown, [string] $Tree, [string[]] $Roots)
+
+    # Windows: why the link $Link (a reparse point below the directory $Tree, $Shown in the usual
+    # spelling) must not be passed, or '' ([149]). The tree walk judges a link as the object it is and
+    # never follows it, which is sound only while its target lies inside the tree and is judged there:
+    # a .pth linking out of the tree, to a file nobody judged or to a share, ran elevated (measured on a
+    # Windows 11 test VM). So a link whose target leaves the tree, or is a network path, is refused
+    # whatever the target's ACL. $Roots are the tree's spellings: $Tree itself and the path it names
+    # with every link on the way followed (Resolve-PwshPyLinkedPath). uv's own links stay inside: its
+    # minor-version junctions (cpython-3.12-... to cpython-3.12.13-... beside it) carry an absolute
+    # target in the directory itself (measured on the same VM). Only symlinks and junctions redirect;
+    # any other reparse point (a deduplicated or cloud file) is the file itself and keeps the walk's
+    # ACL verdict.
+    $linkType = [string]$Link.LinkType
+    if ($linkType -ne 'SymbolicLink' -and $linkType -ne 'Junction') { return '' }
+    # As Get-PwshPyUvDistrust reads a target: 5.1 spells one on a share UNC\server\share.
+    $target = ([string](@($Link.Target)[0])) -replace '^\\\?\?\\', ''
+    if ($PSVersionTable.PSEdition -ne 'Core') { $target = $target -replace '^UNC\\', '\\' }
+    if (-not $target) { return "the link $Shown cannot be read" }
+    if (Test-PwshPyAbsolutePath -Path $target) {
+        $network = Get-PwshPyNetworkDistrust -Path $target
+        if ($network) { return "the link $Shown points to ${target}: $network" }
+        $resolved = $target
+    } else {
+        $resolved = Join-Path ([IO.Path]::GetDirectoryName($Shown)) $target
+    }
+    $outside = "the link $Shown points to $target, outside $Tree (an elevated run follows no link out of the directory it judged)"
+    try {
+        $full = [IO.Path]::GetFullPath((ConvertFrom-PwshPyDriveLongPath -Path $resolved.Replace('/', '\'))).TrimEnd('\')
+    } catch {
+        return $outside
+    }
+    foreach ($root in $Roots) {
+        if (-not $root) { continue }
+        $root = $root.TrimEnd('\')
+        if ($full -eq $root -or $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { return '' }
+    }
+    return $outside
+}
+
 function Get-PwshPyWindowsTreeDistrust {
     param([string] $Path)
 
     # Windows half of Get-PwshPyPythonTreeDistrust: every entry below $Path judged with the rights of
     # its kind, as Get-PwshPyLeafDistrust judges one, a link (symlink or junction) as the link object it
     # is (Get-PwshPyLinkDistrust) and never followed: its target inside the directory is judged where
-    # it lies. uv's lock file inherits the directory's ACL here (measured with uv 0.13), so unlike POSIX
+    # it lies, and one outside it, or on a share, is refused (Get-PwshPyTreeLinkDistrust). uv's lock file inherits the directory's ACL here (measured with uv 0.13), so unlike POSIX
     # no entry is exempt. The trusted SIDs are asked for once, and a verdict is kept per distinct owner
     # and DACL (their SDDL) and kind: the entries of an install share a few, so most are judged by a
     # lookup (measured on a Windows 11 test VM, five installs: see Get-PwshPyPythonTreeDistrust).
     $trusted = Get-PwshPyTrustedSid
     $sections = [Security.AccessControl.AccessControlSections]'Access, Owner'
     $verdicts = @{}
+    # Where a link below may point: inside the tree, as spelled or as it really lies.
+    $roots = @([IO.Path]::GetFullPath($Path), (Resolve-PwshPyLinkedPath -Path ([IO.Path]::GetFullPath($Path))))
     # Walked in the extended-length form, so a path past MAX_PATH reads on 5.1 too.
     $stack = New-Object System.Collections.Generic.Stack[IO.DirectoryInfo]
     $stack.Push((New-Object IO.DirectoryInfo (ConvertTo-PwshPyLongPath -Path $Path)))
@@ -996,6 +1150,7 @@ function Get-PwshPyWindowsTreeDistrust {
                     return "the ACL of $shown cannot be read ($($_.Exception.Message))"
                 }
                 $why = Get-PwshPyAclDistrust -Path $shown -Rights $PwshPyAncestorWriteRights -Security $security -Trusted $trusted
+                if (-not $why) { $why = Get-PwshPyTreeLinkDistrust -Link $child -Shown $shown -Tree $Path -Roots $roots }
             } else {
                 $isDirectory = $child -is [IO.DirectoryInfo]
                 try {
@@ -1057,6 +1212,34 @@ function Get-PwshPyPythonDirDistrust {
     }
     if ($why -or $directory -ne $Path) { return $why }
     return (Get-PwshPyPythonTreeDistrust -Path $Path)
+}
+
+function Get-PwshPyCacheDistrust {
+    param([string] $Path)
+
+    # Why an elevated run must not unpack into, or run the script from, the cache directory $Path (an
+    # absolute path), or '' ([98]). The tree is verified against its hashes and executed later, so an
+    # account that can write the directory, or rename one above it, could swap a file between the check
+    # and uv reading it; and an unpack removes and rewrites the directory with elevated rights. Its root
+    # is whatever PWSHPY_PACK_CACHE, LOCALAPPDATA or XDG_CACHE_HOME the caller set, so it is judged like
+    # uv's managed-Python directory: itself, every directory above it and every entry below it, or,
+    # before the first unpack, the nearest directory that exists.
+    return (Get-PwshPyPythonDirDistrust -Path $Path)
+}
+
+function Assert-PwshPyCacheTrusted {
+    param([string] $Path)
+
+    # Exits 127 when an elevated run may not use the cache directory $Path (Get-PwshPyCacheDistrust).
+    $why = Get-PwshPyCacheDistrust -Path $Path
+    if (-not $why) { return }
+    if ($PwshPyOnWindows) {
+        $remedy = 'set PWSHPY_PACK_CACHE to a directory only this account, SYSTEM and Administrators can modify, or take every other account''s write access off the path named above'
+    } else {
+        $remedy = 'set PWSHPY_PACK_CACHE to a directory only root can modify, or make the path named above root''s alone (chown root, chmod go-w)'
+    }
+    Write-PwshPyFailure "pwshpy: refusing the cache directory ${Path}: $why (an elevated run unpacks and runs the script only from a directory no other account can modify, nor anything below it): $remedy"
+    exit 127
 }
 
 function Resolve-PwshPyManagedPython {
@@ -1244,20 +1427,34 @@ function Get-PwshPyEmptyFileDistrust {
     param([string] $Path)
 
     # Why $Path cannot serve an elevated run as an empty file no other account can change, or ''. Makes
-    # the directory and the file when they are missing; the directory is judged before anything is
-    # written in it, so a file is only ever created where no other account can swap it, and an existing
-    # entry is never truncated or deleted (a link there could point at any file the elevated account
-    # may write). A link, a directory or a file with content in its place is refused: only an account
-    # trusted with the directory can have put it there, and removing it is left to that account.
+    # the directory and the file when they are missing. Each directory is judged before anything is
+    # created in it: the one above (the account's data directory), so the directory is only ever created
+    # where no other account can add, swap or redirect an entry ([131]: a link on the way would have it
+    # created at the link's target first), then the directory itself before the file. An existing entry
+    # is never truncated or deleted (a link there could point at any file the elevated account may
+    # write). A link, a directory or a file with content in its place is refused: only an account
+    # trusted with the directory can have put it there, and removing it is left to that account. A
+    # create that fails (a file where the directory belongs, an entry Get-Item does not see) is a
+    # reason too, so the caller refuses with its remedy rather than stopping on the exception.
     $directory = [IO.Path]::GetDirectoryName($Path)
-    $null = [IO.Directory]::CreateDirectory($directory)
+    $why = Get-PwshPyUvDistrust -Path ([IO.Path]::GetDirectoryName($directory)) -Directory $true
+    if ($why) { return $why }
+    try {
+        $null = [IO.Directory]::CreateDirectory($directory)
+    } catch {
+        return "$directory cannot be created ($($_.Exception.Message))"
+    }
     $why = Get-PwshPyUvDistrust -Path $directory -Directory $true
     if ($why) { return $why }
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if (-not $item) {
-        # CreateNew: fails rather than open whatever appeared at the path since it was looked at.
-        [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write).Dispose()
-        $item = Get-Item -LiteralPath $Path -Force
+        try {
+            # CreateNew: fails rather than open whatever appeared at the path since it was looked at.
+            [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write).Dispose()
+            $item = Get-Item -LiteralPath $Path -Force
+        } catch {
+            return "$Path cannot be created ($($_.Exception.Message))"
+        }
     }
     if ($item.LinkType -or $item.PSIsContainer) { return "$Path is not a plain file" }
     if ($item.Length -ne 0) { return "$Path is not empty" }
@@ -1314,12 +1511,20 @@ function Invoke-PwshPyElevated {
             [Console]::Error.WriteLine('pwshpy: elevation declined (sudo did not grant root)')
             exit 77
         }
+        # Only the -v prompts ([136-sh]): the relaunch runs as sudo -n, which never asks, so a sudo
+        # that keeps no credential after -v (timestamp_timeout=0) would prompt a second time without
+        # -n. Such a setup is told by sudo -n -v failing, and declined like a refused prompt.
+        & sudo -n -v
+        if ($LASTEXITCODE -ne 0) {
+            [Console]::Error.WriteLine('pwshpy: elevation declined (sudo keeps no credential after the password prompt, so it would ask again (timestamp_timeout=0))')
+            exit 77
+        }
         # sudo keeps the console, so output and exit code flow back without a relay. A sudo that
-        # grants -v but then refuses the command itself (timestamp_timeout=0, sudoers allowing
-        # only -v) exits with that sudo's own code, which no wrapper can tell from the script's.
+        # grants -v but then refuses the command itself (sudoers allowing only -v) exits with that
+        # sudo's own code, which no wrapper can tell from the script's.
         # Every word literal (ConvertTo-PwshPyNativeCall): the caller's '*' or '~' reaches the
         # script as typed, and a runner path holding '?' names this file, not a sibling it matches.
-        $sudoArgs = @((Get-PwshPyHostPath), '-NoProfile', '-File', $self)
+        $sudoArgs = @('-n', (Get-PwshPyHostPath), '-NoProfile', '-File', $self)
         if ($null -ne $ForwardArgs) { $sudoArgs += $ForwardArgs }
         . (ConvertTo-PwshPyNativeCall -FilePath 'sudo' -ArgumentList $sudoArgs)
         exit $LASTEXITCODE
@@ -1420,6 +1625,11 @@ function Write-PwshPyManifest {
     Write-Host "entry      : $PwshPyEntry"
     Write-Host "payload    : sha256 $PwshPySha"
     Write-Host "uv args    : $($PwshPyUvArgs -join ' ')"
+    if ($PwshPyGitSource) {
+        Write-Host 'git source : yes (an elevated run needs git 2.32 or later)'
+    } else {
+        Write-Host 'git source : no'
+    }
     Write-Host "cache dir  : $CacheDir"
     Write-Host 'files      :'
     foreach ($line in ($PwshPyFileHashes -split "`n")) {
@@ -1507,11 +1717,20 @@ $PwshPyPrepare = {
 
     # --- unpack -----------------------------------------------------------------------------
 
+    # Elevated: the cache is judged before anything is removed or written in it, and the tree an unpack
+    # wrote is judged again, since a new directory inherits whatever the one above passes down ([98]).
+    # Absolute first: the walk refuses a relative path, and a relative PWSHPY_PACK_CACHE names the
+    # caller's directory.
+    if ($PwshPyElevatedRun) {
+        $PwshPyCacheDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PwshPyCacheDir)
+        Assert-PwshPyCacheTrusted -Path $PwshPyCacheDir
+    }
     if ($PwshPyClean -and (Test-Path -LiteralPath $PwshPyCacheDir)) {
         Remove-Item -LiteralPath $PwshPyCacheDir -Recurse -Force
     }
     if (-not (Test-PwshPyTree -Root $PwshPyCacheDir)) {
         Invoke-PwshPyUnpackLocked -CacheDir $PwshPyCacheDir
+        if ($PwshPyElevatedRun) { Assert-PwshPyCacheTrusted -Path $PwshPyCacheDir }
     }
 
     # --- uv ---------------------------------------------------------------------------------
@@ -1579,7 +1798,7 @@ $PwshPyPrepare = {
         # caller's profile) and XDG_CONFIG_HOME this run got, and a core.fsmonitor, core.sshCommand or
         # credential.helper there runs a command elevated when uv fetches a git source. A set
         # GIT_CONFIG_GLOBAL replaces both (git 2.32 and later; an older git ignores it and still reads
-        # them). POSIX: /dev/null, which only root can change. Windows: an empty file below the
+        # them, so for a script with a git source one is refused below, [156]). POSIX: /dev/null, which only root can change. Windows: an empty file below the
         # account's own data directory, judged as an elevated run judges a uv, which Git for Windows
         # reads as an empty configuration (measured with 2.55). Not the NUL device, which an MSYS2 or
         # Cygwin git may read as a file named NUL in its working directory, nor a path such as
@@ -1615,6 +1834,23 @@ $PwshPyPrepare = {
             Write-PwshPyFailure "pwshpy: refusing uv's managed-Python directory $($env:UV_PYTHON_INSTALL_DIR): $PwshPyPythonDirWhy (an elevated run lets uv search only a directory no other account can modify, nor anything below it): $(Get-PwshPyPythonRemedy -Why $PwshPyPythonDirWhy)"
             exit 127
         }
+        # The PATH uv will see: the caller's directories no other account can modify ([107]), judged
+        # while a POSIX root run's helpers still come from the fixed PATH. Script scope by name: the run
+        # preparation, a block of its own, reads it.
+        $script:PwshPyTrustedUvPath = Get-PwshPyTrustedPath -Path $PwshPyCallerPath
+        # The git uv will run, asked only for a script that needs one; with none, uv fails on its own.
+        # Before uv is asked for a managed Python, which it may download: a run refused here calls no uv
+        # ([156], as the .sh root run).
+        if ($PwshPyGitSource) {
+            $PwshPyUvGit = Get-PwshPyGitOn -Path $script:PwshPyTrustedUvPath
+            if ($PwshPyUvGit) {
+                $PwshPyGitWhy = Get-PwshPyGitVersionDistrust -Git $PwshPyUvGit
+                if ($PwshPyGitWhy) {
+                    Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy"
+                    exit 127
+                }
+            }
+        }
         # Script scope by name: the run preparation, a block of its own, reads it.
         $script:PwshPyPython = Resolve-PwshPyManagedPython -Uv $PwshPyUv
     }
@@ -1644,7 +1880,7 @@ $PwshPyPrepareRun = {
     # gets the caller's whole PATH back from the shim, behind the entries uv puts in front of the PATH
     # it was given, which the shim is handed too ([107]).
     if ($PwshPyElevatedRun) {
-        $PwshPyTrustedUvPath = Get-PwshPyTrustedPath -Path $PwshPyCallerPath
+        $PwshPyTrustedUvPath = $script:PwshPyTrustedUvPath
         Set-Item -LiteralPath ('Env:' + $PwshPyPathEnv) -Value $PwshPyCallerPath
         # When no caller directory is trusted this is ''. Windows PowerShell 5.1 deletes a variable set
         # to '', so under 5.1 the shim finds no uv PATH, cannot tell what uv put in front, and gives

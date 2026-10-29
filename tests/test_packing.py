@@ -34,13 +34,13 @@ _FULL_TEMPLATE = (
     "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|"
     "@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@|@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@|"
     "@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_RELATIVE@@|@@PWSHPY_PYTHON_REQUEST@@|"
-    "@@PWSHPY_PATH_ENV@@|@@PWSHPY_UV_PATH_ENV@@|@@PWSHPY_GIT_SOURCE@@"
+    "@@PWSHPY_PATH_ENV@@|@@PWSHPY_UV_PATH_ENV@@|@@PWSHPY_GIT_SOURCE@@|@@PWSHPY_CALLER_ENV@@"
 )
 
 _SH_TEMPLATE = (
     "@@PWSHPY_PAYLOAD_B64@@|@@PWSHPY_PAYLOAD_SHA256@@|@@PWSHPY_ENTRY@@|@@PWSHPY_UV_ARGS@@|@@PWSHPY_FILE_HASHES@@|"
     "@@PWSHPY_SHIM@@|@@PWSHPY_ARGV_ENV@@|@@PWSHPY_CWD_ENV@@|@@PWSHPY_UV_ARGS_ANCHORED@@|@@PWSHPY_PYTHON_REQUEST@@|"
-    "@@PWSHPY_PATH_ENV@@|@@PWSHPY_UV_PATH_ENV@@|@@PWSHPY_GIT_SOURCE@@"
+    "@@PWSHPY_PATH_ENV@@|@@PWSHPY_UV_PATH_ENV@@|@@PWSHPY_GIT_SOURCE@@|@@PWSHPY_CALLER_ENV@@"
 )
 
 
@@ -191,12 +191,20 @@ def test_render_runner_substitutes_every_placeholder() -> None:
         "PWSHPY_PACK_PATH",
         "PWSHPY_PACK_UV_PATH",
         "$false",
+        "PWSHPY_PACK_CALLER",
     ]
 
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(
-    "placeholder", ["@@PWSHPY_ENTRY@@", "@@PWSHPY_PATH_ENV@@", "@@PWSHPY_UV_PATH_ENV@@", "@@PWSHPY_GIT_SOURCE@@"]
+    "placeholder",
+    [
+        "@@PWSHPY_ENTRY@@",
+        "@@PWSHPY_PATH_ENV@@",
+        "@@PWSHPY_UV_PATH_ENV@@",
+        "@@PWSHPY_GIT_SOURCE@@",
+        "@@PWSHPY_CALLER_ENV@@",
+    ],
 )
 def test_render_runner_rejects_a_template_missing_a_placeholder(placeholder: str) -> None:
     """Shipping a runner with a literal placeholder would fail cryptically on the target host; the
@@ -234,9 +242,23 @@ def test_render_posix_runner_substitutes_its_placeholders() -> None:
         ),
     )
     assert "@@PWSHPY" not in rendered
-    payload, sha, entry, uv_args, hashes, shim, argv_env, cwd_env, anchored, request, path_env, uv_path_env, git = (
-        rendered.split("|")
-    )
+    (
+        payload,
+        sha,
+        entry,
+        uv_args,
+        hashes,
+        shim,
+        argv_env,
+        cwd_env,
+        anchored,
+        request,
+        path_env,
+        uv_path_env,
+        git,
+        caller,
+    ) = rendered.split("|")
+    assert caller == "PWSHPY_PACK_CALLER"
     assert shlex.split(request) == [">=3.11"]
     assert git == "'0'"
     assert [payload, sha, shim, argv_env, cwd_env, path_env, uv_path_env] == [
@@ -255,7 +277,14 @@ def test_render_posix_runner_substitutes_its_placeholders() -> None:
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(
-    "placeholder", ["@@PWSHPY_ENTRY@@", "@@PWSHPY_PATH_ENV@@", "@@PWSHPY_UV_PATH_ENV@@", "@@PWSHPY_GIT_SOURCE@@"]
+    "placeholder",
+    [
+        "@@PWSHPY_ENTRY@@",
+        "@@PWSHPY_PATH_ENV@@",
+        "@@PWSHPY_UV_PATH_ENV@@",
+        "@@PWSHPY_GIT_SOURCE@@",
+        "@@PWSHPY_CALLER_ENV@@",
+    ],
 )
 def test_render_posix_runner_rejects_a_template_missing_a_placeholder(placeholder: str) -> None:
     """A literal placeholder in a shipped .sh would break on the target host; one the .sh must carry

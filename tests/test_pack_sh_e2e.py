@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -28,6 +29,7 @@ from pathlib import Path
 import pytest
 from elevation_doubles import (
     GIT_VARIABLES,
+    HOME_VARIABLES,
     LIBRARY_PATH_PLANTS,
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
@@ -37,6 +39,7 @@ from elevation_doubles import (
     OTHER_UID,
     RUNNING_AS_ROOT,
     UV_SOURCE_VARIABLES,
+    data_home,
     default_uv_cache_dir,
     default_uv_cache_env,
     fetched_git_source,
@@ -45,11 +48,13 @@ from elevation_doubles import (
     owned_by_another_account,
     plant_library_path,
     planted_managed_python,
+    second_prompts,
     session_uv_cache,
     trusted_managed_python,
     with_account_cache_home,
     with_data_home,
     without_python_dir_check,
+    write_fake_sudo,
     write_git_source,
     write_local_wheel,
     write_planted_environment,
@@ -57,11 +62,10 @@ from elevation_doubles import (
     write_planted_venv,
     write_recording_uv,
 )
-from test_pack_sudo_double import second_prompts, write_sudo_double
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.enums import RunnerFormat
-from pwshpy.domain.packing import SHIM_MODULE, PackOptions
+from pwshpy.domain.packing import CALLER_ENV_VAR, SHIM_MODULE, PackOptions
 
 if sys.platform != "win32":
     import pwd
@@ -415,10 +419,13 @@ sys.exit(9)
 """
 
 
-def _elevate_setup(tmp_path: Path, *, grant: bool, cached: bool = True) -> tuple[Path, Path, dict[str, str]]:
+def _elevate_setup(
+    tmp_path: Path, *, grant: bool, cached: bool = True, per_parent: bool = False
+) -> tuple[Path, Path, dict[str, str]]:
     """A packed marker-writing script, a sudo double on PATH, and the marker the script writes.
 
-    The double logs every call to ``sudo-calls.txt`` in ``tmp_path``.
+    The double logs every call to ``sudo-calls.txt`` in ``tmp_path``; ``cached`` and ``per_parent`` as
+    for :func:`elevation_doubles.write_fake_sudo`.
     """
     entry = tmp_path / "who.py"
     entry.write_text(_ELEVATE_ENTRY)
@@ -427,7 +434,7 @@ def _elevate_setup(tmp_path: Path, *, grant: bool, cached: bool = True) -> tuple
     runner.chmod(0o755)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_sudo_double(bin_dir, grant=grant, cached=cached, calls=tmp_path / "sudo-calls.txt")
+    write_fake_sudo(bin_dir, grant=grant, cached=cached, per_parent=per_parent, calls=tmp_path / "sudo-calls.txt")
     marker = tmp_path / "ran.marker"
     environment = _env(tmp_path)
     environment["PATH"] = os.pathsep.join([str(bin_dir), environment["PATH"]])
@@ -485,6 +492,19 @@ def test_elevate_never_lets_sudo_prompt_twice(tmp_path: Path, cached: bool) -> N
     assert result.returncode == 77, result.stdout + result.stderr
     assert "pwshpy: elevation declined" in result.stderr, result.stderr
     assert not marker.exists(), "the packed script ran although sudo kept no credential"
+
+
+@_needs_non_root
+def test_elevate_runs_where_sudo_keeps_the_credential_per_parent_process(tmp_path: Path) -> None:
+    """[R8]: under ``timestamp_type=ppid`` sudo keeps the credential ``sudo -v`` cached for the process
+    that ran it, this runner's shell. The relaunch must run as that shell's child: exec'd, its parent
+    was the shell's own parent, ``sudo -n`` found no credential and exited 1, which reads as the
+    script's exit code. Run as a child, the script runs elevated and its own code comes back."""
+    runner, marker, environment = _elevate_setup(tmp_path, grant=True, per_parent=True)
+    result = _run(["sh"], runner, "--pwshpy-elevate", env=environment)
+    assert second_prompts(tmp_path / "sudo-calls.txt") == [], (tmp_path / "sudo-calls.txt").read_text()
+    assert result.returncode == 9, result.stdout + result.stderr
+    assert marker.exists(), "the packed script never ran: " + result.stderr
 
 
 @_needs_non_root
@@ -813,7 +833,7 @@ def test_elevate_forwards_the_pinned_uv(tmp_path: Path) -> None:
     runner = _trust_runner(tmp_path, hide_system_uv=True)
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
-    write_sudo_double(bin_dir, grant=True, calls=tmp_path / "sudo-calls.txt")
+    write_fake_sudo(bin_dir, grant=True, calls=tmp_path / "sudo-calls.txt")
     environment = _trust_env(tmp_path, bin_dir, Path(_UV or "uv").parent)
     result = _run(["sh"], runner, "--pwshpy-elevate", "--pwshpy-uv", str(planted), "--", "a b", env=environment)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1418,6 +1438,13 @@ def _recording_python_runner(
     return runner, uv, record
 
 
+def _caller_home_env(tmp_path: Path) -> dict[str, str]:
+    """[159]: the caller's own HOME, XDG directories, netrc and uv credentials directory, each its own path
+    (XDG_STATE_HOME is left unset: the shim must remove what the caller did not have)."""
+    names = ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "NETRC", "UV_CREDENTIALS_DIR")
+    return {name: str(tmp_path / ("caller-" + name.lower())) for name in names}
+
+
 def _recorded_variables(record: Path) -> dict[str, str]:
     lines = record.read_text(encoding="utf-8").splitlines()
     return dict(line[4:].split("=", 1) for line in lines if line.startswith("env:"))
@@ -1538,6 +1565,60 @@ def test_as_root_uv_caches_in_the_accounts_own_cache_never_the_callers(tmp_path:
     account_cache = default_uv_cache_dir(tmp_path)
     assert account_cache.is_dir() is as_root, result.stderr
     assert (f"pwshpy: uv caches in {account_cache}:" in result.stderr) is as_root, result.stderr
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_uv_and_git_run_with_the_accounts_own_home(tmp_path: Path, as_root: bool) -> None:
+    """[159] (user decision: own HOME for uv): as root uv and the git it runs got the HOME, XDG
+    directories, NETRC and UV_CREDENTIALS_DIR sudo -E or env_keep handed over, so they read the
+    caller's netrc, credentials and git credential store and wrote below the caller's home. Now uv
+    gets the account's own (its passwd home, answered inside tmp_path here; the cache and data
+    directories the runner names; <home>/.config; the rest unset to their defaults below that home),
+    and each caller value travels to the shim under PWSHPY_PACK_CALLER_<NAME>, the names in
+    PWSHPY_PACK_CALLER. The control (not root) hands uv the caller's environment untouched."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root)
+    caller = _caller_home_env(tmp_path)
+    environment = {**_trust_env(tmp_path, uv.parent), **caller}
+    environment.pop("XDG_STATE_HOME", None)
+    result = _run_in(["sh"], runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = _recorded_variables(record)
+    if not as_root:
+        assert {name: recorded.get(name) for name in caller} == caller, recorded
+        assert not [name for name in recorded if name.startswith(CALLER_ENV_VAR)], recorded
+        return
+    home = tmp_path
+    assert recorded["HOME"] == str(home), recorded
+    assert recorded["XDG_CONFIG_HOME"] == f"{home}/.config", recorded
+    assert recorded["XDG_CACHE_HOME"] == str(default_uv_cache_dir(tmp_path).parent), recorded
+    assert recorded["XDG_DATA_HOME"] == str(data_home(tmp_path)), recorded
+    assert [name for name in ("XDG_STATE_HOME", "NETRC", "UV_CREDENTIALS_DIR") if name in recorded] == []
+    assert recorded[CALLER_ENV_VAR] == " ".join(HOME_VARIABLES), recorded
+    handed = {name: recorded.get(f"{CALLER_ENV_VAR}_{name}") for name in HOME_VARIABLES}
+    assert handed == {**dict.fromkeys(HOME_VARIABLES), **caller}, handed
+    assert f"pwshpy: setting HOME={home}: " in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
+def test_as_root_the_script_gets_the_callers_home_back(tmp_path: Path, as_root: bool) -> None:
+    """[159]: the packed script itself, started by a real uv through the shim, sees the caller's HOME
+    and XDG directories again, and no XDG_STATE_HOME the caller did not have, as it gets the caller's
+    PATH back ([107])."""
+    _needs_managed_python()
+    source = (
+        "import os\n"
+        "for name in ('HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'NETRC', 'XDG_STATE_HOME'):\n"
+        "    print('home:' + name + '=' + os.environ.get(name, '<unset>'))\n"
+    )
+    runner, uv = _python_runner(tmp_path, as_root=as_root, source=source)
+    caller = _caller_home_env(tmp_path)
+    environment = {**_trust_env(tmp_path, uv.parent), **caller}
+    environment.pop("XDG_STATE_HOME", None)
+    result = _run_in(["sh"], runner, "--pwshpy-no-install-uv", env=environment, cwd=_work_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    seen = dict(line[5:].split("=", 1) for line in result.stdout.splitlines() if line.startswith("home:"))
+    expected = {name: caller[name] for name in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "NETRC")}
+    assert seen == {**expected, "XDG_STATE_HOME": "<unset>"}, result.stdout
 
 
 @pytest.mark.parametrize("as_root", [True, False], ids=["root", "not-root-control"])
@@ -1713,6 +1794,44 @@ def test_as_root_an_untrusted_managed_python_dir_is_refused_before_uv_runs_a_pyt
     assert result.returncode == 0, result.stdout + result.stderr
     assert marker.is_file(), "the control never ran the planted .pth: " + result.stderr
     assert _reported_python(result) is not None, result.stdout
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_a_relative_managed_python_dir_is_refused_not_climbed_forever(
+    tmp_path: Path, shell_id: str, shell: list[str]
+) -> None:
+    """[R7]: the managed-Python check climbs from a missing directory towards / by stripping the last
+    component, which never ends on a relative path (no slash left to strip). The data home a root run
+    names comes from the passwd database and is absolute, so this takes the lookup's answer as a
+    relative one: the check refuses it with 127 at once instead of looping until the test times out."""
+    runner, uv, record = _recording_python_runner(tmp_path, as_root=True)
+    text = runner.read_text(encoding="utf-8")
+    answered = "'" + str(data_home(runner.parent)) + "'"
+    assert text.count(answered) == 1
+    runner.write_text(text.replace(answered, "'rel-data-home'"), encoding="utf-8", newline="\n")
+    # A session of its own: on a timeout the whole group goes, the looping command substitution included,
+    # which killing the shell alone would leave running.
+    process = subprocess.Popen(  # noqa: S603 - fixed argv from resolved shell + our own artefact
+        [*shell, str(runner), "--pwshpy-uv", str(uv)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+        env=_trust_env(tmp_path),
+        cwd=_work_dir(tmp_path),
+        start_new_session=True,
+    )
+    try:
+        _, stderr = process.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        if sys.platform != "win32":  # always true here (a POSIX-only module); narrows the POSIX-only calls
+            os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        pytest.fail("the managed-Python check never returned on a relative directory")
+    assert process.returncode == 127, stderr
+    expected = f"{_PYTHON_DIR_REFUSED} rel-data-home/uv/python: rel-data-home/uv/python is not an absolute path"
+    assert expected in stderr, stderr
+    assert not record.exists(), "uv ran the script"
 
 
 def _open_below(planted: Path, where: str) -> Path:
@@ -2461,6 +2580,51 @@ def test_an_old_git_is_neither_asked_nor_refused_without_root_and_a_git_source(
     assert "run" in record.read_text(encoding="utf-8").splitlines(), "uv never ran the script"
 
 
+#: The start of the refusal a root run prints for a git another account can modify ([157]).
+_GIT_TRUST_REFUSED = "pwshpy pack: refusing git at "
+#: The remedy that refusal names.
+_GIT_TRUST_REMEDY = "or run the script without root"
+
+
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+@pytest.mark.parametrize("plant", ["world-writable-file", "link-into-an-open-directory", "private-control"])
+def test_as_root_a_git_source_runs_only_a_git_no_other_account_can_modify(
+    tmp_path: Path, shell_id: str, shell: list[str], plant: str
+) -> None:
+    """[157] (user decision: judge the git file): the PATH uv sees holds only directories no other
+    account can modify, but the git found there was never judged itself, so a git file another account
+    can write, or a link to one in a directory it can write, ran as root when uv fetched a git source. A
+    root run of a script with a git source now judges that git the way it judges uv (the walk from /,
+    every link, the file) and exits 127 before git or uv run; the private control runs."""
+    runner, uv, record, marker, environment = _git_version_setup(
+        tmp_path, as_root=True, git_source=True, version_output="git version 2.45.0"
+    )
+    git = uv.parent / "git"
+    if plant == "world-writable-file":
+        git.chmod(0o777)
+    elif plant == "link-into-an-open-directory":
+        open_bin = tmp_path / "open-bin"
+        open_bin.mkdir()
+        open_bin.chmod(0o777)
+        git.rename(open_bin / "git")
+        git.symlink_to(open_bin / "git")
+    result = _run_in(shell, runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
+    refusals = [line for line in result.stderr.splitlines() if line.startswith(_GIT_TRUST_REFUSED)]
+    if plant == "private-control":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert refusals == [], result.stderr
+        assert "run" in record.read_text(encoding="utf-8").splitlines(), "uv never ran the script"
+        return
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert not marker.exists(), "the runner ran the git it refused"
+    assert not record.exists(), "uv ran the script: " + record.read_text(encoding="utf-8")
+    assert len(refusals) == 1, result.stderr
+    (refusal,) = refusals
+    assert refusal.startswith(f"{_GIT_TRUST_REFUSED}{git}: "), refusal
+    assert "writable by every account" in refusal, refusal
+    assert refusal.endswith(_GIT_TRUST_REMEDY), refusal
+
+
 @pytest.mark.parametrize("git_source", [True, False], ids=["git-source", "none"])
 def test_info_names_whether_the_script_has_a_git_source(tmp_path: Path, git_source: bool) -> None:
     """[116]: --pwshpy-info shows what the pack recorded, so a refused root run can be explained."""
@@ -2495,15 +2659,17 @@ def _cache_trust_runner(tmp_path: Path) -> tuple[Path, Path, str]:
     return runner, marker, key.split("'")[1][:16]
 
 
-def _cache_trust_run(shell: list[str], tmp_path: Path, runner: Path, root: Path) -> subprocess.CompletedProcess[str]:
+def _cache_trust_run(
+    shell: list[str], tmp_path: Path, runner: Path, root: Path, *, umask: int = 0o022
+) -> subprocess.CompletedProcess[str]:
     """Run the runner from :func:`_cache_trust_runner` with its pack cache below ``root``.
 
     No managed Python is offered, so a run that gets past the cache check stops later: these tests are
-    about whether the cache was judged. Under umask 022, as sudo runs root (its default umask is the
-    union of the caller's and 022): a host's 002 would make the unpacked tree group-writable.
+    about whether the cache was judged. Under ``umask``: 022 by default, as sudo runs root (its default
+    umask is the union of the caller's and 022); 002 for the test of the runner's own modes ([R6]).
     """
     env = {**_env(tmp_path), "PWSHPY_PACK_CACHE": str(root), **managed_python_env(tmp_path, managed=None)}
-    saved = os.umask(0o022)
+    saved = os.umask(umask)
     try:
         return _run(shell, runner, "--pwshpy-no-install-uv", env=env)
     finally:
@@ -2561,6 +2727,47 @@ def test_as_root_a_cached_file_another_account_can_modify_is_refused(
     assert result.returncode == 127, result.stdout + result.stderr
     assert _CACHE_REFUSAL in result.stderr and "mark.py" in result.stderr, result.stderr
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("umask", [0o002, 0o022], ids=["umask-002", "umask-022-control"])
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_the_runner_decides_the_modes_of_its_unpack(
+    tmp_path: Path, shell_id: str, shell: list[str], umask: int
+) -> None:
+    """[R6]: a root run under the caller's umask 002 (a host with per-user groups, a root login shell)
+    created a group-writable cache directory and tree, which its own check then refused, on that run
+    and on every later one. The runner unpacks under umask 022 itself: no refusal, nothing below the
+    cache root group- or world-writable, and the warm run that follows passes too."""
+    root = _cache_root(tmp_path / "cache-root", mode=0o755)
+    runner, _, key = _cache_trust_runner(tmp_path)
+    for _ in range(2):
+        result = _cache_trust_run(shell, tmp_path, runner, root, umask=umask)
+        assert _CACHE_REFUSAL not in result.stderr, result.stderr
+        assert (root / key / "mark.py").is_file(), result.stdout + result.stderr
+    writable = [path for path in root.rglob("*") if path.lstat().st_mode & 0o022 and not path.is_symlink()]
+    assert writable == [], writable
+
+
+@pytest.mark.parametrize("variable", ["XDG_CACHE_HOME", "HOME"])
+@pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])
+def test_as_root_the_default_pack_cache_is_the_accounts_own_never_the_callers(
+    tmp_path: Path, shell_id: str, shell: list[str], variable: str
+) -> None:
+    """[R3]: with PWSHPY_PACK_CACHE unset a root run took its pack cache from XDG_CACHE_HOME or HOME,
+    which sudo's env_keep or sudo -E hand over from the caller, so the [98] check refused the run's own
+    default with 127 (and the caller chose where root unpacks). The default now comes from the
+    account's passwd home, as uv's cache does: no refusal, the tree there, nothing in the caller's."""
+    caller = _cache_root(tmp_path / "caller-home", mode=0o777)
+    runner, _, key = _cache_trust_runner(tmp_path)
+    env = {**_env(tmp_path), **managed_python_env(tmp_path, managed=None), variable: str(caller)}
+    del env["PWSHPY_PACK_CACHE"]
+    if variable == "HOME":
+        env.pop("XDG_CACHE_HOME", None)
+    result = _run(shell, runner, "--pwshpy-no-install-uv", env=env)
+    assert _CACHE_REFUSAL not in result.stderr, result.stderr
+    own = tmp_path / "default-cache" / "pwshpy-pack" / key
+    assert (own / "mark.py").is_file(), result.stdout + result.stderr
+    assert [path.name for path in caller.rglob("pwshpy-pack")] == []
 
 
 @pytest.mark.parametrize("shell_id,shell", _SHELLS, ids=[s[0] for s in _SHELLS])

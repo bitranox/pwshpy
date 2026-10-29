@@ -174,9 +174,15 @@ fi
 
 # --- cache location ---------------------------------------------------------------------
 
+# As root the default is below the running account's own cache directory (PWSHPY_CACHE_HOME, from the
+# passwd database), never XDG_CACHE_HOME or HOME: sudo's env_keep or sudo -E hand those over from the
+# caller, whose directory the cache check would then refuse ([R3]), and the caller would choose where
+# root unpacks. PWSHPY_PACK_CACHE stays the caller's to set, and is judged like any other.
 pwshpy_cache_root() {
     if [ -n "${PWSHPY_PACK_CACHE:-}" ]; then
         printf '%s' "$PWSHPY_PACK_CACHE"
+    elif [ "$PWSHPY_AS_ROOT" = "1" ]; then
+        printf '%s' "$PWSHPY_CACHE_HOME/pwshpy-pack"
     elif [ -n "${XDG_CACHE_HOME:-}" ]; then
         printf '%s' "$XDG_CACHE_HOME/pwshpy-pack"
     else
@@ -824,8 +830,17 @@ pwshpy_python_tree_distrust() {
 # site-packages would run as root before any check of the path uv answers (measured with uv 0.13):
 # the directory is judged before uv starts, as a uv is, itself and every directory above it, and then
 # everything below it (pwshpy_python_tree_distrust). One that does not exist yet is judged by the
-# nearest one that does, where `uv python install` will create it; it holds no install yet.
+# nearest one that does, where `uv python install` will create it; it holds no install yet. A relative
+# path is refused first: the climb towards / strips components up to the last slash, so it would never
+# end on a path that has none (and the path would name whatever the working directory holds).
 pwshpy_python_dir_distrust() {
+    case $1 in
+        /*) ;;
+        *)
+            printf '%s' "$1 is not an absolute path"
+            return 0
+            ;;
+    esac
     _pd_dir=$1
     while [ ! -e "$_pd_dir" ] && [ ! -L "$_pd_dir" ]; do
         _pd_dir=${_pd_dir%/*}
@@ -873,7 +888,7 @@ pwshpy_require_trusted_cache() {
     [ -n "$_rc_why" ] || return 0
     _rc_why="$_rc_why (as root the script is unpacked and run only from a directory no other account can"
     _rc_why="$_rc_why modify, nor anything below it): set PWSHPY_PACK_CACHE to a directory only root can"
-    _rc_why="$_rc_why modify, or make the path named above root's alone (chown root, chmod go-w)"
+    _rc_why="$_rc_why modify, or make the path named above root's alone (chown -R root, chmod -R go-w on it)"
     pwshpy_die "refusing the cache directory $PWSHPY_CACHE: $_rc_why" 127
 }
 
@@ -1015,6 +1030,12 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# The account's cache directory, as root: the pack cache's default (pwshpy_cache_root) and uv's cache
+# (UV_CACHE_DIR below) are below it. Asked while the helpers come from the fixed PATH.
+if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+    PWSHPY_CACHE_HOME=$(pwshpy_account_cache_home) \
+        || pwshpy_die "cannot read the home directory of uid $(pwshpy_euid) from the passwd database" 70
+fi
 PWSHPY_CACHE="$(pwshpy_cache_root)/$(printf '%s' "$PWSHPY_SHA" | cut -c1-16)"
 
 # Before the elevate block: the manifest needs no root, so --pwshpy-info never prompts for sudo.
@@ -1055,8 +1076,13 @@ if [ "$PWSHPY_WANT_ELEVATE" = "1" ] && [ "$PWSHPY_AS_ROOT" != "1" ]; then
     else
         set -- -- "$@"
     fi
+    # Not exec'd: sudo keeps a credential per terminal by default, but per parent process under
+    # timestamp_type=ppid, and the -v calls above ran with this shell as their parent. Exec'd, the
+    # relaunch's parent would be this shell's own parent, which holds no credential, so sudo -n would
+    # refuse with 1, an exit code the script could have returned too ([R8]).
     # shellcheck disable=SC2086
-    exec sudo -n /bin/sh "$0" $PWSHPY_FWD "$@"
+    sudo -n /bin/sh "$0" $PWSHPY_FWD "$@"
+    exit $?
 fi
 
 # --- unpack -----------------------------------------------------------------------------
@@ -1078,8 +1104,17 @@ if [ "$PWSHPY_CLEAN" = "1" ]; then
     rm -rf "$PWSHPY_CACHE"
 fi
 if ! pwshpy_verify_tree; then
+    # As root the runner decides the modes of what it creates ([R6]): under the caller's umask (002 on a
+    # host with per-user groups) the directories mkdir and tar create would be group-writable, and the
+    # check below would refuse the runner's own unpack, on every later run too. The caller's umask is
+    # back before uv and the script run.
+    if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+        PWSHPY_CALLER_UMASK=$(umask)
+        umask 022
+    fi
     pwshpy_unpack_locked
     if [ "$PWSHPY_AS_ROOT" = "1" ]; then
+        umask "$PWSHPY_CALLER_UMASK"
         pwshpy_require_trusted_cache
     fi
 fi
@@ -1136,8 +1171,6 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # Asked while the helpers still come from the fixed PATH.
     PWSHPY_DATA_HOME=$(pwshpy_account_data_home) \
         || pwshpy_die "cannot read the home directory of uid $(pwshpy_euid) from the passwd database" 70
-    PWSHPY_CACHE_HOME=$(pwshpy_account_cache_home) \
-        || pwshpy_die "cannot read the home directory of uid $(pwshpy_euid) from the passwd database" 70
     pwshpy_caller_cwd
     PWSHPY_CALLER_PREFIX=${PWSHPY_CALLER_CWD%/}/
     case $PWSHPY_CACHE in
@@ -1170,6 +1203,34 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     UV_CACHE_DIR=$PWSHPY_CACHE_HOME/uv
     export UV_CACHE_DIR
     printf '%s\n' "pwshpy: uv caches in $UV_CACHE_DIR: as root uv uses the running account's own cache directory" >&2
+    # The home too ([159], user decision: own HOME for uv): uv and the git it runs read and write below
+    # HOME and the XDG directories (uv's credentials and its netrc, git's ~/.git-credentials, caches,
+    # state), which sudo's env_keep or sudo -E hand over from the caller, so as root they would read the
+    # caller's secrets and create files the caller then cannot remove. From here on uv and git get the
+    # running account's own: its passwd home (the directory its cache directory is in), its cache and
+    # data directories as named above, <home>/.config, and the defaults below that home for the state
+    # directory, the netrc and uv's credentials. The packed script gets the caller's back from the shim
+    # (@@PWSHPY_CALLER_ENV@@ names what was replaced), as it gets the caller's PATH ([107]).
+    PWSHPY_CALLER_NAMES=
+    for _ce in HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME NETRC UV_CREDENTIALS_DIR; do
+        if eval "[ -n \"\${$_ce+set}\" ]"; then
+            eval "@@PWSHPY_CALLER_ENV@@_$_ce=\$$_ce"
+            export "@@PWSHPY_CALLER_ENV@@_$_ce"
+        else
+            unset "@@PWSHPY_CALLER_ENV@@_$_ce"
+        fi
+        PWSHPY_CALLER_NAMES="$PWSHPY_CALLER_NAMES $_ce"
+    done
+    export "@@PWSHPY_CALLER_ENV@@=${PWSHPY_CALLER_NAMES# }"
+    unset XDG_STATE_HOME NETRC UV_CREDENTIALS_DIR
+    HOME=${PWSHPY_CACHE_HOME%/*}
+    # A home of / reads "" in pwshpy_account_home (no trailing slash).
+    [ -n "$HOME" ] || HOME=/
+    XDG_CONFIG_HOME=${HOME%/}/.config
+    XDG_CACHE_HOME=$PWSHPY_CACHE_HOME
+    XDG_DATA_HOME=$PWSHPY_DATA_HOME
+    export HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME
+    printf '%s\n' "pwshpy: setting HOME=$HOME: as root uv and git use the running account's own home" >&2
     # While the helpers still come from the fixed PATH: the checks of the directory and of the Python's
     # path run ls. The directory first: uv runs every Python it finds there.
     PWSHPY_PYTHON_DIR_WHY=$(pwshpy_python_dir_distrust "$UV_PYTHON_INSTALL_DIR")
@@ -1196,6 +1257,16 @@ if [ "$PWSHPY_AS_ROOT" = "1" ]; then
     # The git uv will run, asked only for a script that needs one; with none, uv fails on its own.
     # Before uv is asked for a managed Python, which it may download: a run refused here calls no uv.
     if [ "$PWSHPY_GIT_SOURCE" = "1" ] && [ -n "$PWSHPY_UV_GIT" ]; then
+        # The directories on uv's PATH were judged, the git file found there was not: one another account
+        # can modify, or a link to one, runs as root when uv fetches a git source ([157], user decision:
+        # judge the git file). Judged like uv, and before it is run for its version.
+        PWSHPY_GIT_TRUST_WHY=$(pwshpy_uv_distrust "$PWSHPY_UV_GIT")
+        if [ -n "$PWSHPY_GIT_TRUST_WHY" ]; then
+            PWSHPY_GIT_TRUST_WHY="$PWSHPY_GIT_TRUST_WHY (as root uv runs only a git no other account can modify):"
+            PWSHPY_GIT_TRUST_WHY="$PWSHPY_GIT_TRUST_WHY make the path named above root's alone (chown root, then"
+            PWSHPY_GIT_TRUST_WHY="$PWSHPY_GIT_TRUST_WHY chmod go-w on it), or run the script without root"
+            pwshpy_die "refusing git at $PWSHPY_UV_GIT: $PWSHPY_GIT_TRUST_WHY" 127
+        fi
         pwshpy_require_git_config_global "$PWSHPY_UV_GIT"
     fi
     pwshpy_resolve_managed_python

@@ -604,7 +604,27 @@ Details worth knowing:
   it stops with `pwshpy: refusing git at <path>: git <version> ignores GIT_CONFIG_GLOBAL, ...` (or
   `git --version names no version this runner can read, ...`) and exit code 127, naming the remedy
   to upgrade git or to run the script without elevation; Git for Windows' `2.x.y.windows.n` counts
-  by its major and minor numbers. The
+  by its major and minor numbers. Before that git is asked its version, both runners judge the git
+  file itself the way they judge a `uv` (every directory from the root down, every link on the way,
+  the file): uv's `PATH` holds only directories no other account can modify, but a git file in one
+  of them that another account owns or can write, or a link to one in a directory it can write,
+  would run as root when uv fetches the source. Such a git stops the run with `pwshpy pack: refusing
+  git at <path>: <reason> ...` (`.sh`) or `pwshpy: refusing git at <path>: <reason> ...` (`.ps1`)
+  and exit code 127, before it runs. On Windows the git judged is the one uv runs: uv looks in each
+  `PATH` directory in turn for `git` with each `PATHEXT` extension appended, in `PATHEXT` order,
+  then for a bare `git` (measured with uv 0.13.6), so a `git.cmd` in an earlier directory is the git
+  it runs, not a `git.exe` further down. A git found that way that is not a `.exe`, `.com`, `.cmd`
+  or `.bat` is refused (`it is not a program an elevated run asks for its version`). A root run (the
+  `.sh` as root, the `.ps1` elevated on Linux or macOS) also hands uv and the git it runs the running
+  account's own home, never the caller's: `HOME` is the home the passwd database records,
+  `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME` are below it, and `XDG_STATE_HOME`,
+  `NETRC` and `UV_CREDENTIALS_DIR` are unset so their defaults follow that home (`pwshpy: setting
+  HOME=<home>` on stderr). Before, uv and git used the ones `sudo -E` or `env_keep` handed over:
+  uv read the caller's netrc and credentials file and created root-owned directories below the
+  caller's home, and a credential helper the administrators configured read and rewrote the
+  caller's `~/.git-credentials` as root (measured). The packed script gets the caller's values back
+  from the shim, and a variable the caller had not set is unset again, as it gets the caller's
+  `PATH` back. An elevated `.ps1` run on Windows keeps the caller's profile variables. The
   system file (`/etc/gitconfig`, or the one below Git
   for Windows' install directory) is the administrators' and still applies. The runner cannot tell
   who set a variable, so an elevated run in a network that reaches the internet only through a proxy
@@ -637,12 +657,15 @@ Details worth knowing:
   token, SYSTEM, or root) also judges the cache directory the way it judges uv's managed-Python
   directory: the directory itself, every directory above it and every entry below it, before it
   removes or writes anything there (before the first unpack, the nearest directory that exists), and
-  the tree again after an unpack. A cache another account can modify, wherever `PWSHPY_PACK_CACHE`,
-  `LOCALAPPDATA`, `XDG_CACHE_HOME` or `HOME` put it, stops the run with `pwshpy: refusing the cache
-  directory <dir>: <reason>` and exit code 127; a relative `PWSHPY_PACK_CACHE` is judged against
-  the caller's directory. A root run under umask 002 writes a group-writable tree, which the root
-  rule refuses (sudo's default umask is the caller's combined with 022, so a sudo run does not). Both runners
-  serialize a cold-cache extraction with an atomic lock (`FileShare.None` on Windows, a lock file
+  the tree again after an unpack. A cache another account can modify, wherever `PWSHPY_PACK_CACHE`
+  or `LOCALAPPDATA` put it, stops the run with `pwshpy: refusing the cache directory <dir>: <reason>`
+  and exit code 127; a relative `PWSHPY_PACK_CACHE` is judged against the caller's directory. With
+  `PWSHPY_PACK_CACHE` unset, a root run on Linux or macOS (the `.sh` as root, the `.ps1` elevated)
+  unpacks below the running account's own cache directory, `<home>/.cache/pwshpy-pack` with the home
+  the passwd database records, never below `XDG_CACHE_HOME` or `HOME`, which `sudo -E` or `env_keep`
+  can hand over from the caller. A root run decides the modes of what it unpacks itself (directories 0755,
+  nothing group- or world-writable), so a caller's umask 002 no longer gets its own unpack refused.
+  Both runners serialize a cold-cache extraction with an atomic lock (`FileShare.None` on Windows, a lock file
   created under `noclobber` on POSIX), so two concurrent first runs never race.
 - **Packing is deterministic**: identical sources produce identical bytes (the `.sh` tar is built
   with fixed mtime/mode/order), so the payload hash is a stable cache key and two builds are

@@ -93,6 +93,9 @@ $PwshPyCwdEnv = '@@PWSHPY_CWD_ENV@@'
 # gets the first back behind the entries uv put in front of the second ([107]).
 $PwshPyPathEnv = '@@PWSHPY_PATH_ENV@@'
 $PwshPyUvPathEnv = '@@PWSHPY_UV_PATH_ENV@@'
+# An elevated POSIX run names here the home variables it replaced for uv and git with the account's own,
+# each caller value in <this>_<NAME>, so the shim gives the script the caller's back ([159]).
+$PwshPyCallerEnv = '@@PWSHPY_CALLER_ENV@@'
 # Per uv arg, the relative path an elevated run (which starts uv in another directory) puts the
 # caller's directory in front of: '' for a value left as it is. Parallel to $PwshPyUvArgs.
 $PwshPyUvArgsRelative = @(@@PWSHPY_UV_ARGS_RELATIVE@@)
@@ -139,11 +142,51 @@ function Get-PwshPyPayload {
     return $bytes
 }
 
+function Invoke-PwshPyChmod {
+    param([string[]] $Arguments)
+
+    # POSIX root run: chmod from the fixed helper PATH, failing loudly (a mode left as the umask made
+    # it would be refused by the trust check later, with a reason that hides this one).
+    & chmod @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "chmod $($Arguments -join ' ') exited $LASTEXITCODE" }
+}
+
+function Initialize-PwshPyDirectory {
+    param([string] $Path, [bool] $Private = $false)
+
+    # Creates the directory $Path and any missing parent. An elevated POSIX run decides the modes of
+    # what it creates ([R6]): 0755 each, 0700 for $Path when $Private, whatever the caller's umask (002
+    # on a host with per-user groups would make them group-writable, which the trust check then refuses,
+    # on this run and every later one). Created with that mode where .NET can (7 and later), so no
+    # moment exists in which another account could add an entry; otherwise set right after creation.
+    if (-not $PwshPyRootPath) {
+        New-Item -ItemType Directory -Force -Path $Path | Out-Null
+        return
+    }
+    $missing = New-Object System.Collections.Generic.List[string]
+    $probe = $Path
+    while ($probe -and -not (Test-Path -LiteralPath $probe)) {
+        $missing.Insert(0, $probe)
+        $probe = Split-Path -Parent $probe
+    }
+    $modeType = 'System.IO.UnixFileMode' -as [type]
+    foreach ($directory in $missing) {
+        $octal = if ($Private -and $directory -eq $Path) { '700' } else { '755' }
+        if ($modeType) {
+            [void][IO.Directory]::CreateDirectory($directory, [Convert]::ToInt32($octal, 8) -as $modeType)
+        } else {
+            [void][IO.Directory]::CreateDirectory($directory)
+        }
+        Invoke-PwshPyChmod -Arguments @($octal, '--', $directory)
+    }
+}
+
 function Expand-PwshPyPayload {
     param([string] $Destination)
 
     if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force }
-    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    # Private while it is written: no other account can reach a file in it before its mode is set.
+    Initialize-PwshPyDirectory -Path $Destination -Private $true
 
     $archive = Join-Path $Destination '.payload.zip'
     [IO.File]::WriteAllBytes($archive, (Get-PwshPyPayload))
@@ -151,6 +194,11 @@ function Expand-PwshPyPayload {
     try { $null = [System.IO.Compression.ZipFile] } catch { Add-Type -AssemblyName System.IO.Compression.FileSystem }
     [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $Destination)
     Remove-Item -LiteralPath $archive -Force
+    if ($PwshPyRootPath) {
+        # What the extraction created took the caller's umask ([R6]); no group or other write anywhere.
+        Invoke-PwshPyChmod -Arguments @('-R', 'go-w', '--', $Destination)
+        Invoke-PwshPyChmod -Arguments @('755', '--', $Destination)
+    }
 }
 
 function Invoke-PwshPyUnpackLocked {
@@ -161,7 +209,7 @@ function Invoke-PwshPyUnpackLocked {
     # process's Remove-Item + re-extract can yank the directory another is already running from.
     # The warm path (a verified tree) never reaches here, so a normal run pays no lock cost.
     $parent = Split-Path -Parent $CacheDir
-    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    Initialize-PwshPyDirectory -Path $parent
     # New-Item -Force does not complain when a FILE sits at that path, and opening the lock under
     # it then raises the same IOException as a held lock, so the loop below would wait out its
     # 60 s and blame another process. Say what is actually wrong instead.
@@ -178,6 +226,8 @@ function Invoke-PwshPyUnpackLocked {
             continue
         }
         try {
+            # The lock file, too, took the caller's umask ([R6]).
+            if ($PwshPyRootPath) { Invoke-PwshPyChmod -Arguments @('go-w', '--', $lockPath) }
             # Double-checked: another process may have finished extracting while we waited.
             if (Test-PwshPyTree -Root $CacheDir) { return }
             Expand-PwshPyPayload -Destination $CacheDir
@@ -314,6 +364,35 @@ function Test-PwshPyAbsolutePath {
     # current drive or directory; only a drive-qualified or UNC path names one file.
     if ($PwshPyOnWindows) { return ($Path -match '^[A-Za-z]:[\\/]' -or $Path -match '^[\\/]{2}[^\\/]') }
     return $Path.StartsWith('/')
+}
+
+function Get-PwshPyLinkTargetKind {
+    param([string] $Target, [string] $LinkType)
+
+    # What the link target $Target (as read off .Target, the \??\ prefix gone) names: 'absolute' (a
+    # drive path or a UNC path, Test-PwshPyAbsolutePath), 'relative' (to the link's own directory) or
+    # 'unplaceable'. POSIX: absolute or relative. Windows: relative only when plainly so - no leading \
+    # or /, no ':', and not a device name .Target spells without its \??\ (Volume{GUID}\..., GLOBALROOT\...,
+    # UNC\...). Anything else names a place relative to the current drive (\Users\...), or one the
+    # object manager resolves (a volume GUID, a device), which no walk here can judge, so it is
+    # refused rather than joined below the link as before ([R1], spellings measured with mklink on a
+    # Windows 11 VM, identical under pwsh 7.6 and Windows PowerShell 5.1). A junction's target is always
+    # absolute; a junction with any other is refused too.
+    if (Test-PwshPyAbsolutePath -Path $Target) { return 'absolute' }
+    if (-not $PwshPyOnWindows) { return 'relative' }
+    if ($LinkType -eq 'Junction') { return 'unplaceable' }
+    if ($Target.StartsWith('\') -or $Target.StartsWith('/') -or $Target.Contains(':')) { return 'unplaceable' }
+    foreach ($device in @('Volume{', 'GLOBALROOT\', 'GLOBALROOT/', 'UNC\', 'UNC/')) {
+        if ($Target.StartsWith($device, [StringComparison]::OrdinalIgnoreCase)) { return 'unplaceable' }
+    }
+    return 'relative'
+}
+
+function Get-PwshPyUnplaceableReason {
+    param([string] $Link, [string] $Target)
+
+    # The reason a link whose target Get-PwshPyLinkTargetKind calls unplaceable is refused for.
+    return "the link $Link points to $Target, which names no drive or share path (an elevated run follows only a link whose target is a drive path, a UNC path or relative to the link)"
 }
 
 function Get-PwshPyNetworkDistrust {
@@ -572,7 +651,9 @@ function Get-PwshPyUvDistrust {
             $target = ([string](@($item.Target)[0])) -replace '^\\\?\?\\', ''
             if ($PSVersionTable.PSEdition -ne 'Core') { $target = $target -replace '^UNC\\', '\\' }
             if (-not $target) { return "the symlink $next cannot be read" }
-            if (Test-PwshPyAbsolutePath -Path $target) {
+            $kind = Get-PwshPyLinkTargetKind -Target $target -LinkType $linkType
+            if ($kind -eq 'unplaceable') { return (Get-PwshPyUnplaceableReason -Link $next -Target $target) }
+            if ($kind -eq 'absolute') {
                 $network = Get-PwshPyNetworkDistrust -Path $target
                 if ($network) { return "the link $next points to ${target}: $network" }
                 if ($PwshPyOnWindows) { $target = ConvertFrom-PwshPyDriveLongPath -Path $target.Replace('/', '\') }
@@ -649,22 +730,94 @@ function Get-PwshPyTrustedPath {
 function Get-PwshPyGitOn {
     param([string] $Path)
 
-    # The git the PATH $Path finds, or ''. Looked up by name in each directory and never run;
-    # Get-Command would also answer with an alias or function of this session, and read '[', '*' and
-    # '?' in an entry as wildcards. POSIX: an executable 'git', its mode read with the fixed-PATH ls.
-    $name = if ($PwshPyOnWindows) { 'git.exe' } else { 'git' }
+    # The git the PATH $Path finds, the file uv would run, or ''. Looked up by name in each directory
+    # and never run; Get-Command would also answer with an alias or function of this session, and read
+    # '[', '*' and '?' in an entry as wildcards. POSIX: an executable 'git', its mode read with the
+    # fixed-PATH ls. Windows: the names uv tries (Get-PwshPyWindowsGitName), in each directory in turn.
+    $names = if ($PwshPyOnWindows) { Get-PwshPyWindowsGitName } else { @('git') }
     foreach ($directory in ($Path -split [IO.Path]::PathSeparator)) {
         if (-not $directory) { continue }
-        $candidate = $directory + [IO.Path]::DirectorySeparatorChar + $name
-        try {
-            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
-        } catch {
-            continue
+        foreach ($name in $names) {
+            $candidate = $directory + [IO.Path]::DirectorySeparatorChar + $name
+            try {
+                if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+            } catch {
+                continue
+            }
+            if (-not $PwshPyOnWindows -and -not (Test-PwshPyExecutable -Path $candidate)) { continue }
+            if ($PwshPyOnWindows) { return (Get-PwshPyOnDiskSpelling -Path $candidate) }
+            return $candidate
         }
-        if (-not $PwshPyOnWindows -and -not (Test-PwshPyExecutable -Path $candidate)) { continue }
-        return $candidate
     }
     return ''
+}
+
+function Get-PwshPyOnDiskSpelling {
+    param([string] $Path)
+
+    # Windows: the existing file $Path with its name spelled as the directory holds it ('git.exe' for a
+    # lookup of git.EXE, which PATHEXT spells upper-case), so a message names the file as a listing
+    # shows it. A name with a wildcard character is no file name on Windows and never gets here.
+    $directory = [IO.Path]::GetDirectoryName($Path)
+    $name = [IO.Path]::GetFileName($Path)
+    if ($name.IndexOfAny([char[]]'*?') -ge 0) { return $Path }
+    try {
+        foreach ($entry in [IO.Directory]::GetFiles($directory, $name)) {
+            if ([string]::Equals([IO.Path]::GetFileName($entry), $name, [StringComparison]::OrdinalIgnoreCase)) {
+                return (Join-Path $directory ([IO.Path]::GetFileName($entry)))
+            }
+        }
+    } catch {
+        return $Path
+    }
+    return $Path
+}
+
+function Get-PwshPyWindowsGitName {
+    # The file names, in order, under which uv finds git in one PATH directory on Windows (measured with
+    # uv 0.13.6, [R2]): 'git' with each PATHEXT entry appended as written, in PATHEXT order (an entry
+    # without its dot names a file nobody has), then the bare 'git'. With PATHEXT unset or empty only
+    # the bare name. So a git.cmd ahead of git.exe in PATHEXT, or in an earlier directory, is the git uv
+    # runs, and the one judged here.
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($extension in ([string]$env:PATHEXT).Split(';')) {
+        if ($extension) { $names.Add('git' + $extension) }
+    }
+    $names.Add('git')
+    return $names.ToArray()
+}
+
+function Get-PwshPyGitKindDistrust {
+    param([string] $Git)
+
+    # Why the git file $Git is not one an elevated run may ask for its version, or ''. Windows: only a
+    # program or a batch file (.exe, .com, .cmd, .bat) is run for its version; anything else PATHEXT
+    # makes uv find (a bare file, a .js or .vbs a script host would open) is refused, which fails closed
+    # ([R2]). POSIX: any executable file.
+    if (-not $PwshPyOnWindows) { return '' }
+    $extension = [IO.Path]::GetExtension($Git)
+    foreach ($known in @('.exe', '.com', '.cmd', '.bat')) {
+        if ([string]::Equals($extension, $known, [StringComparison]::OrdinalIgnoreCase)) { return '' }
+    }
+    return 'it is not a program an elevated run asks for its version (a .exe, .com, .cmd or .bat), and uv would run it for a git source: install git as a program, or run the script without elevation'
+}
+
+function Initialize-PwshPyStderrFile {
+    # A new empty file for a native program's stderr, its path returned. [IO.Path]::GetTempFileName()
+    # places it in TMPDIR, which an elevated POSIX run got from the caller (sudo -E, env_keep): in a
+    # directory the caller can write, an entry the caller swaps in at that name (a link) would have root
+    # truncate and write the file it names ([R5]). So an elevated POSIX run makes it in a directory only
+    # root can enter, below the running account's own cache directory, and opens it CreateNew, which
+    # refuses an entry already there. Elsewhere GetTempFileName: unelevated the directory is the caller's
+    # own, and an elevated Windows run's TEMP is the elevated token's profile.
+    if (-not $PwshPyRootPath) { return [IO.Path]::GetTempFileName() }
+    $directory = Join-Path (Get-PwshPyAccountCacheHome) 'pwshpy-tmp'
+    Initialize-PwshPyDirectory -Path $directory -Private $true
+    # An existing one too: whatever made it, from here only root can enter it.
+    Invoke-PwshPyChmod -Arguments @('700', '--', $directory)
+    $path = Join-Path $directory ([Guid]::NewGuid().ToString('N'))
+    [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None).Dispose()
+    return $path
 }
 
 function Get-PwshPyGitVersionDistrust {
@@ -678,7 +831,7 @@ function Get-PwshPyGitVersionDistrust {
     # as the .sh: a git printing a warning before its "git version" line names no version here.
     # 'Continue' for the call: with 'Stop', Windows PowerShell 5.1 stops at the first line a native
     # program writes to a redirected stderr.
-    $stderr = [IO.Path]::GetTempFileName()
+    $stderr = Initialize-PwshPyStderrFile
     $saved = $ErrorActionPreference
     $first = ''
     try {
@@ -923,7 +1076,7 @@ function Invoke-PwshPyUvPython {
     # redirected stderr, so the call runs under 'Continue'.
     $words = @('python') + $Arguments + @('--no-config', '--directory', (Get-PwshPyAnchorDirectory))
     if ($PwshPyPythonRequest) { $words += $PwshPyPythonRequest }
-    $stderr = [IO.Path]::GetTempFileName()
+    $stderr = Initialize-PwshPyStderrFile
     $saved = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
@@ -1065,7 +1218,10 @@ function Resolve-PwshPyLinkedPath {
         $target = ([string](@($item.Target)[0])) -replace '^\\\?\?\\', ''
         if ($PSVersionTable.PSEdition -ne 'Core') { $target = $target -replace '^UNC\\', '\\' }
         if (-not $target) { return '' }
-        if (Test-PwshPyAbsolutePath -Path $target) {
+        $kind = Get-PwshPyLinkTargetKind -Target $target -LinkType $linkType
+        # A target no walk can place leaves the path unresolved, as an unreadable link does.
+        if ($kind -eq 'unplaceable') { return '' }
+        if ($kind -eq 'absolute') {
             $target = ConvertFrom-PwshPyDriveLongPath -Path $target.Replace('/', '\')
             $current = [IO.Path]::GetPathRoot($target)
         }
@@ -1094,7 +1250,9 @@ function Get-PwshPyTreeLinkDistrust {
     $target = ([string](@($Link.Target)[0])) -replace '^\\\?\?\\', ''
     if ($PSVersionTable.PSEdition -ne 'Core') { $target = $target -replace '^UNC\\', '\\' }
     if (-not $target) { return "the link $Shown cannot be read" }
-    if (Test-PwshPyAbsolutePath -Path $target) {
+    $kind = Get-PwshPyLinkTargetKind -Target $target -LinkType $linkType
+    if ($kind -eq 'unplaceable') { return (Get-PwshPyUnplaceableReason -Link $Shown -Target $target) }
+    if ($kind -eq 'absolute') {
         $network = Get-PwshPyNetworkDistrust -Path $target
         if ($network) { return "the link $Shown points to ${target}: $network" }
         $resolved = $target
@@ -1236,7 +1394,7 @@ function Assert-PwshPyCacheTrusted {
     if ($PwshPyOnWindows) {
         $remedy = 'set PWSHPY_PACK_CACHE to a directory only this account, SYSTEM and Administrators can modify, or take every other account''s write access off the path named above'
     } else {
-        $remedy = 'set PWSHPY_PACK_CACHE to a directory only root can modify, or make the path named above root''s alone (chown root, chmod go-w)'
+        $remedy = 'set PWSHPY_PACK_CACHE to a directory only root can modify, or make the path named above root''s alone (chown -R root, chmod -R go-w on it)'
     }
     Write-PwshPyFailure "pwshpy: refusing the cache directory ${Path}: $why (an elevated run unpacks and runs the script only from a directory no other account can modify, nor anything below it): $remedy"
     exit 127
@@ -1714,6 +1872,13 @@ $PwshPyPrepare = {
     $script:PwshPyCallerPath = $env:PATH
     $PwshPyRootPath = $PwshPyElevatedRun -and -not $PwshPyOnWindows
     if ($PwshPyRootPath) { $env:PATH = $PwshPyFixedPath }
+    # As root the pack cache's default is below the running account's own cache directory (from the
+    # passwd database, as uv's cache below), never XDG_CACHE_HOME or HOME: sudo -E or env_keep hand those
+    # over from the caller, whose directory the cache check would then refuse ([R3]), and the caller would
+    # choose where root unpacks. PWSHPY_PACK_CACHE stays the caller's to set, and is judged like any other.
+    if ($PwshPyRootPath -and -not $env:PWSHPY_PACK_CACHE) {
+        $PwshPyCacheDir = Join-Path (Join-Path (Get-PwshPyAccountCacheHome) 'pwshpy-pack') $PwshPySha.Substring(0, 16)
+    }
 
     # --- unpack -----------------------------------------------------------------------------
 
@@ -1828,6 +1993,38 @@ $PwshPyPrepare = {
         if ($PwshPyOnWindows) { $PwshPyUvCache = Join-Path $PwshPyUvCache 'cache' }
         Set-Item -LiteralPath 'Env:UV_CACHE_DIR' -Value $PwshPyUvCache
         Write-PwshPyNotice "pwshpy: uv caches in ${PwshPyUvCache}: an elevated run uses the running account's own cache directory"
+        # POSIX: the home too ([159], user decision: own HOME for uv), as the .sh root run. uv and the git
+        # it runs read and write below HOME and the XDG directories (uv's credentials and its netrc, git's
+        # ~/.git-credentials, caches, state), which sudo -E or env_keep hand over from the caller, so as
+        # root they would read the caller's secrets and create files the caller cannot remove. uv and git
+        # get the running account's own: its passwd home (the directory its cache directory is in), its
+        # cache and data directories, <home>/.config, and the defaults below that home for the state
+        # directory, the netrc and uv's credentials; the shim gives the script the caller's back. Windows
+        # is not covered: an elevated token keeps the caller's own profile there.
+        if (-not $PwshPyOnWindows) {
+            $PwshPyCallerNames = New-Object System.Collections.Generic.List[string]
+            foreach ($name in @('HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'NETRC', 'UV_CREDENTIALS_DIR')) {
+                $handOver = "Env:${PwshPyCallerEnv}_$name"
+                if (Test-Path -LiteralPath "Env:$name") {
+                    Set-Item -LiteralPath $handOver -Value ([Environment]::GetEnvironmentVariable($name))
+                } else {
+                    Remove-Item -LiteralPath $handOver -ErrorAction SilentlyContinue
+                }
+                $PwshPyCallerNames.Add($name)
+            }
+            Set-Item -LiteralPath "Env:$PwshPyCallerEnv" -Value ($PwshPyCallerNames -join ' ')
+            foreach ($name in @('XDG_STATE_HOME', 'NETRC', 'UV_CREDENTIALS_DIR')) {
+                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+            }
+            $PwshPyAccountCache = Get-PwshPyAccountCacheHome
+            $PwshPyAccountHome = Split-Path -Parent $PwshPyAccountCache
+            if (-not $PwshPyAccountHome) { $PwshPyAccountHome = '/' }
+            Set-Item -LiteralPath 'Env:HOME' -Value $PwshPyAccountHome
+            Set-Item -LiteralPath 'Env:XDG_CONFIG_HOME' -Value ($PwshPyAccountHome.TrimEnd('/') + '/.config')
+            Set-Item -LiteralPath 'Env:XDG_CACHE_HOME' -Value $PwshPyAccountCache
+            Set-Item -LiteralPath 'Env:XDG_DATA_HOME' -Value $PwshPyDataHome
+            Write-PwshPyNotice "pwshpy: setting HOME=${PwshPyAccountHome}: an elevated run lets uv and git use the running account's own home"
+        }
         # The directory before uv searches it: uv runs every Python it finds there.
         $PwshPyPythonDirWhy = Get-PwshPyPythonDirDistrust -Path $env:UV_PYTHON_INSTALL_DIR
         if ($PwshPyPythonDirWhy) {
@@ -1844,6 +2041,20 @@ $PwshPyPrepare = {
         if ($PwshPyGitSource) {
             $PwshPyUvGit = Get-PwshPyGitOn -Path $script:PwshPyTrustedUvPath
             if ($PwshPyUvGit) {
+                # The directories on uv's PATH were judged, the git file found there was not: one another
+                # account can modify, or a link to one, runs elevated when uv fetches a git source ([157],
+                # user decision: judge the git file). Judged like uv, and before it is run for its version.
+                $PwshPyGitWhy = Get-PwshPyUvDistrust -Path $PwshPyUvGit
+                if ($PwshPyGitWhy) {
+                    $PwshPyGitRemedy = if ($PwshPyOnWindows) { 'take every other account''s write access off the path named above (only the running account, SYSTEM and Administrators may change it), or run the script without elevation' } else { 'make the path named above root''s alone (chown root, then chmod go-w on it), or run the script without elevation' }
+                    Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy (an elevated run lets uv run only a git no other account can modify): $PwshPyGitRemedy"
+                    exit 127
+                }
+                $PwshPyGitWhy = Get-PwshPyGitKindDistrust -Git $PwshPyUvGit
+                if ($PwshPyGitWhy) {
+                    Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy"
+                    exit 127
+                }
                 $PwshPyGitWhy = Get-PwshPyGitVersionDistrust -Git $PwshPyUvGit
                 if ($PwshPyGitWhy) {
                     Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy"

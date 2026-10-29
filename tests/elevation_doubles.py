@@ -7,7 +7,8 @@ for it. Imported by bare module name (``import elevation_doubles``): ``tests/`` 
 Contents:
     * :data:`RUNNING_AS_ROOT` - whether this process is root (the runners then never elevate).
     * :func:`owned_by_another_account` - a file this suite made, owned by an account other than root.
-    * :func:`write_fake_sudo` - write a ``sudo`` double into a directory.
+    * :func:`write_fake_sudo` - write a ``sudo`` double (``-v`` prompts, ``-n`` follows the cached credential).
+    * :func:`second_prompts` - the calls such a double logged as a second password prompt.
     * :func:`link_tools` - a ``PATH`` directory holding only the named tools.
     * :data:`MANAGED_PYTHON_VARIABLES` - the variables that steer where uv's managed Pythons come from.
     * :data:`INTERPRETER_VARIABLES` - the variables an elevated run drops before uv picks a Python.
@@ -74,17 +75,27 @@ def owned_by_another_account(path: Path) -> int:
     return path.lstat().st_uid
 
 
-def write_fake_sudo(bin_dir: Path, *, grant: bool, calls: Path | None = None) -> Path:
-    """Write a ``sudo`` double: ``-v`` grants or refuses, anything else runs as the same user.
+def write_fake_sudo(
+    bin_dir: Path, *, grant: bool, cached: bool = True, per_parent: bool = False, calls: Path | None = None
+) -> Path:
+    """Write a ``sudo`` double into ``bin_dir`` (put it first on PATH); its path.
+
+    It models what the elevate paths rely on ([136]): ``sudo -v`` is the password prompt; ``-n`` never
+    prompts and succeeds only while a credential is cached (``-n -v`` asks, ``-n <cmd>`` runs the command
+    as the same user); a command without ``-n`` would prompt again and is logged ``PROMPT <command>``
+    (see :func:`second_prompts`), then run when ``grant``. Every call is logged first, one line of its
+    arguments, so a test can prove sudo was never called.
 
     Args:
-        bin_dir: Directory to write the double into (put it first on ``PATH``).
-        grant: Whether ``sudo -v`` succeeds (exit 0) or refuses (exit 1).
-        calls: When given, every invocation appends its arguments as one line to this file,
-            so a test can prove sudo was never called.
+        bin_dir: Directory to write the double into.
+        grant: Whether the prompt (``sudo -v``, or a command without ``-n``) succeeds.
+        cached: Whether ``-n`` finds a cached credential; False models ``timestamp_timeout=0``.
+        per_parent: Model ``timestamp_type=ppid``: the credential ``-v`` caches belongs to the parent
+            process of that call, so ``-n`` finds it only when called from the same parent.
+        calls: The call log (default ``<bin_dir>/sudo-calls.txt``).
 
     Returns:
-        The path of the written double.
+        The written double.
 
     Example:
         >>> import tempfile
@@ -92,15 +103,47 @@ def write_fake_sudo(bin_dir: Path, *, grant: bool, calls: Path | None = None) ->
         ...     write_fake_sudo(Path(d), grant=False).name
         'sudo'
     """
-    record = f'printf \'%s\\n\' "$*" >> "{calls}"\n' if calls is not None else ""
+    log = calls if calls is not None else bin_dir / "sudo-calls.txt"
+    owner = bin_dir / "sudo-credential-parent"
+    has_credential = f"[ {int(cached)} = 1 ]"
+    if per_parent:
+        has_credential += f' && [ "$PPID" = "$(cat \'{owner}\' 2>/dev/null)" ]'
+    lines = [
+        "#!/bin/sh",
+        f"printf '%s\\n' \"$*\" >> '{log}'",
+        'if [ "$1" = "-n" ]; then',
+        "    shift",
+        f"    if {has_credential}; then :; else echo 'sudo: a password is required' >&2; exit 1; fi",
+        '    if [ "$1" = "-v" ]; then exit 0; fi',
+        '    exec "$@"',
+        "fi",
+        'if [ "$1" = "-v" ]; then',
+        f"    if [ {int(grant)} != 1 ]; then exit 1; fi",
+        f"    printf '%s' \"$PPID\" > '{owner}'",
+        "    exit 0",
+        "fi",
+        f"printf 'PROMPT %s\\n' \"$*\" >> '{log}'",
+        f"if [ {int(grant)} != 1 ]; then exit 1; fi",
+        'exec "$@"',
+    ]
     script = bin_dir / "sudo"
-    script.write_text(
-        "#!/bin/sh\n" + record + f'if [ "$1" = "-v" ]; then exit {0 if grant else 1}; fi\n' + 'exec "$@"\n',
-        encoding="utf-8",
-        newline="\n",
-    )
+    script.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     script.chmod(0o755)
     return script
+
+
+def second_prompts(calls: Path) -> list[str]:
+    """The calls a :func:`write_fake_sudo` double logged as prompting for a password a second time.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as d:
+        ...     second_prompts(Path(d) / "sudo-calls.txt")
+        []
+    """
+    if not calls.exists():
+        return []
+    return [line for line in calls.read_text(encoding="utf-8").splitlines() if line.startswith("PROMPT ")]
 
 
 def link_tools(bin_dir: Path, names: tuple[str, ...]) -> Path:
@@ -195,6 +238,18 @@ NETWORK_VARIABLES = (
     "UV_NATIVE_TLS",
     "UV_SYSTEM_CERTS",
     "UV_KEYRING_PROVIDER",
+)
+
+#: [159] The home variables a root run replaces for uv and git with the running account's own, in the
+#: runners' order; the shim gives the script the caller's back.
+HOME_VARIABLES = (
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "NETRC",
+    "UV_CREDENTIALS_DIR",
 )
 
 #: [X23 G1] Variables git reads, which an elevated run drops because their name starts with GIT_ (one
@@ -389,8 +444,8 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
 
     After the arguments it records ``env:<NAME>=<value>`` for each of :data:`INTERPRETER_VARIABLES`,
     :data:`LIBRARY_VARIABLES`, :data:`UV_SOURCE_VARIABLES`, :data:`NETWORK_VARIABLES`,
-    ``SSH_ASKPASS``, ``PASSWORD_STORE_DIR``, ``PYTHONNOUSERSITE`` and every variable whose name holds
-    ``GIT_`` or ``GCM_`` it was handed, so a
+    :data:`HOME_VARIABLES`, ``SSH_ASKPASS``, ``PASSWORD_STORE_DIR``, ``PYTHONNOUSERSITE`` and every
+    variable whose name holds ``GIT_`` or ``GCM_`` or starts with ``PWSHPY_PACK_CALLER`` it was handed, so a
     test can read both what a runner passed, dropped and set. A ``uv python ...`` call (an elevated
     run resolving its interpreter) is recorded the same way into ``record`` with ``.python`` appended
     to its name, and ``uv python find`` prints the path of a stand-in ``python`` beside the double, so
@@ -409,6 +464,7 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
             *LIBRARY_VARIABLES,
             *UV_SOURCE_VARIABLES,
             *NETWORK_VARIABLES,
+            *HOME_VARIABLES,
             "SSH_ASKPASS",
             "PASSWORD_STORE_DIR",
             "PYTHONNOUSERSITE",
@@ -417,7 +473,8 @@ def write_recording_uv(directory: Path, record: Path) -> Path:
     # Every name holding GIT_ or GCM_, found by pattern: the runners drop by prefix, so no list can name
     # them all.
     report += "env | sed -n -e 's/^\\([A-Za-z0-9_]*GIT_[A-Za-z0-9_]*=.*\\)$/env:\\1/p' "
-    report += "-e 's/^\\([A-Za-z0-9_]*GCM_[A-Za-z0-9_]*=.*\\)$/env:\\1/p' >> \"$record\"\n"
+    report += "-e 's/^\\([A-Za-z0-9_]*GCM_[A-Za-z0-9_]*=.*\\)$/env:\\1/p' "
+    report += "-e 's/^\\(PWSHPY_PACK_CALLER[A-Za-z0-9_]*=.*\\)$/env:\\1/p' >> \"$record\"\n"
     python = directory / "python"
     python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
     python.chmod(0o755)
@@ -885,6 +942,7 @@ __all__ = [
     "LIBRARY_VARIABLES",
     "LOCAL_WHEEL_DISTRIBUTION",
     "MANAGED_PYTHON_VARIABLES",
+    "HOME_VARIABLES",
     "NETWORK_VARIABLES",
     "NOT_A_GCM_VARIABLE",
     "NOT_A_GIT_VARIABLE",
@@ -907,6 +965,7 @@ __all__ = [
     "managed_python_dir",
     "managed_python_env",
     "owned_by_another_account",
+    "second_prompts",
     "session_uv_cache",
     "plant_library_path",
     "planted_managed_python",

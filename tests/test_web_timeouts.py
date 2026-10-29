@@ -20,8 +20,8 @@ import pytest
 
 from pwshpy.adapters.cli.main import main
 from pwshpy.adapters.native import web as web_mod
-from pwshpy.composition import build_testing
 from pwshpy.adapters.native.web import download_file, invoke_rest_method, invoke_web_request
+from pwshpy.composition import build_testing
 from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
 
 _TIMEOUT = 0.3

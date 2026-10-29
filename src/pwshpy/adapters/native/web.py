@@ -97,7 +97,7 @@ def _http_error_response(
     )
 
 
-def invoke_web_request(
+def invoke_web_request(  # noqa: PLR0913 - mirrors the WebRequester port: Invoke-WebRequest's independent options
     url: str,
     *,
     method: str = "GET",
@@ -140,7 +140,7 @@ def invoke_web_request(
         raise _transport_error(f"web request to {url!r}", exc, timeout) from exc
 
 
-def invoke_rest_method(
+def invoke_rest_method(  # noqa: PLR0913 - mirrors the RestInvoker port: Invoke-RestMethod's independent options
     url: str,
     *,
     method: str = "GET",

@@ -62,7 +62,9 @@ def base_url() -> Iterator[str]:
 
 
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize(("path", "status"), [("/notfound", 404), ("/teapot", 418), ("/boom", 500), ("/empty-error", 503)])
+@pytest.mark.parametrize(
+    ("path", "status"), [("/notfound", 404), ("/teapot", 418), ("/boom", 500), ("/empty-error", 503)]
+)
 def test_invoke_web_request_raises_on_an_http_error_status(base_url: str, path: str, status: int) -> None:
     """A 4xx or 5xx answer raises NativeCallError naming the status, like Invoke-WebRequest."""
     with pytest.raises(NativeCallError) as caught:

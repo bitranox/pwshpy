@@ -26,25 +26,20 @@ Contents:
     * :class:`JsonBytes` - the JSON bytes plus the replaced paths.
     * :func:`json_bytes` - dump a plain value, repairing lone surrogates.
     * :func:`record_json_bytes` - dump one record, repairing lone surrogates.
-    * :class:`Repaired` / :func:`repair_surrogates` - the same repair for output that is not JSON.
+    * :class:`Repaired` / :func:`repair_surrogates` / :func:`repair_record` - the same repair for
+      output that is not JSON.
     * :func:`describe_replacements` / :func:`describe_output_replacements` - the warning text.
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Mapping
 from typing import NamedTuple, cast
 
 import orjson
 
-from ...domain.records import PSRecord
-
-#: Every UTF-16 surrogate code point; as a lone code point in a ``str`` it is an undecodable byte.
-_SURROGATE = re.compile("[" + chr(0xD800) + "-" + chr(0xDFFF) + "]")
-
-#: U+REPLACEMENT CHARACTER, written in place of each surrogate.
-_REPLACEMENT = chr(0xFFFD)
+from ...domain.records import PSRecord, to_dict_keeping_surrogate_keys
+from ...domain.surrogates import has_surrogate, repaired_key_names, replace_surrogates
 
 #: What every warning says after naming the place.
 _WARNING_TAIL = "not valid UTF-8; each undecodable byte written as U+FFFD"
@@ -149,6 +144,11 @@ def repair_surrogates(value: object) -> Repaired:
 def record_json_bytes(record: PSRecord) -> JsonBytes:
     """Dump ``record`` as JSON bytes (``orjson.dumps(record.to_dict())``), writing each lone surrogate as U+FFFD.
 
+    The record is dumped with its surrogate mapping keys kept
+    (:func:`~pwshpy.domain.records.to_dict_keeping_surrogate_keys`), so a repaired key is named in
+    the returned paths like a repaired value; the bytes equal ``orjson.dumps(record.to_dict())``
+    whenever that has nothing to repair in a value.
+
     Args:
         record: The record to serialise.
 
@@ -164,7 +164,27 @@ def record_json_bytes(record: PSRecord) -> JsonBytes:
         >>> result.data == b'{"name":"X","value":"a' + chr(0xFFFD).encode() + b'b"}', result.replaced
         (True, ('value',))
     """
-    return json_bytes(record.to_dict())
+    return json_bytes(to_dict_keeping_surrogate_keys(record))
+
+
+def repair_record(record: PSRecord) -> Repaired:
+    """``record.to_dict()`` with each lone surrogate written as U+FFFD, and the paths that held one.
+
+    The human table's counterpart of :func:`record_json_bytes`: keys and values repaired by the same
+    rule, a repaired key named like a repaired value.
+
+    Args:
+        record: The record to repair.
+
+    Returns:
+        The repaired mapping and the replaced field paths.
+
+    Example:
+        >>> from pwshpy.domain.records import CimInstance
+        >>> repair_record(CimInstance(class_name="c", properties={"k" + chr(0xDCFF): 1})).replaced
+        ('properties.k?',)
+    """
+    return repair_surrogates(to_dict_keeping_surrogate_keys(record))
 
 
 def describe_replacements(record: PSRecord, position: int, fields: tuple[str, ...]) -> str:
@@ -228,21 +248,17 @@ class _Repairer:
         return self._leaf(value, path)
 
     def _mapping(self, mapping: Mapping[object, object], path: str) -> dict[object, object]:
-        # Valid keys are reserved first, so a repaired key never takes a name that was already
-        # someone's, whichever comes first; a repaired key that collides takes the next free suffix.
-        taken = {key for key in mapping if isinstance(key, str) and not _SURROGATE.search(key)}
+        renamed = repaired_key_names(mapping)
         repaired: dict[object, object] = {}
         for key, item in mapping.items():
-            new_key = key
-            if isinstance(key, str) and _SURROGATE.search(key):
-                new_key = _free_name(_SURROGATE.sub(_REPLACEMENT, key), taken)
-                taken.add(new_key)
-                self.paths.append(_join(path, _ascii(new_key)))
+            new_key = renamed.get(key, key)
+            if key in renamed:
+                self.paths.append(_join(path, _ascii(str(new_key))))
             repaired[new_key] = self.value(item, _join(path, _ascii(str(new_key))))
         return repaired
 
     def _text(self, text: str, path: str) -> str:
-        repaired = _SURROGATE.sub(_REPLACEMENT, text)
+        repaired = replace_surrogates(text)
         if repaired != text:
             self.paths.append(path)
         return repaired
@@ -254,17 +270,9 @@ class _Repairer:
         if self._default is None or leaf is None or isinstance(leaf, (bool, int, float)):
             return leaf
         converted = self._default(leaf)
-        if isinstance(converted, str) and _SURROGATE.search(converted):
+        if has_surrogate(converted):
             return self._text(converted, path)
         return leaf
-
-
-def _free_name(name: str, taken: set[str]) -> str:
-    """``name``, or ``name~2``, ``name~3``, ... - the first not in ``taken``."""
-    candidate, suffix = name, 2
-    while candidate in taken:
-        candidate, suffix = f"{name}~{suffix}", suffix + 1
-    return candidate
 
 
 def _ascii(segment: str) -> str:
@@ -287,5 +295,6 @@ __all__ = [
     "describe_replacements",
     "json_bytes",
     "record_json_bytes",
+    "repair_record",
     "repair_surrogates",
 ]

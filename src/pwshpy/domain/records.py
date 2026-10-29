@@ -16,7 +16,6 @@ Contents:
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator, Mapping
 from datetime import datetime
 from typing import Any, cast
@@ -43,6 +42,7 @@ from .enums import (
 )
 from .errors import NativeCallError
 from .scheduling import TaskSettings
+from .surrogates import has_surrogate, repaired_key_names
 
 
 class PSRecord(BaseModel):
@@ -66,12 +66,14 @@ class PSRecord(BaseModel):
         """Return a JSON-serializable mapping of this record's fields.
 
         A mapping key holding a lone surrogate (a byte that was not valid UTF-8, decoded with
-        ``surrogateescape``) is kept as it is, exactly like such a value, so the output layer can
-        write each such byte as U+FFFD and name the field. pydantic-core alone does neither: it
-        rewrote a dict field's own key into three U+FFFD without a word (two keys differing only
-        in their bad bytes then collapsed into one entry), and raised ``UnicodeEncodeError`` for a
-        key deeper in an open bag. Such keys stand in as placeholders while pydantic dumps and are
-        put back afterwards; a record without one is ``model_dump(mode="json")`` unchanged.
+        ``surrogateescape``) is written as one U+FFFD per such byte, a key that then collides with
+        another keeping its entry as ``<key>~2`` (``~3``, ...), so the result always serialises.
+        pydantic-core alone rewrote a dict field's own key into three U+FFFD (two keys differing
+        only in their bad bytes collapsed into one entry) and raised ``UnicodeEncodeError`` for a
+        key deeper in an open bag. A surrogate in a VALUE is kept, for the output layer to repair
+        and name; the output layer names a repaired key too, through
+        :func:`to_dict_keeping_surrogate_keys`. A record without such a key is
+        ``model_dump(mode="json")`` unchanged.
 
         Returns:
             The record's fields in their JSON form (``datetime`` -> ISO text, enum -> its value).
@@ -83,23 +85,54 @@ class PSRecord(BaseModel):
             {'name': 'a'}
             >>> class Bag(PSRecord):
             ...     data: dict[str, Any]
-            >>> Bag(data={"k" + chr(0xDCFF): 1}).to_dict() == {"data": {"k" + chr(0xDCFF): 1}}
+            >>> Bag(data={"k" + chr(0xDCFF): 1}).to_dict() == {"data": {"k" + chr(0xFFFD): 1}}
             True
         """
         if not _holds_surrogate_key(self):
             return self.model_dump(mode="json")
-        mask = _KeyMask(self)
-        masked = cast("PSRecord", mask.mask(self))
-        return cast("dict[str, Any]", mask.unmask(masked.model_dump(mode="json")))
+        return cast("dict[str, Any]", _repair_keys(_dump_keeping_keys(self)))
 
 
-#: Every UTF-16 surrogate code point; as a lone code point in a ``str`` it is an undecodable byte.
-_SURROGATE = re.compile("[" + chr(0xD800) + "-" + chr(0xDFFF) + "]")
+def to_dict_keeping_surrogate_keys(record: PSRecord) -> dict[str, Any]:
+    """``record.to_dict()``, but a mapping key holding a lone surrogate is kept as it is.
+
+    For the output layer, which repairs such a key itself so that it can name the record and field
+    in its warning (the domain prints nothing). A library caller wants :meth:`PSRecord.to_dict`,
+    whose result always serialises. Such keys stand in as placeholders while pydantic dumps and are
+    put back afterwards.
+
+    Args:
+        record: The record to dump.
+
+    Returns:
+        The record's fields in their JSON form, surrogate keys untouched.
+
+    Example:
+        >>> bag = CimInstance(class_name="c", properties={"k" + chr(0xDCFF): 1})
+        >>> to_dict_keeping_surrogate_keys(bag)["properties"] == {"k" + chr(0xDCFF): 1}
+        True
+    """
+    if not _holds_surrogate_key(record):
+        return record.model_dump(mode="json")
+    return _dump_keeping_keys(record)
 
 
-def _has_surrogate(key: object) -> bool:
-    """Whether ``key`` is a string holding a lone surrogate (an ASCII key never does)."""
-    return isinstance(key, str) and not key.isascii() and _SURROGATE.search(key) is not None
+def _dump_keeping_keys(record: PSRecord) -> dict[str, Any]:
+    """``model_dump(mode="json")`` with every surrogate key masked while pydantic dumps, then restored."""
+    mask = _KeyMask(record)
+    masked = cast("PSRecord", mask.mask(record))
+    return cast("dict[str, Any]", mask.unmask(masked.model_dump(mode="json")))
+
+
+def _repair_keys(value: object) -> object:
+    """The dumped ``value`` with every surrogate key renamed by the shared rule (values untouched)."""
+    if isinstance(value, dict):
+        mapping = cast("dict[object, object]", value)
+        renamed = repaired_key_names(mapping)
+        return {renamed.get(key, key): _repair_keys(item) for key, item in mapping.items()}
+    if isinstance(value, list):
+        return [_repair_keys(item) for item in cast("list[object]", value)]
+    return value
 
 
 def _children(value: object) -> Iterator[tuple[object, object]]:
@@ -116,7 +149,7 @@ def _children(value: object) -> Iterator[tuple[object, object]]:
 
 def _holds_surrogate_key(value: object) -> bool:
     """Whether a mapping anywhere in ``value`` (nested records included) has a surrogate key."""
-    return any(_has_surrogate(key) or _holds_surrogate_key(item) for key, item in _children(value))
+    return any(has_surrogate(key) or _holds_surrogate_key(item) for key, item in _children(value))
 
 
 def _string_keys(value: object) -> Iterator[str]:
@@ -162,13 +195,13 @@ class _KeyMask:
         return value
 
     def _stand_in(self, key: object) -> object:
-        if not _has_surrogate(key):
+        if not has_surrogate(key):
             return key
         number = len(self._originals)
         while (placeholder := f"{chr(0)}{number}") in self._taken:
             number += 1
         self._taken.add(placeholder)
-        self._originals[placeholder] = cast("str", key)
+        self._originals[placeholder] = key
         return placeholder
 
     def _original(self, key: object) -> object:
@@ -1059,4 +1092,5 @@ __all__ = [
     "WebResponse",
     "WindowsImage",
     "WindowsUpdate",
+    "to_dict_keeping_surrogate_keys",
 ]

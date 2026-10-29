@@ -84,8 +84,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   like such a value: one U+FFFD per undecodable byte, with the `warning:` line naming the record and
   field. A key nested inside the bag made `--json` / `--jsonl` and `ps.write_records` fail with
   `UnicodeEncodeError`, and a key of the bag itself was silently rewritten into three U+FFFD, so two
-  keys differing only in their bad bytes collapsed into one entry. `PSRecord.to_dict()` now keeps such
-  a key as it is, exactly as it keeps such a value; a record without one dumps as before.
+  keys differing only in their bad bytes collapsed into one entry. `PSRecord.to_dict()` now writes
+  such a key the same way (one U+FFFD per byte, a colliding key kept as `<key>~2`), so
+  `orjson.dumps(record.to_dict())` never fails over a key; a surrogate in a value is still left for
+  the output layer to repair and name. A record without such a key dumps as before.
 - The human table writes a byte that is not valid UTF-8 as U+FFFD, like `--json` / `--jsonl`, with
   the same `warning: <Record> record N, field <path>: ...` line on stderr. `pwshpy env > file` with
   such a value wrote the raw byte, so the file was not valid UTF-8 and disagreed with the JSON.

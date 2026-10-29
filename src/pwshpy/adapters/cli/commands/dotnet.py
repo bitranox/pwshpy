@@ -19,7 +19,7 @@ from typing import Any
 
 import rich_click as click
 
-from ....domain.records import PSInvocationResult
+from ....domain.records import PSInvocationResult, to_dict_keeping_surrogate_keys
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..output import emit, emit_json
@@ -55,7 +55,8 @@ def cli_cmdlet(ctx: click.Context, name: str, params: tuple[str, ...], timeout: 
     Values are bound as strings (PowerShell coerces most); for typed/switch parameters use ``run``.
     """
     result = get_cli_context(ctx).services.ps.cmdlet(name, timeout=timeout, **parse_pairs(params, "=", "KEY=VALUE"))
-    emit_json(result.to_dict() if streams else result.output)
+    # Keys kept as they are, so emit_json repairs and names a bad key like a bad value.
+    emit_json(to_dict_keeping_surrogate_keys(result) if streams else result.output)
 
 
 @click.command("get_command", context_settings=CLICK_CONTEXT_SETTINGS)
@@ -83,7 +84,8 @@ def _cmdlet_wrapper_options(command: Callable[..., None]) -> Callable[..., Any]:
 
 def _emit_cmdlet(result: PSInvocationResult, *, streams: bool) -> None:
     """Emit a cmdlet result as JSON: all six streams with ``--streams``, else just the output."""
-    emit_json(result.to_dict() if streams else result.output)
+    # Keys kept as they are, so emit_json repairs and names a bad key like a bad value.
+    emit_json(to_dict_keeping_surrogate_keys(result) if streams else result.output)
 
 
 @click.command("get_ad_user", context_settings=CLICK_CONTEXT_SETTINGS)

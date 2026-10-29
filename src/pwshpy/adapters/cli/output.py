@@ -67,7 +67,7 @@ from ..native.record_json import (
     describe_replacements,
     json_bytes,
     record_json_bytes,
-    repair_surrogates,
+    repair_record,
 )
 
 #: Windows error codes for a downstream reader closing the pipe: ERROR_BROKEN_PIPE (109)
@@ -272,7 +272,7 @@ def _table_row(record: PSRecord, position: int) -> dict[str, Any]:
         >>> _table_row(task, 1)["settings"]
         'allow_hard_terminate=False'
     """
-    repaired = repair_surrogates(record.to_dict())
+    repaired = repair_record(record)
     if repaired.replaced:
         emit_text(f"warning: {describe_replacements(record, position, repaired.replaced)}\n", err=True)
     row = cast("dict[str, Any]", repaired.value)

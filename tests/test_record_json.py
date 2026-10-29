@@ -25,7 +25,14 @@ from pwshpy.adapters.native.record_json import (
     record_json_bytes,
 )
 from pwshpy.domain.enums import ProcessStatus
-from pwshpy.domain.records import CimInstance, EnvVar, PSInvocationResult, PSObjectRecord, PSRecord
+from pwshpy.domain.records import (
+    CimInstance,
+    EnvVar,
+    PSInvocationResult,
+    PSObjectRecord,
+    PSRecord,
+    to_dict_keeping_surrogate_keys,
+)
 
 #: The code point os.environ / os.fsdecode hold for the undecodable byte 0xFF.
 _BAD = chr(0xDCFF)
@@ -129,10 +136,10 @@ def test_a_surrogate_in_a_dict_fields_own_key_is_one_fffd_per_byte_and_named() -
     """A dict field's own key: one U+FFFD per byte and a warning path, never three U+FFFD silently.
 
     pydantic-core alone rewrites such a key into three U+FFFD (the surrogate's UTF-8 bytes) and
-    reports nothing; to_dict keeps the key as it is, like a value, so the repair here names it.
+    reports nothing; the output layer dumps with the key kept, so the repair here names it.
     """
     record = CimInstance(class_name="c", properties={"k" + _BAD: "v"})
-    assert record.to_dict()["properties"] == {"k" + _BAD: "v"}
+    assert to_dict_keeping_surrogate_keys(record)["properties"] == {"k" + _BAD: "v"}
     result = record_json_bytes(record)
     assert json.loads(result.data)["properties"] == {"k" + _FFFD: "v"}
     assert result.replaced == ("properties.k?",)
@@ -176,7 +183,8 @@ def test_to_dict_keeps_the_json_form_of_values_beside_a_surrogate_key() -> None:
     clean = CimInstance(class_name="c", properties={"k": {"t": when, "s": ProcessStatus.RUNNING}, "x": when})
     dumped = clean.to_dict()["properties"]
     assert dumped == {"k": {"t": "2026-10-29T12:00:00Z", "s": "running"}, "x": "2026-10-29T12:00:00Z"}
-    assert record.to_dict()["properties"] == {"k" + _BAD: dumped["k"], "x": dumped["x"]}
+    assert to_dict_keeping_surrogate_keys(record)["properties"] == {"k" + _BAD: dumped["k"], "x": dumped["x"]}
+    assert record.to_dict()["properties"] == {"k" + _FFFD: dumped["k"], "x": dumped["x"]}
 
 
 @pytest.mark.os_agnostic
@@ -184,7 +192,7 @@ def test_a_real_key_that_looks_like_an_internal_placeholder_is_kept() -> None:
     """Whatever stands in for a surrogate key while pydantic dumps must never capture a real key."""
     bag = {chr(0) + str(n): n for n in range(4)} | {"k" + _BAD: "v"}
     record = CimInstance(class_name="c", properties=bag)
-    assert record.to_dict()["properties"] == bag
+    assert to_dict_keeping_surrogate_keys(record)["properties"] == bag
 
 
 @pytest.mark.os_agnostic

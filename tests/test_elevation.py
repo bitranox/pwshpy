@@ -216,6 +216,31 @@ def test_no_sudo_on_path_is_a_failure_that_names_sudo(tmp_path: Path, monkeypatc
 
 @pytest.mark.os_posix
 @pytest.mark.skipif(sys.platform == "win32", reason="the sudo double is a POSIX sh script")
+def test_every_sudo_call_runs_the_one_sudo_found_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The probe, ``-v``, ``-n -v`` and the relaunch all run ONE sudo: the one this process's PATH
+    lookup finds, by its absolute path. With a relative PATH entry and a child cwd holding another
+    sudo under the same relative name, a lookup made per call in the child's cwd ran that other one."""
+    found = _sudo_on_path(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    (work / "bin").mkdir(parents=True)
+    other = work / "other-sudo.log"
+    write_fake_sudo(work / "bin", grant=True, calls=other)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", f"bin{os.pathsep}{os.environ['PATH'].split(os.pathsep, 1)[1]}")
+
+    assert _sudo_relaunch()(sys.executable, _exits_with(7), str(work), wait=True) == 7
+
+    assert not other.exists(), other.read_text(encoding="utf-8")
+    assert found.read_text(encoding="utf-8").splitlines() == [
+        _PROBE,
+        "-v",
+        "-n -v",
+        f"-n {sys.executable} {' '.join(_exits_with(7))}",
+    ]
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the sudo double is a POSIX sh script")
 @pytest.mark.parametrize(
     "nopasswd", ["ALL", "relaunch", "/bin/true"], ids=["nopasswd-all", "nopasswd-the-relaunch", "nopasswd-another"]
 )

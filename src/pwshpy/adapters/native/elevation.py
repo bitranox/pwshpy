@@ -23,6 +23,7 @@ Contents:
 
 from __future__ import annotations
 
+import errno
 import importlib
 import os
 import shutil
@@ -135,10 +136,11 @@ def _sudo_relaunch(executable: str, argv: Sequence[str], cwd: str, *, wait: bool
             sudo that cached no credential for the command to run on.
         NativeCallError: sudo could not be started at all.
     """
-    command = ["sudo", "-n", executable, *argv]
     try:
-        if not _sudo_runs_without_a_password(executable, cwd):
-            _ask_sudo_for_root(cwd)
+        sudo = _find_sudo()
+        command = [sudo, "-n", executable, *argv]
+        if not _sudo_runs_without_a_password(sudo, executable, cwd):
+            _ask_sudo_for_root(sudo, cwd)
         if wait:
             completed = subprocess.run(command, cwd=cwd, check=False)  # noqa: S603  # nosec B603 - fixed argv, no shell
             return completed.returncode
@@ -148,13 +150,29 @@ def _sudo_relaunch(executable: str, argv: Sequence[str], cwd: str, *, wait: bool
     return None
 
 
+def _find_sudo() -> str:
+    """The absolute path of the ``sudo`` this process's PATH finds, for every sudo call of one relaunch.
+
+    Looked up once, here, rather than per call: a relative PATH entry is resolved against the cwd of
+    the process doing the lookup, so a per-call lookup in the child's ``cwd`` could run another sudo
+    than the probe did.
+
+    Raises:
+        FileNotFoundError: No ``sudo`` on PATH (the caller reports it as a failed relaunch).
+    """
+    found = shutil.which("sudo")
+    if found is None:
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), "sudo")
+    return str(Path(found).absolute())
+
+
 #: What the probe runs the relaunch's interpreter with: Python started to do nothing.
 _PROBE_ARGS = ("-c", "pass")
 #: How long the probe may take; ``sudo -n`` never waits for a person.
 _PROBE_TIMEOUT_SECONDS = 60
 
 
-def _sudo_runs_without_a_password(executable: str, cwd: str) -> bool:
+def _sudo_runs_without_a_password(sudo: str, executable: str, cwd: str) -> bool:
     """Whether ``sudo -n`` runs the relaunch's own program without asking for a password ([280]).
 
     Under sudo's default ``verifypw=all``, ``sudo -v`` wants a password unless EVERY sudoers rule of
@@ -166,10 +184,6 @@ def _sudo_runs_without_a_password(executable: str, cwd: str) -> bool:
     ``sudo -v`` flow decides as before. Silent: its output and refusal are not the user's business.
     """
     if executable != sys.executable or bool(getattr(sys, "frozen", False)):
-        return False
-    # The sudo the relaunch's PATH lookup finds, by its path; none is reported by the flow below.
-    sudo = shutil.which("sudo")
-    if sudo is None:
         return False
     try:
         probe = subprocess.run(  # noqa: S603  # nosec B603 - fixed argv, no shell
@@ -187,7 +201,7 @@ def _sudo_runs_without_a_password(executable: str, cwd: str) -> bool:
     return probe.returncode == 0
 
 
-def _ask_sudo_for_root(cwd: str) -> None:
+def _ask_sudo_for_root(sudo: str, cwd: str) -> None:
     """Ask for the password with ``sudo -v``, and raise unless sudo granted root.
 
     A Ctrl+C at the prompt is a refusal too: a password prompt has no "No", so
@@ -196,14 +210,14 @@ def _ask_sudo_for_root(cwd: str) -> None:
     step converts it; a Ctrl+C once the command runs interrupts as usual.
     """
     try:
-        granted = subprocess.run(["sudo", "-v"], cwd=cwd, check=False).returncode == 0  # noqa: S607  # nosec B603 B607 - fixed argv, no shell; sudo resolved from PATH like the relaunch
+        granted = subprocess.run([sudo, "-v"], cwd=cwd, check=False).returncode == 0  # noqa: S603  # nosec B603 - fixed argv, no shell
     except KeyboardInterrupt as exc:
         raise native_error("The sudo password prompt was interrupted.", exc, kind=ElevationDeclinedError) from exc
     if not granted:
         raise ElevationDeclinedError("sudo did not grant root (refused, a wrong password, or not allowed).")
     # `-n -v` re-validates without prompting: it fails when `-v` cached nothing. `-n true` would
     # also fail for a user whose sudoers rule allows only the command itself, not `true`.
-    cached = subprocess.run(["sudo", "-n", "-v"], cwd=cwd, check=False).returncode == 0  # noqa: S607  # nosec B603 B607 - fixed argv, no shell; sudo resolved from PATH like the relaunch
+    cached = subprocess.run([sudo, "-n", "-v"], cwd=cwd, check=False).returncode == 0  # noqa: S603  # nosec B603 - fixed argv, no shell
     if not cached:
         raise ElevationDeclinedError(
             "sudo granted root but cached no credential (sudoers timestamp_timeout=0?), so the command "

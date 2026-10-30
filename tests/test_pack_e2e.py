@@ -567,6 +567,7 @@ def test_elevate_switch_runs_the_script_as_root(tmp_path: Path) -> None:
     output stream, so relaying the child's exit code through a return value silently
     swallowed the child's stdout and reported success for every run.
     """
+    _needs_managed_python()  # _run forbids downloads, so the script needs a managed Python installed
     entry = tmp_path / "who.py"
     entry.write_text('import os\nimport sys\n\nprint("euid:%d" % os.geteuid())\nsys.exit(9)\n')
     manifest = pack_script(entry)

@@ -16,17 +16,20 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   Every command that binds a log context does so through one helper that reads the name off the
   click context; `config`, `config-deploy` and `config-generate-examples` keep their extra log
   fields.
-- A refusal systemd sends over D-Bus (`org.freedesktop.DBus.Error.AccessDenied`, or
-  `org.freedesktop.DBus.Error.InteractiveAuthorizationRequired`, which a non-root caller gets where
-  polkit is installed) raises `NativeAccessDeniedError` and the `pwshpy` CLI exits 13, as for every
-  other refused native call: `pwshpy stop_service sshd.service` as non-root exited 1 with a plain
-  `NativeCallError` before. Any other D-Bus error reply stays a plain `NativeCallError`, whose
-  message now names the D-Bus error.
+- A refusal systemd or the Secret Service (the Linux credential vault) sends over D-Bus
+  (`org.freedesktop.DBus.Error.AccessDenied`, or
+  `org.freedesktop.DBus.Error.InteractiveAuthorizationRequired`, which a non-root caller gets from
+  systemd where polkit is installed) raises `NativeAccessDeniedError` and the `pwshpy` CLI exits 13,
+  as for every other refused native call: `pwshpy stop_service sshd.service` as non-root exited 1
+  with a plain `NativeCallError` before, as did a credential call the Secret Service refused. Any
+  other D-Bus error reply from either stays a plain `NativeCallError`, whose message now names the
+  D-Bus error.
 - Linux services and scheduled tasks: a D-Bus read systemd refuses is reported (skipped with a
   warning in a listing, raised under `strict=True`) instead of reading as a stopped, disabled or
-  missing unit. A start, stop, restart, set_startup, enable or disable whose wait or read-back read
-  systemd refuses raises `NativeAccessDeniedError`; enabling a timer whose monotonic timers systemd
-  refuses to read raises before anything is enabled.
+  missing unit. `start_service`, `stop_service`, `restart_service`, `set_service`,
+  `register_scheduled_task`, `enable_scheduled_task` and `disable_scheduled_task` raise
+  `NativeAccessDeniedError` when systemd refuses a read of their wait or read-back; enabling a timer
+  whose monotonic timers systemd refuses to read raises before anything is enabled.
 - `get_content`, `get_content_lines`, `write_text`, `write_text_stream` and `write_records` raise
   `NativeCallError` (a `NativeAccessDeniedError` for a refusal) for an unknown encoding, text that
   is not valid in the encoding, and a file that cannot be read or written, as every other pwshpy
@@ -78,8 +81,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `env_reset` off; `PSModulePath` is root pwsh's own default. With no home
   for root or no `/bin/sh`, the run stops with exit code 70 (`pwshpy: cannot elevate: ...`) before
   sudo is asked anything.
-- An elevated or root pack run also ignores `UV_GIT_LFS`, as it ignores `UV_KEYRING_PROVIDER`; the
-  line it prints for either now ends `no keyring, no git-lfs`.
+- An elevated or root pack run also ignores `UV_GIT_LFS`, with which uv runs git-lfs for a git
+  source, as it ignores `UV_KEYRING_PROVIDER`. The line it prints for every connection variable it
+  drops (`HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` in either case, `SSL_CERT_FILE`,
+  `SSL_CERT_DIR`, `SSL_CLIENT_CERT`, `UV_NATIVE_TLS`, `UV_SYSTEM_CERTS`, `UV_KEYRING_PROVIDER` and
+  `UV_GIT_LFS`) now ends `no keyring, no git-lfs`.
 - `get_scheduled_task("\\Microsoft\\Windows\\Defrag\\")` lists the folder on Windows: a folder path
   ending in a backslash, the form every record's `task_path` carries, raised `NativeCallError`
   0x8007007B because the Task Scheduler refuses it. The listing strips the trailing backslash, as
@@ -262,8 +268,6 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `timestamp_type=ppid` the relaunch found no cached credential and exited 1.
 - Packed `.sh` runner, as root: a relative managed-Python directory is refused (`is not an absolute
   path`, exit code 127) instead of looping forever while the runner walks up its parents.
-- A Secret Service (credential vault) D-Bus refusal on Linux raises `NativeAccessDeniedError` (exit
-  13), not a plain `NativeCallError`.
 
 ## [1.11.0] - 2026-10-29
 

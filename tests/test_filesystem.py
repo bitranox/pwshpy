@@ -230,6 +230,22 @@ def test_a_symlink_loop_is_absent_without_a_warning(tmp_path: Path, caplog: pyte
     assert not isinstance(caught.value, NativeAccessDeniedError)
 
 
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="ENAMETOOLONG for one over-long component is a POSIX error")
+def test_an_error_that_is_neither_absent_nor_denied_is_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ENAMETOOLONG is outside pathlib's not-found set and is no refusal: a warning, then a typed error."""
+    overlong = str(tmp_path / ("x" * 300))
+    fs = NativeFileSystem()
+    with caplog.at_level("WARNING", logger="pwshpy.adapters.native.filesystem"):
+        assert fs.test_path(overlong) is False
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
+    with pytest.raises(NativeCallError, match=r"^cannot read ") as caught:
+        fs.get_item(overlong)
+    assert not isinstance(caught.value, NativeAccessDeniedError)
+
+
 @pytest.mark.os_windows
 @pytest.mark.skipif(sys.platform != "win32", reason="ERROR_INVALID_NAME is a Windows error")
 def test_a_wildcard_path_on_windows_is_absent_without_a_warning(

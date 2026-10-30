@@ -214,6 +214,41 @@ def test_get_item_below_a_file_is_path_not_found(tmp_path: Path) -> None:
     assert not isinstance(caught.value, NativeAccessDeniedError)
 
 
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="a symlink loop needs POSIX symlinks")
+def test_a_symlink_loop_is_absent_without_a_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """ELOOP is in pathlib's not-found set: get_item says "path not found", test_path False, no warning."""
+    loop = tmp_path / "a"
+    loop.symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(loop)
+    fs = NativeFileSystem()
+    with caplog.at_level("WARNING", logger="pwshpy.adapters.native.filesystem"):
+        assert fs.test_path(str(loop)) is False
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+    with pytest.raises(NativeCallError, match=r"^path not found: ") as caught:
+        fs.get_item(str(loop))
+    assert not isinstance(caught.value, NativeAccessDeniedError)
+
+
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="ERROR_INVALID_NAME is a Windows error")
+def test_a_wildcard_path_on_windows_is_absent_without_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A wildcard fails stat with winerror 123 (ERROR_INVALID_NAME), in pathlib's not-found set: no warning.
+
+    The directory must exist: below a missing one Windows answers winerror 3 (ENOENT) first.
+    """
+    wildcard = str(tmp_path / "*.log")
+    fs = NativeFileSystem()
+    with caplog.at_level("WARNING", logger="pwshpy.adapters.native.filesystem"):
+        assert fs.test_path(wildcard) is False
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+    with pytest.raises(NativeCallError, match=r"^path not found: ") as caught:
+        fs.get_item(wildcard)
+    assert not isinstance(caught.value, NativeAccessDeniedError)
+
+
 @pytest.mark.os_agnostic
 def test_a_nul_in_the_path_keeps_its_answer(tmp_path: Path) -> None:
     """A NUL keeps the answer it had: test_path says False, get_item says "path not found"."""

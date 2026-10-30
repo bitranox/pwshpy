@@ -15,6 +15,7 @@ Contents:
 
 from __future__ import annotations
 
+import errno
 import logging
 import shutil
 from collections.abc import Iterator
@@ -28,20 +29,41 @@ from .marshal import native_error
 
 logger = logging.getLogger(__name__)
 
+#: The errors that mean "absent", copied from pathlib's own ignore set (``_IGNORED_ERRNOS`` /
+#: ``_IGNORED_WINERRORS`` behind ``Path.exists()`` on 3.10-3.13): no such entry, a component that
+#: is a file, a bad descriptor, a symlink loop; on Windows a drive not ready (21), an invalid name
+#: such as a wildcard (123) and an unresolvable link (1921).  Anything else, a refusal above all,
+#: is not an answer about existence.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+_ABSENT_WINERRORS = frozenset({21, 123, 1921})
+
+
+def _is_absent(exc: OSError) -> bool:
+    """Whether ``exc`` is one of pathlib's "the path does not exist" errors.
+
+    ``winerror`` is read with getattr because only Windows' OSError carries it.
+
+    Example:
+        >>> _is_absent(FileNotFoundError(errno.ENOENT, "gone")), _is_absent(PermissionError(errno.EACCES, "no"))
+        (True, False)
+    """
+    return exc.errno in _ABSENT_ERRNOS or getattr(exc, "winerror", None) in _ABSENT_WINERRORS
+
 
 def _exists(target: Path) -> bool:
     """Whether ``target`` exists; a refusal raises, typed, on every Python.
 
     Not ``Path.exists()``: on 3.10-3.13 it lets a raw ``PermissionError`` out, and on 3.14 it
-    answers False for it, so a denied path would read as missing.
+    answers False for every OSError, so a denied path would read as missing. Only pathlib's own
+    not-found set (:data:`_ABSENT_ERRNOS`, :data:`_ABSENT_WINERRORS`) answers False here.
     """
     try:
         target.stat()
-    except (FileNotFoundError, NotADirectoryError):
-        return False  # ENOTDIR: a component is a file, so the path can never exist
     except ValueError:
         return False  # a NUL in the path: Path.exists() answered False here, keep that answer
     except OSError as exc:
+        if _is_absent(exc):
+            return False
         raise native_error(f"cannot read {str(target)!r}: {exc}", exc) from exc
     return True
 
@@ -131,8 +153,9 @@ class NativeFileSystem:
         """Return whether ``path`` exists (like Test-Path).
 
         A path the caller may not read answers False, as Test-Path does, and logs one WARNING
-        naming the path, where Test-Path writes a non-terminating error. A path that plainly does
-        not exist answers False without a warning.
+        naming the path, where Test-Path writes a non-terminating error. A path that cannot exist
+        (pathlib's not-found set: no such entry, a file as a component, a symlink loop, a Windows
+        invalid name such as a wildcard) answers False without a warning.
         """
         try:
             return _exists(Path(path))

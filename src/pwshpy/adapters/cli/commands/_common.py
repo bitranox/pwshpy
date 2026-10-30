@@ -46,8 +46,8 @@ def bind_command(
 
     Example:
         >>> ctx = click.Context(click.Command("get_volume"))
-        >>> bind_command(ctx).__class__.__name__
-        '_GeneratorContextManager'
+        >>> isinstance(bind_command(ctx), AbstractContextManager)
+        True
     """
     name = ctx.command.name or ctx.info_name or "pwshpy"
     return lib_log_rich.runtime.bind(job_id=f"cli-{name}", extra={**(extra or {}), "command": name})

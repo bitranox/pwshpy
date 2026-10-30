@@ -17,11 +17,6 @@ Contents:
     * :func:`has_pending_job` - whether a unit still has a job queued or running.
     * :func:`unit_path` / :func:`path_property` - resolve a unit's object path once, then read
       several properties from it (one ``GetUnit`` instead of one per property).
-
-    A read systemd refuses (``AccessDenied`` / ``InteractiveAuthorizationRequired``) raises
-    :class:`~pwshpy.domain.errors.NativeAccessDeniedError` from every lookup and read here, never
-    the "not loaded", "no unit file" or default answer the helpers give for a unit or property that
-    is genuinely absent: a refusal says nothing about the unit.
     * :func:`load_unit_path` - the same, but ``LoadUnit`` loads an unloaded unit from its file
       (None for a name with no unit file, which systemd answers as a ``not-found`` object).
     * :func:`load_unit` - :func:`load_unit_path` that raises when the ``LoadUnit`` call or the
@@ -35,6 +30,11 @@ Contents:
     * :func:`is_unlisted_unit` - the one skip rule for a ``ListUnits`` entry: not-found or masked,
       and not running.
     * :func:`list_units` - the ``ListUnits`` reply parsed once into :class:`ListedUnit` entries.
+
+A read systemd refuses (``AccessDenied`` / ``InteractiveAuthorizationRequired``) raises
+:class:`~pwshpy.domain.errors.NativeAccessDeniedError` from every lookup and read here, never
+the "not loaded", "no unit file" or default answer the helpers give for a unit or property that
+is genuinely absent: a refusal says nothing about the unit.
 """
 
 from __future__ import annotations

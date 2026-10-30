@@ -68,6 +68,8 @@ def _run_driver(source: str, pool_size: str) -> str:
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
         check=False,
     )

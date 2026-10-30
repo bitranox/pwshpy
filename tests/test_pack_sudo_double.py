@@ -56,7 +56,13 @@ def test_an_interrupted_prompt_signals_the_caller_and_grants_nothing(tmp_path: P
     sudo = write_fake_sudo(tmp_path, grant=True, per_parent=True, interrupt_prompt=interrupt)
     script = f"trap 'echo INT; exit 7' INT; '{sudo}' -v; echo \"v=$?\"; '{sudo}' -n true; echo \"n=$?\""
     result = subprocess.run(  # noqa: S603 - fixed argv, the double
-        ["/bin/sh", "-c", script], capture_output=True, text=True, check=False, timeout=30
+        ["/bin/sh", "-c", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=30,
     )
     if interrupt:
         assert (result.returncode, result.stdout) == (7, "INT\n"), result.stderr
@@ -123,7 +129,13 @@ def test_the_double_models_env_reset_and_env_keep(
     )
     caller = {"PATH": "/usr/bin:/bin", "HOME": "caller-home", "KEPT": "k", "DROPPED": "d"}
     seen = subprocess.run(  # noqa: S603 - the double
-        [str(sudo), "-n", "/usr/bin/env"], capture_output=True, text=True, check=True, env=caller
+        [str(sudo), "-n", "/usr/bin/env"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+        env=caller,
     ).stdout.splitlines()
     variables = dict(line.split("=", 1) for line in seen)
     assert {name: variables.get(name) for name in expected} == expected, variables

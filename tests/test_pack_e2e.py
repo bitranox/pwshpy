@@ -445,8 +445,24 @@ def test_concurrent_cold_starts_do_not_race(tmp_path: Path) -> None:
     }
     assert _PWSH is not None
     argv = [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), _NEVER_INSTALL_UV, "concurrent"]
-    first = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
-    second = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
+    first = subprocess.Popen(  # noqa: S603 - the test's own runner argv
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+    )
+    second = subprocess.Popen(  # noqa: S603 - the test's own runner argv
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+    )
     out_a, err_a = first.communicate(timeout=300)
     out_b, err_b = second.communicate(timeout=300)
     assert first.returncode == 0, err_a
@@ -535,6 +551,8 @@ def test_no_install_uv_fails_cleanly_when_uv_is_absent(tmp_path: Path) -> None:
         [str(_PWSH), "-NoProfile", "-NonInteractive", "-File", str(manifest.output_path), "-PwshPyNoInstallUv"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
         check=False,
         # An empty PATH is not enough: the runner also probes the well-known per-user install
@@ -982,6 +1000,8 @@ def test_the_relaunch_stub_records_what_sudo_passed_and_points_pwsh_at_the_home(
         [*shell.split(" ", 1), "-c", stub, _STUB_NAME, target_home, "/usr/bin/env"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
         env=sudo_env,
     )

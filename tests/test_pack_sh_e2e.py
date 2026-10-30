@@ -278,8 +278,24 @@ def test_concurrent_cold_starts_do_not_race(tmp_path: Path) -> None:
     runner = _pack_sh(_project(tmp_path), tmp_path / "app.sh")
     environment = _env(tmp_path)
     argv = ["sh", str(runner), "concurrent"]
-    first = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
-    second = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
+    first = subprocess.Popen(  # noqa: S603 - the test's own runner argv
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+    )
+    second = subprocess.Popen(  # noqa: S603 - the test's own runner argv
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+    )
     out_a, err_a = first.communicate(timeout=300)
     out_b, err_b = second.communicate(timeout=300)
     assert first.returncode == 0, err_a
@@ -317,8 +333,24 @@ def test_concurrent_cold_starts_extract_once_when_mkdir_is_not_exclusive(tmp_pat
     environment = _env(tmp_path)
     environment["PATH"] = os.pathsep.join([str(_shadow_tools(tmp_path, counter)), environment["PATH"]])
     argv = ["sh", str(runner)]
-    first = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
-    second = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)  # noqa: S603
+    first = subprocess.Popen(  # noqa: S603 - the test's own runner argv
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+    )
+    second = subprocess.Popen(  # noqa: S603 - the test's own runner argv
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+    )
     _, err_a = first.communicate(timeout=300)
     _, err_b = second.communicate(timeout=300)
 
@@ -385,6 +417,8 @@ def test_no_install_uv_fails_cleanly_when_uv_absent(tmp_path: Path) -> None:
         [sh_bin, str(runner), "--pwshpy-no-install-uv"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
         check=False,
         env={
@@ -602,6 +636,8 @@ def test_elevate_forwards_the_no_install_uv_switch(tmp_path: Path) -> None:
         [sh_bin, str(runner), "--pwshpy-elevate", "--pwshpy-no-install-uv"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
         check=False,
         env={

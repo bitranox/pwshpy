@@ -56,6 +56,8 @@ def _run_ps_json(script: str) -> object:
         [_pwsh_exe(), "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
     return json.loads(completed.stdout)

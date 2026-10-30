@@ -225,7 +225,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - Packed `.sh` runner, as root: a relative managed-Python directory is refused (`is not an absolute
   path`, exit code 127) instead of looping forever while the runner walks up its parents.
 
-## [1.11.0] 2026-10-29 00:00:55
+## [1.11.0] - 2026-10-29
 
 ### Added
 
@@ -263,7 +263,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - A failed Windows Update search keeps its HRESULT across the worker process: the error raised in
   the caller has `.hresult` set, and an `E_ACCESSDENIED` search raises `NativeAccessDeniedError`.
 
-## [1.10.0] 2026-10-27 08:35:45
+## [1.10.0] - 2026-10-27
 
 ### Fixed
 
@@ -317,7 +317,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   scheduled-task tests take the task name from one constant, and every `ValidationError` test in
   `test_scheduling_domain.py` names the expected error.
 
-## [1.9.0] 2026-10-26 22:23:51
+## [1.9.0] - 2026-10-26
 
 ### Added
 
@@ -380,7 +380,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   shim (pwsh 7 keeps it). An unelevated run is unchanged.
 
 
-## [1.8.1] 2026-10-26 13:51:55
+## [1.8.1] - 2026-10-26
 
 Never tagged or published to PyPI; these changes first ship in 1.9.0.
 
@@ -437,7 +437,7 @@ Never tagged or published to PyPI; these changes first ship in 1.9.0.
   `Stop` ends the whole process tree. It adds a parse check to run before shipping a `.ps1` and the
   `"$t: done"` parse trap.
 
-## [1.8.0] 2026-10-26 09:42:09
+## [1.8.0] - 2026-10-26
 
 ### Added
 
@@ -461,7 +461,7 @@ Never tagged or published to PyPI; these changes first ship in 1.9.0.
   the effective values back on both systems. With `allow_demand_start=False`,
   `start_scheduled_task` raises `NativeCallError` and only the triggers start the task.
 
-## [1.7.0] 2026-10-24 23:57:13
+## [1.7.0] - 2026-10-24
 
 ### Added
 
@@ -550,7 +550,7 @@ Never tagged or published to PyPI; these changes first ship in 1.9.0.
 - The packer's `requires-python` scan of a PEP 723 block skips the contents of TOML multi-line
   strings, so a `[` line inside one no longer ends the scan early.
 
-## [1.6.0] 2026-10-23 12:21:55
+## [1.6.0] - 2026-10-23
 
 ### Added
 
@@ -658,7 +658,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
 - A git older than 2.32 ignores `GIT_CONFIG_GLOBAL` and still reads the global config in an elevated
   run.
 
-## [1.5.2] 2026-10-19 14:48:04
+## [1.5.2] - 2026-10-19
 
 ### Fixed
 
@@ -666,7 +666,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
   comment, which gitignore reads as part of the pattern, so they ignored nothing. Each comment now has
   its own line and the patterns apply.
 
-## [1.5.1] 2026-10-18 22:49:59
+## [1.5.1] - 2026-10-18
 
 ### Documentation
 
@@ -676,7 +676,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
   stderr as error records under `Stop`, `pwsh -File` splitting `--out=C:\data` at the colon, and an
   unguarded read probe before a lock.
 
-## [1.5.0] 2026-10-18 11:40:29
+## [1.5.0] - 2026-10-18
 
 ### Fixed
 
@@ -687,7 +687,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
   does not grant root or the prompt is interrupted, as a declined UAC prompt does on Windows, and only
   then runs the command. A Ctrl+C once the command runs interrupts as before.
 
-## [1.4.0] 2026-10-16 23:24:25
+## [1.4.0] - 2026-10-16
 
 ### Added
 
@@ -705,7 +705,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
   fails at once with the Windows error. The real `ShellExecuteEx` call now runs in the Windows test
   lane, where before every test replaced it.
 
-## [1.3.3] 2026-10-15 17:16:31
+## [1.3.3] - 2026-10-15
 
 ### Fixed
 
@@ -726,7 +726,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
   (`pytest_runtest_setup` in `tests/conftest.py`); registered in `pyproject.toml` alone they skipped
   nothing, so a test trusting its marker ran everywhere. `tests/test_platform_markers.py` pins it.
 
-## [1.3.2] 2026-10-15 13:23:00
+## [1.3.2] - 2026-10-15
 
 ### Added
 - Python 3.15 is a supported version: declared in the classifiers, so CI and `make test-all` run it.
@@ -748,7 +748,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
 - A packed `.sh` runner that fails while holding the extraction lock (a corrupt payload, a failing
   `tar`) now releases it; before, every later start waited ten minutes for it.
 
-## [1.3.1] 2026-10-12 19:21:08
+## [1.3.1] - 2026-10-12
 
 ### Fixed
 - **A digit-only `.env` value no longer stops logging setup with `Input should be a valid string`.**
@@ -757,7 +757,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
   refused. The `[lib_log_rich]` section now turns such a number back into the text that was
   written; numeric settings still read as numbers and a value that is not text is still refused.
 
-## [1.3.0] 2026-10-08 10:36:51
+## [1.3.0] - 2026-10-08
 
 ### Changed
 - **Requires lib_layered_config 7.0.1.** An unquoted `.env` value now converts like the
@@ -884,7 +884,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
   `>>> from click.testing import CliRunner` and the lines after it. Each docstring now stops the
   help text before that section, and a test checks the help of every registered command.
 
-## [1.2.1] 2026-07-30 18:11:54
+## [1.2.1] - 2026-07-30
 
 ### Changed
 
@@ -893,7 +893,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
   it. An install re-fetches a skill only when that version changes, so the two numbers drifting
   apart meant a skill edit could ship to nobody. No functional change to the library.
 
-## [1.2.0] 2026-07-24 14:48:10
+## [1.2.0] - 2026-07-24
 
 ### Added
 - **Script packer: ship a Python tool as one self-extracting POSIX `.sh`, alongside the `.ps1`.**
@@ -913,7 +913,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
   now carry `skipif(sys.platform != "win32")`, so they skip cleanly off Windows under
   `make test-all` (which does not exclude the `mutating` marker) instead of erroring.
 
-## [1.1.0] 2026-07-24 12:48:10
+## [1.1.0] - 2026-07-24
 
 ### Added
 - **Script packer: ship a Python tool as one self-extracting `.ps1`.** `pwshpy pack ENTRY`
@@ -928,7 +928,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
   `-PwshPyNoInstallUv` / `-PwshPyElevate` switches, verifies its cache against per-file hashes
   before running, and serializes concurrent cold-start extraction with a lock.
 
-## [1.0.2] 2026-07-19 22:30:08
+## [1.0.2] - 2026-07-19
 
 ### Fixed
 - **`config-deploy` no longer crashes on a legacy Windows console codepage (cp1252).** It printed a
@@ -936,7 +936,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
   files had already been written, misreporting a successful deploy as a failure. It now prints a
   plain ASCII marker.
 
-## [1.0.1] 2026-07-15 15:35:59
+## [1.0.1] - 2026-07-15
 
 ### Added
 - `pwshpy.adapters.powershell.is_runtime_available()` - reports whether .NET can actually
@@ -994,7 +994,7 @@ environment, choose code that runs with those rights. Details in `docs/power-too
   is scoped to this project's dependency tree, so environment-only packages are not audited
   at all. The project now suppresses no vulnerability findings.
 
-## [1.0.0] 2026-07-10
+## [1.0.0] - 2026-07-10
 
 ### Added
 - Initial release.

@@ -12,18 +12,19 @@ from __future__ import annotations
 
 import logging
 
-import lib_log_rich.runtime
 import rich_click as click
 
 from pwshpy import __init__conf__
 
 from ..constants import CLICK_CONTEXT_SETTINGS
+from ._common import bind_command
 
 logger = logging.getLogger(__name__)
 
 
 @click.command("info", context_settings=CLICK_CONTEXT_SETTINGS)
-def cli_info() -> None:
+@click.pass_context
+def cli_info(ctx: click.Context) -> None:
     """Print resolved metadata so users can inspect installation details.
 
     \f
@@ -34,7 +35,7 @@ def cli_info() -> None:
         >>> result.exit_code == 0
         True
     """
-    with lib_log_rich.runtime.bind(job_id="cli-info", extra={"command": "info"}):
+    with bind_command(ctx):
         logger.info("Displaying package information")
         __init__conf__.print_info()
 
@@ -56,7 +57,8 @@ def _fail() -> None:
 
 
 @click.command("fail", hidden=True, context_settings=CLICK_CONTEXT_SETTINGS)
-def cli_fail() -> None:
+@click.pass_context
+def cli_fail(ctx: click.Context) -> None:
     """Hidden diagnostic command that triggers :func:`_fail`.
 
     Not listed in ``--help``; exists only as the CLI-level failure vehicle for
@@ -70,7 +72,7 @@ def cli_fail() -> None:
         >>> result.exit_code != 0
         True
     """
-    with lib_log_rich.runtime.bind(job_id="cli-fail", extra={"command": "fail"}):
+    with bind_command(ctx):
         logger.warning("Executing intentional failure command")
         _fail()
 

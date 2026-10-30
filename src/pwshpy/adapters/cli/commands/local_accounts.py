@@ -15,14 +15,13 @@ from __future__ import annotations
 
 import logging
 
-import lib_log_rich.runtime
 import rich_click as click
 
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..output import emit
 from ..typed_click import option
-from ._common import resolve_format
+from ._common import bind_command, resolve_format
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +44,7 @@ def cli_local_users(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
     """
     fmt = resolve_format(as_json, as_jsonl)
     ps = get_cli_context(ctx).services.ps
-    with lib_log_rich.runtime.bind(job_id="cli-local-users", extra={"command": "local-users"}):
+    with bind_command(ctx):
         logger.info("Listing local users")
         emit(ps.get_local_user(), fmt)
 
@@ -67,7 +66,7 @@ def cli_local_groups(ctx: click.Context, as_json: bool, as_jsonl: bool) -> None:
     """
     fmt = resolve_format(as_json, as_jsonl)
     ps = get_cli_context(ctx).services.ps
-    with lib_log_rich.runtime.bind(job_id="cli-local-groups", extra={"command": "local-groups"}):
+    with bind_command(ctx):
         logger.info("Listing local groups")
         emit(ps.get_local_group(), fmt)
 
@@ -90,7 +89,7 @@ def cli_current_identity(ctx: click.Context, as_json: bool, as_jsonl: bool) -> N
     """
     fmt = resolve_format(as_json, as_jsonl)
     ps = get_cli_context(ctx).services.ps
-    with lib_log_rich.runtime.bind(job_id="cli-current-identity", extra={"command": "get_current_identity"}):
+    with bind_command(ctx):
         logger.info("Reading the current identity")
         emit([ps.get_current_identity()], fmt)
 

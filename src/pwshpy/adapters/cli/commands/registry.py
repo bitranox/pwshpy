@@ -14,14 +14,13 @@ from __future__ import annotations
 
 import logging
 
-import lib_log_rich.runtime
 import rich_click as click
 
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..output import emit
 from ..typed_click import argument, option
-from ._common import resolve_format
+from ._common import bind_command, resolve_format
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +43,7 @@ def cli_get_item_property(ctx: click.Context, key: str, as_json: bool, as_jsonl:
     """
     fmt = resolve_format(as_json, as_jsonl)
     ps = get_cli_context(ctx).services.ps
-    with lib_log_rich.runtime.bind(job_id="cli-get-item-property", extra={"command": "get_item_property"}):
+    with bind_command(ctx):
         logger.info("Reading registry values")
         emit(ps.get_item_property(key), fmt)
 
@@ -65,7 +64,7 @@ def cli_registry_keys(ctx: click.Context, key: str, as_json: bool, as_jsonl: boo
     """
     fmt = resolve_format(as_json, as_jsonl)
     ps = get_cli_context(ctx).services.ps
-    with lib_log_rich.runtime.bind(job_id="cli-registry-keys", extra={"command": "registry_keys"}):
+    with bind_command(ctx):
         logger.info("Reading registry subkeys")
         emit(ps.registry_keys(key), fmt)
 

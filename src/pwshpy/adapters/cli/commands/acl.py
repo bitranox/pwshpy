@@ -13,14 +13,13 @@ from __future__ import annotations
 
 import logging
 
-import lib_log_rich.runtime
 import rich_click as click
 
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..output import emit
 from ..typed_click import argument, option
-from ._common import resolve_format
+from ._common import bind_command, resolve_format
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +43,7 @@ def cli_acl(ctx: click.Context, path: str, as_json: bool, as_jsonl: bool) -> Non
     """
     fmt = resolve_format(as_json, as_jsonl)
     ps = get_cli_context(ctx).services.ps
-    with lib_log_rich.runtime.bind(job_id="cli-acl", extra={"command": "acl"}):
+    with bind_command(ctx):
         logger.info("Reading ACL")
         emit(ps.get_acl(path), fmt)
 

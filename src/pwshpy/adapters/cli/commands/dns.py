@@ -12,14 +12,13 @@ from __future__ import annotations
 
 import logging
 
-import lib_log_rich.runtime
 import rich_click as click
 
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..output import emit
 from ..typed_click import argument, option
-from ._common import resolve_format
+from ._common import bind_command, resolve_format
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +40,7 @@ def cli_resolve(ctx: click.Context, name: str, timeout: float | None, as_json: b
     """
     fmt = resolve_format(as_json, as_jsonl)
     ps = get_cli_context(ctx).services.ps
-    with lib_log_rich.runtime.bind(job_id="cli-resolve", extra={"command": "resolve"}):
+    with bind_command(ctx):
         logger.info("Resolving host name")
         emit(ps.resolve_dns_name(name, timeout=timeout), fmt)
 

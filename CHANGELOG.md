@@ -13,8 +13,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   proxies through the environment (`HTTP_PROXY`/`HTTPS_PROXY`) instead.
 - CLI log lines name the registered command (`get_volume`, job id `cli-get_volume`) instead of the
   old short names (`disks`, job id `cli-disks`), so a log search finds the command a user typed.
-  Every command binds its log context through one helper that reads the name off the click
-  context; `config`, `config-deploy` and `config-generate-examples` keep their extra log fields.
+  Every command that binds a log context does so through one helper that reads the name off the
+  click context; `config`, `config-deploy` and `config-generate-examples` keep their extra log
+  fields.
 - A refusal systemd sends over D-Bus (`org.freedesktop.DBus.Error.AccessDenied`, or
   `org.freedesktop.DBus.Error.InteractiveAuthorizationRequired`, which a non-root caller gets where
   polkit is installed) raises `NativeAccessDeniedError` and the `pwshpy` CLI exits 13, as for every

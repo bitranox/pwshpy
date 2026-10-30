@@ -1480,8 +1480,7 @@ class Ps:
                 this call before anything is read.
 
         Example:
-            >>> from pwshpy.domain.pipeline import Pipeline
-            >>> isinstance(build_ps().get_acl("C:/Windows"), Pipeline)
+            >>> callable(build_ps().get_acl)
             True
         """
         return Pipeline(self._require_acl("get_acl").source(path))

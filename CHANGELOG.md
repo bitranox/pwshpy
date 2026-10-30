@@ -45,6 +45,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- `get_item` and `test_path` on a path below a directory the caller cannot search no longer let a
+  raw `PermissionError` out on Python 3.10-3.13: `get_item` raises `NativeAccessDeniedError`,
+  `test_path` returns False. On Python 3.14, where `get_item` said "path not found" for such a path,
+  it raises `NativeAccessDeniedError` too. `test_path` logs one WARNING naming the denied path, as
+  `Test-Path` writes a non-terminating error; a path that does not exist reads False with no warning.
 - `get_scheduled_task("\\Microsoft\\Windows\\Defrag\\")` lists the folder on Windows: a folder path
   ending in a backslash, the form every record's `task_path` carries, raised `NativeCallError`
   0x8007007B because the Task Scheduler refuses it. The listing strips the trailing backslash, as

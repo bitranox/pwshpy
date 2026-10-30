@@ -15,15 +15,35 @@ Contents:
 
 from __future__ import annotations
 
+import logging
 import shutil
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ...domain.enums import FileItemType
-from ...domain.errors import NativeCallError
+from ...domain.errors import NativeAccessDeniedError, NativeCallError
 from ...domain.records import FileSystemItem
 from .marshal import native_error
+
+logger = logging.getLogger(__name__)
+
+
+def _exists(target: Path) -> bool:
+    """Whether ``target`` exists; a refusal raises, typed, on every Python.
+
+    Not ``Path.exists()``: on 3.10-3.13 it lets a raw ``PermissionError`` out, and on 3.14 it
+    answers False for it, so a denied path would read as missing.
+    """
+    try:
+        target.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False  # ENOTDIR: a component is a file, so the path can never exist
+    except ValueError:
+        return False  # a NUL in the path: Path.exists() answered False here, keep that answer
+    except OSError as exc:
+        raise native_error(f"cannot read {str(target)!r}: {exc}", exc) from exc
+    return True
 
 
 def _to_item(entry: Path) -> FileSystemItem:
@@ -69,7 +89,7 @@ class NativeFileSystem:
     def get_item(self, path: str) -> FileSystemItem:
         """Return one file/directory as a record (like Get-Item)."""
         target = Path(path)
-        if not target.exists():
+        if not _exists(target):
             raise NativeCallError(f"path not found: {path!r}")
         return _to_item(target)
 
@@ -108,8 +128,19 @@ class NativeFileSystem:
         return _lines()
 
     def test_path(self, path: str) -> bool:
-        """Return whether ``path`` exists (like Test-Path)."""
-        return Path(path).exists()
+        """Return whether ``path`` exists (like Test-Path).
+
+        A path the caller may not read answers False, as Test-Path does, and logs one WARNING
+        naming the path, where Test-Path writes a non-terminating error. A path that plainly does
+        not exist answers False without a warning.
+        """
+        try:
+            return _exists(Path(path))
+        except NativeAccessDeniedError as exc:
+            logger.warning("test_path: access to %r is denied, reporting it absent: %s", path, exc)
+        except NativeCallError as exc:
+            logger.warning("test_path: cannot check %r, reporting it absent: %s", path, exc)
+        return False
 
     def new_item(self, path: str, *, item_type: FileItemType = FileItemType.FILE) -> FileSystemItem:
         """Create a file or directory (per ``item_type``); return it (like New-Item) (**mutating**)."""

@@ -2028,7 +2028,9 @@ class Ps:
             Its :class:`FileSystemItem` (``size`` None for a directory).
 
         Raises:
-            NativeCallError: ``path`` does not exist or cannot be read.
+            NativeCallError: ``path`` does not exist (``"path not found: ..."``, also when a
+                component of it is a file) or cannot be read; a path below a directory the
+                caller may not search raises :class:`NativeAccessDeniedError`, on every Python.
 
         Example:
             >>> callable(build_ps().get_item)
@@ -2095,8 +2097,10 @@ class Ps:
             path: The path to check.
 
         Returns:
-            True when it exists (a broken symlink reads False, as :meth:`pathlib.Path.exists`
-            follows links).
+            True when it exists (a broken symlink reads False, as the check follows links).
+            A path the caller may not read (below a directory it cannot search) reads False
+            too, as Test-Path answers, and logs one WARNING naming the path where Test-Path
+            writes a non-terminating error; it never raises for it.
 
         Example:
             >>> isinstance(build_ps().test_path("."), bool)

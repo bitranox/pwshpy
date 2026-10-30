@@ -149,3 +149,76 @@ def test_a_denied_entry_stat_is_raised_as_is_not_as_a_listing_error(tmp_path: Pa
         locked.chmod(0o700)
     assert isinstance(caught.value.__cause__, PermissionError)
     assert not isinstance(caught.value.__cause__, NativeCallError)
+
+
+def _locked_child(tmp_path: Path) -> tuple[Path, Path]:
+    """A directory at mode 000 holding ``x``: the caller cannot search it, so ``x`` is unreadable."""
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "x").write_text("x", encoding="utf-8")
+    locked.chmod(0o000)
+    return locked, locked / "x"
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(not _POSIX_NON_ROOT, reason="needs POSIX search permission enforced (non-root)")
+def test_get_item_below_an_unsearchable_directory_is_denied_not_missing(tmp_path: Path) -> None:
+    """Get-Item on a denied path is an access error (UnauthorizedAccessException), not PathNotFound."""
+    locked, child = _locked_child(tmp_path)
+    try:
+        with pytest.raises(NativeAccessDeniedError, match=r"^cannot read ") as caught:
+            NativeFileSystem().get_item(str(child))
+    finally:
+        locked.chmod(0o700)
+    assert isinstance(caught.value.__cause__, PermissionError)
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(not _POSIX_NON_ROOT, reason="needs POSIX search permission enforced (non-root)")
+def test_test_path_below_an_unsearchable_directory_is_false_with_one_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Test-Path on a denied path returns False and reports the denial (pwsh: a non-terminating error)."""
+    locked, child = _locked_child(tmp_path)
+    try:
+        with caplog.at_level("WARNING", logger="pwshpy.adapters.native.filesystem"):
+            answer = NativeFileSystem().test_path(str(child))
+    finally:
+        locked.chmod(0o700)
+    assert answer is False
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert str(child) in warnings[0].getMessage()
+    assert "denied" in warnings[0].getMessage()
+
+
+@pytest.mark.os_agnostic
+def test_test_path_on_a_missing_path_is_false_without_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A path that does not exist, or lies below a file, is plainly absent: no warning."""
+    (tmp_path / "file").write_text("x", encoding="utf-8")
+    fs = NativeFileSystem()
+    with caplog.at_level("WARNING", logger="pwshpy.adapters.native.filesystem"):
+        assert fs.test_path(str(tmp_path / "nope")) is False
+        assert fs.test_path(str(tmp_path / "file" / "below")) is False
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
+
+@pytest.mark.os_agnostic
+def test_get_item_below_a_file_is_path_not_found(tmp_path: Path) -> None:
+    """A component that is a file means the path can never exist: "path not found", not an access error."""
+    (tmp_path / "file").write_text("x", encoding="utf-8")
+    with pytest.raises(NativeCallError, match=r"^path not found: ") as caught:
+        NativeFileSystem().get_item(str(tmp_path / "file" / "below"))
+    assert not isinstance(caught.value, NativeAccessDeniedError)
+
+
+@pytest.mark.os_agnostic
+def test_a_nul_in_the_path_keeps_its_answer(tmp_path: Path) -> None:
+    """A NUL keeps the answer it had: test_path says False, get_item says "path not found"."""
+    fs = NativeFileSystem()
+    bad = str(tmp_path / "a\x00b")
+    assert fs.test_path(bad) is False
+    with pytest.raises(NativeCallError, match=r"^path not found: "):
+        fs.get_item(bad)

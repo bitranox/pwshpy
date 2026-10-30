@@ -224,7 +224,7 @@ class ShortcutSpec:
             259 characters.  The expansion of such a reference must fit in 259 characters too:
             a longer one is refused by Windows when the shortcut is written (``SetPath`` fails
             with E_FAIL 0x80004005, raised as ``NativeCallError``; no file is written; measured
-            with LongPathsEnabled=0).  The spec cannot check that, because the expansion depends
+            with LongPathsEnabled 0 and 1).  The spec cannot check that, because the expansion depends
             on the host's environment.
         arguments: The argv passed to ``target``, stored as a tuple.  Any sequence of str is
             accepted; a bare str is refused, never split.  Joined with

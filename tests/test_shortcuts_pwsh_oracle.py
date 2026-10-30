@@ -272,37 +272,14 @@ def test_an_env_target_expanding_to_259_characters_reads_back_whole(tmp_path: Pa
     assert _wscript_read(path)["TargetPath"] == ours.target
 
 
-_FILESYSTEM_KEY = r"SYSTEM\CurrentControlSet\Control\FileSystem"
-
-
-def _long_paths_enabled() -> bool:
-    """Return whether ``LongPathsEnabled`` is set to anything but 0 (an absent value is 0)."""
-    if sys.platform != "win32":  # pragma: no cover - the module already skipped off Windows
-        return False
-    # Imported here, after the platform check narrows it: winreg is a Windows-only stdlib module.
-    import winreg
-
-    try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _FILESYSTEM_KEY) as key:
-            value, _kind = winreg.QueryValueEx(key, "LongPathsEnabled")
-    except FileNotFoundError:
-        return False
-    return value != 0
-
-
 def test_an_env_target_expanding_past_259_characters_is_refused_and_nothing_is_written(tmp_path: Path) -> None:
     """Raw text within the 259 limit, expansion at 260: SetPath fails E_FAIL and no file appears.
 
     The domain check sees only the raw text (its length is within the limit), so the refusal
     comes from the shell as NativeCallError, and the adapter never saves after a failed set.
-    The expectation was measured with ``LongPathsEnabled`` 0 only, so on a host with long paths
-    enabled the test skips rather than asserting an unmeasured limit.
+    ``LongPathsEnabled`` does not change it: SetPath refused the same expansion with the value
+    at 1, in a process whose ``RtlAreLongPathsEnabled`` was 1, so the test asserts on any host.
     """
-    if _long_paths_enabled():
-        pytest.skip(
-            "LongPathsEnabled is set on this host; the E_FAIL refusal at 260 was measured only with "
-            "the legacy 259 limit (LongPathsEnabled=0)"
-        )
     path = tmp_path / "Exp260.lnk"
     target = _env_target(260)
     assert len(target) <= 259

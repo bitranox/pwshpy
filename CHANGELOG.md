@@ -224,6 +224,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `timestamp_type=ppid` the relaunch found no cached credential and exited 1.
 - Packed `.sh` runner, as root: a relative managed-Python directory is refused (`is not an absolute
   path`, exit code 127) instead of looping forever while the runner walks up its parents.
+- A Secret Service (credential vault) D-Bus refusal on Linux raises `NativeAccessDeniedError` (exit
+  13), not a plain `NativeCallError`.
 
 ## [1.11.0] - 2026-10-29
 

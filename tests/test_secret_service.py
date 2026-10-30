@@ -13,8 +13,10 @@ round-trip instead of skipping it, so an opted-in run cannot look green without 
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import sys
+from typing import Any
 
 import pytest
 from session_bus_isolation import PROCESS_OPTED_IN
@@ -22,7 +24,7 @@ from session_bus_isolation import SECRET_SERVICE_OPT_IN as _OPT_IN
 
 from pwshpy.adapters.native.secret_service import SecretServiceCredentialStore, scoped_attributes
 from pwshpy.application.ports import CredentialStore
-from pwshpy.domain.errors import NativeCallError
+from pwshpy.domain.errors import NativeAccessDeniedError, NativeCallError
 from pwshpy.domain.records import Credential
 
 _HAS_JEEPNEY = importlib.util.find_spec("jeepney") is not None
@@ -96,3 +98,66 @@ def _exercise_roundtrip(store: CredentialStore) -> None:
         store.delete(_TARGET)
 
     assert store.load(_TARGET) is None
+
+
+_ACCESS_DENIED = "org.freedesktop.DBus.Error.AccessDenied"
+_NO_SUCH_OBJECT = "org.freedesktop.Secret.Error.NoSuchObject"
+
+
+class _RefusingSessionBus:
+    """A session bus whose Secret Service opens a session, then answers every other call with one error.
+
+    The replies are built with jeepney's own message constructors (``new_method_return`` /
+    ``new_error``), so the adapter reads the error name from jeepney's real header fields.
+    """
+
+    def __init__(self, error_name: str) -> None:
+        self._jeepney = importlib.import_module("jeepney")
+        self._error_name = error_name
+        self.methods: list[str] = []
+        self.closed = False
+
+    def send_and_get_reply(self, msg: Any) -> Any:
+        method = str(msg.header.fields[self._jeepney.HeaderFields.member])
+        self.methods.append(method)
+        if method == "OpenSession":
+            return self._jeepney.new_method_return(msg, "vo", (("s", ""), "/org/freedesktop/secrets/session/1"))
+        return self._jeepney.new_error(msg, self._error_name, "s", ("refused by the test bus",))
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _use_session_bus(monkeypatch: pytest.MonkeyPatch, bus: _RefusingSessionBus) -> None:
+    # jeepney's connect call is the external edge onto the session D-Bus; the adapter is unchanged.
+    blocking = importlib.import_module("jeepney.io.blocking")
+
+    def open_dbus_connection(**_kwargs: object) -> _RefusingSessionBus:
+        return bus
+
+    monkeypatch.setattr(blocking, "open_dbus_connection", open_dbus_connection)
+
+
+@pytest.mark.os_linux
+@pytest.mark.skipif(not _HAS_JEEPNEY, reason="needs jeepney (a Linux-only dependency)")
+def test_a_refused_secret_service_call_is_native_access_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Secret Service call answered with AccessDenied is a NativeAccessDeniedError (CLI exit 13)."""
+    bus = _RefusingSessionBus(_ACCESS_DENIED)
+    _use_session_bus(monkeypatch, bus)
+    with pytest.raises(NativeAccessDeniedError) as caught:
+        SecretServiceCredentialStore().load(_TARGET)
+    assert isinstance(caught.value, PermissionError)
+    assert _ACCESS_DENIED in str(caught.value)
+    assert bus.methods == ["OpenSession", "SearchItems"]
+    assert bus.closed
+
+
+@pytest.mark.os_linux
+@pytest.mark.skipif(not _HAS_JEEPNEY, reason="needs jeepney (a Linux-only dependency)")
+def test_any_other_secret_service_error_stays_a_plain_native_call_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An error reply that is no refusal stays a NativeCallError naming the error, never a denial."""
+    _use_session_bus(monkeypatch, _RefusingSessionBus(_NO_SUCH_OBJECT))
+    with pytest.raises(NativeCallError) as caught:
+        SecretServiceCredentialStore().load(_TARGET)
+    assert not isinstance(caught.value, NativeAccessDeniedError)
+    assert _NO_SUCH_OBJECT in str(caught.value)

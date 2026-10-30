@@ -8,6 +8,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Changed
 
+- The web verbs open each request through their own opener (redirects to http/https only), so an
+  opener a library caller installed with `urllib.request.install_opener` is no longer used; set
+  proxies through the environment (`HTTP_PROXY`/`HTTPS_PROXY`) instead.
 - CLI log lines name the registered command (`get_volume`, job id `cli-get_volume`) instead of the
   old short names (`disks`, job id `cli-disks`), so a log search finds the command a user typed.
   Every command binds its log context through one helper that reads the name off the click

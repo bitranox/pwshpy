@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import io
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -745,3 +746,25 @@ def test_sh_pack_records_whether_the_script_has_a_git_source(
     options = PackOptions(format=RunnerFormat.SH, with_packages=with_packages)
     runner = Path(pack_script(entry, tmp_path / "app.sh", options=options).output_path)
     assert runner.read_text(encoding="utf-8").count(f"\nPWSHPY_GIT_SOURCE={flag}\n") == 1
+
+
+#: One chmod call of the .ps1 runner: ``Invoke-PwshPyChmod -Arguments @(...)``.
+_CHMOD_CALL = re.compile(r"Invoke-PwshPyChmod -Arguments @\(([^)]*)\)")
+
+
+@pytest.mark.os_agnostic
+def test_every_ps1_chmod_ends_its_options_before_the_mode(tmp_path: Path) -> None:
+    """BSD chmod (macOS) stops parsing options at the mode, so a ``--`` after it is read as a file
+    name and the call fails with 'chmod: --: No such file or directory'. GNU chmod permutes its
+    arguments, which hides the order on Linux; only options may come before the ``--``."""
+    entry = tmp_path / "app.py"
+    entry.write_text("print('hi')\n", newline="\n")
+    runner = Path(pack_script(entry, tmp_path / "app.ps1", options=PackOptions(format=RunnerFormat.PS1)).output_path)
+    calls = [
+        [word.strip() for word in match.split(",")] for match in _CHMOD_CALL.findall(runner.read_text(encoding="utf-8"))
+    ]
+    assert len(calls) >= 6, calls  # every chmod site of the runner, so an empty parse cannot pass
+    for words in calls:
+        assert "'--'" in words, words
+        before = words[: words.index("'--'")]
+        assert all(word.startswith("'-") for word in before), words

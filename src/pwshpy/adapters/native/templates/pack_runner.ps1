@@ -150,7 +150,9 @@ function Invoke-PwshPyChmod {
     param([string[]] $Arguments)
 
     # POSIX root run: chmod from the fixed helper PATH, failing loudly (a mode left as the umask made
-    # it would be refused by the trust check later, with a reason that hides this one).
+    # it would be refused by the trust check later, with a reason that hides this one). Callers put
+    # '--' before the mode: BSD chmod (macOS) stops parsing options at the mode, so a '--' after it
+    # is taken for a file name; GNU chmod permutes its arguments and would hide the mistake.
     & chmod @Arguments
     if ($LASTEXITCODE -ne 0) { throw "chmod $($Arguments -join ' ') exited $LASTEXITCODE" }
 }
@@ -181,7 +183,7 @@ function Initialize-PwshPyDirectory {
         } else {
             [void][IO.Directory]::CreateDirectory($directory)
         }
-        Invoke-PwshPyChmod -Arguments @($octal, '--', $directory)
+        Invoke-PwshPyChmod -Arguments @('--', $octal, $directory)
     }
 }
 
@@ -200,8 +202,8 @@ function Expand-PwshPyPayload {
     Remove-Item -LiteralPath $archive -Force
     if ($PwshPyRootPath) {
         # What the extraction created took the caller's umask ([R6]); no group or other write anywhere.
-        Invoke-PwshPyChmod -Arguments @('-R', 'go-w', '--', $Destination)
-        Invoke-PwshPyChmod -Arguments @('755', '--', $Destination)
+        Invoke-PwshPyChmod -Arguments @('-R', '--', 'go-w', $Destination)
+        Invoke-PwshPyChmod -Arguments @('--', '755', $Destination)
     }
 }
 
@@ -231,7 +233,7 @@ function Invoke-PwshPyUnpackLocked {
         }
         try {
             # The lock file, too, took the caller's umask ([R6]).
-            if ($PwshPyRootPath) { Invoke-PwshPyChmod -Arguments @('go-w', '--', $lockPath) }
+            if ($PwshPyRootPath) { Invoke-PwshPyChmod -Arguments @('--', 'go-w', $lockPath) }
             # Double-checked: another process may have finished extracting while we waited.
             if (Test-PwshPyTree -Root $CacheDir) { return }
             Expand-PwshPyPayload -Destination $CacheDir
@@ -835,7 +837,7 @@ function Initialize-PwshPyPrivateTemp {
     $why = Get-PwshPyCacheDistrust -Path $temp
     if (-not $why) {
         Initialize-PwshPyDirectory -Path $temp -Private $true
-        Invoke-PwshPyChmod -Arguments @('700', '--', $temp)
+        Invoke-PwshPyChmod -Arguments @('--', '700', $temp)
         $why = Get-PwshPyCacheDistrust -Path $temp
     }
     if ($why) {
@@ -857,7 +859,7 @@ function Initialize-PwshPyStderrFile {
     $directory = Join-Path (Get-PwshPyAccountCacheHome) 'pwshpy-tmp'
     Initialize-PwshPyDirectory -Path $directory -Private $true
     # An existing one too: whatever made it, from here only root can enter it.
-    Invoke-PwshPyChmod -Arguments @('700', '--', $directory)
+    Invoke-PwshPyChmod -Arguments @('--', '700', $directory)
     $path = Join-Path $directory ([Guid]::NewGuid().ToString('N'))
     [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None).Dispose()
     return $path

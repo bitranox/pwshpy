@@ -3,7 +3,9 @@
 ``new_user`` with a password and ``disabled`` runs ``useradd``, ``chpasswd`` and ``usermod``.
 Stand-in commands on PATH (the real seam: ``run_process`` resolves argv[0] on PATH) each sleep
 less than ``timeout`` but together longer, so a per-command bound lets the verb run for about three
-times ``timeout`` while one overall deadline stops it. A deadline that passes after ``useradd``
+times ``timeout`` while one overall deadline stops it. A test that pins WHICH commands finished
+gives each stand-in its own step, far from the deadline either way, because starting a stand-in
+can take tenths of a second on a loaded runner. A deadline that passes after ``useradd``
 still lets ``usermod --lock`` run for a disabled account, and the message names what was done.
 Nothing touches a real account: the stand-ins only sleep and log their argv, and the name read
 back afterwards is ``root``, which every POSIX host has.
@@ -27,11 +29,15 @@ pytestmark = [
 
 _STEP_SECONDS = 0.5
 _TIMEOUT = 1.2  # more than one step, less than the three steps of new_user together
+#: A step that ends long before any deadline here, even where each stand-in takes a while to start
+#: (a loaded macOS runner took more than the 0.2 s a uniform 0.5 s step left).
+_QUICK_SECONDS = 0.05
+#: A step the deadline always kills first, yet shorter than the 5 s grace a disabled account's lock gets.
+_SLOW_SECONDS = 2.5
 
 
-@pytest.fixture
-def slow_shadow_utils(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Put useradd / chpasswd / usermod stand-ins first on PATH; each sleeps one step, then logs its argv.
+def _install_stand_ins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, steps: dict[str, float]) -> Path:
+    """Put useradd / chpasswd / usermod stand-ins first on PATH; each sleeps its step, then logs its argv.
 
     Only chpasswd drains stdin (it is the one fed the password): a stand-in reading stdin it is
     never given would wait on the terminal under ``pytest -s``. A stand-in killed while it sleeps
@@ -40,13 +46,34 @@ def slow_shadow_utils(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "calls.log"
-    for command in ("useradd", "chpasswd", "usermod"):
+    for command, seconds in steps.items():
         drain = "cat >/dev/null\n" if command == "chpasswd" else ""
         script = bin_dir / command
-        script.write_text(f'#!/bin/sh\n{drain}sleep {_STEP_SECONDS}\necho "{command} $*" >>"{log}"\n', encoding="utf-8")
+        script.write_text(f'#!/bin/sh\n{drain}sleep {seconds}\necho "{command} $*" >>"{log}"\n', encoding="utf-8")
         script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
     return log
+
+
+@pytest.fixture
+def slow_shadow_utils(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Stand-ins that each sleep one ``_STEP_SECONDS`` step: each fits in ``_TIMEOUT``, the three do not."""
+    steps: dict[str, float] = dict.fromkeys(("useradd", "chpasswd", "usermod"), _STEP_SECONDS)
+    return _install_stand_ins(tmp_path, monkeypatch, steps=steps)
+
+
+@pytest.fixture
+def slow_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """useradd and chpasswd end at once; usermod outlasts the deadline but not the lock grace."""
+    steps = {"useradd": _QUICK_SECONDS, "chpasswd": _QUICK_SECONDS, "usermod": _SLOW_SECONDS}
+    return _install_stand_ins(tmp_path, monkeypatch, steps=steps)
+
+
+@pytest.fixture
+def slow_chpasswd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """useradd and usermod end at once; chpasswd outlasts every deadline here."""
+    steps = {"useradd": _QUICK_SECONDS, "chpasswd": _SLOW_SECONDS, "usermod": _QUICK_SECONDS}
+    return _install_stand_ins(tmp_path, monkeypatch, steps=steps)
 
 
 def _calls(log: Path) -> list[str]:
@@ -71,14 +98,14 @@ def test_new_user_within_the_deadline_completes(slow_shadow_utils: Path) -> None
     assert user.enabled is False
 
 
-def test_a_timed_out_disabled_new_user_is_still_locked(slow_shadow_utils: Path) -> None:
+def test_a_timed_out_disabled_new_user_is_still_locked(slow_lock: Path) -> None:
     """useradd and chpasswd finish, usermod --lock is killed: the lock still runs, within a grace.
 
     Without it the account requested disabled is left ENABLED with a known password.
     """
     with pytest.raises(OperationTimeoutError) as caught:
         PosixLocalAccountController().new_user("root", password="pw", disabled=True, timeout=_TIMEOUT)
-    assert _calls(slow_shadow_utils) == ["useradd root", "chpasswd ", "usermod --lock root"]
+    assert _calls(slow_lock) == ["useradd root", "chpasswd ", "usermod --lock root"]
     message = str(caught.value)
     assert "'root' was created" in message
     assert "its password was set" in message
@@ -86,22 +113,22 @@ def test_a_timed_out_disabled_new_user_is_still_locked(slow_shadow_utils: Path) 
     assert caught.value.timeout == _TIMEOUT
 
 
-def test_a_killed_chpasswd_is_named_and_the_account_still_locked(slow_shadow_utils: Path) -> None:
+def test_a_killed_chpasswd_is_named_and_the_account_still_locked(slow_chpasswd: Path) -> None:
     """chpasswd killed by the deadline: the message says the password may not be set; the lock still runs."""
     with pytest.raises(OperationTimeoutError) as caught:
         PosixLocalAccountController().new_user("root", password="pw", disabled=True, timeout=0.8)
-    assert _calls(slow_shadow_utils) == ["useradd root", "usermod --lock root"]
+    assert _calls(slow_chpasswd) == ["useradd root", "usermod --lock root"]
     message = str(caught.value)
     assert "'root' was created" in message
     assert "its password may not be set" in message
     assert "the account was locked" in message
 
 
-def test_a_timed_out_enabled_new_user_is_not_locked(slow_shadow_utils: Path) -> None:
+def test_a_timed_out_enabled_new_user_is_not_locked(slow_chpasswd: Path) -> None:
     """Not disabled: nothing extra runs after the deadline; the message still names what was done."""
     with pytest.raises(OperationTimeoutError) as caught:
         PosixLocalAccountController().new_user("root", password="pw", timeout=0.8)
-    assert _calls(slow_shadow_utils) == ["useradd root"]
+    assert _calls(slow_chpasswd) == ["useradd root"]
     message = str(caught.value)
     assert "'root' was created" in message
     assert "its password may not be set" in message

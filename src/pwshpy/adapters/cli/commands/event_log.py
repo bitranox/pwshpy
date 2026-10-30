@@ -14,14 +14,13 @@ from __future__ import annotations
 
 import logging
 
-import lib_log_rich.runtime
 import rich_click as click
 
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..output import emit
 from ..typed_click import argument, option
-from ._common import resolve_format
+from ._common import bind_command, resolve_format
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +44,7 @@ def cli_event_log(ctx: click.Context, log_name: str, as_json: bool, as_jsonl: bo
     """
     fmt = resolve_format(as_json, as_jsonl)
     ps = get_cli_context(ctx).services.ps
-    with lib_log_rich.runtime.bind(job_id="cli-eventlog", extra={"command": "eventlog"}):
+    with bind_command(ctx):
         logger.info("Reading event log")
         emit(ps.get_win_event(log_name), fmt)
 

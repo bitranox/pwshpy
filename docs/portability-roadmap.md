@@ -221,6 +221,8 @@ box (like the Windows mutating tests need a throwaway Windows VM).
   entries synthesized from the mode.
 - **Privilege:** editing a file's ACL needs to own it (or CAP_FOWNER); `set_owner` to another user
   needs root - like the Windows verbs need admin / SeRestorePrivilege.
+- **macOS:** not supported. `os.getxattr` exists on Linux only, so the facade refuses `get_acl` and
+  the three verbs with `PlatformUnsupportedError` before any adapter call.
 
 ---
 

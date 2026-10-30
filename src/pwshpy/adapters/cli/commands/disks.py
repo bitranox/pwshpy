@@ -12,14 +12,13 @@ from __future__ import annotations
 
 import logging
 
-import lib_log_rich.runtime
 import rich_click as click
 
 from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..output import emit
 from ..typed_click import option
-from ._common import resolve_format
+from ._common import bind_command, resolve_format
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,7 @@ def cli_disks(ctx: click.Context, as_json: bool, as_jsonl: bool, limit: int | No
     """
     fmt = resolve_format(as_json, as_jsonl)
     ps = get_cli_context(ctx).services.ps
-    with lib_log_rich.runtime.bind(job_id="cli-disks", extra={"command": "disks"}):
+    with bind_command(ctx):
         logger.info("Listing mounted filesystems")
         pipeline = ps.get_volume()
         if limit is not None:

@@ -14,7 +14,7 @@ from pydantic import SecretStr, ValidationError
 import pwshpy
 from pwshpy import ps
 from pwshpy.adapters.native.known_folders import posix_known_folder, windows_known_folder
-from pwshpy.application.ports import WindowsImageSource
+from pwshpy.application.ports import AclSource, WindowsImageSource
 from pwshpy.composition import Ps, build_ps
 from pwshpy.domain.enums import (
     AceType,
@@ -689,6 +689,9 @@ class _InjectedPs:
     windows_updates: _FakeWindowsUpdates = field(default_factory=_FakeWindowsUpdates)
     known_folders: _FakeKnownFolders = field(default_factory=_FakeKnownFolders)
     shortcut_controller: _FakeShortcutController | None = field(default_factory=_FakeShortcutController)
+    acl_source: AclSource = field(default=_fake_acl)
+    #: An OS with ACL support, named so the fakes are reached on the macOS CI cell too.
+    platform: str = "linux"
     facade: Ps = field(init=False)
 
     def __post_init__(self) -> None:
@@ -717,7 +720,7 @@ class _InjectedPs:
             local_user_source=_fake_local_users,
             local_group_source=_fake_local_groups,
             local_account_controller=self.local_account_controller,
-            acl_source=_fake_acl,
+            acl_source=self.acl_source,
             acl_controller=self.acl_controller,
             ps_runner=_fake_runner,
             cmdlet_runner=_fake_cmdlet,
@@ -744,6 +747,7 @@ class _InjectedPs:
             elevator=self.elevator.elevate,
             script_packer=self.packer.pack_script,
             script_unpacker=self.packer.unpack_script,
+            platform=self.platform,
         )
 
 
@@ -1005,6 +1009,66 @@ def test_injected_acl_adapters(injected: _InjectedPs) -> None:
     ]
     assert fake_acl_controller.last_rights == 0x1200A9
     assert fake_acl_controller.last_type is AceType.DENY
+
+
+def _call_each_acl_verb(facade: Ps) -> Iterator[tuple[str, PlatformUnsupportedError]]:
+    """Call get_acl and the three ACL verbs; yield each verb with the refusal it raised."""
+    calls = {
+        "get_acl": lambda: facade.get_acl("/tmp"),
+        "add_acl_ace": lambda: facade.add_acl_ace("/tmp", "user:nobody", 4),
+        "remove_acl_ace": lambda: facade.remove_acl_ace("/tmp", "user:nobody"),
+        "set_owner": lambda: facade.set_owner("/tmp", "nobody"),
+    }
+    for verb, call in calls.items():
+        with pytest.raises(PlatformUnsupportedError) as caught:
+            call()
+        yield verb, caught.value
+
+
+@pytest.mark.os_agnostic
+def test_acl_verbs_on_macos_are_platform_unsupported_before_any_adapter_call() -> None:
+    """macOS has no POSIX ACL xattr backend: all four verbs refuse, and no adapter is reached."""
+    read: list[str] = []
+
+    def _recording_acl(path: str) -> Iterator[AclEntry]:
+        read.append(path)
+        return _fake_acl(path)
+
+    injected = _InjectedPs(platform="darwin", acl_source=_recording_acl)
+    refusals = dict(_call_each_acl_verb(injected.facade))
+    assert sorted(refusals) == ["add_acl_ace", "get_acl", "remove_acl_ace", "set_owner"]
+    for verb, error in refusals.items():
+        assert str(error) == f"ps.{verb} needs Windows or Linux: macOS ACLs are not supported (got darwin)"
+    assert read == []
+    assert injected.acl_controller.calls == []
+
+
+@pytest.mark.os_agnostic
+def test_acl_verbs_on_another_posix_os_are_platform_unsupported_naming_it() -> None:
+    """Only Windows and Linux have an ACL backend: any other OS is refused by its own name."""
+    injected = _InjectedPs(platform="freebsd14")
+    for verb, error in _call_each_acl_verb(injected.facade):
+        assert str(error) == f"ps.{verb} needs Windows or Linux: ACLs are not supported (got freebsd14)"
+    assert injected.acl_controller.calls == []
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_acl_verbs_reach_the_adapters_on_windows_and_linux(platform: str) -> None:
+    """The guard lets both supported OSes through to the injected adapters."""
+    injected = _InjectedPs(platform=platform)
+    assert injected.facade.get_acl("P").select(lambda e: e.trustee_sid).to_list() == ["S-1-5-32-544"]
+    injected.facade.set_owner("P", "S-1-5-32-544")
+    assert injected.acl_controller.calls == [("set_owner", "P", "S-1-5-32-544")]
+
+
+@pytest.mark.os_macos
+@pytest.mark.skipif(sys.platform != "darwin", reason="the production facade's macOS refusal")
+def test_production_acl_verbs_are_platform_unsupported_on_macos() -> None:
+    """On macOS the real facade refuses all four verbs (posix_acl would raise a raw AttributeError)."""
+    refusals = dict(_call_each_acl_verb(build_ps()))
+    assert sorted(refusals) == ["add_acl_ace", "get_acl", "remove_acl_ace", "set_owner"]
+    assert all("macOS ACLs are not supported" in str(error) for error in refusals.values())
 
 
 @pytest.mark.os_agnostic

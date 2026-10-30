@@ -15,7 +15,6 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final, cast
 
 import click.exceptions as click_exceptions
-import lib_log_rich.runtime
 import rich_click as click
 from lib_layered_config import (
     Config,
@@ -36,7 +35,7 @@ from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import CLIContext, get_cli_context
 from ..exit_codes import ExitCode
 from ..typed_click import get_current_context, option
-from ._common import CaseInsensitiveChoice
+from ._common import CaseInsensitiveChoice, bind_command
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -84,8 +83,8 @@ def cli_config(ctx: click.Context, output_format: str, section: str | None, prof
     effective_config, effective_profile = _resolve_config(ctx, cli_ctx, profile)
     fmt = OutputFormat(output_format.lower())
 
-    extra = {"command": "config", "format": fmt.value, "profile": effective_profile}
-    with lib_log_rich.runtime.bind(job_id="cli-config", extra=extra):
+    extra = {"format": fmt.value, "profile": effective_profile}
+    with bind_command(ctx, extra=extra):
         logger.info(
             "Displaying configuration",
             extra={"format": fmt.value, "section": section, "profile": effective_profile},
@@ -286,8 +285,8 @@ def cli_config_deploy(
     deploy_targets = tuple(DeployTarget(t.lower()) for t in targets)
     target_values = tuple(t.value for t in deploy_targets)
 
-    extra = {"command": "config-deploy", "targets": target_values, "force": force, "profile": effective_profile}
-    with lib_log_rich.runtime.bind(job_id="cli-config-deploy", extra=extra):
+    extra = {"targets": target_values, "force": force, "profile": effective_profile}
+    with bind_command(ctx, extra=extra):
         _execute_deploy(
             cli_ctx,
             targets=deploy_targets,
@@ -481,8 +480,8 @@ def cli_config_generate_examples(ctx: click.Context, destination: str, force: bo
         >>> runner = CliRunner()
         >>> # Real invocation tested in test_cli_config.py
     """
-    extra = {"command": "config-generate-examples", "destination": destination, "force": force}
-    with lib_log_rich.runtime.bind(job_id="cli-config-generate-examples", extra=extra):
+    extra = {"destination": destination, "force": force}
+    with bind_command(ctx, extra=extra):
         logger.info("Generating example configuration files", extra={"destination": destination, "force": force})
         try:
             paths = generate_examples(

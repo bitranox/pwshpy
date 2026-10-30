@@ -221,10 +221,11 @@ not).
 
 Principals are identified by **SID** (locale-independent); the localized name is a display field.
 
-## ACLs / permissions  *(portable: read + mutation)*
+## ACLs / permissions  *(Windows + Linux: read + mutation)*
 
-Portable: win32security DACLs on Windows, POSIX ACLs on Linux (read + write the kernel ACL xattr
-directly, plus `chown` for the owner - no `setfacl` subprocess). On Linux each entry carries a
+Windows and Linux: win32security DACLs on Windows, POSIX ACLs on Linux (read + write the kernel ACL
+xattr directly, plus `chown` for the owner - no `setfacl` subprocess). On macOS all four raise
+`PlatformUnsupportedError`: it has no Linux ACL xattr. On Linux each entry carries a
 `kind` (owner / user / owning-group / group / mask / other) and a `permissions` `rwx` string;
 `trustee` is `user:NAME` / `group:NAME` (bare = user), `rights` uses the low 3 bits as `rwx`, and
 POSIX ACLs are allow-only (a `--deny` ACE is rejected). Editing an ACL needs to own the file;

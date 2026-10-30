@@ -6,22 +6,52 @@ Contents:
     * :data:`TIMEOUT_RANGE` - the ``--timeout`` range the facade accepts.
     * :func:`enum_by_value` - map a case-insensitive ``click.Choice`` answer to its enum member.
     * :class:`CaseInsensitiveChoice` - a choice matched in any case but shown as written.
+    * :func:`bind_command` - bind the log context to the command's registered name.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from contextlib import AbstractContextManager
 from enum import Enum
 from gettext import gettext as _
 from gettext import ngettext
 from typing import TypeVar
 
+import lib_log_rich.runtime
 import rich_click as click
 from click.shell_completion import CompletionItem
+from lib_log_rich.domain import LogContext
 
 from ..output import RecordFormat
 
 _E = TypeVar("_E", bound=Enum)
+
+
+def bind_command(
+    ctx: click.Context, *, extra: Mapping[str, object] | None = None
+) -> AbstractContextManager[LogContext]:
+    """Bind the log context to the command's registered name, so log lines name a command that exists.
+
+    The name comes from the click context (the name the command is registered and typed under), so
+    a command cannot log under a short internal name nobody can search for: ``pwshpy get_volume``
+    logs with job id ``cli-get_volume`` and ``extra["command"] == "get_volume"``.
+
+    Args:
+        ctx: The running command's click context.
+        extra: Further fields for the bound context; ``command`` is always the registered name.
+
+    Returns:
+        The context manager ``lib_log_rich.runtime.bind`` returns; enter it around the command body.
+
+    Example:
+        >>> ctx = click.Context(click.Command("get_volume"))
+        >>> bind_command(ctx).__class__.__name__
+        '_GeneratorContextManager'
+    """
+    name = ctx.command.name or ctx.info_name or "pwshpy"
+    return lib_log_rich.runtime.bind(job_id=f"cli-{name}", extra={**(extra or {}), "command": name})
+
 
 #: Mirrors the facade's accepted timeout range, ``(0, 2147483]`` seconds, so a bad value is a usage
 #: error (exit 2) before any child starts; NaN slips past a range check, and the facade refuses it.
@@ -165,4 +195,4 @@ class CaseInsensitiveChoice(click.Choice[str]):
         return [CompletionItem(choice) for choice in self._shown() if choice.casefold().startswith(folded)]
 
 
-__all__ = ["CaseInsensitiveChoice", "enum_by_value", "parse_pairs", "resolve_format"]
+__all__ = ["CaseInsensitiveChoice", "bind_command", "enum_by_value", "parse_pairs", "resolve_format"]

@@ -52,6 +52,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   <pwsh> ...`, root's home from the passwd database and `env` from the fixed system directories, and
   the packed script still gets the caller's values back. With no home for root or no `env` there,
   the run stops with exit code 70 (`pwshpy: cannot elevate: ...`) before sudo is asked anything.
+- An elevated or root pack run also ignores `UV_GIT_LFS`, as it ignores `UV_KEYRING_PROVIDER`.
 - `get_scheduled_task("\\Microsoft\\Windows\\Defrag\\")` lists the folder on Windows: a folder path
   ending in a backslash, the form every record's `task_path` carries, raised `NativeCallError`
   0x8007007B because the Task Scheduler refuses it. The listing strips the trailing backslash, as

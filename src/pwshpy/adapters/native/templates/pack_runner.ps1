@@ -57,8 +57,8 @@
     UV_FIND_LINKS, UV_INSECURE_HOST, UV_INSECURE_NO_ZIP_VALIDATION, UV_CACHE_DIR,
     UV_PYTHON_CACHE_DIR, UV_ENV_FILE, HTTPS_PROXY, HTTP_PROXY, ALL_PROXY (and their lower-case
     forms), SSL_CERT_FILE, SSL_CERT_DIR, SSL_CLIENT_CERT, UV_NATIVE_TLS, UV_SYSTEM_CERTS,
-    UV_KEYRING_PROVIDER, every variable whose name starts with GIT_ (git, which uv runs for a git
-    source, reads them) or GCM_ (Git Credential Manager, the credential helper git runs, reads them;
+    UV_KEYRING_PROVIDER, UV_GIT_LFS, every variable whose name starts with GIT_ (git, which uv runs
+    for a git source, reads them) or GCM_ (Git Credential Manager, the credential helper git runs, reads them;
     both on Windows in any case), SSH_ASKPASS and PASSWORD_STORE_DIR are ignored, each with a line on
     stderr; git reads no global config file (GIT_CONFIG_GLOBAL is /dev/null on POSIX and on Windows
     an empty file below the account's data directory, pwshpy\empty.gitconfig, refused with exit 127
@@ -347,13 +347,14 @@ $PwshPyUvSourceVariables = @(
 # through ALL_PROXY, each also in lower case, measured; on Windows the two spellings are one variable),
 # the certificate roots it trusts (SSL_CERT_FILE and SSL_CERT_DIR replace them, measured; UV_NATIVE_TLS
 # and UV_SYSTEM_CERTS switch to the platform store), the client certificate it presents, and a keyring
-# helper it runs for credentials (UV_KEYRING_PROVIDER=subprocess runs `keyring` from PATH). Each lets
-# the caller decide what the default index serves to an elevated run, or what runs elevated; NO_PROXY
-# only exempts hosts from a proxy and changes nothing once these are gone. The packed script runs
-# without them too. Identical to the .sh runner.
+# helper it runs for credentials (UV_KEYRING_PROVIDER=subprocess runs `keyring` from PATH), and
+# UV_GIT_LFS, with which uv runs git-lfs for a git source, another tool the caller would have run
+# elevated. Each lets the caller decide what the default index serves to an elevated run, or what runs
+# elevated; NO_PROXY only exempts hosts from a proxy and changes nothing once these are gone. The
+# packed script runs without them too. Identical to the .sh runner.
 $PwshPyNetworkVariables = @(
     'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
-    'SSL_CLIENT_CERT', 'UV_NATIVE_TLS', 'UV_SYSTEM_CERTS', 'UV_KEYRING_PROVIDER'
+    'SSL_CLIENT_CERT', 'UV_NATIVE_TLS', 'UV_SYSTEM_CERTS', 'UV_KEYRING_PROVIDER', 'UV_GIT_LFS'
 )
 
 function Get-PwshPyRunningUserSid {

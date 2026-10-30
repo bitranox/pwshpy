@@ -44,6 +44,7 @@ from elevation_doubles import (
     LIBRARY_VARIABLES,
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
+    NETWORK_SWITCHES,
     NETWORK_VARIABLES,
     NOT_A_GCM_VARIABLE,
     NOT_A_GIT_VARIABLE,
@@ -4229,7 +4230,7 @@ def test_an_elevated_run_lets_no_proxy_certificate_or_keyring_variable_reach_uv(
     platform-store switches and a keyring helper are each dropped with a line on stderr, before uv
     python find already; the control passes each on unchanged and prints no line."""
     runner, uv, record = _recording_runner(tmp_path, elevated=elevated)
-    value = "1" if name in ("UV_NATIVE_TLS", "UV_SYSTEM_CERTS") else str(tmp_path / f"given-{name}")
+    value = "1" if name in NETWORK_SWITCHES else str(tmp_path / f"given-{name}")
     result = _run_with_path(
         tmp_path, runner, "-PwshPyUv", str(uv), path_first=[], env={name: value}, cwd=_clean_cwd(tmp_path)
     )

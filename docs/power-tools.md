@@ -581,10 +581,11 @@ Details worth knowing:
   its caches and an env file from; an env file can set `PYTHONPATH` again, and `uv run` loads the one
   `UV_ENV_FILE` names despite `--no-config`); and `HTTPS_PROXY`,
   `HTTP_PROXY` and `ALL_PROXY` with their lower-case forms, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
-  `SSL_CLIENT_CERT`, `UV_NATIVE_TLS`, `UV_SYSTEM_CERTS` and `UV_KEYRING_PROVIDER` (how uv connects:
-  a proxy, which uv 0.13 sends its requests through in each of these spellings, the certificate
-  roots it trusts, which `SSL_CERT_FILE` and `SSL_CERT_DIR` replace, the client certificate it
-  presents, and a keyring helper it would run from `PATH`), so the packed script does not see these
+  `SSL_CLIENT_CERT`, `UV_NATIVE_TLS`, `UV_SYSTEM_CERTS`, `UV_KEYRING_PROVIDER` and `UV_GIT_LFS`
+  (how uv connects: a proxy, which uv 0.13 sends its requests through in each of these spellings,
+  the certificate roots it trusts, which `SSL_CERT_FILE` and `SSL_CERT_DIR` replace, the client
+  certificate it presents, a keyring helper it would run from `PATH`, and git-lfs, which it would
+  run for a git source), so the packed script does not see these
   either; and every variable whose name starts with `GIT_` (on Windows in any case, as the
   environment's names are) and `SSH_ASKPASS`, because uv runs git for a git source (a PEP 723
   dependency or a `--with` value) and git reads them: a `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` /

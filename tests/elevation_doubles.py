@@ -311,8 +311,9 @@ UV_SOURCE_VARIABLES = (
 
 
 #: The variables that decide how uv connects ([X22 E1]): a proxy (each spelling uv 0.13 reads), the
-#: certificate roots it trusts, the client certificate it presents, and a keyring helper it runs. An
-#: elevated run drops them; mirrors the runners' list, in its order.
+#: certificate roots it trusts, the client certificate it presents, and a keyring helper it runs; and
+#: UV_GIT_LFS, with which uv runs git-lfs (an extra tool, as the keyring helper). An elevated run drops
+#: them; mirrors the runners' list, in its order.
 NETWORK_VARIABLES = (
     "HTTPS_PROXY",
     "https_proxy",
@@ -326,7 +327,11 @@ NETWORK_VARIABLES = (
     "UV_NATIVE_TLS",
     "UV_SYSTEM_CERTS",
     "UV_KEYRING_PROVIDER",
+    "UV_GIT_LFS",
 )
+
+#: The ones of :data:`NETWORK_VARIABLES` that are switches: a test gives them "1", the others a path.
+NETWORK_SWITCHES = ("UV_NATIVE_TLS", "UV_SYSTEM_CERTS", "UV_GIT_LFS")
 
 #: [159] The home variables a root run replaces for uv and git with the running account's own, in the
 #: runners' order, then the temporary-directory ones it points at a private directory of that account
@@ -1087,6 +1092,7 @@ __all__ = [
     "LOCAL_WHEEL_DISTRIBUTION",
     "MANAGED_PYTHON_VARIABLES",
     "HOME_VARIABLES",
+    "NETWORK_SWITCHES",
     "NETWORK_VARIABLES",
     "NOT_A_GCM_VARIABLE",
     "NOT_A_GIT_VARIABLE",

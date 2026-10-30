@@ -50,6 +50,7 @@ from collections.abc import Generator
 from pathlib import Path
 
 if sys.platform != "win32":
+    import fcntl
     import pwd
 
 #: The runners only elevate for a non-root uid, so as root no test reaches the sudo branch.
@@ -1051,7 +1052,8 @@ PS1_PYTHON_DIR_CHECK = "$PwshPyPythonDirWhy = Get-PwshPyPythonDirDistrust -Path 
 
 
 #: The xdist group of every test whose root run keeps the REAL account cache home: they share the one
-#: temporary directory below it (:func:`removing_a_new_account_temp_dir`), so they run one at a time.
+#: temporary directory below it (:func:`removing_a_new_account_temp_dir`). The group keeps them on one
+#: worker of a run, so they do not wait on each other's lock; the lock is what excludes other runs.
 REAL_ACCOUNT_CACHE_GROUP = "real-account-cache-home"
 
 
@@ -1061,8 +1063,12 @@ def removing_a_new_account_temp_dir() -> Generator[None, None, None]:
 
     A root run makes its private temporary directory below the account's cache home ([159] round 3), and
     a test that keeps the real passwd lookup (``real_data_home``) cannot answer it inside the test, so
-    the run creates it in the real user's cache. Only an empty directory the block created is removed;
-    mark such a test with :data:`REAL_ACCOUNT_CACHE_GROUP`, or one test could remove it under another.
+    the run creates it in the real user's cache. Only an empty directory the block created is removed.
+    The whole block holds an exclusive ``flock`` on the account's cache directory, so one process at a
+    time is inside: an xdist group serialises only the workers of ONE run, and bmk's test-all runs a
+    pytest per Python version at the same time, where one run's cleanup removed the directory between
+    another run's ``mkdir -p`` and ``chmod 700``. The lock is on the existing directory rather than a
+    lock file, so it leaves nothing behind in the user's cache.
 
     Example:
         >>> with removing_a_new_account_temp_dir():
@@ -1071,14 +1077,21 @@ def removing_a_new_account_temp_dir() -> Generator[None, None, None]:
     if sys.platform == "win32":
         yield
         return
-    temp = Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".cache" / "pwshpy-tmp"
-    existed = temp.exists()
+    cache = Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    temp = cache / "pwshpy-tmp"
+    descriptor = os.open(cache, os.O_RDONLY)
     try:
-        yield
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        existed = temp.exists()
+        try:
+            yield
+        finally:
+            if not existed:
+                with contextlib.suppress(OSError):
+                    temp.rmdir()
     finally:
-        if not existed:
-            with contextlib.suppress(OSError):
-                temp.rmdir()
+        os.close(descriptor)
 
 
 def without_python_dir_check(text: str, *, powershell: bool) -> str:

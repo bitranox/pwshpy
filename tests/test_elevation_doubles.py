@@ -13,7 +13,12 @@ import sys
 from pathlib import Path
 
 import pytest
-from elevation_doubles import default_uv_cache_env, managed_python_dir, write_planted_venv
+from elevation_doubles import (
+    default_uv_cache_env,
+    managed_python_dir,
+    removing_a_new_account_temp_dir,
+    write_planted_venv,
+)
 
 #: Debian and Ubuntu ship a ``sitecustomize.py`` in the system Python's own library directory; it is
 #: found before one in a venv's site-packages, so a venv built from such a Python must not rely on one.
@@ -112,3 +117,42 @@ def test_every_question_to_uv_names_a_cache_of_its_own(tmp_path: Path, monkeypat
         assert not Path(cache).exists(), f"{arguments}: the cache {cache} outlived the question"
         assert downloads == "never", (arguments, downloads)
     assert not (tmp_path / "default-cache").exists()
+
+
+#: A second process that enters :func:`removing_a_new_account_temp_dir`: it prints ``ready`` just
+#: before entering and ``entered`` once inside.
+_SECOND_ENTRANT = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from elevation_doubles import removing_a_new_account_temp_dir
+print("ready", flush=True)
+with removing_a_new_account_temp_dir():
+    print("entered", flush=True)
+"""
+
+
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the account temporary directory is a POSIX root-run path")
+def test_a_second_process_waits_outside_the_account_temp_dir_block() -> None:
+    """Only one PROCESS at a time is inside the block, not only one xdist worker of one run.
+
+    bmk's test-all runs a pytest per Python version at the same time, all below the one real
+    ``~/.cache/pwshpy-tmp``; one run's cleanup removed the directory between another run's
+    ``mkdir -p`` and ``chmod 700`` (exit 70, "cannot make ... private").
+    """
+    with removing_a_new_account_temp_dir():
+        second = subprocess.Popen(  # noqa: S603 - a fixed interpreter and script, no shell
+            [sys.executable, "-c", _SECOND_ENTRANT, str(Path(__file__).parent)],
+            stdout=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        assert second.stdout is not None
+        assert second.stdout.readline().strip() == "ready"
+        try:
+            second.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        assert second.poll() is None, "a second process entered while the first was inside"
+    out, _ = second.communicate(timeout=30)
+    assert out.strip() == "entered", out

@@ -658,14 +658,17 @@ def test_elevate_switch_never_lets_sudo_prompt_twice(tmp_path: Path, cached: boo
 @pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
 @pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
 @pytest.mark.parametrize(
-    "nopasswd", ["ALL", "relaunch", "/bin/true"], ids=["nopasswd-all", "nopasswd-the-relaunch", "nopasswd-another"]
+    "nopasswd",
+    ["ALL", "relaunch", "pwsh", "/bin/true"],
+    ids=["nopasswd-all", "nopasswd-the-relaunch", "nopasswd-pwsh-only", "nopasswd-another"],
 )
 def test_elevate_switch_asks_no_password_of_a_user_who_needs_none(tmp_path: Path, nopasswd: str) -> None:
     """[280], as the .sh: a user with a NOPASSWD sudoers rule beside one that wants a password was asked
     for a password by ``sudo -v`` (``verifypw=all``), and declined with 77 without a terminal or a
-    password. The POSIX relaunch now first asks ``sudo -n`` to run the pwsh it relaunches: when that
-    needs no password, nothing is asked and the script runs. A rule for another program only passes no
-    probe, so the old flow asks and declines, quietly."""
+    password. The POSIX relaunch now first asks ``sudo -n`` to run the command it relaunches with: when
+    that needs no password, nothing is asked and the script runs. The relaunch runs pwsh through the
+    fixed ``env`` ([220]), so a rule for another program only, and a rule naming only pwsh ([280] option
+    A, user decision), passes no probe: the old flow asks and declines, quietly."""
     assert _PWSH is not None
     entry = tmp_path / "who.py"
     marker = tmp_path / "ran.marker"
@@ -674,15 +677,16 @@ def test_elevate_switch_asks_no_password_of_a_user_who_needs_none(tmp_path: Path
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
     calls = tmp_path / "sudo-calls.txt"
-    # The relaunch runs the pwsh this process is, by its resolved path ((Get-Process -Id $PID).Path).
-    program = str(Path(_PWSH).resolve()) if nopasswd == "relaunch" else nopasswd
-    write_fake_sudo(bin_dir, grant=False, cached=False, calls=calls, nopasswd=program)
+    # The relaunch's program is the fixed env; the pwsh it starts is this process, by its resolved path
+    # ((Get-Process -Id $PID).Path).
+    programs = {"relaunch": _fixed_env(), "pwsh": str(Path(_PWSH).resolve())}
+    write_fake_sudo(bin_dir, grant=False, cached=False, calls=calls, nopasswd=programs.get(nopasswd, nopasswd))
     environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
     result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment)
     logged = calls.read_text(encoding="utf-8").splitlines()
     assert second_prompts(calls) == [], logged
     assert "a password is required" not in result.stderr, result.stderr
-    if nopasswd == "/bin/true":
+    if nopasswd in ("pwsh", "/bin/true"):
         assert result.returncode == 77, result.stdout + result.stderr
         assert "pwshpy: elevation declined" in result.stderr, result.stderr
         assert "-v" in logged, logged
@@ -713,10 +717,12 @@ def _pwsh_at(directory: Path) -> Path:
 @pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
 @pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
 def test_the_no_password_probe_names_a_bracketed_pwsh_path_literally(tmp_path: Path) -> None:
-    """[280]: the probe asks ``sudo -n`` about the pwsh the relaunch runs, word for word. pwsh on
+    """[280]: the probe asks ``sudo -n`` about the command the relaunch runs, word for word. pwsh on
     POSIX globs an unquoted argument to a native program, so a pwsh at ``<d>/p[12]/pwsh`` was probed
     as ``<d>/p1/pwsh``, which a NOPASSWD rule for the real path does not cover: the user was asked for
-    a password the relaunch never needed, and declined (77) without one."""
+    a password the relaunch never needed, and declined (77) without one. Since [220] the program is the
+    fixed ``env`` and the pwsh one of its arguments, which a globbed probe would start as the empty
+    sibling: the probe fails, and the user without a password is declined."""
     entry = tmp_path / "who.py"
     marker = tmp_path / "ran.marker"
     entry.write_text(f'open({str(marker)!r}, "w").close()\n')
@@ -728,13 +734,14 @@ def test_the_no_password_probe_names_a_bracketed_pwsh_path_literally(tmp_path: P
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
     calls = tmp_path / "sudo-calls.txt"
-    write_fake_sudo(bin_dir, grant=False, cached=False, calls=calls, nopasswd=str(host))
+    write_fake_sudo(bin_dir, grant=False, cached=False, calls=calls, nopasswd=_fixed_env())
     environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
     result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment, host=str(host))
     logged = calls.read_text(encoding="utf-8").splitlines()
     assert result.returncode == 0, result.stdout + result.stderr + repr(logged)
     assert marker.exists(), "the packed script never ran: " + result.stderr
-    assert logged[0] == f"-n {host} -NoProfile -NonInteractive -Command exit 0", logged
+    assert logged[0].startswith(f"-n {_fixed_env()} {' '.join(_root_home_words())} "), logged
+    assert logged[0].endswith(f" {host} -NoProfile -NonInteractive -Command exit 0"), logged
     assert [call for call in logged if call in ("-v", "-n -v")] == [], logged
 
 
@@ -768,6 +775,159 @@ def test_a_failing_probe_falls_back_to_the_password_under_native_error_action(tm
     assert marker.exists(), "the packed script never ran: " + result.stderr
     assert logged[1:3] == ["-v", "-n -v"], logged
     assert second_prompts(calls) == [], logged
+
+
+def _fixed_env() -> str:
+    """The env program the POSIX relaunch runs: the first one in the fixed helper directories."""
+    return next(f"{directory}/env" for directory in _ROOT_HELPER_PATH.split(":") if Path(directory, "env").is_file())
+
+
+def _root_home_words() -> list[str]:
+    """[220]: the assignments the POSIX relaunch hands root's pwsh: root's own home from the passwd
+    database (uid 0, the account `sudo -n` runs a command as), a home of / spelled as the runner spells
+    it, never the caller's HOME."""
+    assert sys.platform != "win32"
+    stored = pwd.getpwuid(0).pw_dir.rstrip("/")
+    return [
+        f"HOME={stored or '/'}",
+        f"XDG_CACHE_HOME={stored}/.cache",
+        f"XDG_CONFIG_HOME={stored}/.config",
+        f"XDG_DATA_HOME={stored}/.local/share",
+    ]
+
+
+def _run_the_posix_relaunch(tmp_path: Path) -> tuple[subprocess.CompletedProcess[str], list[str], dict[str, str]]:
+    """[220]: a -PwshPyElevate run through a sudo double that grants a password prompt, with a caller
+    home of its own (XDG_STATE_HOME left as the suite has it, NETRC the empty string, TMPDIR, TMP and
+    TEMP each a directory of the test). The relaunched child counts as elevated only by the hand-over
+    marker the relaunch sets, so the parent relaunches and the child takes the root branch (its account
+    home answered inside tmp_path); uv is a recording double. Returns the run, the sudo calls (one line
+    of arguments each) and what uv recorded of its environment."""
+    runner, uv, record = _recording_runner(tmp_path, elevated=f"[bool]$env:{CALLER_ENV_VAR}_PRESET")
+    managed_python_env(tmp_path, managed=None)
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "sudo-calls.txt"
+    write_fake_sudo(bin_dir, grant=True, calls=calls)
+    caller = {**_caller_home_env(tmp_path), "NETRC": ""}
+    for name in ("TMPDIR", "TMP", "TEMP"):
+        directory = tmp_path / ("caller-" + name.lower())
+        directory.mkdir()
+        caller[name] = str(directory)
+    result = _run_with_path(
+        tmp_path,
+        runner,
+        "-PwshPyElevate",
+        "-PwshPyUv",
+        str(uv),
+        path_first=[bin_dir, uv.parent],
+        env=caller,
+        cwd=_clean_cwd(tmp_path),
+    )
+    logged = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+    lines = record.read_text(encoding="utf-8").splitlines() if record.exists() else []
+    recorded = dict(line[4:].split("=", 1) for line in lines if line.startswith("env:"))
+    return result, logged, recorded
+
+
+def _relaunch_caller(tmp_path: Path) -> dict[str, str | None]:
+    """The caller values :func:`_run_the_posix_relaunch` gives each hand-over name (None: unset)."""
+    caller: dict[str, str | None] = {**_caller_home_env(tmp_path), "NETRC": ""}
+    caller.update({name: str(tmp_path / ("caller-" + name.lower())) for name in ("TMPDIR", "TMP", "TEMP")})
+    return {name: caller.get(name, os.environ.get(name)) for name in HOME_VARIABLES}
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
+@pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+def test_the_posix_relaunch_starts_root_pwsh_with_roots_own_home(tmp_path: Path) -> None:
+    """[220]: root's pwsh, relaunched by -PwshPyElevate under the HOME sudo keeps (env_keep, sudo -E),
+    created root-owned files in the caller's ~/.cache/powershell before a line of the runner ran, and put
+    the caller's module directory first in its module path (measured on CT 24001). The relaunch now
+    starts it through the fixed env with root's own home and XDG directories from the passwd database,
+    the caller's values riding along in the hand-over; [280] option A (user decision): the
+    no-password probe runs that same command word for word."""
+    assert _PWSH is not None
+    result, logged, _ = _run_the_posix_relaunch(tmp_path)
+    caller_words = [f"{CALLER_ENV_VAR}_PRESET=1"] + [
+        f"{CALLER_ENV_VAR}_{name}={value}" for name, value in _relaunch_caller(tmp_path).items() if value is not None
+    ]
+    prefix = ["-n", _fixed_env(), *_root_home_words(), *caller_words]
+    host = str(Path(_PWSH).resolve())
+    runner = tmp_path / "recording_stand_in.ps1"
+    uv = tmp_path / "rec" / "bin" / "uv"
+    probe = " ".join([*prefix, host, "-NoProfile", "-NonInteractive", "-Command", "exit 0"])
+    relaunch = " ".join([*prefix, host, "-NoProfile", "-File", str(runner), _NEVER_INSTALL_UV, "-PwshPyUv", str(uv)])
+    assert logged == [probe, "-v", "-n -v", relaunch], logged
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
+@pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+def test_the_posix_relaunch_gives_the_script_the_callers_home_back(tmp_path: Path) -> None:
+    """[220]: the relaunched pwsh lives under root's home, so the root branch hands the shim the caller
+    values the relaunch carried, not its own live ones: each caller variable with the caller's value, an
+    unset one unset, and the relaunch's marker reaches neither uv nor the script."""
+    result, _, recorded = _run_the_posix_relaunch(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert recorded["HOME"] == str(tmp_path), recorded
+    assert recorded[CALLER_ENV_VAR] == " ".join(HOME_VARIABLES), recorded
+    handed = {name: recorded.get(f"{CALLER_ENV_VAR}_{name}") for name in HOME_VARIABLES}
+    assert handed == _relaunch_caller(tmp_path), handed
+    assert f"{CALLER_ENV_VAR}_PRESET" not in recorded, recorded
+
+
+def _unused_uid() -> int:
+    """A uid the passwd database has no entry for."""
+    assert sys.platform != "win32"
+    uid = 2**31 - 2
+    while True:
+        try:
+            pwd.getpwuid(uid)
+        except KeyError:
+            return uid
+        uid -= 1
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
+@pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+@pytest.mark.parametrize("missing", ["root-home", "env"])
+def test_the_posix_relaunch_refuses_when_it_cannot_name_roots_home(tmp_path: Path, missing: str) -> None:
+    """[220]: with no home for the account sudo runs the command as (a uid the passwd database does not
+    know), or no env in the fixed helper directories, the relaunch stops with exit code 70 and the
+    reason, before sudo is asked anything; it never falls back to unsetting HOME, under which root's
+    pwsh takes a fixed /tmp home any account can create first (measured on CT 24001)."""
+    entry = tmp_path / "who.py"
+    marker = tmp_path / "ran.marker"
+    entry.write_text(f'open({str(marker)!r}, "w").close()\n')
+    runner = Path(pack_script(entry).output_path)
+    text = runner.read_text(encoding="utf-8")
+    if missing == "root-home":
+        uid = _unused_uid()
+        old, new = "$PwshPySudoTargetUid = '0'", f"$PwshPySudoTargetUid = '{uid}'"
+        reason = f"pwshpy: cannot elevate: cannot read the home directory of uid {uid} from the passwd database"
+    else:
+        empty = tmp_path / "no-env"
+        empty.mkdir()
+        old, new = f"$PwshPyFixedPath = '{_ROOT_HELPER_PATH}'", f"$PwshPyFixedPath = '{empty}'"
+        reason = f"pwshpy: cannot elevate: no env in {empty}"
+    assert text.count(old) == 1, old
+    runner.write_text(text.replace(old, new), encoding="utf-8")
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "sudo-calls.txt"
+    write_fake_sudo(bin_dir, grant=True, calls=calls)
+    environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
+    result = _run(runner, "-PwshPyElevate", env=environment)
+    assert result.returncode == 70, result.stdout + result.stderr
+    assert reason in result.stderr, result.stderr
+    assert not calls.exists(), calls.read_text(encoding="utf-8")
+    assert not marker.exists(), "the packed script ran although the relaunch was refused"
 
 
 @pytest.mark.local_only
@@ -2901,12 +3061,17 @@ def test_the_sudo_relaunch_forwards_wildcards_and_tildes_literally(tmp_path: Pat
     bin_dir.mkdir()
     write_fake_sudo(bin_dir, grant=True)
     arguments = ["*", "*.log", "~", "~/x", "[ab].log"]
+    # The double runs the relaunch as this account, which root's own home ([220]) shuts out: uv, looking
+    # for managed Pythons below that home's XDG_DATA_HOME, stops on the unreadable directory (a real
+    # relaunch runs as root, which can read it). An empty directory of the test's own keeps uv on the
+    # PATH's Python.
     result = _run_with_path(
         tmp_path,
         Path(manifest.output_path),
         "-PwshPyElevate",
         *arguments,
         path_first=[bin_dir, _UvLocation.directory],
+        env=managed_python_env(tmp_path, managed=None),
         cwd=_glob_bait(tmp_path / "work"),
     )
     assert result.returncode == 0, result.stdout + result.stderr

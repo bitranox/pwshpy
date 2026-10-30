@@ -45,6 +45,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- The `.ps1` runner's `-PwshPyElevate` on Linux and macOS starts root pwsh with root's own home: it
+  no longer creates root-owned files in the caller's `~/.cache/powershell`, and the caller's
+  PowerShell module directory no longer comes first in root's module path. The relaunch
+  runs `sudo -n env HOME=<root's home> XDG_CACHE_HOME=... XDG_CONFIG_HOME=... XDG_DATA_HOME=...
+  <pwsh> ...`, root's home from the passwd database and `env` from the fixed system directories, and
+  the packed script still gets the caller's values back. With no home for root or no `env` there,
+  the run stops with exit code 70 (`pwshpy: cannot elevate: ...`) before sudo is asked anything.
 - `get_scheduled_task("\\Microsoft\\Windows\\Defrag\\")` lists the folder on Windows: a folder path
   ending in a backslash, the form every record's `task_path` carries, raised `NativeCallError`
   0x8007007B because the Task Scheduler refuses it. The listing strips the trailing backslash, as
@@ -121,8 +128,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   unless every sudoers rule of the user is `NOPASSWD`: beside Ubuntu's `%sudo` rule the user was
   asked for a password the command does not need, and without a terminal (or without any password,
   as on stock cloud images) elevation was declined with exit code 77. `sudo -n` is now first asked,
-  silently, to run the program the relaunch runs (the current Python, `/bin/sh`, or the running
-  `pwsh`); when it may, the relaunch runs under `sudo -n` without a prompt.
+  silently, to run the program the relaunch runs (the current Python, `/bin/sh`, or for the `.ps1`
+  the relaunch's own command: `env` with root's home, then the running `pwsh`); when it may, the
+  relaunch runs under `sudo -n` without a prompt. A `NOPASSWD` rule naming only `pwsh` does not
+  cover the `.ps1`'s command, so such a user is asked for the password as before.
 - Packed `.ps1` runner: a caller whose PowerShell session or profile sets
   `$PSNativeCommandUseErrorActionPreference = $true` no longer gets exit code 1 and a
   `NativeCommandExitException` when the packed script exits nonzero, or when a refused `sudo` step

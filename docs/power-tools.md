@@ -19,9 +19,11 @@ ps.elevate()  # relaunch THIS process elevated (UAC / sudo), preserving cwd + ar
 
 On Linux and macOS a user sudo lets run the relaunch's own program without a password (a
 `NOPASSWD` sudoers rule) is asked nothing: `sudo -n` is first asked to run that program (the current
-Python for `ps.elevate()`, `/bin/sh` for a `.sh` runner, the running `pwsh` for a `.ps1`), silently,
-and when it may, the command runs as `sudo -n <command>` at once. Probing the very program keeps a
-rule for some other program only from passing the check and then refusing the command. sudo's default
+Python for `ps.elevate()`, `/bin/sh` for a `.sh` runner, and for a `.ps1` the relaunch's whole
+command, `env` with root's home and then the running `pwsh`, see below), silently, and when it may,
+the command runs as `sudo -n <command>` at once. Probing the very program keeps a rule for some other
+program only from passing the check and then refusing the command; for a `.ps1` that includes a rule
+naming only `pwsh`, which is asked for the password as before. sudo's default
 `verifypw=all` is why the check comes first: `sudo -v` wants a password unless every sudoers rule of
 the user is `NOPASSWD`, so beside Ubuntu's `%sudo` rule it asked for one the command does not need.
 Otherwise the password is asked by `sudo -v` first, and only then is the command run, as
@@ -62,6 +64,20 @@ replacing itself with it, so sudo's `timestamp_type=ppid` finds the credential t
 signal sent to the runner's process alone therefore no longer reaches sudo and the relaunched
 script, while one sent to the whole process group (Ctrl-C in a terminal, `timeout`, a systemd stop)
 still does.
+
+On Linux and macOS the `.ps1` runner's `-PwshPyElevate` relaunch starts root's `pwsh` with root's own
+home, as `sudo -n <env> HOME=<home> XDG_CACHE_HOME=<home>/.cache XDG_CONFIG_HOME=<home>/.config
+XDG_DATA_HOME=<home>/.local/share ... <pwsh> -NoProfile -File <runner>`: the home is the one the
+passwd database records for root, and `env` comes from the fixed system directories. So root's pwsh
+neither creates root-owned files in the caller's `~/.cache/powershell` nor puts the caller's
+PowerShell module directory first in its module path, which it did under a `HOME` that `sudo -E` or
+`env_keep` handed over, before a line of the runner ran. The caller's own values of the home
+variables travel along in the hand-over (`PWSHPY_PACK_CALLER_<NAME>`), so the packed script still
+gets them back. When the passwd database names no home for root, or the fixed directories hold no
+`env`, the run stops with exit code 70 and a line starting `pwshpy: cannot elevate:`, before sudo is
+asked anything; it never unsets `HOME` instead, under which pwsh takes a fixed directory below `/tmp`
+for its home that any account can create first. A `pwsh` you start with `sudo` yourself, outside the
+runner, still does both under the `HOME` sudo keeps.
 
 ## Who am I: the token, not `USERNAME`
 

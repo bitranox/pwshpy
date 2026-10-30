@@ -41,10 +41,10 @@
 # PYTHONPATH, PYTHONUSERBASE, UV_INDEX_URL, UV_DEFAULT_INDEX, UV_INDEX, UV_EXTRA_INDEX_URL,
 # UV_FIND_LINKS, UV_INSECURE_HOST, UV_INSECURE_NO_ZIP_VALIDATION, UV_CACHE_DIR, UV_PYTHON_CACHE_DIR,
 # UV_ENV_FILE, HTTPS_PROXY, HTTP_PROXY, ALL_PROXY (and their lower-case forms), SSL_CERT_FILE,
-# SSL_CERT_DIR, SSL_CLIENT_CERT, UV_NATIVE_TLS, UV_SYSTEM_CERTS, UV_KEYRING_PROVIDER, every variable
-# whose name starts with GIT_ (git, which uv runs for a git source, reads them) or GCM_ (Git
-# Credential Manager, the credential helper git runs, reads them), SSH_ASKPASS and PASSWORD_STORE_DIR
-# are ignored, each with a line on stderr; git reads no global config file (GIT_CONFIG_GLOBAL=/dev/null,
+# SSL_CERT_DIR, SSL_CLIENT_CERT, UV_NATIVE_TLS, UV_SYSTEM_CERTS, UV_KEYRING_PROVIDER, UV_GIT_LFS,
+# every variable whose name starts with GIT_ (git, which uv runs for a git source, reads them) or
+# GCM_ (Git Credential Manager, the credential helper git runs, reads them), SSH_ASKPASS and
+# PASSWORD_STORE_DIR are ignored, each with a line on stderr; git reads no global config file (GIT_CONFIG_GLOBAL=/dev/null,
 # so not the ~/.gitconfig or $XDG_CONFIG_HOME/git/config of the HOME it was given), and for a script
 # with a git source a git older than 2.32, which ignores that variable, is refused with exit code 127;
 # the user site-packages is off (PYTHONNOUSERSITE=1) and uv run reads no .env file (--no-env-file).
@@ -688,13 +688,15 @@ pwshpy_drop_interpreter_variables() {
     # both through ALL_PROXY, each also in lower case, measured), the certificate roots it trusts
     # (SSL_CERT_FILE and SSL_CERT_DIR replace them, measured; UV_NATIVE_TLS and UV_SYSTEM_CERTS switch to
     # the platform store), the client certificate it presents, and a keyring helper it runs for
-    # credentials (UV_KEYRING_PROVIDER=subprocess runs `keyring` from PATH). Each lets the caller decide
-    # what the default index serves to a root run, or what runs as root; NO_PROXY only exempts hosts
-    # from a proxy and changes nothing once these are gone. The packed script runs without them too.
+    # credentials (UV_KEYRING_PROVIDER=subprocess runs `keyring` from PATH), and UV_GIT_LFS, with which
+    # uv runs git-lfs for a git source, another tool the caller would have run as root. Each lets the
+    # caller decide what the default index serves to a root run, or what runs as root; NO_PROXY only
+    # exempts hosts from a proxy and changes nothing once these are gone. The packed script runs without
+    # them too.
     for _iv in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy SSL_CERT_FILE SSL_CERT_DIR \
-        SSL_CLIENT_CERT UV_NATIVE_TLS UV_SYSTEM_CERTS UV_KEYRING_PROVIDER; do
+        SSL_CLIENT_CERT UV_NATIVE_TLS UV_SYSTEM_CERTS UV_KEYRING_PROVIDER UV_GIT_LFS; do
         if eval "[ -n \"\${$_iv+set}\" ]"; then
-            _iv_text="as root uv connects with its own defaults: no proxy, its built-in certificate roots, no keyring"
+            _iv_text="as root uv connects with its own defaults: no proxy, its built-in certificate roots, no keyring, no git-lfs"
             printf '%s\n' "pwshpy: ignoring $_iv: $_iv_text" >&2
             unset "$_iv"
         fi

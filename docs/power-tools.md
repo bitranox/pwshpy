@@ -19,9 +19,12 @@ ps.elevate()  # relaunch THIS process elevated (UAC / sudo), preserving cwd + ar
 
 On Linux and macOS a user sudo lets run the relaunch's own program without a password (a
 `NOPASSWD` sudoers rule) is asked nothing: `sudo -n` is first asked to run that program (the current
-Python for `ps.elevate()`, `/bin/sh` for a `.sh` runner, the running `pwsh` for a `.ps1`), silently,
-and when it may, the command runs as `sudo -n <command>` at once. Probing the very program keeps a
-rule for some other program only from passing the check and then refusing the command. sudo's default
+Python for `ps.elevate()`, `/bin/sh` for a `.sh` runner, and for a `.ps1` the relaunch's whole
+command, `/bin/sh` with the stub that gives root's pwsh root's own home and then the running `pwsh`,
+see below), silently, and when it may,
+the command runs as `sudo -n <command>` at once. Probing the very program keeps a rule for some other
+program only from passing the check and then refusing the command; for a `.ps1` that includes a rule
+naming only `pwsh`, which is asked for the password as before. sudo's default
 `verifypw=all` is why the check comes first: `sudo -v` wants a password unless every sudoers rule of
 the user is `NOPASSWD`, so beside Ubuntu's `%sudo` rule it asked for one the command does not need.
 Otherwise the password is asked by `sudo -v` first, and only then is the command run, as
@@ -62,6 +65,25 @@ replacing itself with it, so sudo's `timestamp_type=ppid` finds the credential t
 signal sent to the runner's process alone therefore no longer reaches sudo and the relaunched
 script, while one sent to the whole process group (Ctrl-C in a terminal, `timeout`, a systemd stop)
 still does.
+
+On Linux and macOS the `.ps1` runner's `-PwshPyElevate` relaunch starts root's `pwsh` with root's own
+home, as `sudo -n /bin/sh -c <stub> pwshpy-relaunch <home> <pwsh> -NoProfile -File <runner> ...`: the
+home is the one the passwd database records for root, and the stub is fixed text in the runner (the
+home reaches it as an argument, never as code). Inside sudo's environment the stub records the home
+variables sudo passed (`HOME`, the XDG directories, `NETRC`, `UV_CREDENTIALS_DIR`, `TMPDIR`, `TMP`,
+`TEMP`) in the hand-over (`PWSHPY_PACK_CALLER_<NAME>`, and unsets the record of each one sudo did not
+pass), points `HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME` and `XDG_DATA_HOME` at root's home, unsets
+`PSModulePath` so pwsh computes its default below that home, and starts pwsh. So root's pwsh neither
+creates root-owned files in the caller's `~/.cache/powershell` nor has the caller's PowerShell module
+directory in its module path, which it did under a `HOME` and `PSModulePath` that sudoers kept
+(`env_keep`, or `env_reset` turned off), before a line of the runner ran. The packed script still sees
+the home variables sudo passes: root's `HOME` under a default sudo, the caller's where sudoers keeps
+`HOME` or turns `env_reset` off; `PSModulePath` is root pwsh's own default.
+When the passwd database names no home for root, or there is no `/bin/sh`, the run stops with exit
+code 70 and a line starting `pwshpy: cannot elevate:`, before sudo is asked anything; it never unsets
+`HOME` instead, under which pwsh takes a fixed directory below `/tmp` for its home that any account
+can create first. A `pwsh` you start with `sudo` yourself, outside the runner, still does both under
+the `HOME` sudo keeps.
 
 ## Who am I: the token, not `USERNAME`
 
@@ -565,10 +587,11 @@ Details worth knowing:
   its caches and an env file from; an env file can set `PYTHONPATH` again, and `uv run` loads the one
   `UV_ENV_FILE` names despite `--no-config`); and `HTTPS_PROXY`,
   `HTTP_PROXY` and `ALL_PROXY` with their lower-case forms, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
-  `SSL_CLIENT_CERT`, `UV_NATIVE_TLS`, `UV_SYSTEM_CERTS` and `UV_KEYRING_PROVIDER` (how uv connects:
-  a proxy, which uv 0.13 sends its requests through in each of these spellings, the certificate
-  roots it trusts, which `SSL_CERT_FILE` and `SSL_CERT_DIR` replace, the client certificate it
-  presents, and a keyring helper it would run from `PATH`), so the packed script does not see these
+  `SSL_CLIENT_CERT`, `UV_NATIVE_TLS`, `UV_SYSTEM_CERTS`, `UV_KEYRING_PROVIDER` and `UV_GIT_LFS`
+  (how uv connects: a proxy, which uv 0.13 sends its requests through in each of these spellings,
+  the certificate roots it trusts, which `SSL_CERT_FILE` and `SSL_CERT_DIR` replace, the client
+  certificate it presents, a keyring helper it would run from `PATH`, and git-lfs, which it would
+  run for a git source), so the packed script does not see these
   either; and every variable whose name starts with `GIT_` (on Windows in any case, as the
   environment's names are) and `SSH_ASKPASS`, because uv runs git for a git source (a PEP 723
   dependency or a `--with` value) and git reads them: a `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` /

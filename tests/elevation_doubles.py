@@ -89,6 +89,8 @@ def write_fake_sudo(
     calls: Path | None = None,
     interrupt_prompt: bool = False,
     nopasswd: str | None = None,
+    env_keep: tuple[str, ...] | None = None,
+    reset_home: str = "/root",
 ) -> Path:
     """Write a ``sudo`` double into ``bin_dir`` (put it first on PATH); its path.
 
@@ -120,6 +122,12 @@ def write_fake_sudo(
             ``-v`` and ``-n -v`` still follow ``grant`` and ``cached``, since ``-v`` wants a password
             unless every rule of the user is NOPASSWD. A stock cloud-image user has no password at
             all, so pair it with ``grant=False, cached=False``.
+        env_keep: Model sudo's ``env_reset`` ([220]): a granted command runs with only
+            ``HOME=reset_home``, the caller's ``PATH`` (standing in for ``secure_path``) and each of these
+            names the caller has set, as sudoers ``env_keep`` keeps them (a kept ``HOME`` replaces
+            ``reset_home``). ``()`` is a default sudo; None (the default) keeps the whole environment,
+            as ``sudo -E`` does.
+        reset_home: The ``HOME`` an ``env_reset`` command starts with (sudo sets the target's).
 
     Returns:
         The written double.
@@ -139,15 +147,24 @@ def write_fake_sudo(
     covered = "false"
     if nopasswd is not None:
         covered = f"[ \"$1\" != -v ] && {{ [ '{nopasswd}' = ALL ] || [ \"$1\" = '{nopasswd}' ]; }}"
+    # How a granted command runs: in the caller's whole environment (sudo -E), or in a reset one.
+    run = ["run() {"]
+    if env_keep is None:
+        run.append('    exec "$@"')
+    else:
+        run.extend(f'    if [ -n "${{{name}+set}}" ]; then set -- "{name}=${name}" "$@"; fi' for name in env_keep)
+        run.append(f'    exec /usr/bin/env -i HOME=\'{reset_home}\' PATH="$PATH" "$@"')
+    run.append("}")
     lines = [
         "#!/bin/sh",
+        *run,
         f"printf '%s\\n' \"$*\" >> '{log}'",
         'if [ "$1" = "-n" ]; then',
         "    shift",
-        f'    if {covered}; then exec "$@"; fi',
+        f'    if {covered}; then run "$@"; fi',
         f"    if {has_credential}; then :; else echo 'sudo: a password is required' >&2; exit 1; fi",
         '    if [ "$1" = "-v" ]; then exit 0; fi',
-        '    exec "$@"',
+        '    run "$@"',
         "fi",
         'if [ "$1" = "-v" ]; then',
         f'    if [ {int(interrupt_prompt)} = 1 ]; then kill -INT "$PPID"; sleep 2; exit 1; fi',
@@ -157,7 +174,7 @@ def write_fake_sudo(
         "fi",
         f"printf 'PROMPT %s\\n' \"$*\" >> '{log}'",
         f"if [ {int(grant)} != 1 ]; then exit 1; fi",
-        'exec "$@"',
+        'run "$@"',
     ]
     script = bin_dir / "sudo"
     script.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
@@ -311,8 +328,9 @@ UV_SOURCE_VARIABLES = (
 
 
 #: The variables that decide how uv connects ([X22 E1]): a proxy (each spelling uv 0.13 reads), the
-#: certificate roots it trusts, the client certificate it presents, and a keyring helper it runs. An
-#: elevated run drops them; mirrors the runners' list, in its order.
+#: certificate roots it trusts, the client certificate it presents, and a keyring helper it runs; and
+#: UV_GIT_LFS, with which uv runs git-lfs (an extra tool, as the keyring helper). An elevated run drops
+#: them; mirrors the runners' list, in its order.
 NETWORK_VARIABLES = (
     "HTTPS_PROXY",
     "https_proxy",
@@ -326,7 +344,11 @@ NETWORK_VARIABLES = (
     "UV_NATIVE_TLS",
     "UV_SYSTEM_CERTS",
     "UV_KEYRING_PROVIDER",
+    "UV_GIT_LFS",
 )
+
+#: The ones of :data:`NETWORK_VARIABLES` that are switches: a test gives them "1", the others a path.
+NETWORK_SWITCHES = ("UV_NATIVE_TLS", "UV_SYSTEM_CERTS", "UV_GIT_LFS")
 
 #: [159] The home variables a root run replaces for uv and git with the running account's own, in the
 #: runners' order, then the temporary-directory ones it points at a private directory of that account
@@ -1087,6 +1109,7 @@ __all__ = [
     "LOCAL_WHEEL_DISTRIBUTION",
     "MANAGED_PYTHON_VARIABLES",
     "HOME_VARIABLES",
+    "NETWORK_SWITCHES",
     "NETWORK_VARIABLES",
     "NOT_A_GCM_VARIABLE",
     "NOT_A_GIT_VARIABLE",

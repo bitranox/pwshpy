@@ -17,12 +17,14 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from elevation_doubles import HOME_VARIABLES
 
 from pwshpy.adapters.native.packer import pack_script, unpack_script
 from pwshpy.domain.enums import RunnerFormat
 from pwshpy.domain.errors import PackError
 from pwshpy.domain.packing import (
     ARGV_ENV_VAR,
+    CALLER_ENV_NAMES,
     CALLER_ENV_VAR,
     CWD_ENV_VAR,
     PATH_ENV_VAR,
@@ -768,3 +770,16 @@ def test_every_ps1_chmod_ends_its_options_before_the_mode(tmp_path: Path) -> Non
         assert "'--'" in words, words
         before = words[: words.index("'--'")]
         assert all(word.startswith("'-") for word in before), words
+
+
+def test_the_ps1_hand_over_names_are_the_shims_and_the_doubles(tmp_path: Path) -> None:
+    """[220]: the .ps1 names its hand-over variables twice, in $PwshPyCallerVariables (the root branch)
+    and in the relaunch stub's loop (what sudo passed), and the shim gives back CALLER_ENV_NAMES, which
+    the test doubles mirror as HOME_VARIABLES: all four lists are one, in one order."""
+    text = Path(pack_script(_project(tmp_path)).output_path).read_text(encoding="utf-8")
+    listed = re.search(r"^\$PwshPyCallerVariables = @\(([^)]*)\)$", text, re.MULTILINE)
+    looped = re.search(r"for _pwshpy_name in ([A-Z_ ]+); do", text)
+    assert listed is not None and looped is not None
+    runner_names = tuple(re.findall(r"'([A-Z_]+)'", listed.group(1)))
+    stub_names = tuple(looped.group(1).split())
+    assert runner_names == stub_names == CALLER_ENV_NAMES == HOME_VARIABLES, (runner_names, stub_names)

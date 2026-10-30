@@ -33,6 +33,7 @@ from elevation_doubles import (
     LIBRARY_PATH_PLANTS,
     LOCAL_WHEEL_DISTRIBUTION,
     MANAGED_PYTHON_VARIABLES,
+    NETWORK_SWITCHES,
     NETWORK_VARIABLES,
     NOT_A_GCM_VARIABLE,
     NOT_A_GIT_VARIABLE,
@@ -2386,7 +2387,7 @@ def test_as_root_no_proxy_certificate_or_keyring_variable_reaches_uv(tmp_path: P
     platform-store switches and a keyring helper are each dropped with a line on stderr, before uv
     python find already; not root (the control), each reaches uv unchanged and no line is printed."""
     runner, uv, record = _recording_python_runner(tmp_path, as_root=as_root)
-    value = "1" if name in ("UV_NATIVE_TLS", "UV_SYSTEM_CERTS") else str(tmp_path / f"given-{name}")
+    value = "1" if name in NETWORK_SWITCHES else str(tmp_path / f"given-{name}")
     environment = {**_trust_env(tmp_path), name: value}
     result = _run_in(["sh"], runner, "--pwshpy-uv", str(uv), env=environment, cwd=_work_dir(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
@@ -2395,6 +2396,8 @@ def test_as_root_no_proxy_certificate_or_keyring_variable_reaches_uv(tmp_path: P
     if as_root:
         found = _recorded_variables(Path(f"{record}.python"))
         assert name not in recorded and name not in found and dropped_line, (recorded, found, result.stderr)
+        # The line says what uv does without them, git-lfs included (UV_GIT_LFS).
+        assert "no keyring, no git-lfs" in result.stderr, result.stderr
     else:
         assert recorded.get(name) == value and not dropped_line, (recorded, result.stderr)
 

@@ -99,3 +99,33 @@ def test_a_nopasswd_rule_beside_a_password_rule_runs_only_n_commands_it_covers(t
     assert _call(sudo, "-n", "-v") == 1
     assert _call(sudo, "-v") == 1
     assert second_prompts(tmp_path / "sudo-calls.txt") == []
+
+
+@_POSIX_ONLY
+@pytest.mark.os_posix
+@pytest.mark.parametrize(
+    ("env_keep", "expected"),
+    [
+        (None, {"HOME": "caller-home", "KEPT": "k", "DROPPED": "d"}),
+        ((), {"HOME": "reset-home", "KEPT": None, "DROPPED": None}),
+        (("KEPT", "HOME", "UNSET"), {"HOME": "caller-home", "KEPT": "k", "DROPPED": None}),
+    ],
+    ids=["sudo-E", "env-reset", "env-keep"],
+)
+def test_the_double_models_env_reset_and_env_keep(
+    tmp_path: Path, env_keep: tuple[str, ...] | None, expected: dict[str, str | None]
+) -> None:
+    """[220] ``env_keep``: None passes the caller's whole environment (``sudo -E``); a tuple starts the
+    command with only ``HOME=reset_home``, the caller's ``PATH`` and each listed name the caller has set
+    (a kept ``HOME`` wins, an unset listed name stays unset), as sudo's ``env_reset`` with ``env_keep``."""
+    sudo = write_fake_sudo(
+        tmp_path, grant=False, cached=False, nopasswd="ALL", env_keep=env_keep, reset_home="reset-home"
+    )
+    caller = {"PATH": "/usr/bin:/bin", "HOME": "caller-home", "KEPT": "k", "DROPPED": "d"}
+    seen = subprocess.run(  # noqa: S603 - the double
+        [str(sudo), "-n", "/usr/bin/env"], capture_output=True, text=True, check=True, env=caller
+    ).stdout.splitlines()
+    variables = dict(line.split("=", 1) for line in seen)
+    assert {name: variables.get(name) for name in expected} == expected, variables
+    assert "UNSET" not in variables
+    assert variables["PATH"] == caller["PATH"]

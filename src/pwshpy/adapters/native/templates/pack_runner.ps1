@@ -57,8 +57,8 @@
     UV_FIND_LINKS, UV_INSECURE_HOST, UV_INSECURE_NO_ZIP_VALIDATION, UV_CACHE_DIR,
     UV_PYTHON_CACHE_DIR, UV_ENV_FILE, HTTPS_PROXY, HTTP_PROXY, ALL_PROXY (and their lower-case
     forms), SSL_CERT_FILE, SSL_CERT_DIR, SSL_CLIENT_CERT, UV_NATIVE_TLS, UV_SYSTEM_CERTS,
-    UV_KEYRING_PROVIDER, every variable whose name starts with GIT_ (git, which uv runs for a git
-    source, reads them) or GCM_ (Git Credential Manager, the credential helper git runs, reads them;
+    UV_KEYRING_PROVIDER, UV_GIT_LFS, every variable whose name starts with GIT_ (git, which uv runs
+    for a git source, reads them) or GCM_ (Git Credential Manager, the credential helper git runs, reads them;
     both on Windows in any case), SSH_ASKPASS and PASSWORD_STORE_DIR are ignored, each with a line on
     stderr; git reads no global config file (GIT_CONFIG_GLOBAL is /dev/null on POSIX and on Windows
     an empty file below the account's data directory, pwshpy\empty.gitconfig, refused with exit 127
@@ -100,6 +100,10 @@ $PwshPyUvPathEnv = '@@PWSHPY_UV_PATH_ENV@@'
 # An elevated POSIX run names here the home variables it replaced for uv and git with the account's own,
 # each caller value in <this>_<NAME>, so the shim gives the script the caller's back ([159]).
 $PwshPyCallerEnv = '@@PWSHPY_CALLER_ENV@@'
+# Those names, the ones the shim gives back (CALLER_ENV_NAMES): the root run hands them over, and the
+# POSIX -PwshPyElevate relaunch stub records the values sudo passed of them ([220]; its own copy of the
+# list, held equal by a test).
+$PwshPyCallerVariables = @('HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'NETRC', 'UV_CREDENTIALS_DIR', 'TMPDIR', 'TMP', 'TEMP')
 # Per uv arg, the relative path an elevated run (which starts uv in another directory) puts the
 # caller's directory in front of: '' for a value left as it is. Parallel to $PwshPyUvArgs.
 $PwshPyUvArgsRelative = @(@@PWSHPY_UV_ARGS_RELATIVE@@)
@@ -308,6 +312,22 @@ $PwshPyTrustedUids = @('0')
 $PwshPyFixedPath = '/usr/bin:/bin:/usr/sbin:/sbin:/run/current-system/sw/bin:/run/current-system/profile/bin'
 # POSIX: the id executables in those same directories, the only ones a root run ever asks.
 $PwshPyFixedIds = @('/usr/bin/id', '/bin/id', '/usr/sbin/id', '/sbin/id', '/run/current-system/sw/bin/id', '/run/current-system/profile/bin/id')
+# POSIX: the account `sudo -n <command>` runs the -PwshPyElevate relaunch as, whose home it starts root's
+# pwsh with ([220]): root, unless sudoers sets runas_default otherwise, which is out of scope (the root
+# rules here assume uid 0).
+$PwshPySudoTargetUid = '0'
+# POSIX: the shell sudo runs the relaunch stub with, by absolute path (no PATH lookup; Linux and macOS
+# both have it).
+$PwshPySudoShell = '/bin/sh'
+# POSIX: the stub sudo runs before root's pwsh ([220], Get-PwshPySudoCommandPrefix), as
+# `sh -c <stub> pwshpy-relaunch <home> <pwsh> <args...>`. Constant text: the home is $1, so no value is
+# ever read as shell code. In sudo's environment it records each hand-over name in <hand-over>_<NAME>
+# when sudo passed it and unsets that record when not (a preset one cannot survive), sets the
+# <hand-over>_PRESET marker the root branch reads, drops PSModulePath (pwsh recomputes its default
+# below the new HOME, so no module directory of the caller's stays in it), points HOME and the XDG
+# directories pwsh reads at <home> (a home of / gives /.cache etc.), forgets its own variables and
+# execs pwsh. POSIX sh only (dash, busybox ash, macOS sh). The names are $PwshPyCallerVariables'.
+$PwshPySudoStub = '_pwshpy_home=$1; shift; for _pwshpy_name in HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME NETRC UV_CREDENTIALS_DIR TMPDIR TMP TEMP; do if eval "[ -n \"\${$_pwshpy_name+set}\" ]"; then eval "@@PWSHPY_CALLER_ENV@@_$_pwshpy_name=\$$_pwshpy_name"; export "@@PWSHPY_CALLER_ENV@@_$_pwshpy_name"; else unset "@@PWSHPY_CALLER_ENV@@_$_pwshpy_name"; fi; done; @@PWSHPY_CALLER_ENV@@_PRESET=1; export @@PWSHPY_CALLER_ENV@@_PRESET; unset PSModulePath; case $_pwshpy_home in /) _pwshpy_base=;; *) _pwshpy_base=$_pwshpy_home;; esac; HOME=$_pwshpy_home; XDG_CACHE_HOME=$_pwshpy_base/.cache; XDG_CONFIG_HOME=$_pwshpy_base/.config; XDG_DATA_HOME=$_pwshpy_base/.local/share; export HOME XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME; unset _pwshpy_home _pwshpy_base _pwshpy_name; exec "$@"'
 # The variables through which a caller names the interpreter itself, past --python-preference
 # only-managed (measured with uv 0.13: an explicit UV_PYTHON path and an active virtual or conda
 # environment each run their own python), or that uv refuses beside that flag; then the ones that
@@ -340,13 +360,14 @@ $PwshPyUvSourceVariables = @(
 # through ALL_PROXY, each also in lower case, measured; on Windows the two spellings are one variable),
 # the certificate roots it trusts (SSL_CERT_FILE and SSL_CERT_DIR replace them, measured; UV_NATIVE_TLS
 # and UV_SYSTEM_CERTS switch to the platform store), the client certificate it presents, and a keyring
-# helper it runs for credentials (UV_KEYRING_PROVIDER=subprocess runs `keyring` from PATH). Each lets
-# the caller decide what the default index serves to an elevated run, or what runs elevated; NO_PROXY
-# only exempts hosts from a proxy and changes nothing once these are gone. The packed script runs
-# without them too. Identical to the .sh runner.
+# helper it runs for credentials (UV_KEYRING_PROVIDER=subprocess runs `keyring` from PATH), and
+# UV_GIT_LFS, with which uv runs git-lfs for a git source, another tool the caller would have run
+# elevated. Each lets the caller decide what the default index serves to an elevated run, or what runs
+# elevated; NO_PROXY only exempts hosts from a proxy and changes nothing once these are gone. The
+# packed script runs without them too. Identical to the .sh runner.
 $PwshPyNetworkVariables = @(
     'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
-    'SSL_CLIENT_CERT', 'UV_NATIVE_TLS', 'UV_SYSTEM_CERTS', 'UV_KEYRING_PROVIDER'
+    'SSL_CLIENT_CERT', 'UV_NATIVE_TLS', 'UV_SYSTEM_CERTS', 'UV_KEYRING_PROVIDER', 'UV_GIT_LFS'
 )
 
 function Get-PwshPyRunningUserSid {
@@ -1652,7 +1673,7 @@ function Clear-PwshPyInterpreterVariable {
     }
     foreach ($name in $PwshPyNetworkVariables) {
         if ($null -eq [Environment]::GetEnvironmentVariable($name)) { continue }
-        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run lets uv connect with its own defaults: no proxy, its built-in certificate roots, no keyring"
+        Write-PwshPyNotice "pwshpy: ignoring ${name}: an elevated run lets uv connect with its own defaults: no proxy, its built-in certificate roots, no keyring, no git-lfs"
         Remove-Item -LiteralPath "Env:$name"
     }
     # git, which uv runs for a git source (a PEP 723 dependency or a --with value), reads every GIT_
@@ -1781,11 +1802,13 @@ function Get-PwshPyEmptyFileDistrust {
 }
 
 function Get-PwshPyAccountHome {
-    # POSIX: the home of the account this run is (no trailing slash; '' for /), from the passwd
-    # database: getent asks every name service (Linux), id -P is the BSD and macOS form, and
-    # /etc/passwd itself lists root everywhere; the tools come from the fixed helper directories, never
-    # from PATH. No answer throws: a guessed directory would be one the caller could create.
-    $uid = Get-PwshPyEuid
+    param([string] $Uid = (Get-PwshPyEuid))
+
+    # POSIX: the home of the account $Uid (default: the one this run is; no trailing slash, '' for /),
+    # from the passwd database: getent asks every name service (Linux), id -P is the BSD and macOS form
+    # (it prints the running account's entry, so it answers only for that uid), and /etc/passwd itself
+    # lists root everywhere; the tools come from the fixed helper directories, never from PATH. No
+    # answer throws: a guessed directory would be one the caller could create.
     $answers = New-Object System.Collections.Generic.List[string]
     foreach ($directory in ($PwshPyFixedPath -split ':')) {
         $getent = "$directory/getent"
@@ -1806,6 +1829,28 @@ function Get-PwshPyAccountHome {
     throw "cannot read the home directory of uid $uid from the passwd database"
 }
 
+function Get-PwshPySudoCommandPrefix {
+    # POSIX: the words between `sudo -n` and pwsh's own path in the -PwshPyElevate relaunch, and in the
+    # no-password probe before it, which runs the same command ([280] option A, user decision): one
+    # list, so the two cannot drift apart. pwsh creates its cache below HOME and puts the module
+    # directory below it first in its module path before any line of this file runs, and sudo -E or
+    # env_keep hand root the caller's HOME (and PSModulePath), so root's pwsh made root-owned files in
+    # the caller's ~/.cache/powershell and loaded modules from a directory the caller writes ([220],
+    # measured). So sudo runs the fixed stub ($PwshPySudoStub) with $PwshPySudoShell: inside sudo's own
+    # environment it records each hand-over name sudo passed, and unsets the record of each it did not,
+    # so the script sees what sudo gave it, as before (user decision: match sudo's own view); then it
+    # points HOME and the XDG directories pwsh reads at the home of the account sudo runs it as, from
+    # the passwd database, drops PSModulePath (pwsh recomputes its default) and execs pwsh. HOME is
+    # never unset: pwsh then takes a fixed directory below /tmp for its home, which any account can
+    # create first (measured). The home travels as an argument, never inside the stub's text, so no
+    # value is ever read as shell code. Throws when it cannot name the home or find the shell.
+    $targetHome = Get-PwshPyAccountHome -Uid $PwshPySudoTargetUid
+    if (-not (Test-Path -LiteralPath $PwshPySudoShell -PathType Leaf)) { throw "no $PwshPySudoShell" }
+    # A home of / is '' here, as for the account cache home; the stub makes the directories /.cache etc.
+    $homeValue = if ($targetHome) { $targetHome } else { '/' }
+    return @($PwshPySudoShell, '-c', $PwshPySudoStub, 'pwshpy-relaunch', $homeValue)
+}
+
 function Invoke-PwshPyElevated {
     param([string[]] $ForwardArgs)
 
@@ -1823,15 +1868,25 @@ function Invoke-PwshPyElevated {
             [Console]::Error.WriteLine('pwshpy: sudo not found; cannot elevate')
             exit 127
         }
-        # A user sudo lets run this pwsh, the relaunch's own program, without a password (a NOPASSWD
-        # rule) is asked nothing ([280]): under sudo's default verifypw=all, -v wants a password unless
-        # EVERY rule of the user is NOPASSWD, so beside Ubuntu's %sudo rule it asked for one the
-        # command does not need, and without a terminal (or any password) the run was declined. The
-        # probe runs the same program as the relaunch, word for word (ConvertTo-PwshPyNativeCall, as
-        # the relaunch below: a host path holding [ ] * ? is never globbed into a sibling's), so a rule
-        # for some other program only cannot pass it; it prints nothing, and its refusal is not an
-        # error of this run.
-        $probeArgs = @('-n', (Get-PwshPyHostPath), '-NoProfile', '-NonInteractive', '-Command', 'exit 0')
+        # The relaunch starts pwsh with root's own home ([220], Get-PwshPySudoCommandPrefix);
+        # without one it stops (70, as an elevated child that fails before the script), before sudo is
+        # asked anything.
+        try {
+            $sudoPrefix = @(Get-PwshPySudoCommandPrefix)
+        } catch {
+            [Console]::Error.WriteLine("pwshpy: cannot elevate: $($_.Exception.Message)")
+            exit 70
+        }
+        # A user sudo lets run the relaunch's own command without a password (a NOPASSWD rule) is asked
+        # nothing ([280]): under sudo's default verifypw=all, -v wants a password unless EVERY rule of
+        # the user is NOPASSWD, so beside Ubuntu's %sudo rule it asked for one the command does not
+        # need, and without a terminal (or any password) the run was declined. The probe runs the same
+        # command as the relaunch, the shell and its stub included (user decision, [280] option A),
+        # word for word (ConvertTo-PwshPyNativeCall, as the relaunch below: a host path holding [ ] * ?
+        # is never globbed into a sibling's), so a rule for some other program only, or for pwsh alone,
+        # cannot pass it, and a probe that passes guarantees the relaunch is not refused; it prints
+        # nothing, and its refusal is not an error of this run.
+        $probeArgs = @('-n') + $sudoPrefix + @((Get-PwshPyHostPath), '-NoProfile', '-NonInteractive', '-Command', 'exit 0')
         . (ConvertTo-PwshPyNativeCall -FilePath 'sudo' -ArgumentList $probeArgs -StdoutPath '/dev/null' -StderrPath '/dev/null')
         if ($LASTEXITCODE -ne 0) {
             # Ask for the password with `sudo -v` first: sudo exits 1 when it refuses, which is also
@@ -1855,7 +1910,7 @@ function Invoke-PwshPyElevated {
         # sudo's own code, which no wrapper can tell from the script's.
         # Every word literal (ConvertTo-PwshPyNativeCall): the caller's '*' or '~' reaches the
         # script as typed, and a runner path holding '?' names this file, not a sibling it matches.
-        $sudoArgs = @('-n', (Get-PwshPyHostPath), '-NoProfile', '-File', $self)
+        $sudoArgs = @('-n') + $sudoPrefix + @((Get-PwshPyHostPath), '-NoProfile', '-File', $self)
         if ($null -ne $ForwardArgs) { $sudoArgs += $ForwardArgs }
         . (ConvertTo-PwshPyNativeCall -FilePath 'sudo' -ArgumentList $sudoArgs)
         exit $LASTEXITCODE
@@ -2177,10 +2232,19 @@ $PwshPyPrepare = {
         # directory, the netrc and uv's credentials; the shim gives the script the caller's back. Windows
         # is not covered: an elevated token keeps the caller's own profile there.
         if (-not $PwshPyOnWindows) {
+            # A -PwshPyElevate relaunch started this pwsh with root's own home ([220]), so the live values
+            # are not the ones sudo passed: its stub recorded those in the hand-over itself (a name sudo
+            # did not pass with none, which the shim then unsets), marked by <hand-over>_PRESET. They are
+            # kept as recorded, and the marker goes, so it reaches neither uv nor the script.
+            $PwshPyPresetMarker = "Env:${PwshPyCallerEnv}_PRESET"
+            $PwshPyPreset = Test-Path -LiteralPath $PwshPyPresetMarker
+            Remove-Item -LiteralPath $PwshPyPresetMarker -ErrorAction SilentlyContinue
             $PwshPyCallerNames = New-Object System.Collections.Generic.List[string]
-            foreach ($name in @('HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'NETRC', 'UV_CREDENTIALS_DIR', 'TMPDIR', 'TMP', 'TEMP')) {
+            foreach ($name in $PwshPyCallerVariables) {
                 $handOver = "Env:${PwshPyCallerEnv}_$name"
-                if (Test-Path -LiteralPath "Env:$name") {
+                if ($PwshPyPreset) {
+                    # Carried by the relaunch: left as it is.
+                } elseif (Test-Path -LiteralPath "Env:$name") {
                     Set-Item -LiteralPath $handOver -Value ([Environment]::GetEnvironmentVariable($name))
                 } else {
                     Remove-Item -LiteralPath $handOver -ErrorAction SilentlyContinue
@@ -2269,9 +2333,11 @@ $PwshPyPrepareRun = {
     $env:PwshPyArgvPlaceholder = $null
     Set-Item -Path ('Env:' + $PwshPyArgvEnv) -Value ($PwshPyEncoded -join '|')
     # Only a POSIX root run hands the caller's home variables over to the shim ([159]); in any other run
-    # a hand-over marker came with the caller's environment, and the shim would act on it.
+    # a hand-over marker came with the caller's environment, and the shim would act on it. The relaunch's
+    # PRESET marker ([220]) goes too: only a root run reads it.
     if (-not ($PwshPyElevatedRun -and -not $PwshPyOnWindows)) {
         Remove-Item -LiteralPath "Env:$PwshPyCallerEnv" -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath "Env:${PwshPyCallerEnv}_PRESET" -ErrorAction SilentlyContinue
     }
 
     $PwshPyTarget = Join-Path $PwshPyCacheDir $PwshPyShim

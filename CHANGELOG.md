@@ -66,6 +66,19 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `PlatformUnsupportedError` instead of a raw `AttributeError`: the Linux backend reads the POSIX ACL
   extended attribute through `os.getxattr`, which macOS lacks. The refusal comes before any adapter
   call. ACLs are supported on Windows and Linux; the docs no longer call them portable to macOS.
+- The `.ps1` runner's `-PwshPyElevate` on Linux and macOS starts root pwsh with root's own home: it
+  no longer creates root-owned files in the caller's `~/.cache/powershell`, and root's module path no
+  longer includes the caller's PowerShell module directory. The relaunch runs
+  `sudo -n /bin/sh -c <fixed stub> pwshpy-relaunch <root's home> <pwsh> ...`, root's home taken from
+  the passwd database: inside sudo's environment the stub records the home variables sudo passed,
+  points `HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME` and `XDG_DATA_HOME` at root's home, drops
+  `PSModulePath` and starts pwsh. The packed script still sees the home variables sudo passes: root's
+  `HOME` under a default sudo, the caller's where sudoers keeps `HOME` (`env_keep`) or turns
+  `env_reset` off; `PSModulePath` is root pwsh's own default. With no home
+  for root or no `/bin/sh`, the run stops with exit code 70 (`pwshpy: cannot elevate: ...`) before
+  sudo is asked anything.
+- An elevated or root pack run also ignores `UV_GIT_LFS`, as it ignores `UV_KEYRING_PROVIDER`; the
+  line it prints for either now ends `no keyring, no git-lfs`.
 - `get_scheduled_task("\\Microsoft\\Windows\\Defrag\\")` lists the folder on Windows: a folder path
   ending in a backslash, the form every record's `task_path` carries, raised `NativeCallError`
   0x8007007B because the Task Scheduler refuses it. The listing strips the trailing backslash, as
@@ -142,8 +155,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   unless every sudoers rule of the user is `NOPASSWD`: beside Ubuntu's `%sudo` rule the user was
   asked for a password the command does not need, and without a terminal (or without any password,
   as on stock cloud images) elevation was declined with exit code 77. `sudo -n` is now first asked,
-  silently, to run the program the relaunch runs (the current Python, `/bin/sh`, or the running
-  `pwsh`); when it may, the relaunch runs under `sudo -n` without a prompt.
+  silently, to run the program the relaunch runs (the current Python, `/bin/sh`, or for the `.ps1`
+  the relaunch's own command: `/bin/sh` with the stub that gives root's pwsh root's own home, then the
+  running `pwsh`); when it may, the relaunch runs under `sudo -n` without a prompt. A `NOPASSWD` rule
+  naming only `pwsh` does not cover the `.ps1`'s command, so such a user is asked for the password as
+  before.
 - Packed `.ps1` runner: a caller whose PowerShell session or profile sets
   `$PSNativeCommandUseErrorActionPreference = $true` no longer gets exit code 1 and a
   `NativeCommandExitException` when the packed script exits nonzero, or when a refused `sudo` step

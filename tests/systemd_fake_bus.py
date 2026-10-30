@@ -61,6 +61,15 @@ def denied_reply() -> Reply:
     return Reply(("Access denied",), error=True, error_name=ACCESS_DENIED)
 
 
+#: A D-Bus error that is no refusal: the call reached the bus and failed for another reason.
+FAILED = "org.freedesktop.DBus.Error.Failed"
+
+
+def broken_reply() -> Reply:
+    """A failed call that is no refusal (``org.freedesktop.DBus.Error.Failed``)."""
+    return Reply(("Operation failed",), error=True, error_name=FAILED)
+
+
 class FakeCore:
     """The two jeepney entry points the adapter uses: DBusAddress and new_method_call."""
 
@@ -109,7 +118,11 @@ class FakeConn:
     ``refused_loads`` names units whose ``LoadUnit`` call itself fails with a D-Bus error (an
     invalid name, a refused or broken bus call) - unlike a not-found unit, which systemd answers.
     ``refused_reads`` names (unit, property) pairs whose ``Properties.Get`` fails with a D-Bus
-    error although the unit is loaded (a refused or broken property read).
+    error although the unit is loaded (a refused or broken property read). ``denied_calls`` names
+    (method, unit) pairs of the unit lookups (``GetUnit``, ``LoadUnit``, ``GetUnitFileState``) that
+    systemd refuses. All three answer with the ``AccessDenied`` refusal (:func:`denied_reply`), so
+    the lookup helpers raise it; ``broken_reads`` names (unit, property) pairs whose read fails with
+    an error that is NO refusal (:func:`broken_reply`), which reads as the property's default.
 
     ``aliases`` maps an alias name to its unit: ``LoadUnit`` of the alias returns the unit's own
     object, whose ``Id`` is the unit's name, as on systemd 259 (measured: ``LoadUnit("sshd.service")``
@@ -128,6 +141,7 @@ class FakeConn:
 
     _VERBS = frozenset({"Reload", "StartUnit", "StopUnit", "RestartUnit", "EnableUnitFiles", "DisableUnitFiles"})
     _TRANSITIONS = frozenset({"activating", "deactivating", "reloading"})
+    _LOOKUPS = frozenset({"GetUnit", "LoadUnit", "GetUnitFileState"})  # the calls ``denied_calls`` can refuse
 
     def __init__(
         self,
@@ -144,6 +158,8 @@ class FakeConn:
         walks: dict[str, list[str]] | None = None,
         refused_loads: frozenset[str] = frozenset(),
         refused_reads: frozenset[tuple[str, str]] = frozenset(),
+        broken_reads: frozenset[tuple[str, str]] = frozenset(),
+        denied_calls: frozenset[tuple[str, str]] = frozenset(),
         pending: frozenset[str] = frozenset(),
         aliases: dict[str, str] | None = None,
         denied: dict[str, str] | None = None,
@@ -160,6 +176,8 @@ class FakeConn:
         self._walks = walks or {}
         self._refused_loads = refused_loads
         self._refused_reads = refused_reads
+        self._broken_reads = broken_reads
+        self._denied_calls = denied_calls  # (method, unit) lookups systemd refuses
         self._walking: dict[str, list[str]] = {}  # unit -> ActiveStates still ahead of it
         self._known = {unit for unit, _iface, _prop in props} | set(unit_files) | set(unloaded)
         self._not_found: set[str] = set()  # names LoadUnit answered with a not-found object
@@ -307,6 +325,10 @@ class FakeConn:
         }
         if msg.method == "Get" and (msg.path[len("/u/") :], msg.body[1]) in self._refused_reads:
             return denied_reply()
+        if msg.method == "Get" and (msg.path[len("/u/") :], msg.body[1]) in self._broken_reads:
+            return broken_reply()
+        if msg.method in self._LOOKUPS and (msg.method, msg.body[0]) in self._denied_calls:
+            return denied_reply()
         handler = handlers.get(msg.method)
         return Reply(("unexpected",), error=True) if handler is None else handler(msg)
 
@@ -322,6 +344,7 @@ def use_bus(monkeypatch: pytest.MonkeyPatch, conn: FakeConn) -> None:
 
 __all__ = [
     "ACCESS_DENIED",
+    "FAILED",
     "INTERACTIVE_AUTHORIZATION_REQUIRED",
     "Address",
     "FakeConn",
@@ -329,6 +352,7 @@ __all__ = [
     "HeaderFields",
     "Message",
     "Reply",
+    "broken_reply",
     "denied_reply",
     "use_bus",
 ]

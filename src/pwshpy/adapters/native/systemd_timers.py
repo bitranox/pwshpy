@@ -59,6 +59,7 @@ import re
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
@@ -66,7 +67,7 @@ from pydantic import ValidationError
 
 from ... import __init__conf__
 from ...domain.enums import TaskMultipleInstances, TaskRunLevel, TaskState, WellKnownSid
-from ...domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError
+from ...domain.errors import ConfigurationError, NativeAccessDeniedError, NativeCallError, PlatformUnsupportedError
 from ...domain.records import ScheduledTaskInfo
 from ...domain.scheduling import BootTrigger, DailyTrigger, OnceTrigger, TaskPrincipal, TaskSettings, TaskTrigger
 from . import systemd_dbus as _dbus
@@ -649,7 +650,11 @@ def _owned_service(bus: _dbus.Bus, unit: str, path: str, *, strict: bool) -> boo
     skip-or-raise rule: ownership that cannot be read is no answer, unlike a service that is not ours,
     which is no task and is left out silently.
     """
-    fragment = _dbus.path_property(bus, path, "FragmentPath", None)
+    try:
+        fragment = _dbus.path_property(bus, path, "FragmentPath", None)
+    except NativeAccessDeniedError as exc:
+        skip_or_raise(f"cannot read the unit file path of '{unit}'", exc, strict=strict, log=logger)
+        return False
     if fragment is None:
         skip_or_raise(
             f"cannot read the unit file path of '{unit}'",
@@ -668,32 +673,77 @@ def _owned_service(bus: _dbus.Bus, unit: str, path: str, *, strict: bool) -> boo
     return is_pwshpy_unit(text)
 
 
+def _skip_refused(unit: str, exc: NativeAccessDeniedError, *, strict: bool) -> None:
+    """Apply the listing's skip-or-raise rule to ``unit``, one of whose reads systemd refused.
+
+    A refused read says nothing about the task, so it must not stand in for a default (disabled, no
+    description, no run): the task is skipped with a WARNING, or raised under ``strict``, like a unit
+    whose ``LoadUnit`` fails.
+    """
+    skip_or_raise(f"systemd refused a read of unit '{unit}'", exc, strict=strict, log=logger)
+
+
+def _unless_refused(read: Callable[[], ScheduledTaskInfo], unit: str, *, strict: bool) -> Iterator[ScheduledTaskInfo]:
+    """Yield ``read()``'s task; nothing (skip-or-raise) when systemd refuses one of its reads."""
+    try:
+        task = read()
+    except NativeAccessDeniedError as exc:
+        _skip_refused(unit, exc, strict=strict)
+        return
+    yield task
+
+
+def _listed_timer(bus: _dbus.Bus, unit: _dbus.ListedUnit) -> ScheduledTaskInfo:
+    """The record of a loaded timer from its ``ListUnits`` entry plus its unit file state."""
+    state = _dbus.unit_file_state(bus, unit.name) or UnitFileState.EMPTY
+    return _timer_task(bus, unit.name, unit.path, file_state=state, listed=unit)
+
+
+def _resolve_named(bus: _dbus.Bus, unit: str) -> tuple[_dbus.LoadedUnit, UnitFileState] | None:
+    """``unit`` loaded, with its unit file state; None when it is no task by the listing's rules.
+
+    None for an alias (the listing reports the unit it names), a name with no unit file, and a
+    masked unit that is not running (:func:`_is_absent`).
+
+    Raises:
+        NativeCallError: The ``LoadUnit`` call, its ``LoadState`` or ``Id`` read fails, or systemd
+            refuses the ``GetUnitFileState`` call or the ``ActiveState`` read.
+    """
+    state = _dbus.unit_file_state(bus, unit) or UnitFileState.EMPTY
+    if state is UnitFileState.ALIAS:  # the name of another unit: the listing reports that unit, never the alias
+        return None
+    loaded = _load_named_unit(bus, unit)
+    if loaded is None or _is_absent(bus, loaded, state):
+        return None
+    return loaded, state
+
+
 def _lookup_unit(bus: _dbus.Bus, base: str, *, strict: bool) -> Iterator[ScheduledTaskInfo]:
     """The timer task ``base``, else the on-demand service pwshpy registered as ``base``, else nothing.
 
     The same answer the controller reads back after register: a ``.timer`` makes it a scheduled
     task, a ``.service`` alone an on-demand one - but only a ``.service`` whose unit file pwshpy
     wrote (:func:`_owned_service`), or every system daemon would answer as a task. An alias counts
-    as absent (:func:`_load_named_unit`), and a masked unit unless it is running, as in the listing
+    as absent (:func:`_resolve_named`), and a masked unit unless it is running, as in the listing
     (:func:`_is_absent`). A unit systemd does not answer for (a refused ``LoadUnit``, ``LoadState``
-    or ``Id`` read) ends the lookup through the listing's skip-or-raise rule: the service must not
-    stand in for a timer that may exist.
+    or ``Id`` read, or any read systemd refuses) ends the lookup through the listing's
+    skip-or-raise rule: the service must not stand in for a timer that may exist.
     """
     for unit in (f"{base}.timer", f"{base}.service"):
-        state = _dbus.unit_file_state(bus, unit) or UnitFileState.EMPTY
-        if state is UnitFileState.ALIAS:  # the name of another unit: the listing reports that unit, never the alias
-            continue
         try:
-            loaded = _load_named_unit(bus, unit)
+            resolved = _resolve_named(bus, unit)
         except NativeCallError as exc:
             skip_or_raise(f"cannot load unit '{unit}'", exc, strict=strict, log=logger)
             return
-        if loaded is None or _is_absent(bus, loaded, state):
+        if resolved is None:
             continue
+        loaded, state = resolved
         if unit.endswith(".timer"):
-            yield _timer_task(bus, unit, loaded.path, file_state=state)
+            yield from _unless_refused(
+                partial(_timer_task, bus, unit, loaded.path, file_state=state), unit, strict=strict
+            )
         elif _owned_service(bus, unit, loaded.path, strict=strict):
-            yield _service_task(bus, base, loaded.path)
+            yield from _unless_refused(partial(_service_task, bus, base, loaded.path), unit, strict=strict)
         return
 
 
@@ -750,13 +800,15 @@ def iter_timers(
     Args:
         folder_path: Ignored (systemd timers are flat); kept for parity with the Windows source.
         strict: What happens when systemd does not answer a read the listing needs - the
-            unit-file listing (without it no unloaded timer can be listed), or the ``LoadUnit`` of
-            one timer file or its ``LoadState`` read. False (default) skips what it could not read
-            and logs a WARNING naming it; True raises :class:`NativeCallError` naming it, when
-            iteration reaches it. The deliberate filtering above (not-found, masked, alias,
-            template, stale) is systemd's answer, not a failure, and is the same either way; a
-            single property that cannot be read still falls back to its default in both modes
-            (the task is kept). With ``task_name`` it decides a unit whose ``LoadUnit`` or
+            unit-file listing (without it no unloaded timer can be listed), the ``LoadUnit`` of
+            one timer file or its ``LoadState`` read, or any read of a task that systemd refuses
+            (``AccessDenied`` / ``InteractiveAuthorizationRequired``). False (default) skips what it
+            could not read and logs a WARNING naming it; True raises :class:`NativeCallError` naming
+            it (a :class:`NativeAccessDeniedError` for a refusal), when iteration reaches it. The
+            deliberate filtering above (not-found, masked, alias, template, stale) is systemd's
+            answer, not a failure, and is the same either way; a single property whose read fails
+            for another reason than a refusal still falls back to its default in both modes (the
+            task is kept). With ``task_name`` it decides a unit whose ``LoadUnit`` or
             ``LoadState`` read fails, and an on-demand service whose unit file (``FragmentPath``)
             cannot be read; a task that does not exist, or a service pwshpy did not write, is an
             empty answer either way.
@@ -805,8 +857,7 @@ def iter_timers(
                 # not-found until a daemon-reload. Nothing here depends on the version.
                 continue
             seen.add(name)
-            state = _dbus.unit_file_state(bus, name) or UnitFileState.EMPTY
-            yield _timer_task(bus, name, unit.path, file_state=state, listed=unit)
+            yield from _unless_refused(partial(_listed_timer, bus, unit), name, strict=strict)
         for name, state in _timer_files(bus, strict=strict):
             if name in seen or state in _dbus.UNLISTED_FILE_STATES:
                 continue
@@ -814,7 +865,7 @@ def iter_timers(
             path = _timer_file_path(bus, name, strict=strict)
             if path is None:  # a stale or broken file (no unit behind the name), or a refused load
                 continue
-            yield _timer_task(bus, name, path, file_state=state)
+            yield from _unless_refused(partial(_timer_task, bus, name, path, file_state=state), name, strict=strict)
     finally:
         bus.conn.close()
 
@@ -1218,6 +1269,10 @@ def _monotonic_bases(bus: _dbus.Bus, timer: str) -> list[TimerBase] | None:
 
     ``LoadUnit`` rather than ``GetUnit``: a disabled, stopped timer is usually unloaded, and this
     reads ANY timer the same way - pwshpy's own and one it did not write - from what systemd parsed.
+
+    Raises:
+        NativeAccessDeniedError: systemd refused the ``LoadUnit`` call or a read; a refusal is no
+            "unreadable", so the caller stops before it changes anything.
     """
     raw = _dbus.path_property(
         bus, _dbus.load_unit_path(bus, timer), "TimersMonotonic", None, interface=_dbus.TIMER_IFACE
@@ -1450,7 +1505,9 @@ class SystemdScheduledTaskController:
         A timer with a boot-relative part (``OnBootSec=`` / ``OnStartupSec=``) is enabled but not
         started (:func:`starts_when_armed`): started now, its elapsed boot offset would run the
         job at once. It arms at the next boot. A timer whose monotonic timers cannot be read is
-        treated the same way - never running the job unexpectedly is the safe side.
+        treated the same way - never running the job unexpectedly is the safe side. A read systemd
+        refuses raises :class:`~pwshpy.domain.errors.NativeAccessDeniedError` before anything is
+        enabled.
 
         Raises:
             ConfigurationError: ``task_path`` is no systemd unit name, or a bare template (:func:`existing_unit_base`).

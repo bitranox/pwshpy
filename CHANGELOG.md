@@ -18,6 +18,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   other refused native call: `pwshpy stop_service sshd.service` as non-root exited 1 with a plain
   `NativeCallError` before. Any other D-Bus error reply stays a plain `NativeCallError`, whose
   message now names the D-Bus error.
+- Linux services and scheduled tasks: a D-Bus read systemd refuses is reported (skipped with a
+  warning in a listing, raised under `strict=True`) instead of reading as a stopped, disabled or
+  missing unit. A start, stop, restart, set_startup, enable or disable whose wait or read-back read
+  systemd refuses raises `NativeAccessDeniedError`; enabling a timer whose monotonic timers systemd
+  refuses to read raises before anything is enabled.
 - `get_content`, `get_content_lines`, `write_text`, `write_text_stream` and `write_records` raise
   `NativeCallError` (a `NativeAccessDeniedError` for a refusal) for an unknown encoding, text that
   is not valid in the encoding, and a file that cannot be read or written, as every other pwshpy
@@ -237,6 +242,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `timestamp_type=ppid` the relaunch found no cached credential and exited 1.
 - Packed `.sh` runner, as root: a relative managed-Python directory is refused (`is not an absolute
   path`, exit code 127) instead of looping forever while the runner walks up its parents.
+- A Secret Service (credential vault) D-Bus refusal on Linux raises `NativeAccessDeniedError` (exit
+  13), not a plain `NativeCallError`.
 
 ## [1.11.0] - 2026-10-29
 

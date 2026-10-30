@@ -10,7 +10,8 @@ same trust boundary as the process, so the bytes never leave the machine or that
 
 It needs a running Secret Service with an UNLOCKED default collection. On a bare server or in CI with
 no keyring daemon, or a locked keyring that would need an interactive unlock prompt, the operations
-raise a clear :class:`NativeCallError` rather than silently dropping the secret. jeepney is loaded
+raise a clear :class:`NativeCallError` rather than silently dropping the secret; a call the Secret
+Service refuses (``AccessDenied``) raises its subclass ``NativeAccessDeniedError``. jeepney is loaded
 lazily, so importing this module is safe on Windows/macOS.
 
 Contents:
@@ -27,6 +28,7 @@ from pydantic import SecretStr
 
 from ...domain.errors import NativeCallError, PlatformUnsupportedError
 from ...domain.records import Credential
+from .dbus_errors import reply_error
 from .marshal import native_error
 
 _BUS = "org.freedesktop.secrets"
@@ -73,11 +75,15 @@ class _Session:
         self.session = session
 
     def call(self, path: str, iface: str, method: str, sig: str = "", body: tuple[Any, ...] = ()) -> Any:
-        """One Secret Service method call, mapping a D-Bus error to NativeCallError."""
+        """One Secret Service method call, mapping a D-Bus error reply by its error name.
+
+        A refusal (``org.freedesktop.DBus.Error.AccessDenied``) is a NativeAccessDeniedError, any
+        other error reply a NativeCallError naming the error (:func:`~.dbus_errors.reply_error`).
+        """
         addr = self.core.DBusAddress(path, bus_name=_BUS, interface=iface)
         reply = self.conn.send_and_get_reply(self.core.new_method_call(addr, method, sig, body))
         if str(reply.header.message_type.name).lower() == "error":
-            raise NativeCallError(f"Secret Service {method} failed: {reply.body}")
+            raise reply_error(f"Secret Service {method}", reply)
         return reply.body
 
 

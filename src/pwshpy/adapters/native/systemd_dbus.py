@@ -30,6 +30,11 @@ Contents:
     * :func:`is_unlisted_unit` - the one skip rule for a ``ListUnits`` entry: not-found or masked,
       and not running.
     * :func:`list_units` - the ``ListUnits`` reply parsed once into :class:`ListedUnit` entries.
+
+A read systemd refuses (``AccessDenied`` / ``InteractiveAuthorizationRequired``) raises
+:class:`~pwshpy.domain.errors.NativeAccessDeniedError` from every lookup and read here, never
+the "not loaded", "no unit file" or default answer the helpers give for a unit or property that
+is genuinely absent: a refusal says nothing about the unit.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from enum import Enum
 from typing import Any, NamedTuple, cast
 
 from ...domain.errors import NativeAccessDeniedError, NativeCallError, PlatformUnsupportedError
+from .dbus_errors import error_name, reply_error
 from .marshal import native_error
 
 MANAGER_PATH = "/org/freedesktop/systemd1"
@@ -210,55 +216,12 @@ def is_error(reply: Any) -> bool:
     return str(reply.header.message_type.name).lower() == "error"
 
 
-#: The D-Bus error names systemd answers a refusal with: ``AccessDenied`` (a bus policy refusal,
-#: or a host without polkit) and ``InteractiveAuthorizationRequired`` (polkit would have to ask
-#: and the call did not allow it; what a non-root StopUnit gets on a polkit host, measured).
-_DENIED_ERROR_NAMES = frozenset(
-    {
-        "org.freedesktop.DBus.Error.AccessDenied",
-        "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired",
-    }
-)
-
-
-def error_name(reply: Any) -> str:
-    """The D-Bus error name of an error ``reply`` (jeepney keeps it in a header field), or "".
-
-    Matched by the field's name, so the adapter needs no jeepney import to read it.
-
-    Example:
-        >>> class _Header:
-        ...     fields: dict[object, str] = {}
-        >>> class _Reply:
-        ...     header = _Header()
-        >>> error_name(_Reply())
-        ''
-    """
-    fields: dict[Any, Any] = getattr(reply.header, "fields", {}) or {}
-    for field, value in fields.items():
-        if getattr(field, "name", None) == "error_name":
-            return str(value)
-    return ""
-
-
-def reply_error(what: str, reply: Any) -> NativeCallError:
-    """The typed error for an error ``reply``: a refusal is a NativeAccessDeniedError.
-
-    The decision reads the error NAME, never systemd's (translatable) message text.
-    """
-    name = error_name(reply)
-    text = " ".join(str(part) for part in reply.body) if reply.body else ""
-    message = f"{what} failed: {name}: {text}" if name else f"{what} failed: {text}"
-    if name in _DENIED_ERROR_NAMES:
-        return NativeAccessDeniedError(message)
-    return NativeCallError(message)
-
-
 def call(bus: Bus, method: str, signature: str = "", body: tuple[Any, ...] = ()) -> Any:
     """Send one Manager method call and return its body, mapping a D-Bus error to NativeCallError.
 
-    A refusal (:data:`_DENIED_ERROR_NAMES`) is a :class:`NativeAccessDeniedError`, so the CLI exits
-    as for a ``PermissionError`` (13 on POSIX), like every other refused native call.
+    A refusal (``AccessDenied`` or ``InteractiveAuthorizationRequired``, mapped by
+    :func:`~.dbus_errors.reply_error`) is a :class:`NativeAccessDeniedError`, so the CLI exits as for
+    a ``PermissionError`` (13 on POSIX), like every other refused native call.
     """
     reply = bus.conn.send_and_get_reply(bus.core.new_method_call(bus.mgr, method, signature, body))
     if is_error(reply):
@@ -277,12 +240,18 @@ def unit_path(bus: Bus, name: str) -> str | None:
         The unit's D-Bus object path, or None when systemd has not loaded it (a stopped
         unit is unloaded, so ``GetUnit`` answers "not loaded" for it).
 
+    Raises:
+        NativeAccessDeniedError: systemd refused the ``GetUnit`` call: a refusal says nothing
+            about the unit, so it never reads as "not loaded".
+
     Example:
         >>> callable(unit_path)
         True
     """
     try:
         (path,) = call(bus, "GetUnit", "s", (name,))
+    except NativeAccessDeniedError:
+        raise
     except NativeCallError:
         return None  # a stopped/absent unit unloads -> GetUnit reports "not loaded"
     return str(path)
@@ -378,9 +347,15 @@ def load_unit_path(bus: Bus, name: str) -> str | None:
     """:func:`load_unit`, but a failed ``LoadUnit`` call or ``LoadState`` read is also None (fail-soft).
 
     For field read-backs and the controllers, whose callers apply their "unknown" defaults to None.
+
+    Raises:
+        NativeAccessDeniedError: systemd refused the ``LoadUnit`` call or the ``LoadState`` read: a
+            refusal never reads as a unit with nothing to read.
     """
     try:
         return load_unit(bus, name)
+    except NativeAccessDeniedError:
+        raise
     except NativeCallError:
         return None  # an invalid unit name or an unreadable unit: nothing to read
 
@@ -436,6 +411,11 @@ def path_property(bus: Bus, path: str | None, prop: str, default: Any, *, interf
     Returns:
         The property's value, unwrapped from its D-Bus variant, or ``default``.
 
+    Raises:
+        NativeAccessDeniedError: systemd refused the read (``AccessDenied`` or
+            ``InteractiveAuthorizationRequired``): a refusal is not a missing property, so it never
+            reads as ``default``.
+
     Example:
         >>> path_property(None, None, "ActiveState", "unknown")
         'unknown'
@@ -445,6 +425,9 @@ def path_property(bus: Bus, path: str | None, prop: str, default: Any, *, interf
     props = bus.core.DBusAddress(path, bus_name=MANAGER_BUS, interface=_PROPERTIES_IFACE)
     reply = bus.conn.send_and_get_reply(bus.core.new_method_call(props, "Get", "ss", (interface, prop)))
     if is_error(reply):
+        error = reply_error(f"systemd Get {prop} of {path}", reply)
+        if isinstance(error, NativeAccessDeniedError):
+            raise error
         return default
     value: Any = reply.body[0]
     if isinstance(value, tuple):  # a D-Bus variant arrives as (signature, value); take the value
@@ -453,7 +436,7 @@ def path_property(bus: Bus, path: str | None, prop: str, default: Any, *, interf
 
 
 def path_active_state(bus: Bus, path: str | None) -> ActiveState:
-    """The ActiveState of the unit object ``path``; INACTIVE for a None path or an unanswered read.
+    """The ActiveState of the unit object ``path``; INACTIVE for a None path or a failed read (a refusal raises).
 
     Example:
         >>> path_active_state(None, None) is ActiveState.INACTIVE
@@ -481,9 +464,15 @@ def has_pending_job(bus: Bus, name: str) -> bool:
 
 
 def unit_file_state(bus: Bus, name: str) -> UnitFileState | None:
-    """GetUnitFileState for one unit; ``None`` for a transient unit that has no unit file."""
+    """GetUnitFileState for one unit; ``None`` for a transient unit that has no unit file.
+
+    Raises:
+        NativeAccessDeniedError: systemd refused the call; a refusal never reads as "no unit file".
+    """
     try:
         (state,) = call(bus, "GetUnitFileState", "s", (name,))
+    except NativeAccessDeniedError:
+        raise
     except NativeCallError:
         return None
     return UnitFileState(str(state))

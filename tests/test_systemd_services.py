@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 import pytest
-from systemd_fake_bus import FakeConn, use_bus
+from systemd_fake_bus import ACCESS_DENIED, FakeConn, use_bus
 
 from pwshpy.adapters.native import systemd_dbus, systemd_services
 from pwshpy.adapters.native.systemd_dbus import ActiveState, LoadState, UnitFileState
@@ -26,7 +26,7 @@ from pwshpy.adapters.native.systemd_services import (
     to_start_type,
 )
 from pwshpy.domain.enums import ServiceStartType, ServiceState
-from pwshpy.domain.errors import NativeCallError, OperationTimeoutError
+from pwshpy.domain.errors import NativeAccessDeniedError, NativeCallError, OperationTimeoutError
 from pwshpy.domain.records import ServiceInfo
 
 _HAS_JEEPNEY = importlib.util.find_spec("jeepney") is not None
@@ -374,6 +374,61 @@ def test_strict_lists_a_readable_box_like_lenient_and_keeps_the_deliberate_filte
     assert caplog.records == []
 
 
+def _two_service_conn(refusal: str) -> FakeConn:
+    """Two services, ``denied.service`` first; systemd refuses one read of it, named by ``refusal``.
+
+    ``GetUnitFileState``: both are loaded (``ListUnits`` lists them) and the start type lookup of
+    the first is refused. ``Description``: both are unloaded unit files and reading the first's
+    description is refused.
+    """
+    loaded = refusal == "GetUnitFileState"
+    props: dict[tuple[str, str, str], Any] = {}
+    for name in ("denied.service", "good.service"):
+        props[(name, _UNIT, "ActiveState")] = "inactive"
+        props[(name, _UNIT, "Description")] = name.split(".")[0]
+    return FakeConn(
+        [("denied.service", "denied", "inactive"), ("good.service", "good", "inactive")] if loaded else [],
+        props,
+        frozenset({"denied.service", "good.service"}),
+        file_states={"denied.service": "disabled", "good.service": "disabled"},
+        unloaded=frozenset() if loaded else frozenset({"denied.service", "good.service"}),
+        denied_calls=frozenset({("GetUnitFileState", "denied.service")}) if loaded else frozenset(),
+        refused_reads=frozenset() if loaded else frozenset({("denied.service", "Description")}),
+    )
+
+
+_REFUSALS = ["GetUnitFileState", "Description"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("refusal", _REFUSALS)
+def test_lenient_skips_a_service_systemd_refuses_to_read_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, refusal: str
+) -> None:
+    """[250] A refused read skips that service with a WARNING naming the refusal; the next is listed.
+
+    Before, the refused read answered as an absent value, so the service was listed as one with no
+    start type or an empty description.
+    """
+    use_bus(monkeypatch, _two_service_conn(refusal))
+    with caplog.at_level(logging.WARNING, logger=systemd_services.__name__):
+        assert [s.name for s in iter_services()] == ["good.service"]
+    (warning,) = caplog.records
+    assert "'denied.service'" in warning.getMessage()
+    assert ACCESS_DENIED in warning.getMessage()
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("refusal", _REFUSALS)
+def test_strict_raises_on_a_service_systemd_refuses_to_read(monkeypatch: pytest.MonkeyPatch, refusal: str) -> None:
+    """[250] strict=True: the refused read raises a NativeAccessDeniedError naming the service."""
+    conn = _two_service_conn(refusal)
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeAccessDeniedError, match=r"'denied\.service'"):
+        list(iter_services(strict=True))
+    assert conn.closed is True
+
+
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("strict", [False, True])
 def test_a_property_read_failure_keeps_the_service_with_its_default(
@@ -381,7 +436,9 @@ def test_a_property_read_failure_keeps_the_service_with_its_default(
 ) -> None:
     """[86] Only dropping an ITEM is a strict failure: an unreadable Description still defaults to "".
 
-    The service is listed in both modes; strict does not escalate a single field's default.
+    The service is listed in both modes; strict does not escalate a single field's default. The read
+    fails for another reason than a refusal: a refused read skips the service ([250],
+    ``test_lenient_skips_a_service_systemd_refuses_to_read_and_warns``).
     """
     conn = FakeConn(
         [],
@@ -389,7 +446,7 @@ def test_a_property_read_failure_keeps_the_service_with_its_default(
         frozenset({"good.service"}),
         file_states={"good.service": "disabled"},
         unloaded=frozenset({"good.service"}),
-        refused_reads=frozenset({("good.service", "Description")}),
+        broken_reads=frozenset({("good.service", "Description")}),
     )
     use_bus(monkeypatch, conn)
     with caplog.at_level(logging.WARNING, logger=systemd_services.__name__):
@@ -683,6 +740,44 @@ def test_a_start_whose_job_ends_failed_raises_naming_the_result(
         getattr(SystemdServiceController(), method)("wuauserv.service", timeout=3.0)
     assert not isinstance(caught.value, OperationTimeoutError)
     assert conn.verbs == [verb]
+    assert conn.closed is True
+
+
+def _refused_read_conn(active_state: str, refused: str, walks: dict[str, list[str]] | None = None) -> FakeConn:
+    """The ``_settling_conn`` service, Result ``exit-code``, with its ``refused`` property read refused."""
+    props: dict[tuple[str, str, str], Any] = {
+        ("wuauserv.service", _UNIT, "ActiveState"): active_state,
+        ("wuauserv.service", _UNIT, "Description"): "Update daemon",
+        ("wuauserv.service", systemd_dbus.SERVICE_IFACE, "Result"): "exit-code",
+    }
+    return FakeConn(
+        [],
+        props,
+        frozenset({"wuauserv.service"}),
+        walks=walks,
+        refused_reads=frozenset({("wuauserv.service", refused)}),
+    )
+
+
+@pytest.mark.os_agnostic
+def test_a_failed_start_whose_result_read_is_refused_still_raises_the_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[250] A refused Result read leaves the reason unnamed; the failed start is still the error raised."""
+    conn = _refused_read_conn("failed", "Result", walks={"StartUnit": ["activating", "failed"]})
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeCallError, match=r"'wuauserv\.service' failed: systemd ended its job") as caught:
+        SystemdServiceController().start("wuauserv.service", timeout=3.0)
+    assert not isinstance(caught.value, NativeAccessDeniedError)
+    assert "Result=" not in str(caught.value)
+
+
+@pytest.mark.os_agnostic
+def test_a_refused_read_back_after_a_verb_raises_native_access_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[250] A read-back systemd refuses raises instead of reporting the service with default fields."""
+    conn = _refused_read_conn("active", "Description")
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeAccessDeniedError, match="Description"):
+        SystemdServiceController().start("wuauserv.service", timeout=3.0)
+    assert conn.verbs == ["StartUnit"]
     assert conn.closed is True
 
 

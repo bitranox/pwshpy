@@ -82,6 +82,10 @@
 # every argument the caller typed.
 
 $ErrorActionPreference = 'Stop'
+# Every native call here is judged by its exit code, and several fail as a matter of course (the
+# no-password probe, a script's own exit code). A caller's profile setting this to $true would turn each
+# such exit into a terminating error under 'Stop'. Hosts without the feature ignore the variable.
+$PSNativeCommandUseErrorActionPreference = $false
 
 $PwshPyEntry = @@PWSHPY_ENTRY@@
 $PwshPyShim = '@@PWSHPY_SHIM@@'
@@ -1821,9 +1825,12 @@ function Invoke-PwshPyElevated {
         # rule) is asked nothing ([280]): under sudo's default verifypw=all, -v wants a password unless
         # EVERY rule of the user is NOPASSWD, so beside Ubuntu's %sudo rule it asked for one the
         # command does not need, and without a terminal (or any password) the run was declined. The
-        # probe runs the same program as the relaunch, so a rule for some other program only cannot
-        # pass it; it prints nothing, and its refusal is not an error of this run.
-        $null = & sudo -n (Get-PwshPyHostPath) -NoProfile -NonInteractive -Command 'exit 0' 2>$null
+        # probe runs the same program as the relaunch, word for word (ConvertTo-PwshPyNativeCall, as
+        # the relaunch below: a host path holding [ ] * ? is never globbed into a sibling's), so a rule
+        # for some other program only cannot pass it; it prints nothing, and its refusal is not an
+        # error of this run.
+        $probeArgs = @('-n', (Get-PwshPyHostPath), '-NoProfile', '-NonInteractive', '-Command', 'exit 0')
+        . (ConvertTo-PwshPyNativeCall -FilePath 'sudo' -ArgumentList $probeArgs -StdoutPath '/dev/null' -StderrPath '/dev/null')
         if ($LASTEXITCODE -ne 0) {
             # Ask for the password with `sudo -v` first: sudo exits 1 when it refuses, which is also
             # an ordinary exit code of the script, so only asking separately tells the two apart.

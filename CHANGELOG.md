@@ -26,6 +26,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   as on stock cloud images) elevation was declined with exit code 77. `sudo -n` is now first asked,
   silently, to run the program the relaunch runs (the current Python, `/bin/sh`, or the running
   `pwsh`); when it may, the relaunch runs under `sudo -n` without a prompt.
+- Packed `.ps1` runner: a caller whose PowerShell session or profile sets
+  `$PSNativeCommandUseErrorActionPreference = $true` no longer gets exit code 1 and a
+  `NativeCommandExitException` when the packed script exits nonzero, or when a refused `sudo` step
+  of `-PwshPyElevate` on Linux and macOS should have ended in exit code 77. The runner judges every
+  program it starts by its exit code, whatever the caller's session says.
 - Packed runners (`pwshpy pack`): an elevated run (`.ps1` with an administrator token or as
   SYSTEM, either runner as root) now judges its pack cache before it removes or writes anything
   there, and the unpacked tree again: the cache directory, every directory above it and every

@@ -3,7 +3,8 @@
 The log lines a command writes carry ``job_id`` and ``extra["command"]`` from the bind around its
 body. Both must name the command a user can type (``get_volume``), never a short internal name
 (``disks``) nobody can search for: the binds go through ``bind_command``, which reads the name off
-the click context, and a guard refuses a direct ``lib_log_rich.runtime.bind`` in a command module.
+the click context, and a guard refuses, in every command module but ``_common.py``, a direct
+``lib_log_rich.runtime.bind`` and any ``lib_log_rich`` import except its ``domain`` types.
 """
 
 from __future__ import annotations
@@ -44,6 +45,35 @@ def _is_bind_command(call: ast.Call) -> bool:
     return isinstance(func, ast.Name) and func.id == "bind_command"
 
 
+def _is_lib_log_rich(module: str) -> bool:
+    return module == "lib_log_rich" or module.startswith("lib_log_rich.")
+
+
+def _imports_lib_log_rich(node: ast.Import | ast.ImportFrom) -> bool:
+    """An import that can reach ``bind``: any ``lib_log_rich`` import but ``from lib_log_rich.domain``.
+
+    Matching imports rather than calls catches a bind under any local name (``from ... import
+    bind``, ``import lib_log_rich.runtime as rt``). ``import lib_log_rich.domain`` is refused too:
+    it binds the top-level name, and ``lib_log_rich.bind`` hangs off that.
+    """
+    if isinstance(node, ast.Import):
+        return any(_is_lib_log_rich(alias.name) for alias in node.names)
+    if node.module is None or not _is_lib_log_rich(node.module):
+        return False
+    return not (node.module == "lib_log_rich.domain" or node.module.startswith("lib_log_rich.domain."))
+
+
+def _violations(tree: ast.AST) -> list[str]:
+    """The direct binds and the imports that could reach ``bind`` in ``tree``, each as ``<line> <source>``."""
+    found: list[ast.stmt | ast.expr] = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and _imports_lib_log_rich(node)
+    ]
+    found += [call for call in _calls(tree) if _is_runtime_bind(call)]
+    return [f"{node.lineno} {ast.unparse(node)}" for node in found]
+
+
 def _scan() -> tuple[list[str], int, int]:
     """Return the direct binds outside ``_common.py``, the files scanned and the bind_command calls."""
     direct: list[str] = []
@@ -52,10 +82,9 @@ def _scan() -> tuple[list[str], int, int]:
     for path in sorted(_COMMANDS.glob("*.py")):
         scanned += 1
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for call in _calls(tree):
-            helper_calls += _is_bind_command(call)
-            if _is_runtime_bind(call) and path.name != "_common.py":
-                direct.append(f"{path.name}:{call.lineno} {ast.unparse(call)}")
+        helper_calls += sum(_is_bind_command(call) for call in _calls(tree))
+        if path.name != "_common.py":
+            direct.extend(f"{path.name}:{found}" for found in _violations(tree))
     return direct, scanned, helper_calls
 
 
@@ -72,7 +101,28 @@ def test_no_command_module_binds_its_log_context_by_hand() -> None:
 def test_the_guard_flags_a_literal_bind() -> None:
     """The detector is not blind: a hand-written bind with a literal command name is reported."""
     sample = ast.parse('with lib_log_rich.runtime.bind(job_id="cli-disks", extra={"command": "disks"}):\n    pass\n')
-    assert [call for call in _calls(sample) if _is_runtime_bind(call)]
+    assert _violations(sample)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from lib_log_rich.runtime import bind\nwith bind(job_id='cli-disks'):\n    pass\n",
+        "import lib_log_rich.runtime as rt\nwith rt.bind(job_id='cli-disks'):\n    pass\n",
+        "import lib_log_rich\nwith lib_log_rich.bind(job_id='cli-disks'):\n    pass\n",
+        "from lib_log_rich import runtime as r\n",
+    ],
+)
+def test_the_guard_flags_every_route_to_bind(source: str) -> None:
+    """A bind reached through an imported name or an alias is reported too, not only the dotted call."""
+    assert _violations(ast.parse(source))
+
+
+@pytest.mark.os_agnostic
+def test_the_guard_lets_a_command_import_lib_log_rich_types() -> None:
+    """``lib_log_rich.domain`` holds types only (``logdemo`` needs ``ConsoleTheme``), and no bind."""
+    assert _violations(ast.parse("from lib_log_rich.domain import ConsoleTheme\n")) == []
 
 
 def _logged_events(cli_runner: CliRunner, args: list[str]) -> list[dict[str, Any]]:

@@ -204,8 +204,19 @@ print("dependency:" + cowsay.__name__)
 """
 
 
-def _run(runner: Path, *arguments: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    """Execute a packed runner the way a user would, and capture everything it produced."""
+def _run(
+    runner: Path,
+    *arguments: str,
+    env: dict[str, str] | None = None,
+    host: str | None = None,
+    session: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Execute a packed runner the way a user would, and capture everything it produced.
+
+    ``host`` names another PowerShell executable to start (default: the selected one); ``session`` is
+    PowerShell run first in the caller's session, as a profile would, before the runner is invoked
+    from it with ``&`` (its exit code passed on).
+    """
     assert _PWSH is not None
     child_env = {**os.environ, **(env or {})}
     # The uv the runner finds must be the one this test found, so a PATH-less environment
@@ -221,8 +232,13 @@ def _run(runner: Path, *arguments: str, env: dict[str, str] | None = None) -> su
     # Nor a script environment in the real user's uv cache ([93]), unless the test names its own.
     child_env.setdefault("UV_CACHE_DIR", str(session_uv_cache()))
     runner = _as_this_invoker(runner, arguments)
+    words = [str(runner), _NEVER_INSTALL_UV, *arguments]
+    invocation = ["-File", *words]
+    if session is not None:
+        quoted = " ".join("'" + word.replace("'", "''") + "'" for word in words)
+        invocation = ["-Command", f"{session}; & {quoted}; exit $LASTEXITCODE"]
     return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
-        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(runner), _NEVER_INSTALL_UV, *arguments],
+        [host or _PWSH, "-NoProfile", "-NonInteractive", *invocation],
         capture_output=True,
         encoding="utf-8",
         errors="replace",
@@ -327,6 +343,20 @@ def test_packed_script_returns_its_own_exit_code(tmp_path: Path) -> None:
     """A nonzero exit must survive Python -> uv -> PowerShell, or scripting on it is useless."""
     manifest = pack_script(_project(tmp_path, exit_code=42))
     result = _run(Path(manifest.output_path), env=_isolated_cache(tmp_path))
+    assert result.returncode == 42, result.stderr
+
+
+def test_packed_script_returns_its_own_exit_code_under_native_error_action(tmp_path: Path) -> None:
+    """A caller's session (a profile) may set ``$PSNativeCommandUseErrorActionPreference``; under the
+    runner's ``$ErrorActionPreference = 'Stop'`` the script's nonzero exit then threw
+    NativeCommandExitException and the caller got 1. The script's own code comes back regardless."""
+    manifest = pack_script(_project(tmp_path, exit_code=42))
+    result = _run(
+        Path(manifest.output_path),
+        env=_isolated_cache(tmp_path),
+        session="$PSNativeCommandUseErrorActionPreference = $true",
+    )
+    assert "NativeCommandExitException" not in result.stderr, result.stderr
     assert result.returncode == 42, result.stderr
 
 
@@ -659,6 +689,83 @@ def test_elevate_switch_asks_no_password_of_a_user_who_needs_none(tmp_path: Path
     assert result.returncode == 0, result.stdout + result.stderr
     assert marker.exists(), "the packed script never ran: " + result.stderr
     assert [call for call in logged if call in ("-v", "-n -v")] == [], logged
+
+
+def _pwsh_at(directory: Path) -> Path:
+    """A working pwsh at ``directory/pwsh`` (made with its parents): a copy of the selected pwsh's
+    executable beside links to every other file of its installation, which it loads from its own
+    directory. A copy, not a link: pwsh names itself by its resolved path ((Get-Process -Id $PID).Path).
+    """
+    assert _PWSH is not None
+    installation = Path(_PWSH).resolve().parent
+    directory.mkdir(parents=True)
+    for item in installation.iterdir():
+        if item.name != "pwsh":
+            (directory / item.name).symlink_to(item)
+    shutil.copy2(installation / "pwsh", directory / "pwsh")
+    return directory / "pwsh"
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
+@pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+def test_the_no_password_probe_names_a_bracketed_pwsh_path_literally(tmp_path: Path) -> None:
+    """[280]: the probe asks ``sudo -n`` about the pwsh the relaunch runs, word for word. pwsh on
+    POSIX globs an unquoted argument to a native program, so a pwsh at ``<d>/p[12]/pwsh`` was probed
+    as ``<d>/p1/pwsh``, which a NOPASSWD rule for the real path does not cover: the user was asked for
+    a password the relaunch never needed, and declined (77) without one."""
+    entry = tmp_path / "who.py"
+    marker = tmp_path / "ran.marker"
+    entry.write_text(f'open({str(marker)!r}, "w").close()\n')
+    manifest = pack_script(entry)
+    host = _pwsh_at(tmp_path / "hosts" / "p[12]")
+    # The sibling the glob matches; it never runs.
+    (tmp_path / "hosts" / "p1").mkdir()
+    (tmp_path / "hosts" / "p1" / "pwsh").write_text("")
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "sudo-calls.txt"
+    write_fake_sudo(bin_dir, grant=False, cached=False, calls=calls, nopasswd=str(host))
+    environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
+    result = _run(Path(manifest.output_path), "-PwshPyElevate", env=environment, host=str(host))
+    logged = calls.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0, result.stdout + result.stderr + repr(logged)
+    assert marker.exists(), "the packed script never ran: " + result.stderr
+    assert logged[0] == f"-n {host} -NoProfile -NonInteractive -Command exit 0", logged
+    assert [call for call in logged if call in ("-v", "-n -v")] == [], logged
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@pytest.mark.skipif(sys.platform == "win32", reason="the sudo double needs a POSIX host")
+@pytest.mark.skipif(RUNNING_AS_ROOT, reason="the runner skips elevation when already root")
+def test_a_failing_probe_falls_back_to_the_password_under_native_error_action(tmp_path: Path) -> None:
+    """[280]: a caller's session (a profile) may set ``$PSNativeCommandUseErrorActionPreference``, and
+    under the runner's ``$ErrorActionPreference = 'Stop'`` the probe's ordinary refusal then threw
+    NativeCommandExitException and ended the run, instead of asking for the password with
+    ``sudo -v``. The runner judges every native call by its exit code itself, whatever the session says."""
+    entry = tmp_path / "who.py"
+    marker = tmp_path / "ran.marker"
+    entry.write_text(f'open({str(marker)!r}, "w").close()\n')
+    manifest = pack_script(entry)
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "sudo-calls.txt"
+    write_fake_sudo(bin_dir, grant=True, cached=True, calls=calls)
+    environment = {**_isolated_cache(tmp_path), "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])}
+    result = _run(
+        Path(manifest.output_path),
+        "-PwshPyElevate",
+        env=environment,
+        session="$PSNativeCommandUseErrorActionPreference = $true",
+    )
+    logged = calls.read_text(encoding="utf-8").splitlines()
+    assert "NativeCommandExitException" not in result.stderr, result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr + repr(logged)
+    assert marker.exists(), "the packed script never ran: " + result.stderr
+    assert logged[1:3] == ["-v", "-n -v"], logged
+    assert second_prompts(calls) == [], logged
 
 
 @pytest.mark.local_only

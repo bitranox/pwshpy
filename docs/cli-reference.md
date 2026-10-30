@@ -455,9 +455,10 @@ A refusal systemd sends over D-Bus (`org.freedesktop.DBus.Error.AccessDenied`, o
 `InteractiveAuthorizationRequired`, which a non-root caller gets where polkit is installed) is a
 `NativeAccessDeniedError` and exits 13, like any other refused native call; any other D-Bus error
 reply from systemd is a plain `NativeCallError` naming that error and exits 1. The Secret Service
-(credential vault) maps its D-Bus error replies the same way: `AccessDenied` exits 13, any other
-error 1. A refusal pwshpy reads only from a message or an exit status is a plain `NativeCallError`
-and exits 1: a non-zero exit of a shadow-utils command.
+(credential vault) maps its D-Bus error replies the same way: `AccessDenied` or
+`InteractiveAuthorizationRequired` exits 13, any other error 1. A refusal pwshpy reads only from a
+message or an exit status is a plain `NativeCallError` and exits 1: a non-zero exit of a
+shadow-utils command.
 
 Any other exception that reaches the CLI keeps `lib_cli_exit_tools`' mapping, which reads the codes
 an `OSError` carries before its type: its `winerror` on Windows, else its `errno` (a raw

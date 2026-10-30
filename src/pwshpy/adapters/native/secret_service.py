@@ -11,8 +11,9 @@ same trust boundary as the process, so the bytes never leave the machine or that
 It needs a running Secret Service with an UNLOCKED default collection. On a bare server or in CI with
 no keyring daemon, or a locked keyring that would need an interactive unlock prompt, the operations
 raise a clear :class:`NativeCallError` rather than silently dropping the secret; a call the Secret
-Service refuses (``AccessDenied``) raises its subclass ``NativeAccessDeniedError``. jeepney is loaded
-lazily, so importing this module is safe on Windows/macOS.
+Service refuses (``AccessDenied`` or ``InteractiveAuthorizationRequired``) raises its subclass
+``NativeAccessDeniedError``. jeepney is loaded lazily, so importing this module is safe on
+Windows/macOS.
 
 Contents:
     * :func:`scoped_attributes` - the attribute dict that scopes an item to pwshpy + a target (pure).
@@ -77,8 +78,9 @@ class _Session:
     def call(self, path: str, iface: str, method: str, sig: str = "", body: tuple[Any, ...] = ()) -> Any:
         """One Secret Service method call, mapping a D-Bus error reply by its error name.
 
-        A refusal (``org.freedesktop.DBus.Error.AccessDenied``) is a NativeAccessDeniedError, any
-        other error reply a NativeCallError naming the error (:func:`~.dbus_errors.reply_error`).
+        A refusal (``org.freedesktop.DBus.Error.AccessDenied`` or
+        ``org.freedesktop.DBus.Error.InteractiveAuthorizationRequired``) is a NativeAccessDeniedError,
+        any other error reply a NativeCallError naming the error (:func:`~.dbus_errors.reply_error`).
         """
         addr = self.core.DBusAddress(path, bus_name=_BUS, interface=iface)
         reply = self.conn.send_and_get_reply(self.core.new_method_call(addr, method, sig, body))

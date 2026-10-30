@@ -16,9 +16,10 @@ from typing import Any
 
 from ...domain.errors import NativeAccessDeniedError, NativeCallError
 
-#: The D-Bus error names systemd answers a refusal with: ``AccessDenied`` (a bus policy refusal,
-#: or a host without polkit) and ``InteractiveAuthorizationRequired`` (polkit would have to ask
-#: and the call did not allow it; what a non-root StopUnit gets on a polkit host, measured).
+#: The D-Bus error names a refusal comes as, from systemd and the Secret Service alike (one set,
+#: so the two services cannot drift): ``AccessDenied`` (a bus policy refusal, or a host without
+#: polkit) and ``InteractiveAuthorizationRequired`` (polkit would have to ask and the call did not
+#: allow it; what a non-root systemd StopUnit gets on a polkit host, measured).
 _DENIED_ERROR_NAMES = frozenset(
     {
         "org.freedesktop.DBus.Error.AccessDenied",

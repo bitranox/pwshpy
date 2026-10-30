@@ -112,9 +112,9 @@ class NativeCallError(PwshPyError):
 class NativeAccessDeniedError(NativeCallError, PermissionError):
     """A native call was refused for lack of rights (E_ACCESSDENIED, EACCES, EPERM).
 
-    Also a systemd or Secret Service refusal over D-Bus (``org.freedesktop.DBus.Error.AccessDenied``,
-    for systemd also ``InteractiveAuthorizationRequired``). A shadow-utils refusal stays a plain
-    :class:`NativeCallError`.
+    Also a systemd or Secret Service refusal over D-Bus (``org.freedesktop.DBus.Error.AccessDenied``
+    or ``org.freedesktop.DBus.Error.InteractiveAuthorizationRequired``, from either service). A
+    shadow-utils refusal stays a plain :class:`NativeCallError`.
 
     A :class:`NativeCallError`, so existing handlers keep catching it, and a
     :class:`PermissionError`, so ``except PermissionError`` catches it and the ``pwshpy`` CLI

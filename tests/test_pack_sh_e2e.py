@@ -2396,6 +2396,8 @@ def test_as_root_no_proxy_certificate_or_keyring_variable_reaches_uv(tmp_path: P
     if as_root:
         found = _recorded_variables(Path(f"{record}.python"))
         assert name not in recorded and name not in found and dropped_line, (recorded, found, result.stderr)
+        # The line says what uv does without them, git-lfs included (UV_GIT_LFS).
+        assert "no keyring, no git-lfs" in result.stderr, result.stderr
     else:
         assert recorded.get(name) == value and not dropped_line, (recorded, result.stderr)
 

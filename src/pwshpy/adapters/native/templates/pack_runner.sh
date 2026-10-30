@@ -696,7 +696,7 @@ pwshpy_drop_interpreter_variables() {
     for _iv in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy SSL_CERT_FILE SSL_CERT_DIR \
         SSL_CLIENT_CERT UV_NATIVE_TLS UV_SYSTEM_CERTS UV_KEYRING_PROVIDER UV_GIT_LFS; do
         if eval "[ -n \"\${$_iv+set}\" ]"; then
-            _iv_text="as root uv connects with its own defaults: no proxy, its built-in certificate roots, no keyring"
+            _iv_text="as root uv connects with its own defaults: no proxy, its built-in certificate roots, no keyring, no git-lfs"
             printf '%s\n' "pwshpy: ignoring $_iv: $_iv_text" >&2
             unset "$_iv"
         fi

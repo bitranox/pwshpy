@@ -610,13 +610,13 @@ Every failure across both backends raises a subclass of `PwshPyError`, all expor
   HRESULT when the native error carried one (a pywin32 COM or Win32 error, or a Windows `OSError`
   mapped as `HRESULT_FROM_WIN32`), else `None`; branch on it, never on the localized message.
   - `NativeAccessDeniedError` - a call refused for lack of rights (`E_ACCESSDENIED`, `EACCES`,
-    `EPERM`, psutil `AccessDenied`, a systemd D-Bus `AccessDenied` or
-    `InteractiveAuthorizationRequired`, which a non-root caller gets for `stop_service` where polkit
-    is installed, and a Secret Service D-Bus `AccessDenied` or `InteractiveAuthorizationRequired`).
-    It is also a `PermissionError`, so `except PermissionError` (and `except OSError`) catches it;
-    `errno` holds the POSIX code when the
-    failure carried one. A refusal pwshpy reads only from a message or an exit status is a plain
-    `NativeCallError`: a non-zero exit of a shadow-utils command.
+    `EPERM`, psutil `AccessDenied`, a systemd D-Bus `AccessDenied` or the
+    `InteractiveAuthorizationRequired` a non-root caller gets for `stop_service` where polkit is
+    installed, and a Secret Service D-Bus `AccessDenied` or `InteractiveAuthorizationRequired`). It
+    is also a `PermissionError`, so `except PermissionError` (and `except OSError`) catches it;
+    `errno` holds the POSIX code when the failure carried one. A refusal pwshpy reads only from a
+    message or an exit status is a plain `NativeCallError`: a non-zero exit of a shadow-utils
+    command.
   - `OperationTimeoutError` - a call ran out of its `timeout` (`.timeout` holds the limit).
   - On an HTTP error status: `invoke_web_request` and `invoke_rest_method` raise
     `NativeCallError` for any status urllib does not follow (a refused 3xx such as a redirect

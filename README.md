@@ -83,10 +83,11 @@ against that tasting menu of betrayals, here is what you get instead:
 - **Identity survives a locale.** Principals are keyed by SID, not by a group name Microsoft
   translates, so a script written on an English box still works on a German one.
 - **One script, every machine.** A large part of pwshpy is the same bytes on Windows, macOS, and
-  Linux - not just processes and files, but services, the event log, scheduled tasks, local accounts,
-  ACLs, the credential vault, and the elevation relaunch, each on its native backend (win32 on
-  Windows; systemd, journald, `pwd`/`grp`, the ACL xattr, the desktop keyring, `sudo` on Linux;
-  ACLs are Windows and Linux only), never a shelled-out fake. The second script, the `.sh` twin that always drifts, does not exist.
+  Linux - not just processes and files, but services, the event log, scheduled tasks, local
+  accounts, ACLs, the credential vault, and the elevation relaunch, each on its native backend
+  (win32 on Windows; systemd, journald, `pwd`/`grp`, the ACL xattr, the desktop keyring, `sudo` on
+  Linux; ACLs are Windows and Linux only), never a shelled-out fake. The second script, the `.sh`
+  twin that always drifts, does not exist.
 - **Hand it over as one self-sufficient file.** `pwshpy pack tool.py` folds a Python script and
   every local module it imports into a single self-extracting file - a `.ps1` for Windows or a
   `.sh` for POSIX (`pwshpy pack tool.py -o tool.sh`). Give that one file to anyone: it unpacks

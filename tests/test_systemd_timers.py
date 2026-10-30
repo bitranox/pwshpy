@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 from elevation_doubles import RUNNING_AS_ROOT
-from systemd_fake_bus import Address, FakeConn, FakeCore, Message, Reply, use_bus
+from systemd_fake_bus import ACCESS_DENIED, Address, FakeConn, FakeCore, Message, Reply, use_bus
 
 from pwshpy import __init__conf__
 from pwshpy.adapters.native import systemd_dbus, systemd_timers
@@ -43,7 +43,12 @@ from pwshpy.adapters.native.systemd_timers import (
     usec_to_datetime,
 )
 from pwshpy.domain.enums import TaskLogonType, TaskMultipleInstances, TaskRunLevel, TaskState
-from pwshpy.domain.errors import ConfigurationError, NativeCallError, PlatformUnsupportedError
+from pwshpy.domain.errors import (
+    ConfigurationError,
+    NativeAccessDeniedError,
+    NativeCallError,
+    PlatformUnsupportedError,
+)
 from pwshpy.domain.records import ScheduledTaskInfo
 from pwshpy.domain.scheduling import (
     BootTrigger,
@@ -779,6 +784,18 @@ def test_enable_does_not_start_a_timer_it_cannot_inspect(monkeypatch: pytest.Mon
 
 
 @pytest.mark.os_agnostic
+def test_enable_raises_a_refused_monotonic_read_before_changing_anything(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[250] A refused TimersMonotonic read is no "cannot inspect": enable raises it before EnableUnitFiles."""
+    props = _enable_props("odd", [("OnBootUSec", 600_000_000, 0)])
+    conn = FakeConn([], props, frozenset({"odd.timer"}), refused_reads=frozenset({("odd.timer", "TimersMonotonic")}))
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeAccessDeniedError, match="TimersMonotonic"):
+        SystemdScheduledTaskController().enable("odd")
+    assert conn.verbs == []
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
 def test_listing_reads_an_enabled_inactive_timer_as_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     """iter_timers applies the same enabled-and-inactive -> Ready rule as the controller."""
     props: dict[tuple[str, str, str], Any] = {
@@ -953,17 +970,73 @@ def test_lenient_skips_a_timer_file_that_cannot_be_loaded_and_warns(
     assert failure in warning.getMessage()
 
 
+def _two_timer_conn(refusal: str) -> FakeConn:
+    """Two timers, ``denied.timer`` first; systemd refuses one read of it, named by ``refusal``.
+
+    ``GetUnitFileState``: both are loaded (``ListUnits`` lists them) and the enablement lookup of
+    the first is refused. ``Description``: both are unloaded unit files and reading the first's
+    description is refused.
+    """
+    loaded = refusal == "GetUnitFileState"
+    props: dict[tuple[str, str, str], Any] = {}
+    for base in ("denied", "good"):
+        props[(f"{base}.timer", systemd_dbus.UNIT_IFACE, "ActiveState")] = "active"
+        props[(f"{base}.timer", systemd_dbus.UNIT_IFACE, "Description")] = base
+        props[(f"{base}.timer", _TIMER, "Unit")] = f"{base}.service"
+    return FakeConn(
+        [("denied.timer", "denied", "active"), ("good.timer", "good", "active")] if loaded else [],
+        props,
+        frozenset({"denied.timer", "good.timer"}),
+        unloaded=frozenset() if loaded else frozenset({"denied.timer", "good.timer"}),
+        denied_calls=frozenset({("GetUnitFileState", "denied.timer")}) if loaded else frozenset(),
+        refused_reads=frozenset() if loaded else frozenset({("denied.timer", "Description")}),
+    )
+
+
+_REFUSALS = ["GetUnitFileState", "Description"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("refusal", _REFUSALS)
+def test_lenient_skips_a_timer_systemd_refuses_to_read_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, refusal: str
+) -> None:
+    """[250] A refused read skips that timer with a WARNING naming the refusal; the next is listed.
+
+    Before, the refused read answered as an absent value: a refused enablement lookup listed the
+    timer as disabled, a refused description as an empty one.
+    """
+    use_bus(monkeypatch, _two_timer_conn(refusal))
+    with caplog.at_level(logging.WARNING, logger=systemd_timers.__name__):
+        assert [t.task_name for t in iter_timers()] == ["good"]
+    (warning,) = caplog.records
+    assert "'denied.timer'" in warning.getMessage()
+    assert ACCESS_DENIED in warning.getMessage()
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("refusal", _REFUSALS)
+def test_strict_raises_on_a_timer_systemd_refuses_to_read(monkeypatch: pytest.MonkeyPatch, refusal: str) -> None:
+    """[250] strict=True: the refused read raises a NativeAccessDeniedError naming the timer."""
+    conn = _two_timer_conn(refusal)
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeAccessDeniedError, match=r"'denied\.timer'"):
+        list(iter_timers(strict=True))
+    assert conn.closed is True
+
+
 @pytest.mark.os_agnostic
 def test_load_unit_raises_on_an_unreadable_load_state_and_load_unit_path_stays_fail_soft() -> None:
     """A failed LoadState read is "could not ask", not "not-found"; the fail-soft wrapper still reads None.
 
     load_unit_path's callers (field read-backs, the controllers, the services listing) keep their
-    behaviour: before, the failed read defaulted to not-found and they got None too.
+    behaviour: before, the failed read defaulted to not-found and they got None too. A read systemd
+    REFUSES is the exception: load_unit_path raises it ([250], ``test_systemd_dbus_errors``).
     """
     conn = FakeConn(
         [],
         {("real.service", _SERVICE, "User"): "1000"},
-        refused_reads=frozenset({("real.service", "LoadState")}),
+        broken_reads=frozenset({("real.service", "LoadState")}),
     )
     bus = systemd_dbus.Bus(conn=conn, core=FakeCore(), mgr=Address("/org/freedesktop/systemd1"))
     with pytest.raises(NativeCallError, match=r"LoadState of 'real\.service'"):
@@ -1855,6 +1928,34 @@ def test_lookup_by_name_applies_the_strict_rule_to_an_id_it_cannot_read(
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "knobs",
+    [
+        {"refused_reads": frozenset({("job.timer", "Description")})},
+        {"denied_calls": frozenset({("GetUnitFileState", "job.timer")})},
+    ],
+    ids=["description-read-refused", "file-state-refused"],
+)
+@pytest.mark.parametrize("strict", [False, True])
+def test_lookup_by_name_applies_the_strict_rule_to_a_refused_read(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, knobs: dict[str, Any], strict: bool
+) -> None:
+    """[250] A read systemd refuses is no answer: strict raises the refusal, lenient warns; no service stands in."""
+    conn = _lookup_conn(**knobs)
+    use_bus(monkeypatch, conn)
+    if strict:
+        with pytest.raises(NativeAccessDeniedError, match=r"'job\.timer'"):
+            list(iter_timers(task_name="job", strict=True))
+        assert conn.closed is True
+        return
+    with caplog.at_level(logging.WARNING, logger=systemd_timers.__name__):
+        assert list(iter_timers(task_name="job")) == []
+    (warning,) = caplog.records
+    assert "'job.timer'" in warning.getMessage()
+    assert ACCESS_DENIED in warning.getMessage()
+
+
+@pytest.mark.os_agnostic
 def test_lookup_by_name_reads_each_load_state_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """[50] The LoadState LoadUnit read decides absence too: a second read could fail and default to present."""
     _write_owned(tmp_path, "adhoc.service")
@@ -2255,6 +2356,11 @@ def test_listing_cost_of_the_settings_is_five_property_reads_per_task(monkeypatc
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("refused", ["Conditions", "RefuseManualStart", "Type", "TimeoutStartUSec", "SendSIGKILL"])
 def test_an_unreadable_settings_property_unknowns_only_its_field(monkeypatch: pytest.MonkeyPatch, refused: str) -> None:
+    """A settings read that fails for another reason than a refusal leaves only its field None.
+
+    A refused read is no unknown value: it skips the task ([250],
+    ``test_lenient_skips_a_timer_systemd_refuses_to_read_and_warns``).
+    """
     props = {
         ("job.timer", _TIMER, "Unit"): "job.service",
         **_settings_props(
@@ -2269,7 +2375,7 @@ def test_an_unreadable_settings_property_unknowns_only_its_field(monkeypatch: py
         [("job.timer", "", "active")],
         props,
         frozenset({"job.timer"}),
-        refused_reads=frozenset({("job.service", refused)}),
+        broken_reads=frozenset({("job.service", refused)}),
     )
     use_bus(monkeypatch, conn)
     (task,) = iter_timers(strict=True)  # strict too: a property read stays soft, the task is kept

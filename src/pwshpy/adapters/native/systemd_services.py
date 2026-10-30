@@ -23,7 +23,7 @@ from collections.abc import Iterator
 from enum import Enum
 
 from ...domain.enums import ServiceStartType, ServiceState
-from ...domain.errors import NativeCallError, OperationTimeoutError
+from ...domain.errors import NativeAccessDeniedError, NativeCallError, OperationTimeoutError
 from ...domain.records import ServiceInfo
 from . import systemd_dbus as _dbus
 from .marshal import skip_or_raise
@@ -141,6 +141,44 @@ def _service_file_path(bus: _dbus.Bus, name: str, *, strict: bool) -> str | None
         return None
 
 
+def _skip_refused(name: str, exc: NativeAccessDeniedError, *, strict: bool) -> None:
+    """Apply the listing's skip-or-raise rule to service ``name``, one of whose reads systemd refused.
+
+    A refused read says nothing about the service, so it must not stand in for a default (no start
+    type, an empty description, stopped): the service is skipped with a WARNING, or raised under
+    ``strict``, like a service whose ``LoadUnit`` fails.
+    """
+    skip_or_raise(f"systemd refused a read of service unit '{name}'", exc, strict=strict, log=logger)
+
+
+def _listed_service(bus: _dbus.Bus, unit: _dbus.ListedUnit, *, strict: bool) -> ServiceInfo | None:
+    """The record of a loaded service from its ``ListUnits`` entry; None when systemd refuses its read."""
+    try:
+        start_type = _start_type_of(bus, unit.name)
+    except NativeAccessDeniedError as exc:
+        _skip_refused(unit.name, exc, strict=strict)
+        return None
+    return ServiceInfo(
+        name=unit.name,
+        display_name=unit.description,
+        status=to_service_state(unit.active_state),
+        start_type=start_type,
+        can_stop=True,
+        can_pause_continue=False,
+    )
+
+
+def _file_service(
+    bus: _dbus.Bus, name: str, path: str, *, start_type: ServiceStartType | None, strict: bool
+) -> ServiceInfo | None:
+    """The record of service file ``name`` loaded at ``path``; None when systemd refuses one of its reads."""
+    try:
+        return _service_at(bus, name, path, start_type=start_type)
+    except NativeAccessDeniedError as exc:
+        _skip_refused(name, exc, strict=strict)
+        return None
+
+
 def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
     """Yield a :class:`ServiceInfo` per systemd ``.service`` unit (like Get-Service, Linux).
 
@@ -163,13 +201,15 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
 
     Args:
         strict: What happens when systemd does not answer a read the listing needs - the
-            unit-file listing (without it no unloaded service can be listed), or the ``LoadUnit``
-            of one service file or its ``LoadState`` read. False (default) skips what it could not
-            read and logs a WARNING naming it; True raises :class:`NativeCallError` naming it, when
-            iteration reaches it. The deliberate filtering above (not-found, masked, alias,
+            unit-file listing (without it no unloaded service can be listed), the ``LoadUnit``
+            of one service file or its ``LoadState`` read, or any read of a service that systemd
+            refuses (``AccessDenied`` / ``InteractiveAuthorizationRequired``). False (default)
+            skips what it could not read and logs a WARNING naming it; True raises
+            :class:`NativeCallError` naming it (a :class:`NativeAccessDeniedError` for a refusal),
+            when iteration reaches it. The deliberate filtering above (not-found, masked, alias,
             template, stale) is systemd's answer, not a failure, and is the same either way; a
-            single property that cannot be read (description, state, start type) still falls back
-            to its default in both modes (the service is kept).
+            single property whose read fails for another reason than a refusal (description,
+            state, start type) still falls back to its default in both modes (the service is kept).
 
     Raises:
         NativeCallError: The system bus or ``ListUnits`` cannot be reached, or (with ``strict``)
@@ -200,14 +240,9 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
                 # not-found until a daemon-reload. Nothing here depends on the version.
                 continue
             seen.add(name)
-            yield ServiceInfo(
-                name=name,
-                display_name=unit.description,
-                status=to_service_state(unit.active_state),
-                start_type=_start_type_of(bus, name),
-                can_stop=True,
-                can_pause_continue=False,
-            )
+            listed = _listed_service(bus, unit, strict=strict)
+            if listed is not None:
+                yield listed
         for name, state in _service_files(bus, strict=strict):
             if name in seen or state in _dbus.UNLISTED_FILE_STATES:
                 continue
@@ -215,7 +250,9 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
             path = _service_file_path(bus, name, strict=strict)
             if path is None:  # a stale or broken file (no unit behind the name), or a refused load
                 continue
-            yield _service_at(bus, name, path, start_type=to_start_type(state))
+            service = _file_service(bus, name, path, start_type=to_start_type(state), strict=strict)
+            if service is not None:
+                yield service
     finally:
         bus.conn.close()
 
@@ -238,7 +275,9 @@ class SystemdServiceController:
     a unit that has not settled by the deadline raises :class:`OperationTimeoutError`, as on
     Windows. A call systemd refuses for lack of rights (the D-Bus error ``AccessDenied`` or
     ``InteractiveAuthorizationRequired``) raises :class:`~pwshpy.domain.errors.NativeAccessDeniedError`,
-    any other D-Bus error reply a plain :class:`NativeCallError` naming that error. Settled means the
+    any other D-Bus error reply a plain :class:`NativeCallError` naming that error. A read systemd
+    refuses while the verb waits or reads the unit back raises the refusal too, never a default (no
+    job, inactive, no description). Settled means the
     unit has no pending job (a stop also settles at inactive/failed). A start or restart whose unit
     settles at ``failed`` raises :class:`NativeCallError` naming systemd's ``Service.Result`` (such as
     ``exit-code``), like Start-Service on a service that fails to start; any other settled state is
@@ -329,7 +368,10 @@ def _refuse_a_failed_unit(bus: _dbus.Bus, name: str) -> None:
     """
     if _dbus.active_state(bus, name) is not ActiveState.FAILED:
         return
-    result = _dbus.unit_property(bus, name, "Result", None, interface=_dbus.SERVICE_IFACE)
+    try:
+        result = _dbus.unit_property(bus, name, "Result", None, interface=_dbus.SERVICE_IFACE)
+    except NativeAccessDeniedError:
+        result = None  # a refused Result read leaves only the reason unnamed; the failure is still raised
     reason = f" (Result={result})" if isinstance(result, str) and result else ""
     raise NativeCallError(f"unit {name!r} failed{reason}: systemd ended its job with the unit in the failed state.")
 

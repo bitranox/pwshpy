@@ -14,6 +14,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   other refused native call: `pwshpy stop_service sshd.service` as non-root exited 1 with a plain
   `NativeCallError` before. Any other D-Bus error reply stays a plain `NativeCallError`, whose
   message now names the D-Bus error.
+- Linux services and scheduled tasks: a D-Bus read systemd refuses is reported (skipped with a
+  warning in a listing, raised under `strict=True`) instead of reading as a stopped, disabled or
+  missing unit.
 - `get_content`, `get_content_lines`, `write_text`, `write_text_stream` and `write_records` raise
   `NativeCallError` (a `NativeAccessDeniedError` for a refusal) for an unknown encoding, text that
   is not valid in the encoding, and a file that cannot be read or written, as every other pwshpy

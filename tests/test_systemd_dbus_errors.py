@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 from systemd_fake_bus import (
@@ -76,6 +78,67 @@ def test_a_refused_stop_raises_native_access_denied(monkeypatch: pytest.MonkeyPa
     with pytest.raises(NativeAccessDeniedError):
         SystemdServiceController().stop("x.service")
     assert conn.verbs == ["StopUnit"]
+
+
+# --- [250] a refused lookup never reads as an absent unit ----------------------------------------
+
+_UNIT = systemd_dbus.UNIT_IFACE
+
+
+def _box(**knobs: Any) -> systemd_dbus.Bus:
+    """A bus holding one loaded unit, ``x.service`` (Description "X", a unit file), with ``knobs``."""
+    conn = FakeConn([], {("x.service", _UNIT, "Description"): "X"}, frozenset({"x.service"}), **knobs)
+    return systemd_dbus.Bus(conn=conn, core=FakeCore(), mgr=Address("/org/freedesktop/systemd1"))
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("method", "lookup"),
+    [
+        ("GetUnit", systemd_dbus.unit_path),
+        ("LoadUnit", systemd_dbus.load_unit_path),
+        ("GetUnitFileState", systemd_dbus.unit_file_state),
+    ],
+)
+def test_a_refused_unit_lookup_raises_native_access_denied(method: str, lookup: Callable[..., object]) -> None:
+    """unit_path, load_unit_path and unit_file_state raise a refusal instead of answering None ("absent")."""
+    bus = _box(denied_calls=frozenset({(method, "x.service")}))
+    with pytest.raises(NativeAccessDeniedError, match=method):
+        lookup(bus, "x.service")
+
+
+@pytest.mark.os_agnostic
+def test_a_refused_property_read_raises_native_access_denied() -> None:
+    """path_property raises a refused read, naming the property, instead of returning the default."""
+    bus = _box(refused_reads=frozenset({("x.service", "Description")}))
+    with pytest.raises(NativeAccessDeniedError, match="Description"):
+        systemd_dbus.path_property(bus, "/u/x.service", "Description", "")
+
+
+@pytest.mark.os_agnostic
+def test_a_refused_load_state_read_raises_native_access_denied_through_load_unit_path() -> None:
+    """load_unit_path's LoadState read is refused: a refusal, never the fail-soft None."""
+    bus = _box(refused_reads=frozenset({("x.service", "LoadState")}))
+    with pytest.raises(NativeAccessDeniedError, match="LoadState"):
+        systemd_dbus.load_unit_path(bus, "x.service")
+
+
+@pytest.mark.os_agnostic
+def test_an_absent_unit_still_reads_as_none() -> None:
+    """A unit systemd does not have is still None (or the default): only a refusal raises."""
+    bus = _box()
+    assert systemd_dbus.unit_path(bus, "absent.service") is None
+    assert systemd_dbus.load_unit_path(bus, "absent.service") is None
+    assert systemd_dbus.unit_file_state(bus, "absent.service") is None
+    assert systemd_dbus.path_property(bus, "/u/x.service", "NoSuchProperty", "dflt") == "dflt"
+    assert systemd_dbus.path_property(bus, None, "Description", "dflt") == "dflt"
+
+
+@pytest.mark.os_agnostic
+def test_a_failed_read_that_is_no_refusal_still_reads_as_the_default() -> None:
+    """A property read that fails for another reason than a refusal keeps answering the default."""
+    bus = _box(broken_reads=frozenset({("x.service", "Description")}))
+    assert systemd_dbus.path_property(bus, "/u/x.service", "Description", "dflt") == "dflt"
 
 
 def _is_root() -> bool:

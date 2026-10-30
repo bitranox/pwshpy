@@ -949,13 +949,34 @@ SH_CACHE_HOME_LOOKUP = "$(pwshpy_account_cache_home)"
 PS1_CACHE_HOME_LOOKUP = "function Get-PwshPyAccountCacheHome {"
 
 
+#: Every character that opens or closes a PowerShell single-quoted literal: the ASCII apostrophe and
+#: U+2018-U+201B (the runner escapes the same set through EscapeSingleQuotedStringContent).
+PS_SINGLE_QUOTES = tuple(chr(code) for code in (0x27, 0x2018, 0x2019, 0x201A, 0x201B))
+
+
+def ps_literal(value: object) -> str:
+    """``value`` as a single-quoted PowerShell literal: every quote of ``PS_SINGLE_QUOTES`` inside is
+    doubled, the one escape such a literal has (a profile or temp path may hold one, as in O'Brien).
+
+    Example:
+        >>> ps_literal("C:/temp/it's")
+        "'C:/temp/it''s'"
+        >>> ps_literal("it" + chr(0x2019) + "s") == "'it" + chr(0x2019) * 2 + "s'"
+        True
+    """
+    text = str(value)
+    for quote in PS_SINGLE_QUOTES:
+        text = text.replace(quote, quote * 2)
+    return "'" + text + "'"
+
+
 def _answering(text: str, directory: Path, *, powershell: bool, lookups: tuple[str, str]) -> str:
     """``text`` with one account lookup (``lookups`` = (sh, ps1) form) answering ``directory``."""
     value = str(directory)
     sh_lookup, ps1_lookup = lookups
     if powershell:
         assert text.count(ps1_lookup) == 1
-        answer = "'" + value.replace("'", "''") + "'"
+        answer = ps_literal(value)
         renamed = ps1_lookup.replace(" {", "OnHost {")
         return text.replace(ps1_lookup, f"{ps1_lookup}\n    return {answer}\n}}\n\n{renamed}")
     assert text.count(sh_lookup) == 1
@@ -1073,6 +1094,7 @@ __all__ = [
     "PS1_CACHE_HOME_LOOKUP",
     "PS1_DATA_HOME_LOOKUP",
     "PS1_PYTHON_DIR_CHECK",
+    "PS_SINGLE_QUOTES",
     "REAL_ACCOUNT_CACHE_GROUP",
     "RUNNING_AS_ROOT",
     "UV_SOURCE_VARIABLES",
@@ -1095,6 +1117,7 @@ __all__ = [
     "session_uv_cache",
     "plant_library_path",
     "planted_managed_python",
+    "ps_literal",
     "removing_a_new_account_temp_dir",
     "with_account_cache_home",
     "with_download_doubles",

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from elevation_doubles import ps_literal
 
 from pwshpy import ps
 from pwshpy.domain.enums import TaskMultipleInstances
@@ -77,11 +78,10 @@ def test_lookup_by_name_matches_get_scheduledtask_for_that_task() -> None:
         _run_ps_json("Get-ScheduledTask | Select-Object -First 1 TaskPath,TaskName | ConvertTo-Json -Compress"),
     )
     path, name = str(first["TaskPath"]), str(first["TaskName"])
-    quoted_path, quoted_name = path.replace("'", "''"), name.replace("'", "''")
     theirs = cast(
         "dict[str, Any]",
         _run_ps_json(
-            f"Get-ScheduledTask -TaskPath '{quoted_path}' -TaskName '{quoted_name}' "
+            f"Get-ScheduledTask -TaskPath {ps_literal(path)} -TaskName {ps_literal(name)} "
             "| Select-Object TaskPath,TaskName,@{n='State';e={[int]$_.State}} | ConvertTo-Json -Compress"
         ),
     )

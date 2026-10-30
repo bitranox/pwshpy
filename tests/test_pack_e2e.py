@@ -49,6 +49,7 @@ from elevation_doubles import (
     NOT_A_GIT_VARIABLE,
     OTHER_UID,
     PS1_INSTALLER_DOWNLOADERS,
+    PS_SINGLE_QUOTES,
     REAL_ACCOUNT_CACHE_GROUP,
     RUNNING_AS_ROOT,
     UV_SOURCE_VARIABLES,
@@ -62,6 +63,7 @@ from elevation_doubles import (
     owned_by_another_account,
     plant_library_path,
     planted_managed_python,
+    ps_literal,
     removing_a_new_account_temp_dir,
     second_prompts,
     session_uv_cache,
@@ -235,7 +237,7 @@ def _run(
     words = [str(runner), _NEVER_INSTALL_UV, *arguments]
     invocation = ["-File", *words]
     if session is not None:
-        quoted = " ".join("'" + word.replace("'", "''") + "'" for word in words)
+        quoted = " ".join(ps_literal(word) for word in words)
         invocation = ["-Command", f"{session}; & {quoted}; exit $LASTEXITCODE"]
     return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
         [host or _PWSH, "-NoProfile", "-NonInteractive", *invocation],
@@ -2557,15 +2559,23 @@ _UV_INSTALLER_DOWNLOAD = (
 )
 
 
-def _ps_literal(value: object) -> str:
-    """``value`` as a single-quoted PowerShell literal: a ``'`` inside is doubled, the one escape such a
-    literal has (a profile or temp path may hold one, as in O'Brien).
-
-    Example:
-        >>> _ps_literal("C:/temp/it's")
-        "'C:/temp/it''s'"
-    """
-    return "'" + str(value).replace("'", "''") + "'"
+@pytest.mark.parametrize("quote", PS_SINGLE_QUOTES, ids=lambda quote: f"U+{ord(quote):04X}")
+def test_a_powershell_literal_keeps_every_single_quote_character(tmp_path: Path, quote: str) -> None:
+    """PowerShell ends a single-quoted literal at U+2018-U+201B as well as at the ASCII apostrophe."""
+    assert _PWSH is not None
+    value = f"a{quote}b{quote}{quote}c"
+    out = tmp_path / "out.txt"
+    script = f"[IO.File]::WriteAllText({ps_literal(out)}, {ps_literal(value)}, [Text.UTF8Encoding]::new($false))"
+    result = subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert out.read_text(encoding="utf-8") == value
 
 
 def _with_local_uv_installer(runner: Path, installer: Path) -> None:
@@ -2574,9 +2584,7 @@ def _with_local_uv_installer(runner: Path, installer: Path) -> None:
     text = runner.read_text(encoding="utf-8")
     assert text.count(_UV_INSTALLER_DOWNLOAD) == 1
     runner.write_text(
-        text.replace(
-            _UV_INSTALLER_DOWNLOAD, f"Copy-Item -LiteralPath {_ps_literal(installer)} -Destination $installer"
-        ),
+        text.replace(_UV_INSTALLER_DOWNLOAD, f"Copy-Item -LiteralPath {ps_literal(installer)} -Destination $installer"),
         encoding="utf-8",
     )
 
@@ -2603,11 +2611,11 @@ def test_an_elevated_windows_run_keeps_the_installed_uvs_directory_on_path(tmp_p
     installer = tmp_path / "local-uv-install.ps1"
     host_argv = tmp_path / "installer-host-argv.json"
     record = (
-        f"[IO.File]::WriteAllText({_ps_literal(host_argv)},"
+        f"[IO.File]::WriteAllText({ps_literal(host_argv)},"
         " (ConvertTo-Json -Compress -InputObject @([Environment]::GetCommandLineArgs())))"
     )
-    make_dir = f"New-Item -ItemType Directory -Force -Path {_ps_literal(installed)} | Out-Null"
-    source, target = _ps_literal(_UvLocation.directory / "uv.exe"), _ps_literal(installed / "uv.exe")
+    make_dir = f"New-Item -ItemType Directory -Force -Path {ps_literal(installed)} | Out-Null"
+    source, target = ps_literal(_UvLocation.directory / "uv.exe"), ps_literal(installed / "uv.exe")
     copy_uv = f"Copy-Item -LiteralPath {source} -Destination {target}"
     # With a BOM, so Windows PowerShell 5.1 and pwsh 7 both read a non-ASCII path in it as UTF-8.
     installer.write_text(f"{record}\n{make_dir}\n{copy_uv}\n", encoding="utf-8-sig")
@@ -2747,7 +2755,7 @@ def test_an_unanswered_posix_euid_probe_applies_the_root_rule(tmp_path: Path, pr
     runner = Path(pack_script(entry).output_path)
     text = runner.read_text(encoding="utf-8")
     assert text.count(_FIXED_IDS) == 1
-    replacement = "@(" + ", ".join(_ps_literal(fixed / f"id{n}") for n in range(6)) + ")"
+    replacement = "@(" + ", ".join(ps_literal(fixed / f"id{n}") for n in range(6)) + ")"
     # Treated as root, the run would first refuse its cache below this test's own directory ([98]).
     runner.write_text(_trusting_the_cache(text.replace(_FIXED_IDS, replacement)), encoding="utf-8")
     result = _run_with_path(tmp_path, runner, path_first=[planted.parent], real_probe=True)
@@ -3530,7 +3538,7 @@ def _with_anchor(runner: Path, anchor: Path) -> None:
     """Make ``runner`` start uv in ``anchor``: no test can plant a .venv above System32 or /."""
     text = runner.read_text(encoding="utf-8")
     assert text.count(_ANCHOR_FUNCTION) == 1
-    literal = "'" + str(anchor).replace("'", "''") + "'"
+    literal = ps_literal(anchor)
     stand_in = f"{_ANCHOR_FUNCTION}\n    return {literal}\n}}\n\nfunction Get-PwshPyAnchorDirectoryOnHost {{"
     runner.write_text(text.replace(_ANCHOR_FUNCTION, stand_in), encoding="utf-8")
 

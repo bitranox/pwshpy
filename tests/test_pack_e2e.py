@@ -1886,7 +1886,7 @@ def test_an_elevated_run_skips_a_uv_a_non_admin_can_modify(tmp_path: Path) -> No
     if trusted is None:
         pytest.skip(_needs_a_trusted_uv)
     planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
-    runner = _trust_runner(tmp_path, elevated="$true")
+    runner = _trust_runner(tmp_path, elevated="$true", trust_my_uid=True)
     result = _run_with_path(tmp_path, runner, path_first=[planted.parent, trusted.parent])
     assert result.returncode == 0, result.stdout + result.stderr
     assert _same(_reported_uv(result), trusted), result.stdout + result.stderr
@@ -2012,7 +2012,10 @@ def test_an_elevated_run_uses_a_trusted_pinned_uv(tmp_path: Path) -> None:
     if trusted is None:
         pytest.skip(_needs_a_trusted_uv)
     planted = _uv_stand_in(_user_writable_dir(tmp_path / "planted-bin"))
-    runner = _trust_runner(tmp_path, elevated="$true")
+    # The planted uv must be one the runner would accept, so only the pin explains the result (POSIX:
+    # with trust_my_uid this account's 0755 directory passes; on Windows the Users grant stays).
+    planted.parent.chmod(0o755)
+    runner = _trust_runner(tmp_path, elevated="$true", trust_my_uid=True)
     result = _run_with_path(tmp_path, runner, "-PwshPyUv", str(trusted), path_first=[planted.parent])
     assert result.returncode == 0, result.stdout + result.stderr
     assert _same(_reported_uv(result), trusted), result.stdout + result.stderr

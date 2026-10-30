@@ -7,6 +7,7 @@ naive recorder miss.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -149,10 +150,8 @@ def test_a_second_process_waits_outside_the_account_temp_dir_block() -> None:
         )
         assert second.stdout is not None
         assert second.stdout.readline().strip() == "ready"
-        try:
+        with contextlib.suppress(subprocess.TimeoutExpired):
             second.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass
         assert second.poll() is None, "a second process entered while the first was inside"
     out, _ = second.communicate(timeout=30)
     assert out.strip() == "entered", out

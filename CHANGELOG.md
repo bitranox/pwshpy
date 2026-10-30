@@ -50,6 +50,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `test_path` returns False. On Python 3.14, where `get_item` said "path not found" for such a path,
   it raises `NativeAccessDeniedError` too. `test_path` logs one WARNING naming the denied path, as
   `Test-Path` writes a non-terminating error; a path that does not exist reads False with no warning.
+- `get_acl` and the ACL verbs (`add_acl_ace`, `remove_acl_ace`, `set_owner`) on macOS raise
+  `PlatformUnsupportedError` instead of a raw `AttributeError`: the Linux backend reads the POSIX ACL
+  extended attribute through `os.getxattr`, which macOS lacks. The refusal comes before any adapter
+  call. ACLs are supported on Windows and Linux; the docs no longer call them portable to macOS.
 - `get_scheduled_task("\\Microsoft\\Windows\\Defrag\\")` lists the folder on Windows: a folder path
   ending in a backslash, the form every record's `task_path` carries, raised `NativeCallError`
   0x8007007B because the Task Scheduler refuses it. The listing strips the trailing backslash, as

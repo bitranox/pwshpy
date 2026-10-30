@@ -17,7 +17,7 @@ import os
 import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..adapters.native import NativeAclController as _NativeAclController
 from ..adapters.native import NativeCredentialStore as _NativeCredentialStore
@@ -179,6 +179,18 @@ from ..domain.shortcuts import ShortcutSpec
 #: checker does not statically prune the "other OS" branch (and flag its import unused).
 _ON_WINDOWS: bool = sys.platform == "win32"
 
+
+class _AclPorts(NamedTuple):
+    """The ACL ports and the OS that decides whether they may be used (Windows and Linux only).
+
+    Held together so no verb can reach a port without :meth:`Ps._require_acl` judging the OS.
+    """
+
+    source: AclSource
+    controller: AclController
+    platform: str
+
+
 #: Windows Update's own default query: software updates that are not installed yet.
 _DEFAULT_WU_CRITERIA = "IsInstalled=0 and Type='Software'"
 
@@ -278,6 +290,10 @@ def _absolute_windows_path(path: str | os.PathLike[str]) -> str:
 class Ps:
     """Fluent facade over both backends, returning the same typed pipeline.
 
+    Every port is injected by keyword. ``platform`` (default ``sys.platform``) names the OS the
+    ACL verbs are judged for: anything but Windows and Linux refuses them with
+    :class:`PlatformUnsupportedError` before an ACL port is reached.
+
     Example:
         >>> facade = build_ps()
         >>> facade.get_process().take(1).to_list()  # doctest: +ELLIPSIS
@@ -337,6 +353,7 @@ class Ps:
         elevator: Elevator,
         script_packer: ScriptPacker,
         script_unpacker: ScriptUnpacker,
+        platform: str = sys.platform,
     ) -> None:
         self._process_source = process_source
         self._connection_source = connection_source
@@ -361,8 +378,7 @@ class Ps:
         self._local_user_source = local_user_source
         self._local_group_source = local_group_source
         self._local_account_controller = local_account_controller
-        self._acl_source = acl_source
-        self._acl_controller = acl_controller
+        self._acl = _AclPorts(acl_source, acl_controller, platform)
         self._ps_runner = ps_runner
         self._cmdlet_runner = cmdlet_runner
         self._command_introspector = command_introspector
@@ -1438,7 +1454,7 @@ class Ps:
         self._local_account_controller.remove_group_member(group, member, timeout=timeout)
 
     def get_acl(self, path: str) -> Pipeline[AclEntry]:
-        """Return a lazy pipeline over a filesystem path's ACL entries (native, portable).
+        """Return a lazy pipeline over a filesystem path's ACL entries (native, Windows and Linux).
 
         One AclEntry per entry - a Windows DACL ACE, or a POSIX ACL entry (owner / named user /
         owning group / named group / mask / other, in ``kind``). Filter with e.g.
@@ -1460,16 +1476,18 @@ class Ps:
                 denied). On POSIX the extended ACL is read too: only a file with none (or a
                 filesystem without POSIX ACLs) yields the three mode-bit entries; an extended ACL
                 that cannot be read raises.
+            PlatformUnsupportedError: Not Windows or Linux (macOS has no ACL backend), raised by
+                this call before anything is read.
 
         Example:
             >>> from pwshpy.domain.pipeline import Pipeline
             >>> isinstance(build_ps().get_acl("C:/Windows"), Pipeline)
             True
         """
-        return Pipeline(self._acl_source(path))
+        return Pipeline(self._require_acl("get_acl").source(path))
 
     def add_acl_ace(self, path: str, trustee: str, rights: int, *, access_type: AceType = AceType.ALLOW) -> None:
-        """Grant a trustee ``rights`` on a path's ACL (native, portable, **mutating**).
+        """Grant a trustee ``rights`` on a path's ACL (native, Windows and Linux, **mutating**).
 
         On Windows ``trustee`` is a SID string or name and ``rights`` a Win32 access mask (allow
         or deny). On Linux ``trustee`` is ``user:NAME`` / ``group:NAME`` (bare = user), ``rights``
@@ -1490,15 +1508,17 @@ class Ps:
             NativeCallError: The trustee cannot be resolved, the ACL cannot be read or written,
                 or (Linux) ``access_type`` is ``DENY``; a :class:`NativeAccessDeniedError` when
                 access is denied.
+            PlatformUnsupportedError: Not Windows or Linux (macOS has no ACL backend); nothing
+                is changed.
 
         Example:
             >>> callable(build_ps().add_acl_ace)
             True
         """
-        self._acl_controller.add_ace(path, trustee, rights, access_type=access_type)
+        self._require_acl("add_acl_ace").controller.add_ace(path, trustee, rights, access_type=access_type)
 
     def remove_acl_ace(self, path: str, trustee: str, *, access_type: AceType | None = None) -> None:
-        """Remove a trustee's entries from a path's ACL (native, portable, **mutating**).
+        """Remove a trustee's entries from a path's ACL (native, Windows and Linux, **mutating**).
 
         On Linux the ACL mask is recomputed afterwards (and dropped when no named entry is
         left); POSIX has no deny entries, so ``access_type=AceType.DENY`` changes nothing there.
@@ -1513,15 +1533,17 @@ class Ps:
         Raises:
             NativeCallError: The trustee cannot be resolved, or the ACL cannot be read or
                 written (a :class:`NativeAccessDeniedError` when access is denied).
+            PlatformUnsupportedError: Not Windows or Linux (macOS has no ACL backend); nothing
+                is changed.
 
         Example:
             >>> callable(build_ps().remove_acl_ace)
             True
         """
-        self._acl_controller.remove_ace(path, trustee, access_type=access_type)
+        self._require_acl("remove_acl_ace").controller.remove_ace(path, trustee, access_type=access_type)
 
     def set_owner(self, path: str, owner: str) -> None:
-        """Set the owner of a filesystem path (native, portable, **mutating**; ``chown`` on POSIX).
+        """Set the owner of a filesystem path (native, Windows and Linux, **mutating**; ``chown`` on Linux).
 
         Making another principal the owner needs privilege (SeRestorePrivilege on Windows, root
         on POSIX). On POSIX the owning group is left unchanged.
@@ -1534,12 +1556,14 @@ class Ps:
         Raises:
             NativeCallError: The owner cannot be resolved, or the owner cannot be set (a
                 :class:`NativeAccessDeniedError` when access is denied).
+            PlatformUnsupportedError: Not Windows or Linux (macOS has no ACL backend); nothing
+                is changed.
 
         Example:
             >>> callable(build_ps().set_owner)
             True
         """
-        self._acl_controller.set_owner(path, owner)
+        self._require_acl("set_owner").controller.set_owner(path, owner)
 
     def run(self, script: str, *, timeout: float | None = None) -> list[Any]:
         """Execute a PowerShell script in the hosted engine in-process (.NET).
@@ -2677,6 +2701,18 @@ class Ps:
             refused
         """
         return self._require_shortcuts("get_shortcut").read(_absolute_windows_path(path))
+
+    def _require_acl(self, verb: str) -> _AclPorts:
+        """Return the ACL ports, or refuse ``verb`` on an OS with no ACL backend (not Windows or Linux).
+
+        The Linux backend reads the POSIX ACL xattr through ``os.getxattr``, which exists on
+        Linux only, so macOS would otherwise fail with a raw ``AttributeError``.
+        """
+        platform = self._acl.platform
+        if platform == "win32" or platform.startswith("linux"):
+            return self._acl
+        what = "macOS ACLs are" if platform == "darwin" else "ACLs are"
+        raise PlatformUnsupportedError(f"ps.{verb} needs Windows or Linux: {what} not supported (got {platform})")
 
     def _require_shortcuts(self, verb: str) -> ShortcutController:
         """Return the shortcut controller, or refuse ``verb`` on an OS that has none."""

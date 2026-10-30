@@ -238,6 +238,10 @@ desktop keyring; the local-account verbs drive shadow-utils (`useradd` / `usermo
 `gpasswd` / ...) through a shell-free argv, the one documented subprocess exception (no stable native
 account API), and a POSIX group has no description so `new_local_group`'s is ignored.
 
+`get_acl` and the three ACL verbs run on Windows and Linux only: on macOS they raise
+`PlatformUnsupportedError` before touching the path, since the Linux backend reads an extended
+attribute macOS does not offer.
+
 **Windows only** (no honest Linux analog): the registry verbs (`set_item_property`,
 `remove_item_property`, `new_registry_key`, `remove_registry_key`), `clear_event_log` and
 `new_shortcut`. See [COMMANDS.md](../COMMANDS.md) for the full cmdlet-by-cmdlet table.

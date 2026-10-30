@@ -17,7 +17,8 @@ common cmdlets.
   what pwsh's `[Environment]::GetFolderPath` answers there (see [Known folders](#known-folders)).
 - The **portable native subsystems** dispatch by OS - win32 on Windows, an honest Linux backend
   on Linux: services (systemd D-Bus), event log (journald), scheduled tasks (systemd timers),
-  local accounts (pwd / grp / shadow-utils), ACLs (POSIX ACL xattr) - read and mutating verbs.
+  local accounts (pwd / grp / shadow-utils), ACLs (POSIX ACL xattr; Linux only, so macOS raises
+  `PlatformUnsupportedError`) - read and mutating verbs.
   Where the two OS models differ, the mapping is documented rather than faked; a field the Linux
   model lacks is dropped where nothing depends on it (a POSIX group has no description, so
   `new_local_group`'s is ignored). Scheduled tasks are the widest gap, and there an input with no
@@ -82,7 +83,8 @@ clear `FeatureUnavailableError` and loads no .NET.
 
 - **Linux / macOS:** the portable native subset, the portable native subsystems on their Linux
   backends (systemd, journald, pwd/grp, POSIX ACL, Secret Service, sudo), and .NET when `[full]`
-  and the .NET 10 runtime are present.
+  and the .NET 10 runtime are present. The ACL commands are Linux only: on macOS they raise
+  `PlatformUnsupportedError`.
 - **Windows:** the same surface on win32 backends, plus the five Windows-only subsystems
   (registry, CIM/WMI, hotfixes, Windows Update search, shortcuts), and .NET.
 - **Every OS:** the portable power tools `ps.exec`, `ps.write_text` / `ps.write_text_stream` /

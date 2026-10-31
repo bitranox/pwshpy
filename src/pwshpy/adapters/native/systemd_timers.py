@@ -77,6 +77,8 @@ logger = logging.getLogger(__name__)
 
 _ROOT = "/"  # systemd timers are a flat namespace; task_path is this neutral root (no folder tree)
 _UNIT_DIR = Path("/etc/systemd/system")  # where pwshpy writes its own units (system scope, needs root)
+#: systemd's D-Bus error for a StopUnit of a unit that is not loaded and inactive ("Unit X not loaded.").
+_NO_SUCH_UNIT = "org.freedesktop.systemd1.NoSuchUnit"
 #: The [Unit] key that marks a unit file as one pwshpy wrote; its value is the pwshpy version that
 #: wrote it. systemd ignores a key starting with "X-" without a warning (systemd.unit(5); measured with
 #: systemd-analyze verify on 259, where an unknown key without the prefix warns).
@@ -1438,17 +1440,20 @@ class SystemdScheduledTaskController:
 
     @staticmethod
     def _stop_if_loaded(bus: _dbus.Bus, unit: str) -> None:
-        """Stop ``unit``; a failed StopUnit means it is not loaded, so nothing runs that could be stopped.
+        """Stop ``unit``; systemd's ``NoSuchUnit`` answer means nothing runs that could be stopped.
 
-        A refusal is re-raised: systemd did not say the unit is gone, so going on would delete the
-        file of a unit that may still be running.
+        systemd answers a StopUnit with ``NoSuchUnit`` ("Unit X not loaded.") only for a unit whose
+        load state is an error (not-found, bad-setting, error) AND that is inactive (v259
+        src/core/dbus-unit.c, bus_unit_queue_job); a loaded, inactive unit gets a stop job, which
+        succeeds. Every other failure is re-raised - a refusal, no reply, a conflicting job:
+        systemd did not say the unit is gone, so going on would disable it and delete the file of
+        a unit that may still be running. Decided by the D-Bus error NAME, never its message text.
         """
         try:
             _dbus.call(bus, "StopUnit", "ss", (unit, "replace"))
-        except NativeAccessDeniedError:
-            raise
-        except NativeCallError:
-            return
+        except NativeCallError as exc:
+            if exc.dbus_error_name != _NO_SUCH_UNIT:
+                raise
 
     @classmethod
     def _retire_timer(cls, bus: _dbus.Bus, timer: str, *, remove: bool) -> None:

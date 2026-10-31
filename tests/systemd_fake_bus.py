@@ -64,6 +64,16 @@ def denied_reply() -> Reply:
 #: A D-Bus error that is no refusal: the call reached the bus and failed for another reason.
 FAILED = "org.freedesktop.DBus.Error.Failed"
 
+#: systemd's answer to a StopUnit for a unit whose load state is an error (not-found, bad-setting,
+#: error) and that is inactive: "Unit X not loaded." (systemd v259 src/core/dbus-unit.c,
+#: bus_unit_queue_job). A loaded, inactive unit gets a stop job instead (a success reply).
+NO_SUCH_UNIT = "org.freedesktop.systemd1.NoSuchUnit"
+
+#: Failures that say nothing about whether the unit runs: no reply within the bus timeout, and a stop
+#: job systemd could not queue beside the unit's pending jobs.
+NO_REPLY = "org.freedesktop.DBus.Error.NoReply"
+JOBS_CONFLICTING = "org.freedesktop.systemd1.TransactionJobsConflicting"
+
 
 def broken_reply() -> Reply:
     """A failed call that is no refusal (``org.freedesktop.DBus.Error.Failed``)."""
@@ -89,7 +99,9 @@ class FakeConn:
     only, unless ``file_states`` names another state; ListUnitFiles[ByPatterns] lists them); the
     Manager verbs a controller sends (Reload, StopUnit, ...) are recorded and succeed, except
     those listed in ``failing`` (which also fails ``ListUnits`` and the unit-file listings), and
-    those in ``denied``, refused with the D-Bus error name it maps them to (a refusal).
+    those in ``denied``, refused with the D-Bus error name it maps them to (a refusal), and those
+    in ``verb_errors``, failed with the D-Bus error name it maps them to (no refusal, e.g.
+    :data:`NO_SUCH_UNIT`).
 
     A unit holding properties is LOADED unless it is in ``unloaded``: like systemd, GetUnit and
     property reads fail for an unloaded unit until ``LoadUnit`` loads it from its file. A
@@ -163,6 +175,7 @@ class FakeConn:
         pending: frozenset[str] = frozenset(),
         aliases: dict[str, str] | None = None,
         denied: dict[str, str] | None = None,
+        verb_errors: dict[str, str] | None = None,
     ) -> None:
         self._units = units  # (name, description, active_state)
         self._props = props
@@ -184,6 +197,7 @@ class FakeConn:
         self._pending = set(pending)  # unknown to systemd until the first Reload
         self._aliases = aliases or {}
         self._denied = denied or {}  # verb -> the D-Bus error name systemd refuses it with
+        self._verb_errors = verb_errors or {}  # verb -> the D-Bus error name systemd fails it with
         self.verbs: list[str] = []
         self.reads: list[tuple[str, str]] = []  # every property read as (unit, property), in order
         self.calls: list[tuple[str, tuple[Any, ...]]] = []  # each verb with its body (the unit names sent)
@@ -242,6 +256,8 @@ class FakeConn:
             return Reply(("failed",), error=True)
         if msg.method in self._denied:
             return Reply(("Access denied",), error=True, error_name=self._denied[msg.method])
+        if msg.method in self._verb_errors:
+            return Reply((f"{msg.method} failed",), error=True, error_name=self._verb_errors[msg.method])
         if msg.method in self._walks:
             self._walking[str(msg.body[0])] = list(self._walks[msg.method])
         return Reply(())
@@ -346,6 +362,9 @@ __all__ = [
     "ACCESS_DENIED",
     "FAILED",
     "INTERACTIVE_AUTHORIZATION_REQUIRED",
+    "JOBS_CONFLICTING",
+    "NO_REPLY",
+    "NO_SUCH_UNIT",
     "Address",
     "FakeConn",
     "FakeCore",

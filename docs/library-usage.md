@@ -608,7 +608,9 @@ Every failure across both backends raises a subclass of `PwshPyError`, all expor
 - `NativeCallError` - a wrapped native/OS failure, a `strict=True` listing that cannot read an item,
   or `ProcessResult.check()` on a nonzero exit. `.hresult` holds the failure's unsigned 32-bit
   HRESULT when the native error carried one (a pywin32 COM or Win32 error, or a Windows `OSError`
-  mapped as `HRESULT_FROM_WIN32`), else `None`; branch on it, never on the localized message.
+  mapped as `HRESULT_FROM_WIN32`), else `None`; `.dbus_error_name` holds the error name of a
+  D-Bus error reply (systemd, Secret Service), such as `org.freedesktop.systemd1.NoSuchUnit`, else
+  `None`. Branch on these, never on the localized message.
   - `NativeAccessDeniedError` - a call refused for lack of rights (`E_ACCESSDENIED`, `EACCES`,
     `EPERM`, psutil `AccessDenied`, a systemd D-Bus `AccessDenied` or the
     `InteractiveAuthorizationRequired` a non-root caller gets for `stop_service` where polkit is

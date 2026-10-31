@@ -10,6 +10,7 @@ sends a refused StopUnit for a unit that does not exist, which changes nothing o
 from __future__ import annotations
 
 import os
+import pickle
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -67,6 +68,29 @@ def test_any_other_error_reply_stays_a_plain_native_call_error(name: str) -> Non
     with pytest.raises(NativeCallError) as caught:
         systemd_dbus.call(_bus(reply), "GetUnit", "s", ("x.service",))
     assert not isinstance(caught.value, NativeAccessDeniedError)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("name", "kind"),
+    [
+        ("org.freedesktop.systemd1.NoSuchUnit", NativeCallError),
+        (ACCESS_DENIED, NativeAccessDeniedError),
+        ("", NativeCallError),
+    ],
+)
+def test_the_error_carries_the_reply_s_error_name_across_pickle(name: str, kind: type[NativeCallError]) -> None:
+    """[300] The D-Bus error name is kept on the error (``dbus_error_name``; ``None`` for a reply
+    without one), so a caller branches on the name rather than the service's message text, and it
+    survives pickle together with the message (a refusal keeps its PermissionError errno slot)."""
+    reply = Reply(("text",), error=True, error_name=name)
+    with pytest.raises(NativeCallError) as caught:
+        systemd_dbus.call(_bus(reply), "StopUnit", "ss", ("x.service", "replace"))
+    error = caught.value
+    assert type(error) is kind
+    assert error.dbus_error_name == (name or None)
+    rebuilt = pickle.loads(pickle.dumps(error))  # noqa: S301 - round-trips an object this test built
+    assert (type(rebuilt), str(rebuilt), rebuilt.dbus_error_name) == (kind, str(error), error.dbus_error_name)
 
 
 @pytest.mark.os_agnostic

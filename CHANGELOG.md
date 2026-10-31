@@ -72,8 +72,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   empty one made it relative); a system directory that is not absolute raises `NativeCallError`.
 - `unregister_scheduled_task` on Linux (and `register_scheduled_task` retiring a task's old timer)
   raises a `StopUnit` systemd refuses instead of reading it as "not loaded" and going on to
-  disable the timer and delete its unit file while the unit may still be running; a `StopUnit`
-  that fails for any other reason still means there is nothing to stop.
+  disable the timer and delete its unit file while the unit may still be running. Only systemd's
+  `org.freedesktop.systemd1.NoSuchUnit` answer (a unit that is not loaded and inactive) means there
+  is nothing to stop; a `StopUnit` failing any other way (no reply, a conflicting job) is raised
+  too, and nothing is disabled or deleted. `NativeCallError` carries the D-Bus error name of a
+  failed D-Bus call as `dbus_error_name` (`None` otherwise).
 - A packed `.ps1` run with Windows PowerShell 5.1 started below a pwsh 7 process (pwsh 7, then
   python or any other program, then `powershell.exe`) runs the script. 5.1 inherited pwsh 7's
   `PSModulePath`, could not load its own `Get-FileHash` and `Get-Acl`, and the runner stopped with

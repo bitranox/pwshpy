@@ -15,7 +15,19 @@ from typing import Any
 
 import pytest
 from elevation_doubles import RUNNING_AS_ROOT
-from systemd_fake_bus import ACCESS_DENIED, Address, FakeConn, FakeCore, Message, Reply, use_bus
+from systemd_fake_bus import (
+    ACCESS_DENIED,
+    FAILED,
+    JOBS_CONFLICTING,
+    NO_REPLY,
+    NO_SUCH_UNIT,
+    Address,
+    FakeConn,
+    FakeCore,
+    Message,
+    Reply,
+    use_bus,
+)
 
 from pwshpy import __init__conf__
 from pwshpy.adapters.native import systemd_dbus, systemd_timers
@@ -735,15 +747,58 @@ def test_unregister_raises_a_refused_stop_and_keeps_the_unit_file(
 
 @pytest.mark.os_agnostic
 def test_unregister_goes_on_when_the_unit_is_not_loaded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A StopUnit that fails for another reason (the unit is not loaded) still means nothing to stop."""
+    """[300] A StopUnit systemd answers with NoSuchUnit (the unit is not loaded and inactive) means
+    nothing runs that could be stopped, so the units are disabled and deleted."""
     for unit in ("job.timer", "job.service"):
         (tmp_path / unit).write_text(_OWNED, encoding="utf-8")
-    conn = FakeConn([], {}, failing=frozenset({"StopUnit"}))
+    conn = FakeConn([], {}, verb_errors={"StopUnit": NO_SUCH_UNIT})
     use_bus(monkeypatch, conn)
     monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
     SystemdScheduledTaskController().unregister("job")
     assert list(tmp_path.iterdir()) == []
     assert conn.verbs == ["StopUnit", "DisableUnitFiles", "StopUnit", "Reload"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("unit", ["job.timer", "job.service"])
+@pytest.mark.parametrize("name", [NO_REPLY, JOBS_CONFLICTING, FAILED, ""])
+def test_unregister_raises_a_stop_that_failed_for_another_reason_and_keeps_the_unit_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unit: str, name: str
+) -> None:
+    """[300] Only NoSuchUnit says the unit is not loaded. A StopUnit failing any other way (no reply,
+    a conflicting job, a generic failure, an error with no name) says nothing about whether the unit
+    runs, so unregister raises it as a plain NativeCallError and deletes nothing."""
+    (tmp_path / unit).write_text(_OWNED, encoding="utf-8")
+    if name:
+        conn = FakeConn([], {}, verb_errors={"StopUnit": name})
+    else:
+        conn = FakeConn([], {}, failing=frozenset({"StopUnit"}))
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(NativeCallError, match="StopUnit") as caught:
+        SystemdScheduledTaskController().unregister("job")
+    assert not isinstance(caught.value, NativeAccessDeniedError)
+    assert (tmp_path / unit).exists()
+    assert conn.verbs == ["StopUnit"]
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_register_raises_a_failed_stop_of_the_previous_timer_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[300] Re-registering retires the old timer through the same stop: a StopUnit with no reply
+    raises before the old timer is disabled or deleted and before any unit file is written."""
+    old = _OWNED + "[Timer]\nOnBootSec=1s\n"
+    (tmp_path / "job.timer").write_text(old, encoding="utf-8")
+    conn = FakeConn([], {}, verb_errors={"StopUnit": NO_REPLY}, pending=frozenset({"job.service"}))
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(NativeCallError, match="NoReply"):
+        SystemdScheduledTaskController().register("job", program="/bin/true")
+    assert (tmp_path / "job.timer").read_text(encoding="utf-8") == old
+    assert not (tmp_path / "job.service").exists()
+    assert conn.verbs == ["StopUnit"]
 
 
 @pytest.mark.os_agnostic

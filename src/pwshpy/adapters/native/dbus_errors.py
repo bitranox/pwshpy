@@ -51,14 +51,15 @@ def error_name(reply: Any) -> str:
 def reply_error(what: str, reply: Any) -> NativeCallError:
     """The typed error for an error ``reply``: a refusal is a NativeAccessDeniedError.
 
-    The decision reads the error NAME, never the service's (translatable) message text.
+    The decision reads the error NAME, never the service's (translatable) message text, and the
+    name is kept on the error (``dbus_error_name``, ``None`` for a reply without one), so a caller
+    that must tell one failure from another branches on it too.
     """
     name = error_name(reply)
     text = " ".join(str(part) for part in reply.body) if reply.body else ""
     message = f"{what} failed: {name}: {text}" if name else f"{what} failed: {text}"
-    if name in _DENIED_ERROR_NAMES:
-        return NativeAccessDeniedError(message)
-    return NativeCallError(message)
+    kind = NativeAccessDeniedError if name in _DENIED_ERROR_NAMES else NativeCallError
+    return kind(message, dbus_error_name=name or None)
 
 
 __all__ = ["error_name", "reply_error"]

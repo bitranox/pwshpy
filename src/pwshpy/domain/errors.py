@@ -83,15 +83,19 @@ class NativeCallError(PwshPyError):
 
     ``hresult`` is the failure's status as an unsigned 32-bit HRESULT when the native error
     carried one (a pywin32 COM/Win32 error, or a Windows ``OSError`` whose ``winerror`` is
-    mapped as HRESULT_FROM_WIN32), else ``None``. Branch on it, never on the (localized)
-    message.
+    mapped as HRESULT_FROM_WIN32), else ``None``. ``dbus_error_name`` is the error name of a
+    D-Bus error reply (``org.freedesktop.systemd1.NoSuchUnit``) when the failure was one, else
+    ``None``. Branch on these, never on the (localized) message.
 
     Args:
         message: The human-readable description.
         hresult: The unsigned HRESULT, or ``None`` when the failure carried none.
+        dbus_error_name: The D-Bus error name, or ``None`` when the failure was no D-Bus error
+            reply.
 
     Attributes:
         hresult: The unsigned HRESULT, or ``None``.
+        dbus_error_name: The D-Bus error name, or ``None``.
 
     Example:
         >>> raise NativeCallError("OpenSCManager failed")
@@ -103,10 +107,12 @@ class NativeCallError(PwshPyError):
     """
 
     hresult: int | None = None
+    dbus_error_name: str | None = None
 
-    def __init__(self, message: str, *, hresult: int | None = None) -> None:
+    def __init__(self, message: str, *, hresult: int | None = None, dbus_error_name: str | None = None) -> None:
         super().__init__(message)
         self.hresult = hresult
+        self.dbus_error_name = dbus_error_name
 
 
 class NativeAccessDeniedError(NativeCallError, PermissionError):

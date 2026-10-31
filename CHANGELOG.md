@@ -61,6 +61,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- `restart_computer` and `stop_computer` decode `shutdown.exe`'s messages in the OEM code page it
+  writes them in: on a German Windows a refused shutdown raised `AttributeError` (the umlaut in its
+  message left no stderr to read) instead of `NativeCallError` with that message. They also start
+  `shutdown.exe` from System32 by absolute path, never a `shutdown.exe` in the current directory.
 - `unregister_scheduled_task` on Linux (and `register_scheduled_task` retiring a task's old timer)
   raises a `StopUnit` systemd refuses instead of reading it as "not loaded" and going on to
   disable the timer and delete its unit file while the unit may still be running; a `StopUnit`

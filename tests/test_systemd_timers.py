@@ -716,6 +716,37 @@ def test_unregister_keeps_the_timer_file_when_disabling_fails(monkeypatch: pytes
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("unit", ["job.timer", "job.service"])
+def test_unregister_raises_a_refused_stop_and_keeps_the_unit_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unit: str
+) -> None:
+    """[300] A StopUnit systemd refuses is no "not loaded": unregister raises it and deletes nothing,
+    so a unit that may still be running is never left without its file."""
+    (tmp_path / unit).write_text(_OWNED, encoding="utf-8")
+    conn = FakeConn([], {}, denied={"StopUnit": ACCESS_DENIED})
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(NativeAccessDeniedError, match="StopUnit"):
+        SystemdScheduledTaskController().unregister("job")
+    assert (tmp_path / unit).exists()
+    assert conn.verbs == ["StopUnit"]
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_unregister_goes_on_when_the_unit_is_not_loaded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A StopUnit that fails for another reason (the unit is not loaded) still means nothing to stop."""
+    for unit in ("job.timer", "job.service"):
+        (tmp_path / unit).write_text(_OWNED, encoding="utf-8")
+    conn = FakeConn([], {}, failing=frozenset({"StopUnit"}))
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    SystemdScheduledTaskController().unregister("job")
+    assert list(tmp_path.iterdir()) == []
+    assert conn.verbs == ["StopUnit", "DisableUnitFiles", "StopUnit", "Reload"]
+
+
+@pytest.mark.os_agnostic
 @pytest.mark.skipif(
     sys.platform == "win32" or RUNNING_AS_ROOT,
     reason="needs a directory whose entries this process cannot delete: modes do not bind root; Windows ignores them",

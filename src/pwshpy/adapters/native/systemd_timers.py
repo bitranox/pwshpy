@@ -52,7 +52,6 @@ Contents:
 
 from __future__ import annotations
 
-import contextlib
 import importlib
 import logging
 import re
@@ -1437,11 +1436,24 @@ class SystemdScheduledTaskController:
         except OSError as exc:
             raise native_error(f"cannot delete unit {path}: {exc}", exc) from exc
 
+    @staticmethod
+    def _stop_if_loaded(bus: _dbus.Bus, unit: str) -> None:
+        """Stop ``unit``; a failed StopUnit means it is not loaded, so nothing runs that could be stopped.
+
+        A refusal is re-raised: systemd did not say the unit is gone, so going on would delete the
+        file of a unit that may still be running.
+        """
+        try:
+            _dbus.call(bus, "StopUnit", "ss", (unit, "replace"))
+        except NativeAccessDeniedError:
+            raise
+        except NativeCallError:
+            return
+
     @classmethod
     def _retire_timer(cls, bus: _dbus.Bus, timer: str, *, remove: bool) -> None:
         """Stop a pwshpy ``.timer``; with ``remove`` also disable it and delete its unit file."""
-        with contextlib.suppress(NativeCallError):  # not loaded -> nothing is scheduled to stop
-            _dbus.call(bus, "StopUnit", "ss", (timer, "replace"))
+        cls._stop_if_loaded(bus, timer)
         path = _UNIT_DIR / timer
         if not remove or not path.exists():  # no file under /etc: not ours (a vendor timer), never disable it
             return
@@ -1472,8 +1484,7 @@ class SystemdScheduledTaskController:
             if owned[timer]:
                 self._retire_timer(bus, timer, remove=True)
             if owned[service]:
-                with contextlib.suppress(NativeCallError):  # not loaded / already gone -> nothing to stop
-                    _dbus.call(bus, "StopUnit", "ss", (service, "replace"))
+                self._stop_if_loaded(bus, service)
                 self._remove(_UNIT_DIR / service)
             _dbus.call(bus, "Reload")
         finally:

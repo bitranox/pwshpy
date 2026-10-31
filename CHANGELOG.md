@@ -61,6 +61,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- `unregister_scheduled_task` on Linux (and `register_scheduled_task` retiring a task's old timer)
+  raises a `StopUnit` systemd refuses instead of reading it as "not loaded" and going on to
+  disable the timer and delete its unit file while the unit may still be running; a `StopUnit`
+  that fails for any other reason still means there is nothing to stop.
 - `get_item` and `test_path` on a path below a directory the caller cannot search no longer let a
   raw `PermissionError` out on Python 3.10-3.13: `get_item` raises `NativeAccessDeniedError`,
   `test_path` returns False. On Python 3.14, where `get_item` said "path not found" for such a path,

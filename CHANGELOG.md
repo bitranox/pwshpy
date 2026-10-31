@@ -92,9 +92,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   command line, and the child changes there before it unpacks or runs anything. A directory it cannot
   enter stops it with exit code 70 and `pwshpy: the elevated child failed before running the script:
   cannot change to the caller's directory ...`. pwsh 7 callers were not affected by the System32
-  start, but the child of either host now stops this way in a directory on a drive letter mapped
-  with `net use`, which an elevated process does not see (unless `EnableLinkedConnections` is set):
-  change to a local or UNC path first.
+  start. In a directory on a drive letter mapped with `net use`, which an elevated process does not
+  see (unless `EnableLinkedConnections` is set), the child of either host stops this way: change to
+  a local or UNC path first.
 - `get_item` and `test_path` on a path below a directory the caller cannot search no longer let a
   raw `PermissionError` out on Python 3.10-3.13: `get_item` raises `NativeAccessDeniedError`,
   `test_path` returns False. On Python 3.14, where `get_item` said "path not found" for such a path,

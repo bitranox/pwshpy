@@ -408,12 +408,16 @@ def _module_path_readback(run: str) -> str:
 
 
 def _corrupt_payload(runner: Path) -> None:
-    """Flip the first payload character to another base64 symbol: it still decodes, its hash differs."""
-    lines = runner.read_text().splitlines()
-    start = next(i for i, line in enumerate(lines) if line.strip() == "$PwshPyPayload = @'")
+    """Flip the first payload character to another base64 symbol: it still decodes, its hash differs.
+
+    Bytes in, bytes out: a text round trip would re-encode the runner and turn every LF into CRLF on
+    Windows, so a failure could come from the rewrite rather than from the hash check under test.
+    """
+    lines = runner.read_bytes().split(b"\n")
+    start = next(i for i, line in enumerate(lines) if line.strip() == b"$PwshPyPayload = @'")
     body = lines[start + 1]
-    lines[start + 1] = ("B" if body[0] != "B" else "C") + body[1:]
-    runner.write_text("\n".join(lines) + "\n")
+    lines[start + 1] = (b"B" if body[:1] != b"B" else b"C") + body[1:]
+    runner.write_bytes(b"\n".join(lines))
 
 
 @pytest.mark.os_windows
@@ -454,6 +458,8 @@ def test_windows_powershell_gets_its_module_path_back_on_every_exit(
     result = _run(runner, *arguments, env=env, host=powershell, command=_module_path_readback)
     same, code, after = result.stdout.splitlines()[-3:]
     assert code.startswith(f"CODE={expected_code}"), result.stdout + result.stderr
+    if corrupt:
+        assert "corrupt" in code.lower(), result.stdout + result.stderr
     assert (same, after) == ("SAME=True", f"AFTER={caller_value}"), result.stdout + result.stderr
 
 
@@ -606,13 +612,7 @@ def test_corrupt_payload_is_rejected_before_extraction(tmp_path: Path) -> None:
     """A payload damaged in transit must fail with a clear message, not a cryptic zip error."""
     manifest = pack_script(_project(tmp_path))
     runner = Path(manifest.output_path)
-    lines = runner.read_text().splitlines()
-    start = next(i for i, line in enumerate(lines) if line.strip() == "$PwshPyPayload = @'")
-    # Flip the first character of the first payload line to a different valid base64 symbol, so
-    # the blob still decodes but its bytes - and therefore its sha256 - no longer match.
-    body = lines[start + 1]
-    lines[start + 1] = ("B" if body[0] != "B" else "C") + body[1:]
-    runner.write_text("\n".join(lines) + "\n")
+    _corrupt_payload(runner)
     result = _run(runner, env=_isolated_cache(tmp_path))
     assert result.returncode != 0
     assert "corrupt" in (result.stdout + result.stderr).lower()

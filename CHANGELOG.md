@@ -82,7 +82,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `PSModulePath`, could not load its own `Get-FileHash` and `Get-Acl`, and the runner stopped with
   "the unpacked payload ... does not match its recorded hashes" (an elevated run with an ACL
   refusal). Under 5.1 the runner now loads its built-in modules from 5.1's own module directory and
-  hands the packed script the caller's `PSModulePath` unchanged; pwsh 7 runs are unchanged.
+  hands the packed script the caller's `PSModulePath` unchanged, and it gives the caller's value back
+  on every way out (`-PwshPyHelp`, `-PwshPyInfo`, a usage error, a failure, the unelevated parent of
+  `-PwshPyElevate`), so an interactive 5.1 console that ran the `.ps1` keeps autoloading its own
+  modules; pwsh 7 runs are unchanged.
 - `-PwshPyElevate` from Windows PowerShell 5.1 ran the packed script in `C:\Windows\System32`
   instead of the caller's directory (Windows starts an elevated `powershell.exe` there and ignores
   the working directory); the runner now hands the directory over itself, on the elevated child's

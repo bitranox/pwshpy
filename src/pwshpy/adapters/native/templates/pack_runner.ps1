@@ -91,7 +91,8 @@ $PSNativeCommandUseErrorActionPreference = $false
 # pwsh 7's Microsoft.PowerShell.Security and Utility there first, cannot load them, and Get-Acl and
 # Get-FileHash fail (the payload check read that as a hash mismatch, [310]). The runner uses only
 # built-in modules, so under 5.1 its own process resolves them from 5.1's own module directory alone;
-# the packed script gets the caller's value back (the end of the run preparation). pwsh 7 rewrites the
+# the packed script gets the caller's value back (the end of the run preparation), and the caller's own
+# process on every way out (the finally at the end of this file). pwsh 7 rewrites the
 # variable itself at startup and is left alone. .NET calls only: until the variable is set, a cmdlet
 # (Join-Path, Remove-Item) may live in a module 5.1 cannot load.
 $PwshPyCallerModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
@@ -2040,418 +2041,432 @@ function Write-PwshPyManifest {
     }
 }
 
-# --- argument split ---------------------------------------------------------------------
-# Wrapper switches are consumed here; everything else is forwarded untouched.
+# The main flow, in one try: under Windows PowerShell 5.1 its finally gives the caller's PSModulePath back
+# on every way out ([310], the top of this file). Only assignments and function definitions lie between
+# that reset and here, so nothing before the try can leave the script.
+try {
+    # --- argument split ---------------------------------------------------------------------
+    # Wrapper switches are consumed here; everything else is forwarded untouched.
 
-$PwshPyClean = $false
-$PwshPyNoInstallUv = $false
-$PwshPyWantElevate = $false
-$PwshPyInfo = $false
-$PwshPyHelp = $false
-$PwshPyRelay = ''
-$PwshPyRelayCwd = $null
-$PwshPyUvPin = ''
-$PwshPyRest = New-Object System.Collections.ArrayList
-# The consumed switches an elevated relaunch must pass on again; every other one is either
-# handled before the relaunch (-PwshPyHelp, -PwshPyInfo) or set by it (-PwshPyRelay, -PwshPyRelayCwd).
-$PwshPyRelaunchSwitches = New-Object System.Collections.ArrayList
-$PwshPyExpectRelay = $false
-$PwshPyExpectRelayCwd = $false
-$PwshPyExpectUv = $false
+    $PwshPyClean = $false
+    $PwshPyNoInstallUv = $false
+    $PwshPyWantElevate = $false
+    $PwshPyInfo = $false
+    $PwshPyHelp = $false
+    $PwshPyRelay = ''
+    $PwshPyRelayCwd = $null
+    $PwshPyUvPin = ''
+    $PwshPyRest = New-Object System.Collections.ArrayList
+    # The consumed switches an elevated relaunch must pass on again; every other one is either
+    # handled before the relaunch (-PwshPyHelp, -PwshPyInfo) or set by it (-PwshPyRelay, -PwshPyRelayCwd).
+    $PwshPyRelaunchSwitches = New-Object System.Collections.ArrayList
+    $PwshPyExpectRelay = $false
+    $PwshPyExpectRelayCwd = $false
+    $PwshPyExpectUv = $false
 
-foreach ($argument in $args) {
-    $text = [string]$argument
-    if ($PwshPyExpectRelay) { $PwshPyRelay = $text; $PwshPyExpectRelay = $false; continue }
-    if ($PwshPyExpectRelayCwd) { $PwshPyRelayCwd = $text; $PwshPyExpectRelayCwd = $false; continue }
+    foreach ($argument in $args) {
+        $text = [string]$argument
+        if ($PwshPyExpectRelay) { $PwshPyRelay = $text; $PwshPyExpectRelay = $false; continue }
+        if ($PwshPyExpectRelayCwd) { $PwshPyRelayCwd = $text; $PwshPyExpectRelayCwd = $false; continue }
+        if ($PwshPyExpectUv) {
+            $PwshPyUvPin = $text
+            $PwshPyExpectUv = $false
+            [void]$PwshPyRelaunchSwitches.Add('-PwshPyUv')
+            [void]$PwshPyRelaunchSwitches.Add($text)
+            continue
+        }
+        switch -Exact ($text) {
+            '-PwshPyClean' { $PwshPyClean = $true; [void]$PwshPyRelaunchSwitches.Add($text); continue }
+            '-PwshPyNoInstallUv' { $PwshPyNoInstallUv = $true; [void]$PwshPyRelaunchSwitches.Add($text); continue }
+            '-PwshPyElevate' { $PwshPyWantElevate = $true; continue }
+            '-PwshPyInfo' { $PwshPyInfo = $true; continue }
+            '-PwshPyHelp' { $PwshPyHelp = $true; continue }
+            '-PwshPyRelay' { $PwshPyExpectRelay = $true; continue }
+            '-PwshPyRelayCwd' { $PwshPyExpectRelayCwd = $true; continue }
+            '-PwshPyUv' { $PwshPyExpectUv = $true; continue }
+            default { [void]$PwshPyRest.Add($text) }
+        }
+    }
+    # 64 (EX_USAGE): a malformed switch is neither a missing uv (127) nor the script's own exit code.
     if ($PwshPyExpectUv) {
-        $PwshPyUvPin = $text
-        $PwshPyExpectUv = $false
-        [void]$PwshPyRelaunchSwitches.Add('-PwshPyUv')
-        [void]$PwshPyRelaunchSwitches.Add($text)
-        continue
+        [Console]::Error.WriteLine('pwshpy: -PwshPyUv needs the absolute path of a uv executable')
+        exit 64
     }
-    switch -Exact ($text) {
-        '-PwshPyClean' { $PwshPyClean = $true; [void]$PwshPyRelaunchSwitches.Add($text); continue }
-        '-PwshPyNoInstallUv' { $PwshPyNoInstallUv = $true; [void]$PwshPyRelaunchSwitches.Add($text); continue }
-        '-PwshPyElevate' { $PwshPyWantElevate = $true; continue }
-        '-PwshPyInfo' { $PwshPyInfo = $true; continue }
-        '-PwshPyHelp' { $PwshPyHelp = $true; continue }
-        '-PwshPyRelay' { $PwshPyExpectRelay = $true; continue }
-        '-PwshPyRelayCwd' { $PwshPyExpectRelayCwd = $true; continue }
-        '-PwshPyUv' { $PwshPyExpectUv = $true; continue }
-        default { [void]$PwshPyRest.Add($text) }
+    if ($PwshPyUvPin -and -not (Test-PwshPyAbsolutePath -Path $PwshPyUvPin)) {
+        [Console]::Error.WriteLine("pwshpy: -PwshPyUv needs an absolute path, got: $PwshPyUvPin")
+        exit 64
     }
-}
-# 64 (EX_USAGE): a malformed switch is neither a missing uv (127) nor the script's own exit code.
-if ($PwshPyExpectUv) {
-    [Console]::Error.WriteLine('pwshpy: -PwshPyUv needs the absolute path of a uv executable')
-    exit 64
-}
-if ($PwshPyUvPin -and -not (Test-PwshPyAbsolutePath -Path $PwshPyUvPin)) {
-    [Console]::Error.WriteLine("pwshpy: -PwshPyUv needs an absolute path, got: $PwshPyUvPin")
-    exit 64
-}
-# Only the relaunch writes -PwshPyRelayCwd, beside -PwshPyRelay and with a value; anywhere else it is a
-# usage error rather than a directory change of an ordinary run or an argument the script never asked for.
-if ($PwshPyExpectRelayCwd -or ($null -ne $PwshPyRelayCwd -and -not $PwshPyRelay)) {
-    [Console]::Error.WriteLine('pwshpy: -PwshPyRelayCwd is set only by the elevated relaunch, next to -PwshPyRelay and with a directory')
-    exit 64
-}
-$PwshPyForward = @($PwshPyRest.ToArray())
-
-# Everything up to the script run, as one block. Run in place (dot-sourced) it behaves exactly as
-# if written inline; an elevated child runs it under a guard, because any error it raises there -
-# a corrupt payload, an unwritable cache, a failed uv install - would otherwise be printed only in
-# the child's own console window, which closes at once.
-$PwshPyPrepare = {
-    if ($PwshPyHelp) { Write-PwshPyHelp; exit 0 }
-
-    $PwshPyCacheDir = Join-Path (Get-PwshPyCacheRoot) $PwshPySha.Substring(0, 16)
-    # As root the pack cache's default is below the running account's own cache directory (from the
-    # passwd database, as uv's cache below), never XDG_CACHE_HOME or HOME: sudo -E or env_keep hand those
-    # over from the caller, whose directory the cache check would then refuse ([R3]), and the caller would
-    # choose where root unpacks. PWSHPY_PACK_CACHE stays the caller's to set, and is judged like any other.
-    # Before -PwshPyInfo, which names the directory this run uses; a run that relaunches itself under sudo
-    # gets here again as root.
-    if (-not $PwshPyOnWindows -and -not $env:PWSHPY_PACK_CACHE -and (Test-PwshPyElevated)) {
-        $PwshPyCacheDir = Join-Path (Join-Path (Get-PwshPyAccountCacheHome) 'pwshpy-pack') $PwshPySha.Substring(0, 16)
+    # Only the relaunch writes -PwshPyRelayCwd, beside -PwshPyRelay and with a value; anywhere else it is a
+    # usage error rather than a directory change of an ordinary run or an argument the script never asked for.
+    if ($PwshPyExpectRelayCwd -or ($null -ne $PwshPyRelayCwd -and -not $PwshPyRelay)) {
+        [Console]::Error.WriteLine('pwshpy: -PwshPyRelayCwd is set only by the elevated relaunch, next to -PwshPyRelay and with a directory')
+        exit 64
     }
+    $PwshPyForward = @($PwshPyRest.ToArray())
 
-    if ($PwshPyInfo) { Write-PwshPyManifest -CacheDir $PwshPyCacheDir; exit 0 }
+    # Everything up to the script run, as one block. Run in place (dot-sourced) it behaves exactly as
+    # if written inline; an elevated child runs it under a guard, because any error it raises there -
+    # a corrupt payload, an unwritable cache, a failed uv install - would otherwise be printed only in
+    # the child's own console window, which closes at once.
+    $PwshPyPrepare = {
+        if ($PwshPyHelp) { Write-PwshPyHelp; exit 0 }
 
-    if ($PwshPyWantElevate -and -not (Test-PwshPyElevated)) {
-        exit (Invoke-PwshPyElevated -ForwardArgs (@($PwshPyRelaunchSwitches.ToArray()) + $PwshPyForward))
-    }
-
-    # Asked after any relaunch: the trust rule applies to whatever runs elevated, UAC, SYSTEM
-    # (a scheduled task) or root alike. As root on POSIX every helper the runner calls (ls, the uv
-    # installer's curl and sh) runs with full rights, so from here on they come from fixed system
-    # directories, not from the PATH the caller handed over; that PATH is kept for the uv search
-    # and handed back to the packed script. Windows needs no such reset: the runner calls no
-    # external program there except uv and its own PowerShell, both by full path. On both, uv itself
-    # sees only the caller's PATH directories no other account can modify (see the run below).
-    $PwshPyElevatedRun = Test-PwshPyElevated
-    # Script scope by name: Get-PwshPyUvPath, Install-PwshPyUv and the run below read it.
-    $script:PwshPyCallerPath = $env:PATH
-    $PwshPyRootPath = $PwshPyElevatedRun -and -not $PwshPyOnWindows
-    if ($PwshPyRootPath) { $env:PATH = $PwshPyFixedPath }
-
-    # --- unpack -----------------------------------------------------------------------------
-
-    # Elevated: the cache is judged before anything is removed or written in it, and the tree an unpack
-    # wrote is judged again, since a new directory inherits whatever the one above passes down ([98]).
-    # Absolute first: the walk refuses a relative path, and a relative PWSHPY_PACK_CACHE names the
-    # caller's directory.
-    if ($PwshPyElevatedRun) {
-        $PwshPyCacheDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PwshPyCacheDir)
-        Assert-PwshPyCacheTrusted -Path $PwshPyCacheDir
-    }
-    if ($PwshPyClean -and (Test-Path -LiteralPath $PwshPyCacheDir)) {
-        Remove-Item -LiteralPath $PwshPyCacheDir -Recurse -Force
-    }
-    if (-not (Test-PwshPyTree -Root $PwshPyCacheDir)) {
-        Invoke-PwshPyUnpackLocked -CacheDir $PwshPyCacheDir
-        if ($PwshPyElevatedRun) { Assert-PwshPyCacheTrusted -Path $PwshPyCacheDir }
-    }
-
-    # --- uv ---------------------------------------------------------------------------------
-
-    if ($PwshPyOnWindows) {
-        $PwshPyUvHint = 'An elevated run only runs a uv no account but this one, SYSTEM, Administrators, LOCAL SERVICE, NETWORK SERVICE and TrustedInstaller can modify, in its own directory or any directory above: install uv in this account''s own profile (the installer''s default) or where only administrators can write, or remove the other account''s access from the directory named above; a -PwshPyUv pin must pass the same check.'
-    } else {
-        $PwshPyUvHint = 'As root only a uv no other account can modify is run: install uv where only root can write (root''s own ~/.local/bin, the installer''s default), or take group and other write off the directory named above (chmod go-w); a -PwshPyUv pin must pass the same check.'
-    }
-
-    if ($PwshPyUvPin) {
-        # A pin is the whole answer: no search and no install behind it, so a refused pin fails here.
-        if (-not (Test-Path -LiteralPath $PwshPyUvPin -PathType Leaf)) {
-            Write-PwshPyFailure "pwshpy: no uv at the path given with -PwshPyUv: $PwshPyUvPin"
-            exit 127
+        $PwshPyCacheDir = Join-Path (Get-PwshPyCacheRoot) $PwshPySha.Substring(0, 16)
+        # As root the pack cache's default is below the running account's own cache directory (from the
+        # passwd database, as uv's cache below), never XDG_CACHE_HOME or HOME: sudo -E or env_keep hand those
+        # over from the caller, whose directory the cache check would then refuse ([R3]), and the caller would
+        # choose where root unpacks. PWSHPY_PACK_CACHE stays the caller's to set, and is judged like any other.
+        # Before -PwshPyInfo, which names the directory this run uses; a run that relaunches itself under sudo
+        # gets here again as root.
+        if (-not $PwshPyOnWindows -and -not $env:PWSHPY_PACK_CACHE -and (Test-PwshPyElevated)) {
+            $PwshPyCacheDir = Join-Path (Join-Path (Get-PwshPyAccountCacheHome) 'pwshpy-pack') $PwshPySha.Substring(0, 16)
         }
+
+        if ($PwshPyInfo) { Write-PwshPyManifest -CacheDir $PwshPyCacheDir; exit 0 }
+
+        if ($PwshPyWantElevate -and -not (Test-PwshPyElevated)) {
+            exit (Invoke-PwshPyElevated -ForwardArgs (@($PwshPyRelaunchSwitches.ToArray()) + $PwshPyForward))
+        }
+
+        # Asked after any relaunch: the trust rule applies to whatever runs elevated, UAC, SYSTEM
+        # (a scheduled task) or root alike. As root on POSIX every helper the runner calls (ls, the uv
+        # installer's curl and sh) runs with full rights, so from here on they come from fixed system
+        # directories, not from the PATH the caller handed over; that PATH is kept for the uv search
+        # and handed back to the packed script. Windows needs no such reset: the runner calls no
+        # external program there except uv and its own PowerShell, both by full path. On both, uv itself
+        # sees only the caller's PATH directories no other account can modify (see the run below).
+        $PwshPyElevatedRun = Test-PwshPyElevated
+        # Script scope by name: Get-PwshPyUvPath, Install-PwshPyUv and the run below read it.
+        $script:PwshPyCallerPath = $env:PATH
+        $PwshPyRootPath = $PwshPyElevatedRun -and -not $PwshPyOnWindows
+        if ($PwshPyRootPath) { $env:PATH = $PwshPyFixedPath }
+
+        # --- unpack -----------------------------------------------------------------------------
+
+        # Elevated: the cache is judged before anything is removed or written in it, and the tree an unpack
+        # wrote is judged again, since a new directory inherits whatever the one above passes down ([98]).
+        # Absolute first: the walk refuses a relative path, and a relative PWSHPY_PACK_CACHE names the
+        # caller's directory.
         if ($PwshPyElevatedRun) {
-            $PwshPyPinWhy = Get-PwshPyUvDistrust -Path $PwshPyUvPin
-            if ($PwshPyPinWhy) {
-                Write-PwshPyFailure "pwshpy: refusing the uv given with -PwshPyUv: ${PwshPyUvPin}: $PwshPyPinWhy. $PwshPyUvHint"
-                exit 127
-            }
+            $PwshPyCacheDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PwshPyCacheDir)
+            Assert-PwshPyCacheTrusted -Path $PwshPyCacheDir
         }
-        $PwshPyUv = $PwshPyUvPin
-    } else {
-        $PwshPyUv = Get-PwshPyUvPath -Elevated $PwshPyElevatedRun
-    }
-    if (-not $PwshPyUv) {
-        if ($PwshPyNoInstallUv) {
-            # Written by Write-PwshPyFailure rather than through Write-Error: with
-            # $ErrorActionPreference = 'Stop' the error stream terminates the script on the spot,
-            # and the caller would get PowerShell's exit 1 (or an elevated child's 70) instead of
-            # the 127 meant here.
-            if ($PwshPyElevatedRun) {
-                Write-PwshPyFailure "pwshpy: no uv this elevated run can trust was found and -PwshPyNoInstallUv was given. $PwshPyUvHint"
-            } else {
-                Write-PwshPyFailure 'uv is not installed and -PwshPyNoInstallUv was given. Install it from https://astral.sh/uv'
-            }
-            exit 127
+        if ($PwshPyClean -and (Test-Path -LiteralPath $PwshPyCacheDir)) {
+            Remove-Item -LiteralPath $PwshPyCacheDir -Recurse -Force
         }
-        # Elevated, the installer writes into the running account's own profile, which only that
-        # account, SYSTEM and Administrators may change, so a fresh install passes the trust rule
-        # (under SYSTEM that profile is admin-only).
-        Install-PwshPyUv
-        $PwshPyUv = Get-PwshPyUvPath -Elevated $PwshPyElevatedRun
-    }
-    if (-not $PwshPyUv) {
-        if ($PwshPyElevatedRun) {
-            Write-PwshPyFailure "pwshpy: no uv this elevated run can trust was found after installation. $PwshPyUvHint"
-        } else {
-            Write-PwshPyFailure 'uv is still not on PATH after installation. Install it manually from https://astral.sh/uv'
+        if (-not (Test-PwshPyTree -Root $PwshPyCacheDir)) {
+            Invoke-PwshPyUnpackLocked -CacheDir $PwshPyCacheDir
+            if ($PwshPyElevatedRun) { Assert-PwshPyCacheTrusted -Path $PwshPyCacheDir }
         }
-        exit 127
-    }
 
-    # Elevated: the interpreter, decided here, while a root run on POSIX still runs its helpers (the
-    # passwd lookup, the ls the path check reads) from the fixed PATH, and inside the elevated child's
-    # guard, so a failure is relayed. UV_PYTHON_INSTALL_DIR is named outright after the caller's own
-    # choice was dropped: left to itself uv would look in the data home APPDATA (Windows) or
-    # XDG_DATA_HOME (POSIX) names, which is the caller's to set too.
-    if ($PwshPyElevatedRun) {
-        Clear-PwshPyInterpreterVariable
-        # With every GIT_ variable gone git still reads its global files, .gitconfig and
-        # XDG_CONFIG_HOME's git\config, below the HOME, USERPROFILE (Windows: a UAC relaunch keeps the
-        # caller's profile) and XDG_CONFIG_HOME this run got, and a core.fsmonitor, core.sshCommand or
-        # credential.helper there runs a command elevated when uv fetches a git source. A set
-        # GIT_CONFIG_GLOBAL replaces both (git 2.32 and later; an older git ignores it and still reads
-        # them, so for a script with a git source one is refused below, [156]). POSIX: /dev/null, which only root can change. Windows: an empty file below the
-        # account's own data directory, judged as an elevated run judges a uv, which Git for Windows
-        # reads as an empty configuration (measured with 2.55). Not the NUL device, which an MSYS2 or
-        # Cygwin git may read as a file named NUL in its working directory, nor a path such as
-        # \dev\null, which a git not mapping it resolves on the current drive, where any user may
-        # create the folder. Set after the drop, which would remove it. The system file
-        # (Program Files' etc\gitconfig, /etc/gitconfig) is the administrators' and still applies.
-        $PwshPyGitGlobal = '/dev/null'
+        # --- uv ---------------------------------------------------------------------------------
+
         if ($PwshPyOnWindows) {
-            $PwshPyGitGlobal = Join-Path (Join-Path (Get-PwshPyAccountDataHome) 'pwshpy') 'empty.gitconfig'
-            $PwshPyGitGlobalWhy = Get-PwshPyEmptyFileDistrust -Path $PwshPyGitGlobal
-            if ($PwshPyGitGlobalWhy) {
-                $PwshPyGitGlobalRemedy = "take every other account's write access off the path named above and leave the file empty, or remove its directory and run again elevated, which creates it"
-                # A share is no less a share on the next run, which would create the file there again.
-                if (Test-PwshPyBareNetworkReason -Why $PwshPyGitGlobalWhy) { $PwshPyGitGlobalRemedy = Get-PwshPyNetworkRemedy }
-                Write-PwshPyFailure "pwshpy: refusing the git configuration file ${PwshPyGitGlobal}: $PwshPyGitGlobalWhy (an elevated run points GIT_CONFIG_GLOBAL only at an empty file no other account can modify): $PwshPyGitGlobalRemedy"
+            $PwshPyUvHint = 'An elevated run only runs a uv no account but this one, SYSTEM, Administrators, LOCAL SERVICE, NETWORK SERVICE and TrustedInstaller can modify, in its own directory or any directory above: install uv in this account''s own profile (the installer''s default) or where only administrators can write, or remove the other account''s access from the directory named above; a -PwshPyUv pin must pass the same check.'
+        } else {
+            $PwshPyUvHint = 'As root only a uv no other account can modify is run: install uv where only root can write (root''s own ~/.local/bin, the installer''s default), or take group and other write off the directory named above (chmod go-w); a -PwshPyUv pin must pass the same check.'
+        }
+
+        if ($PwshPyUvPin) {
+            # A pin is the whole answer: no search and no install behind it, so a refused pin fails here.
+            if (-not (Test-Path -LiteralPath $PwshPyUvPin -PathType Leaf)) {
+                Write-PwshPyFailure "pwshpy: no uv at the path given with -PwshPyUv: $PwshPyUvPin"
                 exit 127
             }
-        }
-        Set-Item -LiteralPath 'Env:GIT_CONFIG_GLOBAL' -Value $PwshPyGitGlobal
-        Write-PwshPyNotice "pwshpy: setting GIT_CONFIG_GLOBAL=${PwshPyGitGlobal}: an elevated run lets git read no caller's global config"
-        $PwshPyDataHome = Get-PwshPyAccountDataHome
-        Set-Item -LiteralPath 'Env:UV_PYTHON_INSTALL_DIR' -Value (Join-Path (Join-Path $PwshPyDataHome 'uv') 'python')
-        # The cache too, for the same reason: uv's default follows LOCALAPPDATA (Windows) or XDG_CACHE_HOME
-        # and HOME (POSIX, which sudo -E or env_keep can hand over), and cached script environments and
-        # wheels run elevated. uv's own layout below the folder: uv\cache on Windows, uv on POSIX.
-        $PwshPyUvCache = Join-Path (Get-PwshPyAccountCacheHome) 'uv'
-        if ($PwshPyOnWindows) { $PwshPyUvCache = Join-Path $PwshPyUvCache 'cache' }
-        Set-Item -LiteralPath 'Env:UV_CACHE_DIR' -Value $PwshPyUvCache
-        Write-PwshPyNotice "pwshpy: uv caches in ${PwshPyUvCache}: an elevated run uses the running account's own cache directory"
-        # POSIX: the home too ([159], user decision: own HOME for uv), as the .sh root run. uv and the git
-        # it runs read and write below HOME and the XDG directories (uv's credentials and its netrc, git's
-        # ~/.git-credentials, caches, state), which sudo -E or env_keep hand over from the caller, so as
-        # root they would read the caller's secrets and create files the caller cannot remove. uv and git
-        # get the running account's own: its passwd home (the directory its cache directory is in), its
-        # cache and data directories, <home>/.config, and the defaults below that home for the state
-        # directory, the netrc and uv's credentials; the shim gives the script the caller's back. Windows
-        # is not covered: an elevated token keeps the caller's own profile there.
-        if (-not $PwshPyOnWindows) {
-            # A -PwshPyElevate relaunch started this pwsh with root's own home ([220]), so the live values
-            # are not the ones sudo passed: its stub recorded those in the hand-over itself (a name sudo
-            # did not pass with none, which the shim then unsets), marked by <hand-over>_PRESET. They are
-            # kept as recorded, and the marker goes, so it reaches neither uv nor the script.
-            $PwshPyPresetMarker = "Env:${PwshPyCallerEnv}_PRESET"
-            $PwshPyPreset = Test-Path -LiteralPath $PwshPyPresetMarker
-            Remove-Item -LiteralPath $PwshPyPresetMarker -ErrorAction SilentlyContinue
-            $PwshPyCallerNames = New-Object System.Collections.Generic.List[string]
-            foreach ($name in $PwshPyCallerVariables) {
-                $handOver = "Env:${PwshPyCallerEnv}_$name"
-                if ($PwshPyPreset) {
-                    # Carried by the relaunch: left as it is.
-                } elseif (Test-Path -LiteralPath "Env:$name") {
-                    Set-Item -LiteralPath $handOver -Value ([Environment]::GetEnvironmentVariable($name))
-                } else {
-                    Remove-Item -LiteralPath $handOver -ErrorAction SilentlyContinue
+            if ($PwshPyElevatedRun) {
+                $PwshPyPinWhy = Get-PwshPyUvDistrust -Path $PwshPyUvPin
+                if ($PwshPyPinWhy) {
+                    Write-PwshPyFailure "pwshpy: refusing the uv given with -PwshPyUv: ${PwshPyUvPin}: $PwshPyPinWhy. $PwshPyUvHint"
+                    exit 127
                 }
-                $PwshPyCallerNames.Add($name)
             }
-            Set-Item -LiteralPath "Env:$PwshPyCallerEnv" -Value ($PwshPyCallerNames -join ' ')
-            foreach ($name in @('XDG_STATE_HOME', 'NETRC', 'UV_CREDENTIALS_DIR')) {
-                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
-            }
-            $PwshPyAccountCache = Get-PwshPyAccountCacheHome
-            $PwshPyAccountHome = Split-Path -Parent $PwshPyAccountCache
-            if (-not $PwshPyAccountHome) { $PwshPyAccountHome = '/' }
-            Set-Item -LiteralPath 'Env:HOME' -Value $PwshPyAccountHome
-            Set-Item -LiteralPath 'Env:XDG_CONFIG_HOME' -Value ($PwshPyAccountHome.TrimEnd('/') + '/.config')
-            Set-Item -LiteralPath 'Env:XDG_CACHE_HOME' -Value $PwshPyAccountCache
-            Set-Item -LiteralPath 'Env:XDG_DATA_HOME' -Value $PwshPyDataHome
-            Write-PwshPyNotice "pwshpy: setting HOME=${PwshPyAccountHome}: an elevated run lets uv and git use the running account's own home"
-            # The temporary directory too (handed over above), as the .sh root run: uv, git and the build
-            # backends uv runs create files and directories below TMPDIR (Python's tempfile also reads
-            # TEMP and TMP), the caller's under sudo -E or env_keep, where the caller could swap a
-            # directory root made for a link to anywhere. All three name the account's private temporary
-            # directory (Initialize-PwshPyPrivateTemp).
-            $PwshPyTemp = Initialize-PwshPyPrivateTemp
-            foreach ($name in @('TMPDIR', 'TMP', 'TEMP')) { Set-Item -LiteralPath "Env:$name" -Value $PwshPyTemp }
-            Write-PwshPyNotice "pwshpy: setting TMPDIR=${PwshPyTemp}: an elevated run lets uv and git keep temporary files in the account's own directory"
+            $PwshPyUv = $PwshPyUvPin
+        } else {
+            $PwshPyUv = Get-PwshPyUvPath -Elevated $PwshPyElevatedRun
         }
-        # The directory before uv searches it: uv runs every Python it finds there.
-        $PwshPyPythonDirWhy = Get-PwshPyPythonDirDistrust -Path $env:UV_PYTHON_INSTALL_DIR
-        if ($PwshPyPythonDirWhy) {
-            Write-PwshPyFailure "pwshpy: refusing uv's managed-Python directory $($env:UV_PYTHON_INSTALL_DIR): $PwshPyPythonDirWhy (an elevated run lets uv search only a directory no other account can modify, nor anything below it): $(Get-PwshPyPythonRemedy -Why $PwshPyPythonDirWhy)"
+        if (-not $PwshPyUv) {
+            if ($PwshPyNoInstallUv) {
+                # Written by Write-PwshPyFailure rather than through Write-Error: with
+                # $ErrorActionPreference = 'Stop' the error stream terminates the script on the spot,
+                # and the caller would get PowerShell's exit 1 (or an elevated child's 70) instead of
+                # the 127 meant here.
+                if ($PwshPyElevatedRun) {
+                    Write-PwshPyFailure "pwshpy: no uv this elevated run can trust was found and -PwshPyNoInstallUv was given. $PwshPyUvHint"
+                } else {
+                    Write-PwshPyFailure 'uv is not installed and -PwshPyNoInstallUv was given. Install it from https://astral.sh/uv'
+                }
+                exit 127
+            }
+            # Elevated, the installer writes into the running account's own profile, which only that
+            # account, SYSTEM and Administrators may change, so a fresh install passes the trust rule
+            # (under SYSTEM that profile is admin-only).
+            Install-PwshPyUv
+            $PwshPyUv = Get-PwshPyUvPath -Elevated $PwshPyElevatedRun
+        }
+        if (-not $PwshPyUv) {
+            if ($PwshPyElevatedRun) {
+                Write-PwshPyFailure "pwshpy: no uv this elevated run can trust was found after installation. $PwshPyUvHint"
+            } else {
+                Write-PwshPyFailure 'uv is still not on PATH after installation. Install it manually from https://astral.sh/uv'
+            }
             exit 127
         }
-        # The PATH uv will see: the caller's directories no other account can modify ([107]), judged
-        # while a POSIX root run's helpers still come from the fixed PATH. Script scope by name: the run
-        # preparation, a block of its own, reads it.
-        $script:PwshPyTrustedUvPath = Get-PwshPyTrustedPath -Path $PwshPyCallerPath
-        # The git uv will run, asked only for a script that needs one; with none, uv fails on its own.
-        # Before uv is asked for a managed Python, which it may download: a run refused here calls no uv
-        # ([156], as the .sh root run).
-        if ($PwshPyGitSource) {
-            # The directories on uv's PATH were judged, the git files found there were not: one another
-            # account can modify, or a link to one, runs elevated when uv fetches a git source ([157],
-            # user decision: judge the git file). Judged like uv, and before it is run for its version.
-            # Every git file in the directory uv takes git from, since which one uv runs depends on what
-            # each file is ([R2]); one that fails stops the run.
-            foreach ($PwshPyUvGit in @(Get-PwshPyGitCandidate -Path $script:PwshPyTrustedUvPath)) {
-                $PwshPyGitWhy = Get-PwshPyUvDistrust -Path $PwshPyUvGit
-                if ($PwshPyGitWhy) {
-                    $PwshPyGitRemedy = if ($PwshPyOnWindows) { 'take every other account''s write access off the path named above (only the running account, SYSTEM and Administrators may change it), or run the script without elevation' } else { 'make the path named above root''s alone (chown root, then chmod go-w on it), or run the script without elevation' }
-                    Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy (an elevated run lets uv run only a git no other account can modify): $PwshPyGitRemedy"
-                    exit 127
-                }
-                $PwshPyGitWhy = Get-PwshPyGitKindDistrust -Git $PwshPyUvGit
-                if ($PwshPyGitWhy) {
-                    Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy"
-                    exit 127
-                }
-                $PwshPyGitWhy = Get-PwshPyGitVersionDistrust -Git $PwshPyUvGit
-                if ($PwshPyGitWhy) {
-                    Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy"
+
+        # Elevated: the interpreter, decided here, while a root run on POSIX still runs its helpers (the
+        # passwd lookup, the ls the path check reads) from the fixed PATH, and inside the elevated child's
+        # guard, so a failure is relayed. UV_PYTHON_INSTALL_DIR is named outright after the caller's own
+        # choice was dropped: left to itself uv would look in the data home APPDATA (Windows) or
+        # XDG_DATA_HOME (POSIX) names, which is the caller's to set too.
+        if ($PwshPyElevatedRun) {
+            Clear-PwshPyInterpreterVariable
+            # With every GIT_ variable gone git still reads its global files, .gitconfig and
+            # XDG_CONFIG_HOME's git\config, below the HOME, USERPROFILE (Windows: a UAC relaunch keeps the
+            # caller's profile) and XDG_CONFIG_HOME this run got, and a core.fsmonitor, core.sshCommand or
+            # credential.helper there runs a command elevated when uv fetches a git source. A set
+            # GIT_CONFIG_GLOBAL replaces both (git 2.32 and later; an older git ignores it and still reads
+            # them, so for a script with a git source one is refused below, [156]). POSIX: /dev/null, which only root can change. Windows: an empty file below the
+            # account's own data directory, judged as an elevated run judges a uv, which Git for Windows
+            # reads as an empty configuration (measured with 2.55). Not the NUL device, which an MSYS2 or
+            # Cygwin git may read as a file named NUL in its working directory, nor a path such as
+            # \dev\null, which a git not mapping it resolves on the current drive, where any user may
+            # create the folder. Set after the drop, which would remove it. The system file
+            # (Program Files' etc\gitconfig, /etc/gitconfig) is the administrators' and still applies.
+            $PwshPyGitGlobal = '/dev/null'
+            if ($PwshPyOnWindows) {
+                $PwshPyGitGlobal = Join-Path (Join-Path (Get-PwshPyAccountDataHome) 'pwshpy') 'empty.gitconfig'
+                $PwshPyGitGlobalWhy = Get-PwshPyEmptyFileDistrust -Path $PwshPyGitGlobal
+                if ($PwshPyGitGlobalWhy) {
+                    $PwshPyGitGlobalRemedy = "take every other account's write access off the path named above and leave the file empty, or remove its directory and run again elevated, which creates it"
+                    # A share is no less a share on the next run, which would create the file there again.
+                    if (Test-PwshPyBareNetworkReason -Why $PwshPyGitGlobalWhy) { $PwshPyGitGlobalRemedy = Get-PwshPyNetworkRemedy }
+                    Write-PwshPyFailure "pwshpy: refusing the git configuration file ${PwshPyGitGlobal}: $PwshPyGitGlobalWhy (an elevated run points GIT_CONFIG_GLOBAL only at an empty file no other account can modify): $PwshPyGitGlobalRemedy"
                     exit 127
                 }
             }
+            Set-Item -LiteralPath 'Env:GIT_CONFIG_GLOBAL' -Value $PwshPyGitGlobal
+            Write-PwshPyNotice "pwshpy: setting GIT_CONFIG_GLOBAL=${PwshPyGitGlobal}: an elevated run lets git read no caller's global config"
+            $PwshPyDataHome = Get-PwshPyAccountDataHome
+            Set-Item -LiteralPath 'Env:UV_PYTHON_INSTALL_DIR' -Value (Join-Path (Join-Path $PwshPyDataHome 'uv') 'python')
+            # The cache too, for the same reason: uv's default follows LOCALAPPDATA (Windows) or XDG_CACHE_HOME
+            # and HOME (POSIX, which sudo -E or env_keep can hand over), and cached script environments and
+            # wheels run elevated. uv's own layout below the folder: uv\cache on Windows, uv on POSIX.
+            $PwshPyUvCache = Join-Path (Get-PwshPyAccountCacheHome) 'uv'
+            if ($PwshPyOnWindows) { $PwshPyUvCache = Join-Path $PwshPyUvCache 'cache' }
+            Set-Item -LiteralPath 'Env:UV_CACHE_DIR' -Value $PwshPyUvCache
+            Write-PwshPyNotice "pwshpy: uv caches in ${PwshPyUvCache}: an elevated run uses the running account's own cache directory"
+            # POSIX: the home too ([159], user decision: own HOME for uv), as the .sh root run. uv and the git
+            # it runs read and write below HOME and the XDG directories (uv's credentials and its netrc, git's
+            # ~/.git-credentials, caches, state), which sudo -E or env_keep hand over from the caller, so as
+            # root they would read the caller's secrets and create files the caller cannot remove. uv and git
+            # get the running account's own: its passwd home (the directory its cache directory is in), its
+            # cache and data directories, <home>/.config, and the defaults below that home for the state
+            # directory, the netrc and uv's credentials; the shim gives the script the caller's back. Windows
+            # is not covered: an elevated token keeps the caller's own profile there.
+            if (-not $PwshPyOnWindows) {
+                # A -PwshPyElevate relaunch started this pwsh with root's own home ([220]), so the live values
+                # are not the ones sudo passed: its stub recorded those in the hand-over itself (a name sudo
+                # did not pass with none, which the shim then unsets), marked by <hand-over>_PRESET. They are
+                # kept as recorded, and the marker goes, so it reaches neither uv nor the script.
+                $PwshPyPresetMarker = "Env:${PwshPyCallerEnv}_PRESET"
+                $PwshPyPreset = Test-Path -LiteralPath $PwshPyPresetMarker
+                Remove-Item -LiteralPath $PwshPyPresetMarker -ErrorAction SilentlyContinue
+                $PwshPyCallerNames = New-Object System.Collections.Generic.List[string]
+                foreach ($name in $PwshPyCallerVariables) {
+                    $handOver = "Env:${PwshPyCallerEnv}_$name"
+                    if ($PwshPyPreset) {
+                        # Carried by the relaunch: left as it is.
+                    } elseif (Test-Path -LiteralPath "Env:$name") {
+                        Set-Item -LiteralPath $handOver -Value ([Environment]::GetEnvironmentVariable($name))
+                    } else {
+                        Remove-Item -LiteralPath $handOver -ErrorAction SilentlyContinue
+                    }
+                    $PwshPyCallerNames.Add($name)
+                }
+                Set-Item -LiteralPath "Env:$PwshPyCallerEnv" -Value ($PwshPyCallerNames -join ' ')
+                foreach ($name in @('XDG_STATE_HOME', 'NETRC', 'UV_CREDENTIALS_DIR')) {
+                    Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+                }
+                $PwshPyAccountCache = Get-PwshPyAccountCacheHome
+                $PwshPyAccountHome = Split-Path -Parent $PwshPyAccountCache
+                if (-not $PwshPyAccountHome) { $PwshPyAccountHome = '/' }
+                Set-Item -LiteralPath 'Env:HOME' -Value $PwshPyAccountHome
+                Set-Item -LiteralPath 'Env:XDG_CONFIG_HOME' -Value ($PwshPyAccountHome.TrimEnd('/') + '/.config')
+                Set-Item -LiteralPath 'Env:XDG_CACHE_HOME' -Value $PwshPyAccountCache
+                Set-Item -LiteralPath 'Env:XDG_DATA_HOME' -Value $PwshPyDataHome
+                Write-PwshPyNotice "pwshpy: setting HOME=${PwshPyAccountHome}: an elevated run lets uv and git use the running account's own home"
+                # The temporary directory too (handed over above), as the .sh root run: uv, git and the build
+                # backends uv runs create files and directories below TMPDIR (Python's tempfile also reads
+                # TEMP and TMP), the caller's under sudo -E or env_keep, where the caller could swap a
+                # directory root made for a link to anywhere. All three name the account's private temporary
+                # directory (Initialize-PwshPyPrivateTemp).
+                $PwshPyTemp = Initialize-PwshPyPrivateTemp
+                foreach ($name in @('TMPDIR', 'TMP', 'TEMP')) { Set-Item -LiteralPath "Env:$name" -Value $PwshPyTemp }
+                Write-PwshPyNotice "pwshpy: setting TMPDIR=${PwshPyTemp}: an elevated run lets uv and git keep temporary files in the account's own directory"
+            }
+            # The directory before uv searches it: uv runs every Python it finds there.
+            $PwshPyPythonDirWhy = Get-PwshPyPythonDirDistrust -Path $env:UV_PYTHON_INSTALL_DIR
+            if ($PwshPyPythonDirWhy) {
+                Write-PwshPyFailure "pwshpy: refusing uv's managed-Python directory $($env:UV_PYTHON_INSTALL_DIR): $PwshPyPythonDirWhy (an elevated run lets uv search only a directory no other account can modify, nor anything below it): $(Get-PwshPyPythonRemedy -Why $PwshPyPythonDirWhy)"
+                exit 127
+            }
+            # The PATH uv will see: the caller's directories no other account can modify ([107]), judged
+            # while a POSIX root run's helpers still come from the fixed PATH. Script scope by name: the run
+            # preparation, a block of its own, reads it.
+            $script:PwshPyTrustedUvPath = Get-PwshPyTrustedPath -Path $PwshPyCallerPath
+            # The git uv will run, asked only for a script that needs one; with none, uv fails on its own.
+            # Before uv is asked for a managed Python, which it may download: a run refused here calls no uv
+            # ([156], as the .sh root run).
+            if ($PwshPyGitSource) {
+                # The directories on uv's PATH were judged, the git files found there were not: one another
+                # account can modify, or a link to one, runs elevated when uv fetches a git source ([157],
+                # user decision: judge the git file). Judged like uv, and before it is run for its version.
+                # Every git file in the directory uv takes git from, since which one uv runs depends on what
+                # each file is ([R2]); one that fails stops the run.
+                foreach ($PwshPyUvGit in @(Get-PwshPyGitCandidate -Path $script:PwshPyTrustedUvPath)) {
+                    $PwshPyGitWhy = Get-PwshPyUvDistrust -Path $PwshPyUvGit
+                    if ($PwshPyGitWhy) {
+                        $PwshPyGitRemedy = if ($PwshPyOnWindows) { 'take every other account''s write access off the path named above (only the running account, SYSTEM and Administrators may change it), or run the script without elevation' } else { 'make the path named above root''s alone (chown root, then chmod go-w on it), or run the script without elevation' }
+                        Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy (an elevated run lets uv run only a git no other account can modify): $PwshPyGitRemedy"
+                        exit 127
+                    }
+                    $PwshPyGitWhy = Get-PwshPyGitKindDistrust -Git $PwshPyUvGit
+                    if ($PwshPyGitWhy) {
+                        Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy"
+                        exit 127
+                    }
+                    $PwshPyGitWhy = Get-PwshPyGitVersionDistrust -Git $PwshPyUvGit
+                    if ($PwshPyGitWhy) {
+                        Write-PwshPyFailure "pwshpy: refusing git at ${PwshPyUvGit}: $PwshPyGitWhy"
+                        exit 127
+                    }
+                }
+            }
+            # Script scope by name: the run preparation, a block of its own, reads it.
+            $script:PwshPyPython = Resolve-PwshPyManagedPython -Uv $PwshPyUv
         }
-        # Script scope by name: the run preparation, a block of its own, reads it.
-        $script:PwshPyPython = Resolve-PwshPyManagedPython -Uv $PwshPyUv
-    }
-}
-
-# --- run --------------------------------------------------------------------------------
-# The argument vector goes out of band: PowerShell 5.1 re-quotes arguments on their way to
-# a native executable (empty strings vanish, embedded quotes are mangled) and only 7.3 fixed
-# it. Base64 per argument sidesteps the quoting layer entirely, so the packed script sees
-# exactly what the caller typed on every host.
-
-# The argument vector, the target and the uv arguments, built inside the same guard as the preparation
-# above: a failure here (resolving the target, reading the working directory, setting the variables
-# the shim reads) in an elevated child would otherwise print only in its own window, which closes at
-# once.
-$PwshPyPrepareRun = {
-    $PwshPyEncoded = @('v1')
-    foreach ($argument in $PwshPyForward) {
-        $PwshPyEncoded += [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$argument))
-    }
-    $env:PwshPyArgvPlaceholder = $null
-    Set-Item -Path ('Env:' + $PwshPyArgvEnv) -Value ($PwshPyEncoded -join '|')
-    # Only a POSIX root run hands the caller's home variables over to the shim ([159]); in any other run
-    # a hand-over marker came with the caller's environment, and the shim would act on it. The relaunch's
-    # PRESET marker ([220]) goes too: only a root run reads it.
-    if (-not ($PwshPyElevatedRun -and -not $PwshPyOnWindows)) {
-        Remove-Item -LiteralPath "Env:$PwshPyCallerEnv" -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath "Env:${PwshPyCallerEnv}_PRESET" -ErrorAction SilentlyContinue
     }
 
-    $PwshPyTarget = Join-Path $PwshPyCacheDir $PwshPyShim
-    # Elevated (Windows or POSIX root), uv sees only the caller's PATH directories no other account can
-    # modify, judged while a POSIX root run's helpers still come from the fixed PATH; the packed script
-    # gets the caller's whole PATH back from the shim, behind the entries uv puts in front of the PATH
-    # it was given, which the shim is handed too ([107]).
-    if ($PwshPyElevatedRun) {
-        $PwshPyTrustedUvPath = $script:PwshPyTrustedUvPath
-        Set-Item -LiteralPath ('Env:' + $PwshPyPathEnv) -Value $PwshPyCallerPath
-        # When no caller directory is trusted this is ''. Windows PowerShell 5.1 deletes a variable set
-        # to '', so under 5.1 the shim finds no uv PATH, cannot tell what uv put in front, and gives
-        # the script the caller's PATH without uv's entry. pwsh 7 keeps the variable set to '', so the
-        # shim keeps uv's entry there, as the .sh does (uv 0.13 hands a script run on an empty PATH
-        # '<interpreter bin>:'). Either way it fails safe: nothing untrusted is added.
-        Set-Item -LiteralPath ('Env:' + $PwshPyUvPathEnv) -Value $PwshPyTrustedUvPath
-        # A git dependency would fail with uv's bare "git not found" when the only gits are in
-        # directories left off; name the cause.
-        $PwshPyCallerGit = Get-PwshPyGitOn -Path $PwshPyCallerPath
-        if ($PwshPyCallerGit -and -not (Get-PwshPyGitOn -Path $PwshPyTrustedUvPath)) {
-            $PwshPyGitWhere = if ($PwshPyOnWindows) { 'fails elevated until git is installed in a directory no other account can modify (e.g. a system-wide install)' } else { 'fails as root until git is installed in a directory only root can modify' }
-            Write-PwshPyNotice "pwshpy: no git on uv's PATH: $PwshPyCallerGit and any other git on the caller's PATH are in directories another account can modify; a git dependency $PwshPyGitWhere"
+    # --- run --------------------------------------------------------------------------------
+    # The argument vector goes out of band: PowerShell 5.1 re-quotes arguments on their way to
+    # a native executable (empty strings vanish, embedded quotes are mangled) and only 7.3 fixed
+    # it. Base64 per argument sidesteps the quoting layer entirely, so the packed script sees
+    # exactly what the caller typed on every host.
+
+    # The argument vector, the target and the uv arguments, built inside the same guard as the preparation
+    # above: a failure here (resolving the target, reading the working directory, setting the variables
+    # the shim reads) in an elevated child would otherwise print only in its own window, which closes at
+    # once.
+    $PwshPyPrepareRun = {
+        $PwshPyEncoded = @('v1')
+        foreach ($argument in $PwshPyForward) {
+            $PwshPyEncoded += [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$argument))
         }
-        $env:PATH = $PwshPyTrustedUvPath
+        $env:PwshPyArgvPlaceholder = $null
+        Set-Item -Path ('Env:' + $PwshPyArgvEnv) -Value ($PwshPyEncoded -join '|')
+        # Only a POSIX root run hands the caller's home variables over to the shim ([159]); in any other run
+        # a hand-over marker came with the caller's environment, and the shim would act on it. The relaunch's
+        # PRESET marker ([220]) goes too: only a root run reads it.
+        if (-not ($PwshPyElevatedRun -and -not $PwshPyOnWindows)) {
+            Remove-Item -LiteralPath "Env:$PwshPyCallerEnv" -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "Env:${PwshPyCallerEnv}_PRESET" -ErrorAction SilentlyContinue
+        }
+
+        $PwshPyTarget = Join-Path $PwshPyCacheDir $PwshPyShim
+        # Elevated (Windows or POSIX root), uv sees only the caller's PATH directories no other account can
+        # modify, judged while a POSIX root run's helpers still come from the fixed PATH; the packed script
+        # gets the caller's whole PATH back from the shim, behind the entries uv puts in front of the PATH
+        # it was given, which the shim is handed too ([107]).
+        if ($PwshPyElevatedRun) {
+            $PwshPyTrustedUvPath = $script:PwshPyTrustedUvPath
+            Set-Item -LiteralPath ('Env:' + $PwshPyPathEnv) -Value $PwshPyCallerPath
+            # When no caller directory is trusted this is ''. Windows PowerShell 5.1 deletes a variable set
+            # to '', so under 5.1 the shim finds no uv PATH, cannot tell what uv put in front, and gives
+            # the script the caller's PATH without uv's entry. pwsh 7 keeps the variable set to '', so the
+            # shim keeps uv's entry there, as the .sh does (uv 0.13 hands a script run on an empty PATH
+            # '<interpreter bin>:'). Either way it fails safe: nothing untrusted is added.
+            Set-Item -LiteralPath ('Env:' + $PwshPyUvPathEnv) -Value $PwshPyTrustedUvPath
+            # A git dependency would fail with uv's bare "git not found" when the only gits are in
+            # directories left off; name the cause.
+            $PwshPyCallerGit = Get-PwshPyGitOn -Path $PwshPyCallerPath
+            if ($PwshPyCallerGit -and -not (Get-PwshPyGitOn -Path $PwshPyTrustedUvPath)) {
+                $PwshPyGitWhere = if ($PwshPyOnWindows) { 'fails elevated until git is installed in a directory no other account can modify (e.g. a system-wide install)' } else { 'fails as root until git is installed in a directory only root can modify' }
+                Write-PwshPyNotice "pwshpy: no git on uv's PATH: $PwshPyCallerGit and any other git on the caller's PATH are in directories another account can modify; a git dependency $PwshPyGitWhere"
+            }
+            $env:PATH = $PwshPyTrustedUvPath
+        }
+
+        # uv picks the interpreter, and runs every one it considers to ask its version, so a python planted
+        # in a PATH directory another account can write would run elevated. Elevated, uv runs the Python
+        # Resolve-PwshPyManagedPython chose (a Python uv manages, user decision) and starts in the anchor
+        # directory; the shim is told where to change back to. Everything uv is handed that the caller gave
+        # relative to its own directory (a --with path, a relative PWSHPY_PACK_CACHE) is made absolute
+        # first, or it would resolve against the anchor.
+        $PwshPyRunArgs = @('run', '--no-project')
+        if ($PwshPyElevatedRun) {
+            $PwshPyRunArgs += Get-PwshPyManagedPythonOption -Python $script:PwshPyPython
+            $PwshPyCallerCwd = Get-PwshPyCallerDirectory
+            $PwshPyRunArgs += Get-PwshPyAnchoredUvArg -CallerDirectory $PwshPyCallerCwd
+            $PwshPyTarget = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PwshPyTarget)
+            Set-Item -LiteralPath ('Env:' + $PwshPyCwdEnv) -Value $PwshPyCallerCwd
+        } else {
+            $PwshPyRunArgs += $PwshPyUvArgs
+            # Only an elevated run changes directory or hands over a PATH; one inherited from the caller's
+            # environment must not move an unelevated script or replace its PATH.
+            foreach ($PwshPyHandOver in @($PwshPyCwdEnv, $PwshPyPathEnv, $PwshPyUvPathEnv)) {
+                if (Test-Path -LiteralPath ('Env:' + $PwshPyHandOver)) { Remove-Item -LiteralPath ('Env:' + $PwshPyHandOver) }
+            }
+        }
+        $PwshPyRunArgs += $PwshPyTarget
+        # Under 5.1 the caller's PSModulePath back for the packed script and what it starts, set or absent as
+        # it came ([310], the top of this file): the runner's own built-in modules are loaded by now.
+        if ($PSVersionTable.PSEdition -ne 'Core') {
+            [Environment]::SetEnvironmentVariable('PSModulePath', $PwshPyCallerModulePath, 'Process')
+        }
     }
 
-    # uv picks the interpreter, and runs every one it considers to ask its version, so a python planted
-    # in a PATH directory another account can write would run elevated. Elevated, uv runs the Python
-    # Resolve-PwshPyManagedPython chose (a Python uv manages, user decision) and starts in the anchor
-    # directory; the shim is told where to change back to. Everything uv is handed that the caller gave
-    # relative to its own directory (a --with path, a relative PWSHPY_PACK_CACHE) is made absolute
-    # first, or it would resolve against the anchor.
-    $PwshPyRunArgs = @('run', '--no-project')
-    if ($PwshPyElevatedRun) {
-        $PwshPyRunArgs += Get-PwshPyManagedPythonOption -Python $script:PwshPyPython
-        $PwshPyCallerCwd = Get-PwshPyCallerDirectory
-        $PwshPyRunArgs += Get-PwshPyAnchoredUvArg -CallerDirectory $PwshPyCallerCwd
-        $PwshPyTarget = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PwshPyTarget)
-        Set-Item -LiteralPath ('Env:' + $PwshPyCwdEnv) -Value $PwshPyCallerCwd
+    if ($PwshPyRelay) {
+        try {
+            # Created first, so a child that fails from here on has a file to say why in; the run
+            # below truncates it again for the script's own stderr.
+            [IO.File]::WriteAllText("$PwshPyRelay.err", '')
+            # Into the caller's directory before anything reads the location ([290], Invoke-PwshPyElevated):
+            # the run in place starts uv there, and an elevated run hands it to the shim. Provider-qualified,
+            # so the value can only name a FileSystem directory.
+            if ($null -ne $PwshPyRelayCwd) {
+                try {
+                    Set-Location -LiteralPath ('Microsoft.PowerShell.Core\FileSystem::' + $PwshPyRelayCwd)
+                } catch {
+                    throw "cannot change to the caller's directory ${PwshPyRelayCwd}: $($_.Exception.Message)"
+                }
+            }
+            . $PwshPyPrepare
+            . $PwshPyPrepareRun
+        } catch {
+            # 70 (EX_SOFTWARE), so a caller can tell "the runner never started the script" from
+            # PowerShell's generic 1; the stderr line covers a script that itself exits 70.
+            Write-PwshPyFailure "pwshpy: the elevated child failed before running the script: $($_.Exception.Message) [$($_.CategoryInfo.Category)]"
+            exit 70
+        }
     } else {
-        $PwshPyRunArgs += $PwshPyUvArgs
-        # Only an elevated run changes directory or hands over a PATH; one inherited from the caller's
-        # environment must not move an unelevated script or replace its PATH.
-        foreach ($PwshPyHandOver in @($PwshPyCwdEnv, $PwshPyPathEnv, $PwshPyUvPathEnv)) {
-            if (Test-Path -LiteralPath ('Env:' + $PwshPyHandOver)) { Remove-Item -LiteralPath ('Env:' + $PwshPyHandOver) }
-        }
+        . $PwshPyPrepare
+        . $PwshPyPrepareRun
     }
-    $PwshPyRunArgs += $PwshPyTarget
-    # Under 5.1 the caller's PSModulePath back for the packed script and what it starts, set or absent as
-    # it came ([310], the top of this file): the runner's own built-in modules are loaded by now.
+
+    if ($PwshPyRelay) {
+        # Elevated child: stream to the relay files the parent replays, then hand back the code.
+        . (ConvertTo-PwshPyNativeCall -FilePath $PwshPyUv -ArgumentList $PwshPyRunArgs -StdoutPath "$PwshPyRelay.out" -StderrPath "$PwshPyRelay.err")
+        exit $LASTEXITCODE
+    }
+
+    . (ConvertTo-PwshPyNativeCall -FilePath $PwshPyUv -ArgumentList $PwshPyRunArgs)
+    exit $LASTEXITCODE
+} finally {
+    # Run from an interactive 5.1 console (.\tool.ps1) the runner runs in the console's own process, so
+    # every exit - -PwshPyHelp, -PwshPyInfo, a usage error, a failure, a terminating error, the unelevated
+    # parent of -PwshPyElevate - must hand the caller's value back, or the console keeps the narrowed
+    # one and stops autoloading its modules. A finally runs on exit too (measured under 5.1 and pwsh 7:
+    # exit in the try itself, in a function and in a dot-sourced block called from it).
     if ($PSVersionTable.PSEdition -ne 'Core') {
         [Environment]::SetEnvironmentVariable('PSModulePath', $PwshPyCallerModulePath, 'Process')
     }
 }
-
-if ($PwshPyRelay) {
-    try {
-        # Created first, so a child that fails from here on has a file to say why in; the run
-        # below truncates it again for the script's own stderr.
-        [IO.File]::WriteAllText("$PwshPyRelay.err", '')
-        # Into the caller's directory before anything reads the location ([290], Invoke-PwshPyElevated):
-        # the run in place starts uv there, and an elevated run hands it to the shim. Provider-qualified,
-        # so the value can only name a FileSystem directory.
-        if ($null -ne $PwshPyRelayCwd) {
-            try {
-                Set-Location -LiteralPath ('Microsoft.PowerShell.Core\FileSystem::' + $PwshPyRelayCwd)
-            } catch {
-                throw "cannot change to the caller's directory ${PwshPyRelayCwd}: $($_.Exception.Message)"
-            }
-        }
-        . $PwshPyPrepare
-        . $PwshPyPrepareRun
-    } catch {
-        # 70 (EX_SOFTWARE), so a caller can tell "the runner never started the script" from
-        # PowerShell's generic 1; the stderr line covers a script that itself exits 70.
-        Write-PwshPyFailure "pwshpy: the elevated child failed before running the script: $($_.Exception.Message) [$($_.CategoryInfo.Category)]"
-        exit 70
-    }
-} else {
-    . $PwshPyPrepare
-    . $PwshPyPrepareRun
-}
-
-if ($PwshPyRelay) {
-    # Elevated child: stream to the relay files the parent replays, then hand back the code.
-    . (ConvertTo-PwshPyNativeCall -FilePath $PwshPyUv -ArgumentList $PwshPyRunArgs -StdoutPath "$PwshPyRelay.out" -StderrPath "$PwshPyRelay.err")
-    exit $LASTEXITCODE
-}
-
-. (ConvertTo-PwshPyNativeCall -FilePath $PwshPyUv -ArgumentList $PwshPyRunArgs)
-exit $LASTEXITCODE

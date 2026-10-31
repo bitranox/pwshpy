@@ -213,12 +213,15 @@ def _run(
     env: dict[str, str] | None = None,
     host: str | None = None,
     session: str | None = None,
+    command: Callable[[str], str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute a packed runner the way a user would, and capture everything it produced.
 
     ``host`` names another PowerShell executable to start (default: the selected one); ``session`` is
     PowerShell run first in the caller's session, as a profile would, before the runner is invoked
-    from it with ``&`` (its exit code passed on).
+    from it with ``&`` (its exit code passed on). ``command`` builds the whole ``-Command`` text
+    around the runner's ``& 'runner' ...`` invocation instead, for a test that reads the session's
+    state after the runner returned to it, as an interactive console does.
     """
     assert _PWSH is not None
     child_env = {**os.environ, **(env or {})}
@@ -237,9 +240,11 @@ def _run(
     runner = _as_this_invoker(runner, arguments)
     words = [str(runner), _NEVER_INSTALL_UV, *arguments]
     invocation = ["-File", *words]
+    quoted = " ".join(ps_literal(word) for word in words)
     if session is not None:
-        quoted = " ".join(ps_literal(word) for word in words)
         invocation = ["-Command", f"{session}; & {quoted}; exit $LASTEXITCODE"]
+    if command is not None:
+        invocation = ["-Command", command(f"& {quoted}")]
     return subprocess.run(  # noqa: S603 - fixed argv built from a resolved interpreter path
         [host or _PWSH, "-NoProfile", "-NonInteractive", *invocation],
         capture_output=True,
@@ -388,6 +393,68 @@ def test_windows_powershell_started_below_pwsh_7_runs_the_script(tmp_path: Path)
     result = _run(Path(manifest.output_path), env=env, host=powershell)
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"modules:{module_path}" in result.stdout.splitlines(), result.stdout
+
+
+def _module_path_readback(run: str) -> str:
+    """A session that runs the runner with ``run`` and then reports, on its own last three lines,
+    whether its PSModulePath is still what it was before, the runner's exit code (or what it threw),
+    and the value itself."""
+    return (
+        "$before = $env:PSModulePath; $code = ''; "
+        f"try {{ {run}; $code = [string]$LASTEXITCODE }} catch {{ $code = 'threw: ' + $_.Exception.Message }}; "
+        '[Console]::Out.Write("`nSAME=" + ($env:PSModulePath -ceq $before) + "`nCODE=" + $code + '
+        '"`nAFTER=" + $env:PSModulePath)'
+    )
+
+
+def _corrupt_payload(runner: Path) -> None:
+    """Flip the first payload character to another base64 symbol: it still decodes, its hash differs."""
+    lines = runner.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == "$PwshPyPayload = @'")
+    body = lines[start + 1]
+    lines[start + 1] = ("B" if body[0] != "B" else "C") + body[1:]
+    runner.write_text("\n".join(lines) + "\n")
+
+
+@pytest.mark.os_windows
+@pytest.mark.skipif(
+    sys.platform != "win32" or shutil.which("powershell") is None, reason="needs Windows PowerShell 5.1"
+)
+@pytest.mark.parametrize(
+    ("arguments", "corrupt", "expected_code"),
+    [
+        pytest.param(("-PwshPyInfo",), False, "0", id="info"),
+        pytest.param(("-PwshPyHelp",), False, "0", id="help"),
+        pytest.param(("-PwshPyUv",), False, "64", id="usage-error"),
+        pytest.param(("-PwshPyUv", r"C:\pwshpy-no-such-dir\uv.exe"), False, "127", id="missing-uv"),
+        pytest.param((), True, "threw: ", id="corrupt-payload"),
+        pytest.param((), False, "0", id="script-ran"),
+    ],
+)
+def test_windows_powershell_gets_its_module_path_back_on_every_exit(
+    tmp_path: Path, arguments: tuple[str, ...], corrupt: bool, expected_code: str
+) -> None:
+    """[310]: under Windows PowerShell 5.1 the runner narrows its process's PSModulePath to 5.1's own
+    module directory. Run from an interactive 5.1 console (``.\\tool.ps1``) it runs in the console's
+    process, so it hands the caller's value back on EVERY way out - a switch that exits early, a usage
+    error, a failure exit, a terminating error, the script's own exit - never only on the path that
+    runs the script: the console would otherwise keep the narrowed value and stop autoloading its
+    modules (PowerShellGet, Pester, the user's own). One 5.1 process runs the runner with ``&`` and
+    then reads its PSModulePath, as that console would."""
+    powershell = shutil.which("powershell")
+    assert powershell is not None
+    manifest = pack_script(_project(tmp_path))
+    runner = Path(manifest.output_path)
+    if corrupt:
+        _corrupt_payload(runner)
+    modules = tmp_path / "modules"
+    modules.mkdir()
+    caller_value = os.pathsep.join([str(modules), os.environ.get("PSMODULEPATH", "")])
+    env = {**_isolated_cache(tmp_path), "PSMODULEPATH": caller_value}
+    result = _run(runner, *arguments, env=env, host=powershell, command=_module_path_readback)
+    same, code, after = result.stdout.splitlines()[-3:]
+    assert code.startswith(f"CODE={expected_code}"), result.stdout + result.stderr
+    assert (same, after) == ("SAME=True", f"AFTER={caller_value}"), result.stdout + result.stderr
 
 
 def test_packed_script_returns_its_own_exit_code_under_native_error_action(tmp_path: Path) -> None:

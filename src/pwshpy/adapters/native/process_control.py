@@ -10,14 +10,19 @@ Contents:
 
 from __future__ import annotations
 
+import os
 import subprocess  # nosec B404 - used only to invoke the Windows shutdown command with a fixed argv
 import sys
+from pathlib import Path
 from typing import Any
 
 import psutil as _psutil_module  # pyright: ignore[reportMissingTypeStubs]
 
-from ...domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
+from ...domain.errors import ConfigurationError, NativeCallError, OperationTimeoutError, PlatformUnsupportedError
 from .marshal import native_error
+
+#: shutdown.exe's largest ``/t`` (ten years), from its own usage text.
+_MAX_DELAY_SECONDS = 315_360_000
 
 _psutil: Any = _psutil_module
 _NO_SUCH_PROCESS: type[BaseException] = _psutil.NoSuchProcess
@@ -81,17 +86,36 @@ class NativeProcessControl:
     def _shutdown(self, flag: str, delay_seconds: int, *, force: bool) -> None:
         if sys.platform != "win32":
             raise PlatformUnsupportedError("restart_computer/stop_computer use Windows 'shutdown'; use sudo on POSIX.")
-        argv = ["shutdown", flag, "/t", str(delay_seconds)]
+        if not 0 <= delay_seconds <= _MAX_DELAY_SECONDS:
+            # shutdown.exe answers an out-of-range /t with its whole usage text on stdout and exit 1.
+            raise ConfigurationError(f"delay_seconds must be 0-{_MAX_DELAY_SECONDS} (shutdown /t), got {delay_seconds}")
+        argv = [_shutdown_exe(), flag, "/t", str(delay_seconds)]
         if force:
             argv.append("/f")
         try:
+            # shutdown.exe writes its (localised) messages in the OEM code page; the locale default
+            # (ANSI) cannot decode e.g. a German umlaut, which kills the reader thread and leaves
+            # stderr None. "oem" exists only on Windows, which the guard above has established.
             completed = subprocess.run(  # noqa: S603  # nosec B603 - fixed argv (shutdown), no shell
-                argv, capture_output=True, text=True, check=False
+                argv, capture_output=True, text=True, encoding="oem", errors="replace", check=False
             )
         except OSError as exc:
             raise native_error(f"shutdown failed: {exc}", exc) from exc
         if completed.returncode != 0:
             raise NativeCallError(f"shutdown exited {completed.returncode}: {completed.stderr.strip()}")
+
+
+def _shutdown_exe() -> str:
+    """The absolute path of Windows' own ``shutdown.exe``.
+
+    A bare ``shutdown`` would let CreateProcess pick up a ``shutdown.exe`` in the current
+    directory before System32.
+
+    Example:
+        >>> _shutdown_exe().lower().endswith("shutdown.exe")
+        True
+    """
+    return str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / "shutdown.exe")
 
 
 __all__ = ["NativeProcessControl"]

@@ -2402,12 +2402,15 @@ class Ps:
         Runs Windows ``shutdown /r``.
 
         Args:
-            delay_seconds: Seconds before it happens, passed as ``shutdown /t`` (default 0).
+            delay_seconds: Seconds before it happens, passed as ``shutdown /t`` (default 0;
+                0-315360000).
             force: Close running applications without warning (``shutdown /f``; default True).
 
         Raises:
             PlatformUnsupportedError: Not Windows (use ``sudo`` on POSIX).
-            NativeCallError: ``shutdown`` could not be started or exited nonzero.
+            ConfigurationError: ``delay_seconds`` outside 0-315360000.
+            NativeCallError: ``shutdown`` could not be started or exited nonzero (its message
+                in the error).
 
         Example:
             >>> callable(build_ps().restart_computer)
@@ -2421,12 +2424,15 @@ class Ps:
         Runs Windows ``shutdown /s``.
 
         Args:
-            delay_seconds: Seconds before it happens, passed as ``shutdown /t`` (default 0).
+            delay_seconds: Seconds before it happens, passed as ``shutdown /t`` (default 0;
+                0-315360000).
             force: Close running applications without warning (``shutdown /f``; default True).
 
         Raises:
             PlatformUnsupportedError: Not Windows (use ``sudo`` on POSIX).
-            NativeCallError: ``shutdown`` could not be started or exited nonzero.
+            ConfigurationError: ``delay_seconds`` outside 0-315360000.
+            NativeCallError: ``shutdown`` could not be started or exited nonzero (its message
+                in the error).
 
         Example:
             >>> callable(build_ps().stop_computer)

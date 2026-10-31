@@ -18,8 +18,11 @@ from typing import Any
 
 import psutil as _psutil_module  # pyright: ignore[reportMissingTypeStubs]
 
-from ...domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
+from ...domain.errors import ConfigurationError, NativeCallError, OperationTimeoutError, PlatformUnsupportedError
 from .marshal import native_error
+
+#: shutdown.exe's largest ``/t`` (ten years), from its own usage text.
+_MAX_DELAY_SECONDS = 315_360_000
 
 _psutil: Any = _psutil_module
 _NO_SUCH_PROCESS: type[BaseException] = _psutil.NoSuchProcess
@@ -83,6 +86,9 @@ class NativeProcessControl:
     def _shutdown(self, flag: str, delay_seconds: int, *, force: bool) -> None:
         if sys.platform != "win32":
             raise PlatformUnsupportedError("restart_computer/stop_computer use Windows 'shutdown'; use sudo on POSIX.")
+        if not 0 <= delay_seconds <= _MAX_DELAY_SECONDS:
+            # shutdown.exe answers an out-of-range /t with its whole usage text on stdout and exit 1.
+            raise ConfigurationError(f"delay_seconds must be 0-{_MAX_DELAY_SECONDS} (shutdown /t), got {delay_seconds}")
         argv = [_shutdown_exe(), flag, "/t", str(delay_seconds)]
         if force:
             argv.append("/f")

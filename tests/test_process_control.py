@@ -19,7 +19,7 @@ import pytest
 
 import pwshpy.adapters.native.process_control as pcmod
 from pwshpy.adapters.native.process_control import NativeProcessControl
-from pwshpy.domain.errors import NativeCallError, OperationTimeoutError, PlatformUnsupportedError
+from pwshpy.domain.errors import ConfigurationError, NativeCallError, OperationTimeoutError, PlatformUnsupportedError
 
 #: Windows' own shutdown.exe, spelled out here rather than read from the module under test.
 _SHUTDOWN_EXE = str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / "shutdown.exe")
@@ -99,9 +99,21 @@ def test_shutdown_on_posix_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         NativeProcessControl().stop_computer()
 
 
-#: One past shutdown.exe's largest /t (315360000 s, ten years): it refuses the value and
-#: schedules nothing.
-_OUT_OF_RANGE_DELAY = 315_360_001
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("delay", [-1, 315_360_001])
+def test_a_delay_shutdown_cannot_take_is_refused_before_it_runs(monkeypatch: pytest.MonkeyPatch, delay: int) -> None:
+    """[320] shutdown.exe takes /t 0-315360000 and answers anything else with its usage text, so the
+    delay is refused up front, typed, and shutdown is never started."""
+    started: list[list[str]] = []
+
+    def _record(argv: list[str], **_kwargs: Any) -> None:
+        started.append(argv)
+
+    monkeypatch.setattr(pcmod.sys, "platform", "win32")
+    monkeypatch.setattr(pcmod.subprocess, "run", _record)
+    with pytest.raises(ConfigurationError, match="delay_seconds must be 0-315360000"):
+        NativeProcessControl().restart_computer(delay_seconds=delay)
+    assert started == []
 
 
 @pytest.mark.local_only
@@ -111,14 +123,17 @@ _OUT_OF_RANGE_DELAY = 315_360_001
 def test_a_refused_shutdown_is_a_native_call_error_naming_shutdowns_message() -> None:
     """[320] A shutdown.exe refusal is a NativeCallError carrying its (localised) message.
 
-    Before, the message was decoded as the ANSI code page: a German umlaut in it (OEM 0x81 is
-    undefined in cp1252) killed the reader thread, stderr came back None and the failure path
-    raised AttributeError. Mutating only in the worst case, so it runs on the throwaway VM.
+    A second shutdown while one is scheduled is refused on stderr ("... bereits geplant.(1190)" on a
+    German Windows). That message decodes in either code page, so this pins the refusal path end to
+    end; the OEM decoding itself is pinned by the argv test. Schedules a real shutdown (aborted in
+    ``finally``), so it runs on the throwaway VM only.
     """
+    control = NativeProcessControl()
     try:
+        control.stop_computer(delay_seconds=600, force=False)
         with pytest.raises(NativeCallError, match=r"^shutdown exited [1-9]\d*: \S"):
-            NativeProcessControl().stop_computer(delay_seconds=_OUT_OF_RANGE_DELAY, force=False)
+            control.stop_computer(delay_seconds=600, force=False)
     finally:
-        subprocess.run(  # noqa: S603 - fixed argv: abort anything a wrong refusal scheduled
+        subprocess.run(  # noqa: S603 - fixed argv: abort the shutdown this test scheduled
             [_SHUTDOWN_EXE, "/a"], capture_output=True, check=False
         )

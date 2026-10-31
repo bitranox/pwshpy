@@ -1478,11 +1478,12 @@ _CHILD_STARTED_ELSEWHERE = (
 def test_the_elevated_child_runs_the_script_in_the_callers_directory_wherever_it_starts(
     tmp_path: Path, elevated: str
 ) -> None:
-    """[290]: an over-the-shoulder UAC run started the packed script in C:\\WINDOWS\\system32: Windows
-    starts a System32-resident PowerShell (5.1's powershell.exe) elevated in System32 whatever
-    ProcessStartInfo.WorkingDirectory says (reported; same-user UAC not yet measured here), and the child
-    took its own location as the caller's directory. The relaunch hands the child the caller's directory
-    explicitly; the stand-in starts the child in System32 (/ off Windows) to stand for that.
+    """[290]: a -PwshPyElevate run from Windows PowerShell 5.1 started the packed script in
+    C:\\WINDOWS\\system32: Windows starts an elevated powershell.exe in System32 whatever
+    ProcessStartInfo.WorkingDirectory says (measured with a same-user UAC consent; a pwsh 7 caller kept
+    its directory), and the child took its own location as the caller's directory. The relaunch hands
+    the child the caller's directory explicitly; the stand-in starts the child in System32 (/ off
+    Windows) to stand for that, since no test can answer a UAC prompt.
 
     The child-elevated arm goes through the elevated run's hand-over to the shim (uv starts in System32
     there); the other arm runs the script in place, from the child's location.

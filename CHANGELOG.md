@@ -67,12 +67,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   "the unpacked payload ... does not match its recorded hashes" (an elevated run with an ACL
   refusal). Under 5.1 the runner now loads its built-in modules from 5.1's own module directory and
   hands the packed script the caller's `PSModulePath` unchanged; pwsh 7 runs are unchanged.
-- A `-PwshPyElevate` run of a packed `.ps1` from Windows PowerShell 5.1 started the script in
-  `C:\Windows\System32` instead of the caller's directory (seen in an over-the-shoulder UAC run; the
-  same-user case is still being measured). The relaunch now hands the elevated child the caller's
-  directory on its command line and the child changes there before it unpacks or runs anything; a
-  directory it cannot enter stops it with exit code 70 and `pwshpy: the elevated child failed before
-  running the script: cannot change to the caller's directory ...`.
+- `-PwshPyElevate` from Windows PowerShell 5.1 ran the packed script in `C:\Windows\System32`
+  instead of the caller's directory (Windows starts an elevated `powershell.exe` there and ignores
+  the working directory); the runner now hands the directory over itself, on the elevated child's
+  command line, and the child changes there before it unpacks or runs anything. A directory it cannot
+  enter stops it with exit code 70 and `pwshpy: the elevated child failed before running the script:
+  cannot change to the caller's directory ...`. pwsh 7 callers were not affected.
 - `get_item` and `test_path` on a path below a directory the caller cannot search no longer let a
   raw `PermissionError` out on Python 3.10-3.13: `get_item` raises `NativeAccessDeniedError`,
   `test_path` returns False. On Python 3.14, where `get_item` said "path not found" for such a path,

@@ -1935,9 +1935,10 @@ function Invoke-PwshPyElevated {
     # variable, and a UAC start builds the elevated environment fresh from the profile, so it
     # never reaches the child: on a default client (5.1 policy Restricted) the child would
     # refuse to load this file. The caller already chose to run it; Group Policy still wins.
-    # The caller's directory goes on the command line too ([290]): the working directory set below is not
-    # where the child starts in every case (an over-the-shoulder UAC run of 5.1's powershell.exe started
-    # it in System32), so the child changes there itself before anything else.
+    # The caller's directory goes on the command line too ([290]): Windows starts an elevated
+    # powershell.exe (5.1, in System32) in System32 whatever the working directory set below says
+    # (measured with a same-user UAC consent; pwsh.exe keeps it), so the child changes there itself
+    # before anything else.
     $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $self, '-PwshPyRelay', $relay, '-PwshPyRelayCwd', (Get-Location -PSProvider FileSystem).ProviderPath)
     # Only a missing list is skipped: an empty-string argument is real and must reach the child.
     if ($null -ne $ForwardArgs) { $childArgs += $ForwardArgs }

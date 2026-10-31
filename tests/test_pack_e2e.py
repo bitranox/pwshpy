@@ -349,6 +349,47 @@ def test_packed_script_returns_its_own_exit_code(tmp_path: Path) -> None:
     assert result.returncode == 42, result.stderr
 
 
+_ENTRY_REPORTING_MODULE_PATH = 'import os\n\nprint("modules:" + os.environ.get("PSModulePath", "<absent>"))\n'
+
+
+@pytest.mark.os_windows
+@pytest.mark.skipif(
+    sys.platform != "win32" or shutil.which("pwsh") is None or shutil.which("powershell") is None,
+    reason="needs Windows with both pwsh 7 and Windows PowerShell 5.1",
+)
+def test_windows_powershell_started_below_pwsh_7_runs_the_script(tmp_path: Path) -> None:
+    """[310]: Windows PowerShell 5.1 started below a pwsh 7 process (pwsh 7 -> python -> powershell.exe)
+    inherits pwsh 7's PSModulePath, whose module directories come before its own, so it cannot load its
+    own Microsoft.PowerShell.Utility / Security pieces: the runner's Get-FileHash failed to load and the
+    run stopped with "does not match its recorded hashes". The runner resolves its own modules from 5.1's
+    default path and gives the packed script the caller's PSModulePath back unchanged.
+
+    The module path is the one a pwsh 7 child hands down (pwsh 7 rewrites it at startup); pwsh 7 does not
+    pass it to a powershell.exe it starts itself, only to any other program, so python starts 5.1 here.
+    """
+    pwsh = shutil.which("pwsh")
+    powershell = shutil.which("powershell")
+    assert pwsh is not None and powershell is not None
+    handed_down = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
+        [pwsh, "-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.Write($env:PSModulePath)"],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert handed_down.returncode == 0, handed_down.stderr
+    module_path = handed_down.stdout
+    assert "\\PowerShell\\" in module_path, module_path
+    entry = tmp_path / "app.py"
+    entry.write_text(_ENTRY_REPORTING_MODULE_PATH)
+    manifest = pack_script(entry)
+    env = {**_isolated_cache(tmp_path), "PSModulePath": module_path}
+    result = _run(Path(manifest.output_path), env=env, host=powershell)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"modules:{module_path}" in result.stdout.splitlines(), result.stdout
+
+
 def test_packed_script_returns_its_own_exit_code_under_native_error_action(tmp_path: Path) -> None:
     """A caller's session (a profile) may set ``$PSNativeCommandUseErrorActionPreference``; under the
     runner's ``$ErrorActionPreference = 'Stop'`` the script's nonzero exit then threw
@@ -2215,6 +2256,10 @@ def _directory_trust(tmp_path: Path, *, running_sid: str = "") -> dict[str, str]
     manifest = pack_script(_project(tmp_path))
     probe = tmp_path / "directory_trust.ps1"
     probe.write_text(_DIRECTORY_TRUST_PROBE, encoding="utf-8")
+    # The probe loads only the runner's functions, never its top-level PSModulePath reset ([310]), so a
+    # Windows PowerShell 5.1 host started below pwsh 7 could not load Get-Acl here; it starts with no
+    # inherited PSModulePath, and either host computes its own default at startup.
+    env = {name: value for name, value in os.environ.items() if name.upper() != "PSMODULEPATH"}
     result = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
         [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(probe), str(manifest.output_path), running_sid],
         capture_output=True,
@@ -2222,6 +2267,7 @@ def _directory_trust(tmp_path: Path, *, running_sid: str = "") -> dict[str, str]
         errors="replace",
         timeout=120,
         check=False,
+        env=env,
     )
     assert result.returncode == 0, result.stderr
     return dict(line.split("|", 1) for line in result.stdout.splitlines() if "|" in line)

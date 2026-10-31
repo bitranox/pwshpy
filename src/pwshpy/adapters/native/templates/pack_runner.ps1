@@ -86,6 +86,18 @@ $ErrorActionPreference = 'Stop'
 # no-password probe, a script's own exit code). A caller's profile setting this to $true would turn each
 # such exit into a terminating error under 'Stop'. Hosts without the feature ignore the variable.
 $PSNativeCommandUseErrorActionPreference = $false
+# Windows PowerShell 5.1 started below a pwsh 7 process (pwsh 7 -> any other program -> powershell.exe)
+# inherits pwsh 7's PSModulePath, whose PowerShell 7 module directories come before its own: 5.1 finds
+# pwsh 7's Microsoft.PowerShell.Security and Utility there first, cannot load them, and Get-Acl and
+# Get-FileHash fail (the payload check read that as a hash mismatch, [310]). The runner uses only
+# built-in modules, so under 5.1 its own process resolves them from 5.1's own module directory alone;
+# the packed script gets the caller's value back (the end of the run preparation). pwsh 7 rewrites the
+# variable itself at startup and is left alone. .NET calls only: until the variable is set, a cmdlet
+# (Join-Path, Remove-Item) may live in a module 5.1 cannot load.
+$PwshPyCallerModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    [Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine($PSHOME, 'Modules'), 'Process')
+}
 
 $PwshPyEntry = @@PWSHPY_ENTRY@@
 $PwshPyShim = '@@PWSHPY_SHIM@@'
@@ -2386,6 +2398,11 @@ $PwshPyPrepareRun = {
         }
     }
     $PwshPyRunArgs += $PwshPyTarget
+    # Under 5.1 the caller's PSModulePath back for the packed script and what it starts, set or absent as
+    # it came ([310], the top of this file): the runner's own built-in modules are loaded by now.
+    if ($PSVersionTable.PSEdition -ne 'Core') {
+        [Environment]::SetEnvironmentVariable('PSModulePath', $PwshPyCallerModulePath, 'Process')
+    }
 }
 
 if ($PwshPyRelay) {

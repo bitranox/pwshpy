@@ -384,10 +384,15 @@ Details worth knowing:
   not reach it. It is started with the PowerShell that runs the runner (`powershell.exe` under
   Windows PowerShell 5.1, `pwsh.exe` under pwsh 7) as `-NoProfile -ExecutionPolicy Bypass -File
   runner.ps1 ...`, so the `-Name:Value` caveat above applies to the elevated run even when you
-  called the runner from a PowerShell prompt. Its own console window closes when it exits, so everything it has to say
-  comes back through the parent: the script's stdout and stderr on the parent's stdout and stderr,
-  and an error it hits before the script starts (a corrupt payload, a cache it cannot write, an
-  error the `uv` installer throws) as a `pwshpy: the elevated child failed before running the
+  called the runner from a PowerShell prompt. It runs the script in your current directory, which the
+  runner hands it on its command line; a directory on a drive letter mapped with `net use` (`Z:`)
+  is the exception: an elevated process does not see the drive letters your unelevated logon
+  mapped (unless `EnableLinkedConnections` is set), so the child stops with exit code 70 and
+  `cannot change to the caller's directory`. Change to a local path, or to the UNC path
+  (`\\server\share\...`) the drive maps, before you run it. Its own console window closes when it
+  exits, so everything it has to say comes back through the parent: the script's stdout and stderr
+  on the parent's stdout and stderr, and an error it hits before the script starts (a corrupt
+  payload, a cache it cannot write, an error the `uv` installer throws) as a `pwshpy: the elevated child failed before running the
   script: <error>` line on stderr with exit code 70. A `uv` that is still missing or refused after
   that exits 127, as in a direct run, and a script that itself exits 70 gives the same code: the
   stderr line is what tells them apart. Only a child stopped before it can run a line of the runner (a

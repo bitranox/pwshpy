@@ -100,10 +100,11 @@ def test_shutdown_on_posix_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize("delay", [-1, 315_360_001])
-def test_a_delay_shutdown_cannot_take_is_refused_before_it_runs(monkeypatch: pytest.MonkeyPatch, delay: int) -> None:
+@pytest.mark.parametrize("delay", [-1, 315_360_001, True, False, 3.0, "3"])
+def test_a_delay_shutdown_cannot_take_is_refused_before_it_runs(monkeypatch: pytest.MonkeyPatch, delay: Any) -> None:
     """[320] shutdown.exe takes /t 0-315360000 and answers anything else with its usage text, so the
-    delay is refused up front, typed, and shutdown is never started."""
+    delay is refused up front, typed, and shutdown is never started. A bool is refused although it is
+    an int (True would have passed the range check as /t 1), and so is any other non-int."""
     started: list[list[str]] = []
 
     def _record(argv: list[str], **_kwargs: Any) -> None:

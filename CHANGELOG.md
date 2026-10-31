@@ -64,9 +64,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `restart_computer` and `stop_computer` decode `shutdown.exe`'s output in the OEM code page it
   writes: decoded as ANSI, a character the ANSI code page lacks (a German `u`-umlaut is OEM 0x81)
   killed Python's reader thread with a traceback, and on stderr it would have left no message to
-  report (`AttributeError` instead of `NativeCallError`). A `delay_seconds` outside 0-315360000
-  raises `ConfigurationError` before `shutdown.exe` runs (it answered with its whole usage text and
-  a `NativeCallError` with an empty message), and `shutdown.exe` is started from System32 by
+  report (`AttributeError` instead of `NativeCallError`). A `delay_seconds` that is not an int
+  0-315360000 (a bool included: `True` passed as `/t 1`) raises `ConfigurationError` before
+  `shutdown.exe` runs (it answered with its whole usage text and a `NativeCallError` with an empty
+  message), and `shutdown.exe` is started from System32 by
   absolute path, never from the current directory.
 - `unregister_scheduled_task` on Linux (and `register_scheduled_task` retiring a task's old timer)
   raises a `StopUnit` systemd refuses instead of reading it as "not loaded" and going on to

@@ -83,12 +83,21 @@ class NativeProcessControl:
         """Shut the computer down (Windows ``shutdown /s``) (**destructive**, Windows-only)."""
         self._shutdown("/s", delay_seconds, force=force)
 
-    def _shutdown(self, flag: str, delay_seconds: int, *, force: bool) -> None:
+    def _shutdown(self, flag: str, delay_seconds: object, *, force: bool) -> None:
+        # delay_seconds is typed object here because a library caller can pass anything, and a bool
+        # is an int to isinstance: True would pass the range check and schedule /t 1.
         if sys.platform != "win32":
             raise PlatformUnsupportedError("restart_computer/stop_computer use Windows 'shutdown'; use sudo on POSIX.")
-        if not 0 <= delay_seconds <= _MAX_DELAY_SECONDS:
+        if (
+            isinstance(delay_seconds, bool)
+            or not isinstance(delay_seconds, int)
+            or not 0 <= delay_seconds <= _MAX_DELAY_SECONDS
+        ):
             # shutdown.exe answers an out-of-range /t with its whole usage text on stdout and exit 1.
-            raise ConfigurationError(f"delay_seconds must be 0-{_MAX_DELAY_SECONDS} (shutdown /t), got {delay_seconds}")
+            raise ConfigurationError(
+                f"delay_seconds must be 0-{_MAX_DELAY_SECONDS} whole seconds as an int (shutdown /t), "
+                f"got {delay_seconds!r}"
+            )
         argv = [_shutdown_exe(), flag, "/t", str(delay_seconds)]
         if force:
             argv.append("/f")

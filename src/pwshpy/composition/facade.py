@@ -2408,7 +2408,7 @@ class Ps:
 
         Raises:
             PlatformUnsupportedError: Not Windows (use ``sudo`` on POSIX).
-            ConfigurationError: ``delay_seconds`` outside 0-315360000.
+            ConfigurationError: ``delay_seconds`` is not an int 0-315360000 (a bool is refused).
             NativeCallError: ``shutdown`` could not be started or exited nonzero (its message
                 in the error).
 
@@ -2430,7 +2430,7 @@ class Ps:
 
         Raises:
             PlatformUnsupportedError: Not Windows (use ``sudo`` on POSIX).
-            ConfigurationError: ``delay_seconds`` outside 0-315360000.
+            ConfigurationError: ``delay_seconds`` is not an int 0-315360000 (a bool is refused).
             NativeCallError: ``shutdown`` could not be started or exited nonzero (its message
                 in the error).
 

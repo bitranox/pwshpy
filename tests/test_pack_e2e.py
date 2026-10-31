@@ -1451,6 +1451,93 @@ def test_an_elevated_child_that_runs_the_script_relays_its_output_and_code(tmp_p
     assert "produced no output" not in result.stderr, result.stderr
 
 
+#: The relaunch's working-directory line, and what a test puts in its place to start the elevated child
+#: where Windows starts it instead: System32 (/ off Windows, where .NET reports no system directory).
+_CHILD_WORKING_DIRECTORY = "$startInfo.WorkingDirectory = (Get-Location -PSProvider FileSystem).ProviderPath"
+_CHILD_STARTED_ELSEWHERE = (
+    "$startInfo.WorkingDirectory = '/'; "
+    "if ([Environment]::SystemDirectory) { $startInfo.WorkingDirectory = [Environment]::SystemDirectory }"
+)
+
+
+@pytest.mark.parametrize(
+    "elevated",
+    [
+        pytest.param("$false", id="child-not-elevated"),
+        pytest.param(
+            "[bool]$PwshPyRelay",
+            id="child-elevated",
+            marks=[
+                pytest.mark.local_only,
+                pytest.mark.os_windows,
+                pytest.mark.skipif(sys.platform != "win32", reason="the elevated Windows run needs Windows ACLs"),
+            ],
+        ),
+    ],
+)
+def test_the_elevated_child_runs_the_script_in_the_callers_directory_wherever_it_starts(
+    tmp_path: Path, elevated: str
+) -> None:
+    """[290]: an over-the-shoulder UAC run started the packed script in C:\\WINDOWS\\system32: Windows
+    starts a System32-resident PowerShell (5.1's powershell.exe) elevated in System32 whatever
+    ProcessStartInfo.WorkingDirectory says (reported; same-user UAC not yet measured here), and the child
+    took its own location as the caller's directory. The relaunch hands the child the caller's directory
+    explicitly; the stand-in starts the child in System32 (/ off Windows) to stand for that.
+
+    The child-elevated arm goes through the elevated run's hand-over to the shim (uv starts in System32
+    there); the other arm runs the script in place, from the child's location.
+    """
+    work = tmp_path / "caller work"
+    work.mkdir()
+    entry = tmp_path / "where.py"
+    entry.write_text(_ENTRY_REPORTING_CWD)
+    manifest = pack_script(entry)
+    stand_in = _whole_runner_stand_in(Path(manifest.output_path), tmp_path / "elsewhere.ps1", elevated=elevated)
+    text = stand_in.read_text(encoding="utf-8")
+    assert text.count(_CHILD_WORKING_DIRECTORY) == 1
+    stand_in.write_text(text.replace(_CHILD_WORKING_DIRECTORY, _CHILD_STARTED_ELSEWHERE), encoding="utf-8")
+    result = _run_with_path(tmp_path, stand_in, "-PwshPyElevate", path_first=[_UvLocation.directory], cwd=work)
+    assert result.returncode == 0, result.stdout + result.stderr
+    reported = [line[len("cwd:") :] for line in result.stdout.splitlines() if line.startswith("cwd:")]
+    assert reported, result.stdout + result.stderr
+    assert _same(Path(reported[0]), work), (reported, str(work))
+
+
+def test_an_elevated_child_whose_callers_directory_is_gone_relays_why(tmp_path: Path) -> None:
+    """[290]: a caller's directory the elevated child cannot enter stops it before anything runs, with
+    the early-failure exit and line (written to the relay file the parent replays), naming the directory.
+    """
+    missing = tmp_path / "gone"
+    relay = tmp_path / "relay"
+    marker = tmp_path / "ran.marker"
+    entry = tmp_path / "mark.py"
+    entry.write_text(f"open({str(marker)!r}, 'w').close()\n")
+    manifest = pack_script(entry)
+    result = _run(
+        Path(manifest.output_path),
+        "-PwshPyRelay",
+        str(relay),
+        "-PwshPyRelayCwd",
+        str(missing),
+        env=_isolated_cache(tmp_path),
+    )
+    assert result.returncode == _EARLY_FAILURE_EXIT, result.stdout + result.stderr
+    relayed = (tmp_path / "relay.err").read_text(encoding="utf-8")
+    assert _EARLY_FAILURE_LINE in relayed, relayed
+    assert f"cannot change to the caller's directory {missing}" in relayed, relayed
+    assert not marker.exists()
+
+
+def test_the_callers_directory_switch_is_refused_outside_the_elevated_child(tmp_path: Path) -> None:
+    """[290]: -PwshPyRelayCwd belongs to the relaunch's own command line; given without -PwshPyRelay it
+    is a usage error (64), never a directory change of an ordinary run nor an argument for the script."""
+    manifest = pack_script(_project(tmp_path))
+    result = _run(Path(manifest.output_path), "-PwshPyRelayCwd", str(tmp_path), env=_isolated_cache(tmp_path))
+    assert result.returncode == 64, result.stdout + result.stderr
+    assert "pwshpy: -PwshPyRelayCwd" in result.stderr, result.stderr
+    assert "greeting:" not in result.stdout, result.stdout
+
+
 def test_the_windows_elevated_relaunch_keeps_spaced_paths_and_arguments_whole(tmp_path: Path) -> None:
     """A space in the script path, the temp dir or an argument reaches the child as one argument.
 
@@ -1472,7 +1559,8 @@ def test_the_windows_elevated_relaunch_keeps_spaced_paths_and_arguments_whole(tm
     argv = cast("list[object]", report["argv"])
     assert argv[0] == "-PwshPyRelay"
     assert str(argv[1]).startswith(str(spaced_temp))
-    assert argv[2:] == arguments
+    assert argv[2:4] == ["-PwshPyRelayCwd", str(work)]
+    assert argv[4:] == arguments
     assert report["cwd"] == str(work)
 
 

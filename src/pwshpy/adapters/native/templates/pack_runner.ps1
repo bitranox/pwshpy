@@ -86,6 +86,18 @@ $ErrorActionPreference = 'Stop'
 # no-password probe, a script's own exit code). A caller's profile setting this to $true would turn each
 # such exit into a terminating error under 'Stop'. Hosts without the feature ignore the variable.
 $PSNativeCommandUseErrorActionPreference = $false
+# Windows PowerShell 5.1 started below a pwsh 7 process (pwsh 7 -> any other program -> powershell.exe)
+# inherits pwsh 7's PSModulePath, whose PowerShell 7 module directories come before its own: 5.1 finds
+# pwsh 7's Microsoft.PowerShell.Security and Utility there first, cannot load them, and Get-Acl and
+# Get-FileHash fail (the payload check read that as a hash mismatch, [310]). The runner uses only
+# built-in modules, so under 5.1 its own process resolves them from 5.1's own module directory alone;
+# the packed script gets the caller's value back (the end of the run preparation). pwsh 7 rewrites the
+# variable itself at startup and is left alone. .NET calls only: until the variable is set, a cmdlet
+# (Join-Path, Remove-Item) may live in a module 5.1 cannot load.
+$PwshPyCallerModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    [Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine($PSHOME, 'Modules'), 'Process')
+}
 
 $PwshPyEntry = @@PWSHPY_ENTRY@@
 $PwshPyShim = '@@PWSHPY_SHIM@@'
@@ -1643,8 +1655,8 @@ function Get-PwshPyAnchoredUvArg {
 }
 
 function Get-PwshPyCallerDirectory {
-    # The directory the packed script must run in: PowerShell's current FileSystem location, which an
-    # elevated child inherits as its working directory from the parent that started it.
+    # The directory the packed script must run in: PowerShell's current FileSystem location, which a
+    # relaunched elevated child has set from the -PwshPyRelayCwd its parent handed over ([290]).
     return (Get-Location -PSProvider FileSystem).ProviderPath
 }
 
@@ -1923,7 +1935,11 @@ function Invoke-PwshPyElevated {
     # variable, and a UAC start builds the elevated environment fresh from the profile, so it
     # never reaches the child: on a default client (5.1 policy Restricted) the child would
     # refuse to load this file. The caller already chose to run it; Group Policy still wins.
-    $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $self, '-PwshPyRelay', $relay)
+    # The caller's directory goes on the command line too ([290]): Windows starts an elevated
+    # powershell.exe (5.1, in System32) in System32 whatever the working directory set below says
+    # (measured with a same-user UAC consent; pwsh.exe keeps it), so the child changes there itself
+    # before anything else.
+    $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $self, '-PwshPyRelay', $relay, '-PwshPyRelayCwd', (Get-Location -PSProvider FileSystem).ProviderPath)
     # Only a missing list is skipped: an empty-string argument is real and must reach the child.
     if ($null -ne $ForwardArgs) { $childArgs += $ForwardArgs }
     # Process.Start rather than Start-Process -Verb RunAs: Start-Process rethrows a refused prompt
@@ -2033,17 +2049,20 @@ $PwshPyWantElevate = $false
 $PwshPyInfo = $false
 $PwshPyHelp = $false
 $PwshPyRelay = ''
+$PwshPyRelayCwd = $null
 $PwshPyUvPin = ''
 $PwshPyRest = New-Object System.Collections.ArrayList
 # The consumed switches an elevated relaunch must pass on again; every other one is either
-# handled before the relaunch (-PwshPyHelp, -PwshPyInfo) or set by it (-PwshPyRelay).
+# handled before the relaunch (-PwshPyHelp, -PwshPyInfo) or set by it (-PwshPyRelay, -PwshPyRelayCwd).
 $PwshPyRelaunchSwitches = New-Object System.Collections.ArrayList
 $PwshPyExpectRelay = $false
+$PwshPyExpectRelayCwd = $false
 $PwshPyExpectUv = $false
 
 foreach ($argument in $args) {
     $text = [string]$argument
     if ($PwshPyExpectRelay) { $PwshPyRelay = $text; $PwshPyExpectRelay = $false; continue }
+    if ($PwshPyExpectRelayCwd) { $PwshPyRelayCwd = $text; $PwshPyExpectRelayCwd = $false; continue }
     if ($PwshPyExpectUv) {
         $PwshPyUvPin = $text
         $PwshPyExpectUv = $false
@@ -2058,6 +2077,7 @@ foreach ($argument in $args) {
         '-PwshPyInfo' { $PwshPyInfo = $true; continue }
         '-PwshPyHelp' { $PwshPyHelp = $true; continue }
         '-PwshPyRelay' { $PwshPyExpectRelay = $true; continue }
+        '-PwshPyRelayCwd' { $PwshPyExpectRelayCwd = $true; continue }
         '-PwshPyUv' { $PwshPyExpectUv = $true; continue }
         default { [void]$PwshPyRest.Add($text) }
     }
@@ -2069,6 +2089,12 @@ if ($PwshPyExpectUv) {
 }
 if ($PwshPyUvPin -and -not (Test-PwshPyAbsolutePath -Path $PwshPyUvPin)) {
     [Console]::Error.WriteLine("pwshpy: -PwshPyUv needs an absolute path, got: $PwshPyUvPin")
+    exit 64
+}
+# Only the relaunch writes -PwshPyRelayCwd, beside -PwshPyRelay and with a value; anywhere else it is a
+# usage error rather than a directory change of an ordinary run or an argument the script never asked for.
+if ($PwshPyExpectRelayCwd -or ($null -ne $PwshPyRelayCwd -and -not $PwshPyRelay)) {
+    [Console]::Error.WriteLine('pwshpy: -PwshPyRelayCwd is set only by the elevated relaunch, next to -PwshPyRelay and with a directory')
     exit 64
 }
 $PwshPyForward = @($PwshPyRest.ToArray())
@@ -2386,6 +2412,11 @@ $PwshPyPrepareRun = {
         }
     }
     $PwshPyRunArgs += $PwshPyTarget
+    # Under 5.1 the caller's PSModulePath back for the packed script and what it starts, set or absent as
+    # it came ([310], the top of this file): the runner's own built-in modules are loaded by now.
+    if ($PSVersionTable.PSEdition -ne 'Core') {
+        [Environment]::SetEnvironmentVariable('PSModulePath', $PwshPyCallerModulePath, 'Process')
+    }
 }
 
 if ($PwshPyRelay) {
@@ -2393,6 +2424,16 @@ if ($PwshPyRelay) {
         # Created first, so a child that fails from here on has a file to say why in; the run
         # below truncates it again for the script's own stderr.
         [IO.File]::WriteAllText("$PwshPyRelay.err", '')
+        # Into the caller's directory before anything reads the location ([290], Invoke-PwshPyElevated):
+        # the run in place starts uv there, and an elevated run hands it to the shim. Provider-qualified,
+        # so the value can only name a FileSystem directory.
+        if ($null -ne $PwshPyRelayCwd) {
+            try {
+                Set-Location -LiteralPath ('Microsoft.PowerShell.Core\FileSystem::' + $PwshPyRelayCwd)
+            } catch {
+                throw "cannot change to the caller's directory ${PwshPyRelayCwd}: $($_.Exception.Message)"
+            }
+        }
         . $PwshPyPrepare
         . $PwshPyPrepareRun
     } catch {

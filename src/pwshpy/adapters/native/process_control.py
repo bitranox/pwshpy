@@ -10,10 +10,11 @@ Contents:
 
 from __future__ import annotations
 
-import os
+import ctypes
+import ntpath
 import subprocess  # nosec B404 - used only to invoke the Windows shutdown command with a fixed argv
 import sys
-from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 import psutil as _psutil_module  # pyright: ignore[reportMissingTypeStubs]
@@ -24,6 +25,9 @@ from .marshal import native_error
 #: shutdown.exe's largest ``/t`` (ten years), from its own usage text.
 _MAX_DELAY_SECONDS = 315_360_000
 
+#: Characters GetSystemDirectoryW is first offered; it reports the size it needs when that is short.
+_SYSTEM_DIRECTORY_BUFFER = 260
+
 _psutil: Any = _psutil_module
 _NO_SUCH_PROCESS: type[BaseException] = _psutil.NoSuchProcess
 _ACCESS_DENIED: type[BaseException] = _psutil.AccessDenied
@@ -33,11 +37,18 @@ _TIMEOUT_EXPIRED: type[BaseException] = _psutil.TimeoutExpired
 class NativeProcessControl:
     """Stop/wait for processes (portable) and restart/stop the computer (Windows, destructive).
 
+    Args:
+        system_directory: Returns the directory ``shutdown.exe`` is started from; defaults to
+            :func:`windows_system_directory` (what Windows reports, never an environment variable).
+
     Example:
         >>> pc = NativeProcessControl()
         >>> callable(pc.stop_process)
         True
     """
+
+    def __init__(self, *, system_directory: Callable[[], str] | None = None) -> None:
+        self._system_directory = windows_system_directory if system_directory is None else system_directory
 
     def stop_process(self, pid: int, *, force: bool = False) -> None:
         """Terminate a process by PID (``force`` sends a hard kill) (like Stop-Process) (**mutating**)."""
@@ -98,7 +109,7 @@ class NativeProcessControl:
                 f"delay_seconds must be 0-{_MAX_DELAY_SECONDS} whole seconds as an int (shutdown /t), "
                 f"got {delay_seconds!r}"
             )
-        argv = [_shutdown_exe(), flag, "/t", str(delay_seconds)]
+        argv = [self._shutdown_exe(), flag, "/t", str(delay_seconds)]
         if force:
             argv.append("/f")
         try:
@@ -113,18 +124,57 @@ class NativeProcessControl:
         if completed.returncode != 0:
             raise NativeCallError(f"shutdown exited {completed.returncode}: {completed.stderr.strip()}")
 
+    def _shutdown_exe(self) -> str:
+        # A bare "shutdown", or a path relative to anything, lets CreateProcess take a shutdown.exe
+        # from the current directory first; a path built from SYSTEMROOT is relative when the
+        # variable is empty and a guess when it is unset, so the directory comes from Windows.
+        directory = self._system_directory()
+        if not _is_absolute_windows_path(directory):
+            raise NativeCallError(f"the Windows system directory {directory!r} is not an absolute path")
+        return ntpath.join(directory, "shutdown.exe")
 
-def _shutdown_exe() -> str:
-    """The absolute path of Windows' own ``shutdown.exe``.
 
-    A bare ``shutdown`` would let CreateProcess pick up a ``shutdown.exe`` in the current
-    directory before System32.
+def windows_system_directory() -> str:
+    """Return the Windows system directory (System32) as ``GetSystemDirectoryW`` reports it.
+
+    Returns:
+        The directory, e.g. ``C:\\Windows\\system32``.
+
+    Raises:
+        PlatformUnsupportedError: Not Windows.
+        NativeCallError: ``GetSystemDirectoryW`` failed (carrying its Win32 code).
+    """
+    if sys.platform != "win32":
+        raise PlatformUnsupportedError("the Windows system directory exists only on Windows")
+    get_system_directory = ctypes.WinDLL("kernel32", use_last_error=True).GetSystemDirectoryW
+    get_system_directory.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
+    get_system_directory.restype = ctypes.c_uint
+    size = _SYSTEM_DIRECTORY_BUFFER
+    while True:
+        buffer = ctypes.create_unicode_buffer(size)
+        length: int = get_system_directory(buffer, size)
+        if length == 0:
+            error = ctypes.WinError(ctypes.get_last_error())
+            raise native_error(f"GetSystemDirectoryW failed: {error}", error) from error
+        if length < size:
+            return buffer.value
+        size = length  # too short: length is the size needed, terminating NUL included
+
+
+def _is_absolute_windows_path(path: str) -> bool:
+    """Whether ``path`` is drive-qualified or UNC and rooted, judged the same on every OS.
+
+    ``ntpath.isabs`` is not used: it calls a rooted path with no drive (``\\Windows``) absolute
+    before Python 3.13 and not from 3.13 on, and such a path is relative to the current drive.
 
     Example:
-        >>> _shutdown_exe().lower().endswith("shutdown.exe")
-        True
+        >>> [_is_absolute_windows_path(p) for p in (r"C:\\Windows", r"\\\\srv\\share\\x")]
+        [True, True]
+        >>> [_is_absolute_windows_path(p) for p in ("System32", r"C:Windows", r"\\Windows", "")]
+        [False, False, False, False]
     """
-    return str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / "shutdown.exe")
+    drive, rest = ntpath.splitdrive(path)
+    return bool(drive) and rest.startswith(("\\", "/"))
 
 
-__all__ = ["NativeProcessControl"]
+__all__ = ["NativeProcessControl", "windows_system_directory"]

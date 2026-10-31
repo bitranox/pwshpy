@@ -67,8 +67,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   report (`AttributeError` instead of `NativeCallError`). A `delay_seconds` that is not an int
   0-315360000 (a bool included: `True` passed as `/t 1`) raises `ConfigurationError` before
   `shutdown.exe` runs (it answered with its whole usage text and a `NativeCallError` with an empty
-  message), and `shutdown.exe` is started from System32 by
-  absolute path, never from the current directory.
+  message). `shutdown.exe` is started by absolute path from the system directory Windows reports
+  (`GetSystemDirectoryW`), never from the current directory or a path built from `SYSTEMROOT` (an
+  empty one made it relative); a system directory that is not absolute raises `NativeCallError`.
 - `unregister_scheduled_task` on Linux (and `register_scheduled_task` retiring a task's old timer)
   raises a `StopUnit` systemd refuses instead of reading it as "not loaded" and going on to
   disable the timer and delete its unit file while the unit may still be running; a `StopUnit`

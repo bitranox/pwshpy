@@ -21,8 +21,10 @@ import pwshpy.adapters.native.process_control as pcmod
 from pwshpy.adapters.native.process_control import NativeProcessControl
 from pwshpy.domain.errors import ConfigurationError, NativeCallError, OperationTimeoutError, PlatformUnsupportedError
 
-#: Windows' own shutdown.exe, spelled out here rather than read from the module under test.
-_SHUTDOWN_EXE = str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / "shutdown.exe")
+#: A system directory handed to the control in the argv tests, so they need no real Windows; the
+#: expected program is spelled out from it here rather than read from the module under test.
+_FAKE_SYSTEM_DIR = r"D:\WinRoot\System32"
+_FAKE_SHUTDOWN_EXE = r"D:\WinRoot\System32\shutdown.exe"
 _SLEEP = [sys.executable, "-c", "import time; time.sleep(30)"]
 
 
@@ -84,11 +86,43 @@ def test_restart_computer_builds_shutdown_argv(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(pcmod.sys, "platform", "win32")
     monkeypatch.setattr(pcmod.subprocess, "run", _fake_run)
-    NativeProcessControl().restart_computer(delay_seconds=3, force=True)
+    NativeProcessControl(system_directory=lambda: _FAKE_SYSTEM_DIR).restart_computer(delay_seconds=3, force=True)
     [(argv, kwargs)] = calls
-    assert argv == [_SHUTDOWN_EXE, "/r", "/t", "3", "/f"]
-    assert argv[0].replace("\\", "/").lower().endswith("/system32/shutdown.exe")
+    assert argv == [_FAKE_SHUTDOWN_EXE, "/r", "/t", "3", "/f"]
     assert (kwargs["encoding"], kwargs["errors"]) == ("oem", "replace")
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("reported", ["", "System32", r"Windows\System32", r"C:Windows\System32", r"\Windows\System32"])
+def test_a_system_directory_that_is_not_absolute_is_refused_before_shutdown_runs(
+    monkeypatch: pytest.MonkeyPatch, reported: str
+) -> None:
+    """[320] shutdown.exe is started from the system directory Windows reports, never from a path
+    built from SYSTEMROOT: an empty SYSTEMROOT made it the relative ``System32\\shutdown.exe``, which
+    CreateProcess resolves against the current directory. A directory that is not drive- or
+    UNC-absolute is refused, typed, and nothing is started."""
+    started: list[list[str]] = []
+
+    def _record(argv: list[str], **_kwargs: Any) -> None:
+        started.append(argv)
+
+    monkeypatch.setattr(pcmod.sys, "platform", "win32")
+    monkeypatch.setattr(pcmod.subprocess, "run", _record)
+    with pytest.raises(NativeCallError, match="not an absolute path"):
+        NativeProcessControl(system_directory=lambda: reported).stop_computer()
+    assert started == []
+
+
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="GetSystemDirectoryW is Windows-only")
+def test_the_system_directory_is_the_one_windows_reports() -> None:
+    """[320] The default system directory is GetSystemDirectoryW's answer: absolute, holding
+    shutdown.exe, and the same directory as SystemRoot's System32 (read here from the environment,
+    independently of the module under test), whatever the current SYSTEMROOT says."""
+    reported = Path(pcmod.windows_system_directory())
+    expected = Path(os.environ["SYSTEMROOT"]) / "System32"
+    assert os.path.normcase(reported) == os.path.normcase(expected)
+    assert (reported / "shutdown.exe").is_file()
 
 
 @pytest.mark.os_agnostic
@@ -113,7 +147,7 @@ def test_a_delay_shutdown_cannot_take_is_refused_before_it_runs(monkeypatch: pyt
     monkeypatch.setattr(pcmod.sys, "platform", "win32")
     monkeypatch.setattr(pcmod.subprocess, "run", _record)
     with pytest.raises(ConfigurationError, match="delay_seconds must be 0-315360000"):
-        NativeProcessControl().restart_computer(delay_seconds=delay)
+        NativeProcessControl(system_directory=lambda: _FAKE_SYSTEM_DIR).restart_computer(delay_seconds=delay)
     assert started == []
 
 
@@ -136,5 +170,5 @@ def test_a_refused_shutdown_is_a_native_call_error_naming_shutdowns_message() ->
             control.stop_computer(delay_seconds=600, force=False)
     finally:
         subprocess.run(  # noqa: S603 - fixed argv: abort the shutdown this test scheduled
-            [_SHUTDOWN_EXE, "/a"], capture_output=True, check=False
+            [str(Path(pcmod.windows_system_directory()) / "shutdown.exe"), "/a"], capture_output=True, check=False
         )

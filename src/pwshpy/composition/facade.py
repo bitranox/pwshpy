@@ -2410,7 +2410,7 @@ class Ps:
             PlatformUnsupportedError: Not Windows (use ``sudo`` on POSIX).
             ConfigurationError: ``delay_seconds`` is not an int 0-315360000 (a bool is refused).
             NativeCallError: ``shutdown`` could not be started or exited nonzero (its message
-                in the error).
+                in the error), or Windows reported no absolute system directory to start it from.
 
         Example:
             >>> callable(build_ps().restart_computer)
@@ -2432,7 +2432,7 @@ class Ps:
             PlatformUnsupportedError: Not Windows (use ``sudo`` on POSIX).
             ConfigurationError: ``delay_seconds`` is not an int 0-315360000 (a bool is refused).
             NativeCallError: ``shutdown`` could not be started or exited nonzero (its message
-                in the error).
+                in the error), or Windows reported no absolute system directory to start it from.
 
         Example:
             >>> callable(build_ps().stop_computer)

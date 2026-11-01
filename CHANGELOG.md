@@ -61,6 +61,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- `notebooks/Quickstart.ipynb` installs the checkout it runs in, so CI's "Execute notebooks" job
+  tests the commit under test. It used to install `git+https://github.com/...` every time, which is
+  the pushed default branch, so a pull request's notebook run tested the code already there.
+  Outside a checkout (a downloaded notebook) it still installs from GitHub.
+
 - `restart_computer` and `stop_computer` decode `shutdown.exe`'s output in the OEM code page it
   writes: decoded as ANSI, a character the ANSI code page lacks (a German `u`-umlaut is OEM 0x81)
   killed Python's reader thread with a traceback, and on stderr it would have left no message to

@@ -1271,6 +1271,10 @@ $functions = $functions.Replace("'runas'", "''")
 #: which is what an elevated child refused by the execution policy looks like to the parent.
 _RELAUNCH_BODY = r"""
 $PwshPyOnWindows = $true
+# Stands in for a mapped drive, which needs a real share: a function defined here outranks the artefact's.
+if ($env:PWSHPY_TEST_MAPPED_TO) {
+    function Get-PwshPyMappedUncPath { param([string] $Path) return $env:PWSHPY_TEST_MAPPED_TO }
+}
 $relayAt = [Array]::IndexOf([object[]]$args, '-PwshPyRelay')
 if ($relayAt -ge 0 -and $env:PWSHPY_TEST_SILENT) { exit 3 }
 if ($relayAt -ge 0) {
@@ -1520,7 +1524,7 @@ def test_an_elevated_child_that_runs_the_script_relays_its_output_and_code(tmp_p
 
 #: The relaunch's working-directory line, and what a test puts in its place to start the elevated child
 #: where Windows starts it instead: System32 (/ off Windows, where .NET reports no system directory).
-_CHILD_WORKING_DIRECTORY = "$startInfo.WorkingDirectory = (Get-Location -PSProvider FileSystem).ProviderPath"
+_CHILD_WORKING_DIRECTORY = "$startInfo.WorkingDirectory = $callerDirectory"
 _CHILD_STARTED_ELSEWHERE = (
     "$startInfo.WorkingDirectory = '/'; "
     "if ([Environment]::SystemDirectory) { $startInfo.WorkingDirectory = [Environment]::SystemDirectory }"
@@ -1596,6 +1600,14 @@ def test_an_elevated_child_whose_callers_directory_is_gone_relays_why(tmp_path: 
     assert not marker.exists()
 
 
+def test_the_unc_hint_switch_is_refused_outside_the_elevated_child(tmp_path: Path) -> None:
+    """[330]: -PwshPyRelayCwdUnc is the relaunch's too: without -PwshPyRelayCwd it is a usage error (64)."""
+    manifest = pack_script(_project(tmp_path))
+    result = _run(Path(manifest.output_path), "-PwshPyRelayCwdUnc", str(tmp_path), env=_isolated_cache(tmp_path))
+    assert result.returncode == 64, result.stdout + result.stderr
+    assert "pwshpy: -PwshPyRelayCwd" in result.stderr, result.stderr
+
+
 def test_the_callers_directory_switch_is_refused_outside_the_elevated_child(tmp_path: Path) -> None:
     """[290]: -PwshPyRelayCwd belongs to the relaunch's own command line; given without -PwshPyRelay it
     is a usage error (64), never a directory change of an ordinary run nor an argument for the script."""
@@ -1604,6 +1616,84 @@ def test_the_callers_directory_switch_is_refused_outside_the_elevated_child(tmp_
     assert result.returncode == 64, result.stdout + result.stderr
     assert "pwshpy: -PwshPyRelayCwd" in result.stderr, result.stderr
     assert "greeting:" not in result.stdout, result.stdout
+
+
+def test_a_callers_directory_on_a_mapped_drive_is_named_to_the_child_not_switched_to(tmp_path: Path) -> None:
+    """[330]: the child starts from the caller's own spelling, with the UNC path only beside it for the
+    refusal: from a UNC directory an elevated cmd.exe works in C:\\Windows (measured), so nothing
+    elevated goes there unasked."""
+    work = tmp_path / "work"
+    work.mkdir()
+    unc = "\\\\srv\\share\\work"
+    exit_code, report, stderr = _run_relaunch_stand_in(
+        tmp_path, tmp_path / "harness", work, "plain", env={"PWSHPY_TEST_MAPPED_TO": unc}
+    )
+    assert exit_code == 5, (report, stderr)
+    argv = cast("list[object]", report["argv"])
+    assert argv[2:6] == ["-PwshPyRelayCwd", str(work), "-PwshPyRelayCwdUnc", unc]
+    assert argv[6:] == ["plain"]
+    assert report["cwd"] == str(work)
+
+
+def test_a_runner_on_a_mapped_drive_the_child_cannot_read_is_named_with_its_unc_path(tmp_path: Path) -> None:
+    """[330]: an elevated -File cannot read a runner on the caller's mapped drive, so no line of it runs
+    (measured: exit -196608). The parent names that cause and the UNC path instead of the generic guess,
+    and keeps the child's exit code."""
+    work = tmp_path / "work"
+    work.mkdir()
+    unc = "\\\\srv\\share\\tool.ps1"
+    env = {"PWSHPY_TEST_MAPPED_TO": unc, "PWSHPY_TEST_SILENT": "1"}
+    exit_code, _, stderr = _run_relaunch_stand_in(tmp_path, tmp_path / "harness", work, env=env)
+    assert exit_code == 3, stderr
+    assert "does not see the mapped drive of " in stderr, stderr
+    assert f"run it as {unc} or from a local path" in stderr, stderr
+    assert "execution policy" not in stderr, stderr
+
+
+@pytest.mark.parametrize(
+    ("switches", "expected"),
+    [
+        pytest.param(
+            ["-PwshPyRelayCwdUnc", "\\\\srv\\share\\sub"],
+            "change to \\\\srv\\share\\sub or a local path first",
+            id="mapped-drive",
+        ),
+        pytest.param([], None, id="local"),
+    ],
+)
+def test_the_refusal_to_enter_a_mapped_drive_names_its_unc_path(
+    tmp_path: Path, switches: list[str], expected: str | None
+) -> None:
+    """[330]: the child cannot read the mapping, so its refusal names the path the parent handed it."""
+    missing = tmp_path / "gone"
+    relay = tmp_path / "relay"
+    manifest = pack_script(_project(tmp_path))
+    result = _run(
+        Path(manifest.output_path),
+        "-PwshPyRelay",
+        str(relay),
+        "-PwshPyRelayCwd",
+        str(missing),
+        *switches,
+        env=_isolated_cache(tmp_path),
+    )
+    assert result.returncode == _EARLY_FAILURE_EXIT, result.stdout + result.stderr
+    relayed = (tmp_path / "relay.err").read_text(encoding="utf-8")
+    assert f"cannot change to the caller's directory {missing}" in relayed, relayed
+    assert (expected in relayed) if expected else ("local path first" not in relayed), relayed
+
+
+def test_the_refusal_to_enter_a_share_says_a_mappings_credentials_do_not_carry_over(tmp_path: Path) -> None:
+    """[330]: a UNC directory the child cannot open: a /user: mapping does not reach an elevated process."""
+    share = "\\\\no-such-server.invalid\\share"
+    relay = tmp_path / "relay"
+    manifest = pack_script(_project(tmp_path))
+    result = _run(
+        Path(manifest.output_path), "-PwshPyRelay", str(relay), "-PwshPyRelayCwd", share, env=_isolated_cache(tmp_path)
+    )
+    assert result.returncode == _EARLY_FAILURE_EXIT, result.stdout + result.stderr
+    relayed = (tmp_path / "relay.err").read_text(encoding="utf-8")
+    assert "with the account's own credentials, not those of a drive mapping" in relayed, relayed
 
 
 def test_the_windows_elevated_relaunch_keeps_spaced_paths_and_arguments_whole(tmp_path: Path) -> None:
@@ -2811,6 +2901,66 @@ def test_an_elevated_run_leaves_a_link_to_a_network_path_off_uvs_path(tmp_path: 
     assert refused in result.stderr, result.stderr
 
 
+#: Runs the artefact's Get-PwshPyMappedUncPath over each path in a JSON file, with Get-PSDrive replaced by
+#: a table of drives (a function outranks the cmdlet), so no share is needed: prints a JSON list of answers.
+_ELEVATED_PATH_PROBE = r"""
+param([string] $Artefact, [string] $Paths)
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Artefact, [ref]$tokens, [ref]$errors)
+$found = $ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-PwshPyMappedUncPath'
+}, $false)
+. ([ScriptBlock]::Create($found.Extent.Text))
+function Get-PSDrive {
+    param([string] $Name, [string] $PSProvider, $ErrorAction)
+    switch ($Name) {
+        'Z' { return [pscustomobject]@{ DisplayRoot = '\\srv\share' } }
+        'Y' { return [pscustomobject]@{ DisplayRoot = '\\srv\share\deep\' } }
+        'C' { return [pscustomobject]@{ DisplayRoot = $null } }
+        'D' { return [pscustomobject]@{ DisplayRoot = 'D:\' } }
+    }
+}
+$values = ConvertFrom-Json (Get-Content -LiteralPath $Paths -Raw)
+$answers = @($values | ForEach-Object { Get-PwshPyMappedUncPath -Path $_ })
+ConvertTo-Json -Compress -InputObject $answers
+"""
+
+
+def test_only_a_path_on_a_mapped_drive_has_a_unc_spelling(tmp_path: Path) -> None:
+    """[330]: only a drive whose root is a share answers; a local drive, a drive that cannot be read, a
+    UNC path and a POSIX path answer nothing, and the rest of the path, spaces included, is kept."""
+    cases = {
+        "Z:\\sub dir\\x.ps1": "\\\\srv\\share\\sub dir\\x.ps1",
+        "z:\\sub": "\\\\srv\\share\\sub",
+        "Z:\\": "\\\\srv\\share\\",
+        "Y:\\sub": "\\\\srv\\share\\deep\\sub",
+        "C:\\work": "",
+        "D:\\work": "",
+        "Q:\\no such drive": "",
+        "\\\\srv\\share\\sub": "",
+        "/opt/work": "",
+    }
+    assert _PWSH is not None
+    manifest = pack_script(_project(tmp_path))
+    probe = tmp_path / "probe.ps1"
+    probe.write_text(_ELEVATED_PATH_PROBE, encoding="utf-8")
+    paths = tmp_path / "paths.json"
+    paths.write_text(json.dumps(list(cases)), encoding="utf-8")
+    result = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(probe), str(manifest.output_path), str(paths)],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert dict(zip(cases, json.loads(result.stdout), strict=True)) == cases
+
+
 def _net_use(*args: str) -> subprocess.CompletedProcess[str]:
     """``net use`` with ``args``, its output captured (the text is localised: callers read the exit code)."""
     net = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / "net.exe"
@@ -2844,6 +2994,28 @@ def mapped_drive(tmp_path: Path) -> Iterator[tuple[str, Path]]:
         yield f"{letter}:{rest}", shared
     finally:
         _net_use(f"{letter}:", "/delete", "/y")
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
+def test_the_relaunch_from_a_mapped_drive_keeps_the_letter_and_names_the_unc_path(
+    tmp_path: Path, mapped_drive: tuple[str, Path]
+) -> None:
+    """[330]: the child gets the caller's directory and runner as spelled, so nothing elevated changes
+    to a share unasked, and the real drive's UNC spelling beside them for its refusal. The child here
+    is not elevated, since no test can answer a UAC prompt: this pins the command line."""
+    entry, shared = mapped_drive
+    share = _admin_share(shared)
+    (shared / "work").mkdir()
+    exit_code, report, stderr = _run_relaunch_stand_in(tmp_path, Path(entry) / "harness", Path(entry) / "work", "plain")
+    assert exit_code == 5, (report, stderr)
+    argv = cast("list[object]", report["argv"])
+    host_argv = [str(word) for word in cast("list[object]", report["host_argv"])]
+    assert str(argv[3]).lower() == f"{entry}\\work".lower()
+    assert argv[4] == "-PwshPyRelayCwdUnc"
+    assert str(argv[5]).lower() == f"{share}\\work".lower()
+    assert f"{entry}\\harness\\relaunch.ps1".lower() in [word.lower() for word in host_argv], host_argv
 
 
 @pytest.mark.local_only

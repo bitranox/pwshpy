@@ -385,11 +385,16 @@ Details worth knowing:
   Windows PowerShell 5.1, `pwsh.exe` under pwsh 7) as `-NoProfile -ExecutionPolicy Bypass -File
   runner.ps1 ...`, so the `-Name:Value` caveat above applies to the elevated run even when you
   called the runner from a PowerShell prompt. It runs the script in your current directory, which the
-  runner hands it on its command line; a directory on a drive letter mapped with `net use` (`Z:`)
-  is the exception: an elevated process does not see the drive letters your unelevated logon
-  mapped (unless `EnableLinkedConnections` is set), so the child stops with exit code 70 and
-  `cannot change to the caller's directory`. Change to a local path, or to the UNC path
-  (`\\server\share\...`) the drive maps, before you run it. Its own console window closes when it
+  runner hands it on its command line. An elevated process does not see the drive letters your
+  unelevated logon mapped (unless `EnableLinkedConnections` is set), and the runner does not switch
+  to the share for you. From a directory on such a drive (`Z:\...`) the child stops with exit code 70
+  and `cannot change to the caller's directory`, naming the drive's UNC path; a runner on such a drive
+  cannot start at all, and the parent names its UNC path. Change to a local path, or to the UNC path
+  if you mean it: from a UNC directory an elevated `cmd.exe` (`shell=True`, `os.system`, a `.bat`)
+  works in `C:\Windows` instead, with only a line on stderr, and a program started by bare name can
+  be an executable on the share, running as administrator. The child reaches a share with your
+  account's own credentials, so a drive mapped with `net use /user:...` does not carry over: a UNC
+  directory your account cannot open stops with exit code 70, a runner there as above. Its own console window closes when it
   exits, so everything it has to say comes back through the parent: the script's stdout and stderr
   on the parent's stdout and stderr, and an error it hits before the script starts (a corrupt
   payload, a cache it cannot write, an error the `uv` installer throws) as a `pwshpy: the elevated child failed before running the

@@ -91,20 +91,24 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   on every way out (`-PwshPyHelp`, `-PwshPyInfo`, a usage error, a failure, the unelevated parent of
   `-PwshPyElevate`), so an interactive 5.1 console that ran the `.ps1` keeps autoloading its own
   modules; pwsh 7 runs are unchanged.
-- Linux services: `get_service`, and the wait and read-back of `start_service`, `stop_service` and
-  `restart_service`, no longer read a `GetUnit` that fails for another reason than systemd's
-  `org.freedesktop.systemd1.NoSuchUnit` (no reply from a busy systemd, say) as a stopped unit with no
-  job: they raise `NativeCallError`, so such a stop no longer reports a unit as stopped while it may
-  still be running. A unit that really is not loaded still reads as stopped.
+- Linux services: the wait of `start_service`, `stop_service` and `restart_service`, and the read-back
+  of those and `set_service`, no longer read a `GetUnit`, or a `Job` or `ActiveState` read, that fails
+  (no reply from a busy systemd, say) as a stopped unit with no job: they raise `NativeCallError`, so
+  such a stop no longer reports a unit as stopped while it may still be running. Only systemd's
+  `org.freedesktop.systemd1.NoSuchUnit` reads as not loaded. `set_service` can raise this way after its
+  change was applied. The `get_service` listing is unchanged.
 - `-PwshPyElevate` from Windows PowerShell 5.1 ran the packed script in `C:\Windows\System32`
   instead of the caller's directory (Windows starts an elevated `powershell.exe` there and ignores
   the working directory); the runner now hands the directory over itself, on the elevated child's
   command line, and the child changes there before it unpacks or runs anything. A directory it cannot
   enter stops it with exit code 70 and `pwshpy: the elevated child failed before running the script:
   cannot change to the caller's directory ...`. pwsh 7 callers were not affected by the System32
-  start. In a directory on a drive letter mapped with `net use`, which an elevated process does not
-  see (unless `EnableLinkedConnections` is set), the child of either host stops this way: change to
-  a local or UNC path first.
+  start.
+- `-PwshPyElevate` from a directory on a drive letter mapped with `net use`, which an elevated process
+  does not see (unless `EnableLinkedConnections` is set): the child's exit-70 message now names the
+  drive's UNC path. With the runner itself on such a drive, the parent names the cause and the UNC
+  path, in place of a guess at the execution policy. The runner does not switch to the share itself,
+  because from a UNC directory an elevated `cmd.exe` works in `C:\Windows` instead.
 - `get_item` and `test_path` on a path below a directory the caller cannot search no longer let a
   raw `PermissionError` out on Python 3.10-3.13: `get_item` raises `NativeAccessDeniedError`,
   `test_path` returns False. On Python 3.14, where `get_item` said "path not found" for such a path,

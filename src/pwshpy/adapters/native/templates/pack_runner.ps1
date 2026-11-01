@@ -1864,6 +1864,22 @@ function Get-PwshPySudoCommandPrefix {
     return @($PwshPySudoShell, '-c', $PwshPySudoStub, 'pwshpy-relaunch', $homeValue)
 }
 
+function Get-PwshPyMappedUncPath {
+    param([string] $Path)
+
+    # Windows: the UNC spelling of a $Path on a drive letter mapped to a share (net use, a logon
+    # script), or ''. Only ever NAMED to the user, never switched to ([330], user decision): from a UNC
+    # directory an elevated cmd.exe silently works in C:\Windows and a bare program name finds an
+    # executable on the share (both measured), so an elevated run goes there only by the caller's own
+    # choice. A letter stays the child's first try: under EnableLinkedConnections it is visible there.
+    if ($Path -notmatch '^([A-Za-z]):(\\.*)?$') { return '' }
+    $letter = $Matches[1]
+    $rest = $Matches[2]
+    $drive = Get-PSDrive -Name $letter -PSProvider FileSystem -ErrorAction SilentlyContinue
+    if ($null -eq $drive -or -not ([string]$drive.DisplayRoot).StartsWith('\\')) { return '' }
+    return ([string]$drive.DisplayRoot).TrimEnd('\') + $rest
+}
+
 function Invoke-PwshPyElevated {
     param([string[]] $ForwardArgs)
 
@@ -1929,6 +1945,7 @@ function Invoke-PwshPyElevated {
         exit $LASTEXITCODE
     }
 
+    $callerDirectory = (Get-Location -PSProvider FileSystem).ProviderPath
     # A UAC child cannot inherit this console and a shell-executed start cannot redirect its
     # streams, so the child writes them to files we replay here.
     $relay = Join-Path ([IO.Path]::GetTempPath()) ('pwshpy-pack-' + [Guid]::NewGuid().ToString('N'))
@@ -1940,7 +1957,10 @@ function Invoke-PwshPyElevated {
     # powershell.exe (5.1, in System32) in System32 whatever the working directory set below says
     # (measured with a same-user UAC consent; pwsh.exe keeps it), so the child changes there itself
     # before anything else.
-    $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $self, '-PwshPyRelay', $relay, '-PwshPyRelayCwd', (Get-Location -PSProvider FileSystem).ProviderPath)
+    $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $self, '-PwshPyRelay', $relay, '-PwshPyRelayCwd', $callerDirectory)
+    # What the child's refusal names if it cannot enter a mapped drive: it cannot read the mapping itself.
+    $callerDirectoryUnc = Get-PwshPyMappedUncPath -Path $callerDirectory
+    if ($callerDirectoryUnc) { $childArgs += @('-PwshPyRelayCwdUnc', $callerDirectoryUnc) }
     # Only a missing list is skipped: an empty-string argument is real and must reach the child.
     if ($null -ne $ForwardArgs) { $childArgs += $ForwardArgs }
     # Process.Start rather than Start-Process -Verb RunAs: Start-Process rethrows a refused prompt
@@ -1953,7 +1973,7 @@ function Invoke-PwshPyElevated {
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = Get-PwshPyHostPath
     $startInfo.Arguments = Join-PwshPyCommandLine -Arguments $childArgs
-    $startInfo.WorkingDirectory = (Get-Location -PSProvider FileSystem).ProviderPath
+    $startInfo.WorkingDirectory = $callerDirectory
     $startInfo.UseShellExecute = $true
     $startInfo.Verb = 'runas'
     try {
@@ -1984,7 +2004,13 @@ function Invoke-PwshPyElevated {
     # the execution policy, a window closed early). Its own window is gone by now, so say so
     # rather than exit with a bare code and nothing on screen. The exit code is left unchanged.
     if ($process.ExitCode -ne 0 -and $null -eq $relayText['out'] -and -not $relayText['err'] -and -not $relayText['note']) {
-        [Console]::Error.WriteLine("pwshpy: the elevated child produced no output and exited $($process.ExitCode) (it stopped before running the script, e.g. refused by the execution policy or its window was closed)")
+        # A runner on a mapped drive is the case with a known cause: the child's -File cannot read it (measured).
+        $selfUnc = Get-PwshPyMappedUncPath -Path $self
+        if ($selfUnc) {
+            [Console]::Error.WriteLine("pwshpy: the elevated child produced no output and exited $($process.ExitCode): an elevated process does not see the mapped drive of $self; run it as $selfUnc or from a local path")
+        } else {
+            [Console]::Error.WriteLine("pwshpy: the elevated child produced no output and exited $($process.ExitCode) (it stopped before running the script, e.g. refused by the execution policy or its window was closed)")
+        }
     }
     # Notices first: they were written before the script started (which uv was skipped, and why).
     if ($relayText['note']) { [Console]::Error.Write($relayText['note']) }
@@ -2055,19 +2081,22 @@ try {
     $PwshPyHelp = $false
     $PwshPyRelay = ''
     $PwshPyRelayCwd = $null
+    $PwshPyRelayCwdUnc = ''
     $PwshPyUvPin = ''
     $PwshPyRest = New-Object System.Collections.ArrayList
     # The consumed switches an elevated relaunch must pass on again; every other one is either
-    # handled before the relaunch (-PwshPyHelp, -PwshPyInfo) or set by it (-PwshPyRelay, -PwshPyRelayCwd).
+    # handled before the relaunch (-PwshPyHelp, -PwshPyInfo) or set by it (-PwshPyRelay, -PwshPyRelayCwd, -PwshPyRelayCwdUnc).
     $PwshPyRelaunchSwitches = New-Object System.Collections.ArrayList
     $PwshPyExpectRelay = $false
     $PwshPyExpectRelayCwd = $false
+    $PwshPyExpectRelayCwdUnc = $false
     $PwshPyExpectUv = $false
 
     foreach ($argument in $args) {
         $text = [string]$argument
         if ($PwshPyExpectRelay) { $PwshPyRelay = $text; $PwshPyExpectRelay = $false; continue }
         if ($PwshPyExpectRelayCwd) { $PwshPyRelayCwd = $text; $PwshPyExpectRelayCwd = $false; continue }
+        if ($PwshPyExpectRelayCwdUnc) { $PwshPyRelayCwdUnc = $text; $PwshPyExpectRelayCwdUnc = $false; continue }
         if ($PwshPyExpectUv) {
             $PwshPyUvPin = $text
             $PwshPyExpectUv = $false
@@ -2083,6 +2112,7 @@ try {
             '-PwshPyHelp' { $PwshPyHelp = $true; continue }
             '-PwshPyRelay' { $PwshPyExpectRelay = $true; continue }
             '-PwshPyRelayCwd' { $PwshPyExpectRelayCwd = $true; continue }
+            '-PwshPyRelayCwdUnc' { $PwshPyExpectRelayCwdUnc = $true; continue }
             '-PwshPyUv' { $PwshPyExpectUv = $true; continue }
             default { [void]$PwshPyRest.Add($text) }
         }
@@ -2098,8 +2128,8 @@ try {
     }
     # Only the relaunch writes -PwshPyRelayCwd, beside -PwshPyRelay and with a value; anywhere else it is a
     # usage error rather than a directory change of an ordinary run or an argument the script never asked for.
-    if ($PwshPyExpectRelayCwd -or ($null -ne $PwshPyRelayCwd -and -not $PwshPyRelay)) {
-        [Console]::Error.WriteLine('pwshpy: -PwshPyRelayCwd is set only by the elevated relaunch, next to -PwshPyRelay and with a directory')
+    if ($PwshPyExpectRelayCwd -or $PwshPyExpectRelayCwdUnc -or ($PwshPyRelayCwdUnc -and $null -eq $PwshPyRelayCwd) -or ($null -ne $PwshPyRelayCwd -and -not $PwshPyRelay)) {
+        [Console]::Error.WriteLine('pwshpy: -PwshPyRelayCwd and -PwshPyRelayCwdUnc are set only by the elevated relaunch, next to -PwshPyRelay and with a directory')
         exit 64
     }
     $PwshPyForward = @($PwshPyRest.ToArray())
@@ -2436,7 +2466,14 @@ try {
                 try {
                     Set-Location -LiteralPath ('Microsoft.PowerShell.Core\FileSystem::' + $PwshPyRelayCwd)
                 } catch {
-                    throw "cannot change to the caller's directory ${PwshPyRelayCwd}: $($_.Exception.Message)"
+                    $hint = ''
+                    if ($PwshPyRelayCwdUnc) {
+                        $hint = " (an elevated process does not see a drive you mapped: change to $PwshPyRelayCwdUnc or a local path first)"
+                    } elseif ($PwshPyRelayCwd.StartsWith('\\')) {
+                        # A share is reached with this process's own credentials: a mapping's /user does not carry over.
+                        $hint = " (an elevated process reaches a share with the account's own credentials, not those of a drive mapping)"
+                    }
+                    throw "cannot change to the caller's directory ${PwshPyRelayCwd}: $($_.Exception.Message)$hint"
                 }
             }
             . $PwshPyPrepare

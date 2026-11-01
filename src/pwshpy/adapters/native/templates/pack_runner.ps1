@@ -1331,15 +1331,19 @@ function Get-PwshPyPosixTreeDistrust {
     if ($LASTEXITCODE -eq 0) { $listOption = '-lden' }
     $listing = @(. (ConvertTo-PwshPyNativeCall -FilePath $find.Source -ArgumentList @($top, '!', '-type', 'l', '-exec', $ls.Source, $listOption, '{}', '+') -StderrPath '/dev/null'))
     if ($LASTEXITCODE -ne 0) { return "the entries below $Path cannot be listed" }
+    # The line names the entry: never ask entry by entry, each ls is a fork of pwsh (2864 of them took 43 s
+    # of system time on a uv-managed Python). macOS prints an entry's ACL lines below the entry's own line.
     $acl = $false
+    $entry = ''
     foreach ($line in $listing) {
         $text = [string]$line
+        $at = $text.IndexOf($top)
+        if ($at -ge 0) { $entry = $text.Substring($at) }
         if ($text -match '^\s*[0-9]+: ' -or ($text.Length -gt 10 -and $text[10] -eq [char]'+')) { $acl = $true; break }
     }
     if (-not $acl) { return '' }
-    # Which one, for the message: only now, entry by entry.
-    foreach ($entry in @(. (ConvertTo-PwshPyNativeCall -FilePath $find.Source -ArgumentList @($top, '!', '-type', 'l', '-print') -StderrPath '/dev/null'))) {
-        $listed = Get-PwshPyListing -Path ([string]$entry)
+    if ($entry) {
+        $listed = Get-PwshPyListing -Path $entry
         if ($listed -and $listed.Acl) { return "$entry carries an ACL" }
     }
     return "an entry below $Path carries an ACL"
@@ -2080,10 +2084,10 @@ try {
     $PwshPyWantElevate = $false
     $PwshPyInfo = $false
     $PwshPyHelp = $false
-    $PwshPyRelay = ''
+    $PwshPyRelay = $null
     $PwshPyRelayCwd = $null
     $PwshPyRelayCwdUnc = $null
-    $PwshPyUvPin = ''
+    $PwshPyUvPin = $null
     $PwshPyRest = New-Object System.Collections.ArrayList
     # The consumed switches an elevated relaunch must pass on again; every other one is either
     # handled before the relaunch (-PwshPyHelp, -PwshPyInfo) or set by it (-PwshPyRelay, -PwshPyRelayCwd, -PwshPyRelayCwdUnc).
@@ -2123,13 +2127,18 @@ try {
         [Console]::Error.WriteLine('pwshpy: -PwshPyUv needs the absolute path of a uv executable')
         exit 64
     }
-    if ($PwshPyUvPin -and -not (Test-PwshPyAbsolutePath -Path $PwshPyUvPin)) {
+    if ($null -ne $PwshPyUvPin -and -not (Test-PwshPyAbsolutePath -Path $PwshPyUvPin)) {
         [Console]::Error.WriteLine("pwshpy: -PwshPyUv needs an absolute path, got: $PwshPyUvPin")
+        exit 64
+    }
+    # An empty value would read as the switch left out, so a caller's empty variable would drop it silently.
+    if ($PwshPyExpectRelay -or ($null -ne $PwshPyRelay -and -not $PwshPyRelay)) {
+        [Console]::Error.WriteLine('pwshpy: -PwshPyRelay is set only by the elevated relaunch, with a path')
         exit 64
     }
     # Only the relaunch writes -PwshPyRelayCwd, beside -PwshPyRelay and with a value; anywhere else it is a
     # usage error rather than a directory change of an ordinary run or an argument the script never asked for.
-    if ($PwshPyExpectRelayCwd -or $PwshPyExpectRelayCwdUnc -or ($null -ne $PwshPyRelayCwdUnc -and $null -eq $PwshPyRelayCwd) -or ($null -ne $PwshPyRelayCwd -and -not $PwshPyRelay)) {
+    if ($PwshPyExpectRelayCwd -or $PwshPyExpectRelayCwdUnc -or ($null -ne $PwshPyRelayCwdUnc -and $null -eq $PwshPyRelayCwd) -or ($null -ne $PwshPyRelayCwd -and (-not $PwshPyRelay -or -not $PwshPyRelayCwd))) {
         [Console]::Error.WriteLine('pwshpy: -PwshPyRelayCwd and -PwshPyRelayCwdUnc are set only by the elevated relaunch, next to -PwshPyRelay and with a directory')
         exit 64
     }

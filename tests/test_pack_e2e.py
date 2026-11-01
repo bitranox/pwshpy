@@ -1615,6 +1615,25 @@ def test_the_unc_hint_switch_is_refused_outside_the_elevated_child(tmp_path: Pat
     assert "pwshpy: -PwshPyRelayCwd" in result.stderr, result.stderr
 
 
+@pytest.mark.parametrize(
+    ("switches", "named"),
+    [
+        pytest.param(["-PwshPyUv", ""], "pwshpy: -PwshPyUv needs an absolute path", id="uv"),
+        pytest.param(["-PwshPyRelay", ""], "pwshpy: -PwshPyRelay", id="relay"),
+        pytest.param(["-PwshPyRelay", "R", "-PwshPyRelayCwd", ""], "pwshpy: -PwshPyRelayCwd", id="relay-cwd"),
+    ],
+)
+def test_an_empty_switch_value_is_a_usage_error_never_a_switch_left_out(
+    tmp_path: Path, switches: list[str], named: str
+) -> None:
+    """[400]: `-PwshPyUv $pin` with an empty $pin silently dropped the pin and ran the script."""
+    manifest = pack_script(_project(tmp_path))
+    result = _run(Path(manifest.output_path), *switches, env=_isolated_cache(tmp_path))
+    assert result.returncode == 64, result.stdout + result.stderr
+    assert named in result.stderr, result.stderr
+    assert "greeting:" not in result.stdout, result.stdout
+
+
 def test_the_callers_directory_switch_is_refused_outside_the_elevated_child(tmp_path: Path) -> None:
     """[290]: -PwshPyRelayCwd belongs to the relaunch's own command line; given without -PwshPyRelay it
     is a usage error (64), never a directory change of an ordinary run nor an argument for the script."""
@@ -4545,6 +4564,70 @@ def test_an_elevated_posix_run_refuses_an_acl_below_the_managed_python_dir(tmp_p
     assert not marker.exists(), "uv ran a Python below an ACL elevated: " + marker.read_text()
     assert result.returncode == 127, result.stdout + result.stderr
     assert f"{site_packages.relative_to(planted).as_posix()} carries an ACL" in result.stderr, result.stderr
+
+
+#: The artefact's functions plus a Get-PwshPyListing that counts: every listing is one fork of pwsh.
+_TREE_ACL_PROBE = r"""
+param([string] $Artefact, [string] $Tree, [string] $Uid)
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Artefact, [ref]$tokens, [ref]$errors)
+$definitions = $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+}, $false) | ForEach-Object { $_.Extent.Text }
+. ([ScriptBlock]::Create($definitions -join "`n`n"))
+$PwshPyTrustedUids = @($Uid)
+$PwshPyOnWindows = $false
+$script:listings = 0
+Rename-Item Function:\Get-PwshPyListing Get-PwshPyRealListing
+function Get-PwshPyListing {
+    param([string] $Path)
+    $script:listings++
+    return (Get-PwshPyRealListing -Path $Path)
+}
+ConvertTo-Json -Compress -InputObject ([ordered]@{
+    why = (Get-PwshPyPosixTreeDistrust -Path $Tree); listings = $script:listings
+})
+"""
+
+
+@pytest.mark.local_only
+@pytest.mark.os_posix
+@_POSIX_ONLY
+def test_naming_the_entry_that_carries_an_acl_does_not_list_the_tree_again(tmp_path: Path) -> None:
+    """[370]: the refusal listed every entry once more to name the one: 2864 forks of pwsh, 43 s of system
+    time alone and past the suite's 300 s limit under load. The batched listing already names it."""
+    setfacl = shutil.which("setfacl")
+    if setfacl is None:
+        pytest.skip("setfacl is missing")
+    assert _PWSH is not None
+    tree = tmp_path / "tree"
+    tree.mkdir(mode=0o755)
+    for number in range(40):
+        (tree / f"file{number}").write_text("x")
+        (tree / f"file{number}").chmod(0o644)
+    marked = tree / "a dir with spaces"
+    marked.mkdir(mode=0o755)
+    done = subprocess.run([setfacl, "-m", "u:65534:r-x", str(marked)], capture_output=True, check=False)  # noqa: S603
+    if done.returncode:
+        pytest.skip("this filesystem has no POSIX ACLs")
+    manifest = pack_script(_project(tmp_path))
+    probe = tmp_path / "probe.ps1"
+    probe.write_text(_TREE_ACL_PROBE, encoding="utf-8")
+    result = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
+        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(probe), str(manifest.output_path), str(tree), str(os.getuid())],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["why"] == f"{tree}/a dir with spaces carries an ACL", report
+    assert report["listings"] <= 1, report
 
 
 @pytest.mark.local_only

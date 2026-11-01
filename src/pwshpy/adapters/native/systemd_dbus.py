@@ -54,6 +54,9 @@ UNIT_IFACE = "org.freedesktop.systemd1.Unit"
 TIMER_IFACE = "org.freedesktop.systemd1.Timer"  # LastTriggerUSec, NextElapseUSecRealtime, Unit
 SERVICE_IFACE = "org.freedesktop.systemd1.Service"  # ExecMainCode, ExecMainStatus, ExecMainStartTimestamp
 _PROPERTIES_IFACE = "org.freedesktop.DBus.Properties"
+#: systemd's D-Bus error for a unit it has not loaded: ``GetUnit`` of a stopped, absent or ill-named unit,
+#: and ``StopUnit`` of an inactive unit whose load state is an error ("Unit X not loaded."; measured on 259).
+NO_SUCH_UNIT = "org.freedesktop.systemd1.NoSuchUnit"
 
 
 class LoadState(str, Enum):
@@ -237,12 +240,14 @@ def unit_path(bus: Bus, name: str) -> str | None:
         name: The unit name, e.g. ``"sshd.service"``.
 
     Returns:
-        The unit's D-Bus object path, or None when systemd has not loaded it (a stopped
+        The unit's D-Bus object path, or None when systemd answers :data:`NO_SUCH_UNIT` (a stopped
         unit is unloaded, so ``GetUnit`` answers "not loaded" for it).
 
     Raises:
-        NativeAccessDeniedError: systemd refused the ``GetUnit`` call: a refusal says nothing
-            about the unit, so it never reads as "not loaded".
+        NativeAccessDeniedError: systemd refused the ``GetUnit`` call.
+        NativeCallError: ``GetUnit`` failed any other way (no reply from a busy systemd). Like a
+            refusal, that says nothing about the unit, so it never reads as "not loaded". Decided by
+            the D-Bus error NAME, never its message text.
 
     Example:
         >>> callable(unit_path)
@@ -250,9 +255,9 @@ def unit_path(bus: Bus, name: str) -> str | None:
     """
     try:
         (path,) = call(bus, "GetUnit", "s", (name,))
-    except NativeAccessDeniedError:
-        raise
-    except NativeCallError:
+    except NativeCallError as exc:
+        if exc.dbus_error_name != NO_SUCH_UNIT:
+            raise
         return None  # a stopped/absent unit unloads -> GetUnit reports "not loaded"
     return str(path)
 
@@ -390,6 +395,7 @@ def unit_files(bus: Bus, suffix: str) -> list[UnitFile]:
 def unit_property(bus: Bus, name: str, prop: str, default: Any, *, interface: str = UNIT_IFACE) -> Any:
     """Read one property of a loaded unit; ``default`` if the unit is not loaded or lacks it.
 
+    A ``GetUnit`` that fails for another reason than "not loaded" raises (:func:`unit_path`).
     ``interface`` picks the property's D-Bus interface: the generic ``Unit`` one by default, or
     the type-specific :data:`TIMER_IFACE` / :data:`SERVICE_IFACE` for a timer's or service's own
     properties (systemd exposes those only under the type's interface). To read several
@@ -446,7 +452,7 @@ def path_active_state(bus: Bus, path: str | None) -> ActiveState:
 
 
 def active_state(bus: Bus, name: str) -> ActiveState:
-    """The unit's ActiveState, or INACTIVE when it is not loaded."""
+    """The unit's ActiveState, or INACTIVE when it is not loaded; any other lookup failure raises (:func:`unit_path`)."""
     return path_active_state(bus, unit_path(bus, name))
 
 
@@ -455,7 +461,8 @@ def has_pending_job(bus: Bus, name: str) -> bool:
 
     The job, not the ActiveState, says whether a start/stop is still on its way: a Type=oneshot
     unit's start job ends with the unit inactive, and right after RestartUnit an active unit still
-    reads active. An unloaded unit has no job.
+    reads active. An unloaded unit has no job; a lookup that fails any other way raises
+    (:func:`unit_path`), because reading it as "no job" would end a caller's wait early.
     """
     job: Any = path_property(bus, unit_path(bus, name), "Job", (0, "/"))
     if not isinstance(job, tuple) or not job:
@@ -482,6 +489,7 @@ __all__ = [
     "ActiveState",
     "Bus",
     "MANAGER_BUS",
+    "NO_SUCH_UNIT",
     "RUNNING_ACTIVE_STATES",
     "SERVICE_IFACE",
     "TIMER_IFACE",

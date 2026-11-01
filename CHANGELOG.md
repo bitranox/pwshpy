@@ -91,6 +91,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   on every way out (`-PwshPyHelp`, `-PwshPyInfo`, a usage error, a failure, the unelevated parent of
   `-PwshPyElevate`), so an interactive 5.1 console that ran the `.ps1` keeps autoloading its own
   modules; pwsh 7 runs are unchanged.
+- Linux services: `get_service`, and the wait and read-back of `start_service`, `stop_service` and
+  `restart_service`, no longer read a `GetUnit` that fails for another reason than systemd's
+  `org.freedesktop.systemd1.NoSuchUnit` (no reply from a busy systemd, say) as a stopped unit with no
+  job: they raise `NativeCallError`, so such a stop no longer reports a unit as stopped while it may
+  still be running. A unit that really is not loaded still reads as stopped.
 - `-PwshPyElevate` from Windows PowerShell 5.1 ran the packed script in `C:\Windows\System32`
   instead of the caller's directory (Windows starts an elevated `powershell.exe` there and ignores
   the working directory); the runner now hands the directory over itself, on the elevated child's

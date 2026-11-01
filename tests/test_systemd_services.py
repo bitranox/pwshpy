@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 import pytest
-from systemd_fake_bus import ACCESS_DENIED, FakeConn, use_bus
+from systemd_fake_bus import ACCESS_DENIED, NO_REPLY, FakeConn, Message, Reply, use_bus
 
 from pwshpy.adapters.native import systemd_dbus, systemd_services
 from pwshpy.adapters.native.systemd_dbus import ActiveState, LoadState, UnitFileState
@@ -768,6 +768,64 @@ def test_a_failed_start_whose_result_read_is_refused_still_raises_the_failure(mo
         SystemdServiceController().start("wuauserv.service", timeout=3.0)
     assert not isinstance(caught.value, NativeAccessDeniedError)
     assert "Result=" not in str(caught.value)
+
+
+class _GetUnitBusyAfterFailed(FakeConn):
+    """A bus whose GetUnit gets no reply once the unit has read ``failed``: only the Result lookup meets it."""
+
+    def _get_unit(self, msg: Message) -> Reply:
+        if self.reads and self.reads[-1][1] == "ActiveState":
+            return Reply(("no reply",), error=True, error_name=NO_REPLY)
+        return super()._get_unit(msg)
+
+
+@pytest.mark.os_agnostic
+def test_a_failed_start_whose_result_lookup_gets_no_reply_still_raises_the_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[350] The GetUnit behind the Result read failing leaves the reason unnamed, as a refused read does;
+    the error raised is still that the start failed, never the lookup's own."""
+    props: dict[tuple[str, str, str], Any] = {
+        ("wuauserv.service", _UNIT, "ActiveState"): "failed",
+        ("wuauserv.service", systemd_dbus.SERVICE_IFACE, "Result"): "exit-code",
+    }
+    conn = _GetUnitBusyAfterFailed(
+        [], props, frozenset({"wuauserv.service"}), walks={"StartUnit": ["activating", "failed"]}
+    )
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeCallError, match=r"'wuauserv\.service' failed: systemd ended its job") as caught:
+        SystemdServiceController().start("wuauserv.service", timeout=3.0)
+    assert "Result=" not in str(caught.value)
+
+
+@pytest.mark.os_agnostic
+def test_a_wait_whose_job_lookup_gets_no_reply_raises_instead_of_reporting_it_settled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[350] A busy systemd is not an unloaded unit: reading it as "no job" ended the wait at once and
+    reported a stop that may still be running as finished."""
+    props = {("wuauserv.service", _UNIT, "ActiveState"): "deactivating"}
+    conn = FakeConn(
+        [],
+        props,
+        frozenset({"wuauserv.service"}),
+        lookup_errors={("GetUnit", "wuauserv.service"): NO_REPLY},
+    )
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeCallError, match="NoReply"):
+        SystemdServiceController().stop("wuauserv.service", timeout=3.0)
+    assert conn.verbs == ["StopUnit"]
+    assert conn.closed is True
+
+
+@pytest.mark.os_agnostic
+def test_a_stop_whose_unit_unloaded_under_the_wait_still_settles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[350] control: a stopped unit unloads and GetUnit answers NoSuchUnit, which is the ordinary end of
+    a stop: no job, settled, and the absent unit reads back as stopped."""
+    conn = FakeConn([], {}, frozenset({"wuauserv.service"}))
+    use_bus(monkeypatch, conn)
+    info = SystemdServiceController().stop("wuauserv.service", timeout=3.0)
+    assert info.status is ServiceState.STOPPED
 
 
 @pytest.mark.os_agnostic

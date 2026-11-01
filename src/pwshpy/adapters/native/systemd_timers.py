@@ -77,8 +77,6 @@ logger = logging.getLogger(__name__)
 
 _ROOT = "/"  # systemd timers are a flat namespace; task_path is this neutral root (no folder tree)
 _UNIT_DIR = Path("/etc/systemd/system")  # where pwshpy writes its own units (system scope, needs root)
-#: systemd's D-Bus error for a StopUnit of a unit that is not loaded and inactive ("Unit X not loaded.").
-_NO_SUCH_UNIT = "org.freedesktop.systemd1.NoSuchUnit"
 #: The [Unit] key that marks a unit file as one pwshpy wrote; its value is the pwshpy version that
 #: wrote it. systemd ignores a key starting with "X-" without a warning (systemd.unit(5); measured with
 #: systemd-analyze verify on 259, where an unknown key without the prefix warns).
@@ -1452,7 +1450,7 @@ class SystemdScheduledTaskController:
         try:
             _dbus.call(bus, "StopUnit", "ss", (unit, "replace"))
         except NativeCallError as exc:
-            if exc.dbus_error_name != _NO_SUCH_UNIT:
+            if exc.dbus_error_name != _dbus.NO_SUCH_UNIT:
                 raise
 
     @classmethod

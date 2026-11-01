@@ -66,7 +66,8 @@ FAILED = "org.freedesktop.DBus.Error.Failed"
 
 #: systemd's answer to a StopUnit for a unit whose load state is an error (not-found, bad-setting,
 #: error) and that is inactive: "Unit X not loaded." (systemd v259 src/core/dbus-unit.c,
-#: bus_unit_queue_job). A loaded, inactive unit gets a stop job instead (a success reply).
+#: bus_unit_queue_job). A loaded, inactive unit gets a stop job instead (a success reply). GetUnit of
+#: a unit that is not loaded, or of a name that is no valid unit name, answers it too (measured on 259).
 NO_SUCH_UNIT = "org.freedesktop.systemd1.NoSuchUnit"
 
 #: Failures that say nothing about whether the unit runs: no reply within the bus timeout, and a stop
@@ -135,6 +136,8 @@ class FakeConn:
     systemd refuses. All three answer with the ``AccessDenied`` refusal (:func:`denied_reply`), so
     the lookup helpers raise it; ``broken_reads`` names (unit, property) pairs whose read fails with
     an error that is NO refusal (:func:`broken_reply`), which reads as the property's default.
+    ``lookup_errors`` maps (method, unit) of a unit lookup to the D-Bus error name it fails with (no
+    refusal, e.g. :data:`NO_REPLY`).
 
     ``aliases`` maps an alias name to its unit: ``LoadUnit`` of the alias returns the unit's own
     object, whose ``Id`` is the unit's name, as on systemd 259 (measured: ``LoadUnit("sshd.service")``
@@ -176,6 +179,7 @@ class FakeConn:
         aliases: dict[str, str] | None = None,
         denied: dict[str, str] | None = None,
         verb_errors: dict[str, str] | None = None,
+        lookup_errors: dict[tuple[str, str], str] | None = None,
     ) -> None:
         self._units = units  # (name, description, active_state)
         self._props = props
@@ -198,6 +202,7 @@ class FakeConn:
         self._aliases = aliases or {}
         self._denied = denied or {}  # verb -> the D-Bus error name systemd refuses it with
         self._verb_errors = verb_errors or {}  # verb -> the D-Bus error name systemd fails it with
+        self._lookup_errors = lookup_errors or {}  # (method, unit) -> the D-Bus error name it fails with
         self.verbs: list[str] = []
         self.reads: list[tuple[str, str]] = []  # every property read as (unit, property), in order
         self.calls: list[tuple[str, tuple[Any, ...]]] = []  # each verb with its body (the unit names sent)
@@ -225,7 +230,9 @@ class FakeConn:
 
     def _get_unit(self, msg: Message) -> Reply:
         (name,) = msg.body
-        return Reply((f"/u/{name}",)) if name in self._loaded() else Reply(("not loaded",), error=True)
+        if name in self._loaded():
+            return Reply((f"/u/{name}",))
+        return Reply((f"Unit {name} not loaded.",), error=True, error_name=NO_SUCH_UNIT)
 
     def _load_unit(self, msg: Message) -> Reply:
         (name,) = msg.body
@@ -345,6 +352,9 @@ class FakeConn:
             return broken_reply()
         if msg.method in self._LOOKUPS and (msg.method, msg.body[0]) in self._denied_calls:
             return denied_reply()
+        if msg.method in self._LOOKUPS and (msg.method, msg.body[0]) in self._lookup_errors:
+            error_name = self._lookup_errors[(msg.method, msg.body[0])]
+            return Reply((f"{msg.method} failed",), error=True, error_name=error_name)
         handler = handlers.get(msg.method)
         return Reply(("unexpected",), error=True) if handler is None else handler(msg)
 

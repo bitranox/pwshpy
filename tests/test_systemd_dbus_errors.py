@@ -18,7 +18,10 @@ from typing import Any
 import pytest
 from systemd_fake_bus import (
     ACCESS_DENIED,
+    FAILED,
     INTERACTIVE_AUTHORIZATION_REQUIRED,
+    JOBS_CONFLICTING,
+    NO_REPLY,
     Address,
     FakeConn,
     FakeCore,
@@ -156,6 +159,29 @@ def test_an_absent_unit_still_reads_as_none() -> None:
     assert systemd_dbus.unit_file_state(bus, "absent.service") is None
     assert systemd_dbus.path_property(bus, "/u/x.service", "NoSuchProperty", "dflt") == "dflt"
     assert systemd_dbus.path_property(bus, None, "Description", "dflt") == "dflt"
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("name", [NO_REPLY, JOBS_CONFLICTING, FAILED])
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(systemd_dbus.unit_path, id="unit_path"),
+        pytest.param(systemd_dbus.active_state, id="active_state"),
+        pytest.param(systemd_dbus.has_pending_job, id="has_pending_job"),
+        pytest.param(lambda bus, unit: systemd_dbus.unit_property(bus, unit, "Description", "dflt"), id="unit_property"),
+    ],
+)
+def test_a_get_unit_failing_for_another_reason_never_reads_as_not_loaded(name: str, read: Callable[..., object]) -> None:
+    """[350] Only systemd's NoSuchUnit says the unit is not loaded. A GetUnit failing any other way (a
+    busy systemd that does not answer) says nothing about the unit, so it raises the plain NativeCallError
+    instead of reading as an absent, inactive unit with no job. The unit is loaded here: the default
+    answer would be a false one."""
+    bus = _box(lookup_errors={("GetUnit", "x.service"): name})
+    with pytest.raises(NativeCallError, match="GetUnit") as caught:
+        read(bus, "x.service")
+    assert not isinstance(caught.value, NativeAccessDeniedError)
+    assert caught.value.dbus_error_name == name
 
 
 @pytest.mark.os_agnostic

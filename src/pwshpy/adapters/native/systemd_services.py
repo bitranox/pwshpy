@@ -364,14 +364,15 @@ def _refuse_a_failed_unit(bus: _dbus.Bus, name: str) -> None:
     The job settling only says systemd finished with it; a unit whose process exited non-zero, was
     killed or timed out settles at ``failed``, and returning that as a plain Stopped would read as
     success. ``Service.Result`` names why (``exit-code``, ``signal``, ``timeout``, ...); an
-    unreadable one only leaves the reason unnamed, never the failure unreported.
+    unreadable one (refused, or its lookup got no reply) only leaves the reason unnamed, never the
+    failure unreported.
     """
     if _dbus.active_state(bus, name) is not ActiveState.FAILED:
         return
     try:
         result = _dbus.unit_property(bus, name, "Result", None, interface=_dbus.SERVICE_IFACE)
-    except NativeAccessDeniedError:
-        result = None  # a refused Result read leaves only the reason unnamed; the failure is still raised
+    except NativeCallError:
+        result = None  # an unreadable Result leaves only the reason unnamed; the failure is still raised
     reason = f" (Result={result})" if isinstance(result, str) and result else ""
     raise NativeCallError(f"unit {name!r} failed{reason}: systemd ended its job with the unit in the failed state.")
 

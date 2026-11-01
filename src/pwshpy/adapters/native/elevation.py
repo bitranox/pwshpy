@@ -101,6 +101,7 @@ def elevate(
         ``None`` when ``wait`` is ``False``.
 
     Raises:
+        ElevationDirectoryError: Windows, before any prompt: the directory is on a ``net use`` drive.
         ElevationDeclinedError: The UAC prompt was refused, or sudo did not grant root or
             cached no credential for the command (sudoers ``timestamp_timeout=0``).
         NativeCallError: If the elevated relaunch (``ShellExecuteEx`` / ``sudo``) fails.
@@ -114,7 +115,8 @@ def elevate(
     resolved_exe, resolved_argv = _relaunch_target(executable, argv)
     directory = cwd or str(Path.cwd())
     if sys.platform == "win32":
-        refuse_a_mapped_drive(str(Path(directory).absolute()), connection_of=_network_connection)
+        # ntpath, not Path.absolute(): below Python 3.12 that keeps a drive-relative "Z:sub" as it is.
+        refuse_a_mapped_drive(ntpath.abspath(directory), connection_of=_network_connection)
         return _shell_execute_runas(resolved_exe, resolved_argv, directory, wait=wait)
     return _sudo_relaunch(resolved_exe, resolved_argv, directory, wait=wait)
 
@@ -270,7 +272,7 @@ def refuse_a_mapped_drive(directory: str, *, connection_of: Callable[[str], str 
     Example:
         >>> refuse_a_mapped_drive("C:\\\\work", connection_of=lambda drive: None)
     """
-    drive, rest = ntpath.splitdrive(directory)
+    drive, rest = ntpath.splitdrive(directory.removeprefix("\\\\?\\").removeprefix("\\\\.\\"))
     if not drive.endswith(":"):
         return
     share = connection_of(drive)
@@ -285,11 +287,16 @@ def refuse_a_mapped_drive(directory: str, *, connection_of: Callable[[str], str 
 
 
 def _network_connection(drive: str) -> str | None:
-    """The share a drive letter is mapped to; None for a local, ``subst`` or unreadable drive."""
+    """The share a drive letter is mapped to; None when the answer is anything else.
+
+    Every failed answer reads as "not mapped", because a host with the Workstation service stopped fails
+    this call for ``C:`` too, and an elevation from a local disk must not stop there. So a remembered drive
+    that is disconnected gets the prompt, as before the refusal existed.
+    """
     win32wnet = _load("win32wnet")
     try:
         return str(win32wnet.WNetGetConnection(drive))
-    except Exception:  # pywintypes.error: not a network drive, or no answer to refuse on
+    except _load("pywintypes").error:
         return None
 
 

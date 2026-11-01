@@ -310,8 +310,33 @@ def test_elevate_windows_forwards_target_and_cwd(monkeypatch: pytest.MonkeyPatch
         return 3
 
     monkeypatch.setattr(elevation, "_shell_execute_runas", _fake_runas)
+    monkeypatch.setattr(elevation, "_network_connection", _connection_table)
     assert elevation.elevate(cwd="C:/work", wait=True) == 3
     assert captured == {"executable": "py.exe", "argv": ["-m", "pwshpy", "services"], "cwd": "C:/work", "wait": True}
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("spelled", ["Z:\\sub", "z:/sub", "\\\\?\\Z:\\sub"])
+def test_elevate_refuses_a_mapped_drive_before_any_prompt(monkeypatch: pytest.MonkeyPatch, spelled: str) -> None:
+    """[390] The refusal stands in front of the prompt, on the path ``elevate`` itself takes."""
+    monkeypatch.setattr(elevation, "is_elevated", lambda: False)
+    monkeypatch.setattr(elevation.sys, "platform", "win32")
+
+    def _fake_target(_executable: str | None, _argv: Any) -> tuple[str, list[str]]:
+        return "py.exe", []
+
+    monkeypatch.setattr(elevation, "_relaunch_target", _fake_target)
+    monkeypatch.setattr(elevation, "_network_connection", _connection_table)
+    prompted: list[str] = []
+
+    def _record_prompt(_executable: str, _argv: Any, directory: str, *, wait: bool) -> int:
+        prompted.append(directory)
+        return 0
+
+    monkeypatch.setattr(elevation, "_shell_execute_runas", _record_prompt)
+    with pytest.raises(ElevationDirectoryError, match=r"\\\\srv\\share\\sub"):
+        elevation.elevate(cwd=spelled)
+    assert prompted == []
 
 
 @pytest.mark.os_agnostic

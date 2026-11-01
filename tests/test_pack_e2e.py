@@ -3042,7 +3042,7 @@ def mapped_drive(tmp_path: Path) -> Iterator[tuple[str, Path]]:
 @_WINDOWS_ONLY
 def test_the_real_connection_of_a_mapped_drive_is_refused_naming_its_share(mapped_drive: tuple[str, Path]) -> None:
     """[390] The real WNetGetConnection answers the letter; a local drive answers nothing."""
-    connection_of = elevation._network_connection  # the one call that needs a real drive
+    connection_of = elevation._network_connection  # pyright: ignore[reportPrivateUsage] - white-box test
     letter_path, _ = mapped_drive
     assert connection_of(letter_path[:2]) is not None
     assert connection_of(os.environ["SYSTEMDRIVE"]) is None

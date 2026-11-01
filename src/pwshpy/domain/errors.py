@@ -299,6 +299,7 @@ __all__ = [
     "ConfigurationError",
     "PackError",
     "ElevationDeclinedError",
+    "ElevationDirectoryError",
     "ElevationRequiredError",
     "FeatureUnavailableError",
     "NativeAccessDeniedError",

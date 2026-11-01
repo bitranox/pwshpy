@@ -361,7 +361,7 @@ to your script untouched. The `.ps1` spells them `-PwshPy...`; the `.sh` spells 
 | `-PwshPyClean`       | `--pwshpy-clean`         | discard the cached extraction and unpack again                                                                                      |
 | `-PwshPyNoInstallUv` | `--pwshpy-no-install-uv` | fail with exit 127 instead of installing uv                                                                                         |
 | `-PwshPyElevate`     | `--pwshpy-elevate`       | relaunch elevated first (UAC on Windows, `sudo` on POSIX); exit 77 if refused                                                       |
-| `-PwshPyUv PATH`     | `--pwshpy-uv PATH`       | run the uv at this absolute path, no search and no install; exit 64 if relative                                                     |
+| `-PwshPyUv PATH`     | `--pwshpy-uv PATH`       | run the uv at this absolute path, no search and no install; exit 64 if relative or empty                                                     |
 | `-PwshPyHelp`        | `--pwshpy-help`          | show the artefact's own help                                                                                                        |
 
 Details worth knowing:

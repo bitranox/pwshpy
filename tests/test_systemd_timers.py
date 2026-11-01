@@ -2704,3 +2704,45 @@ def test_running_a_task_that_refuses_a_demand_start_raises_naming_the_refusal(mo
     with pytest.raises(NativeCallError, match="refuse manual start"):
         SystemdScheduledTaskController().run("job")
     assert conn.verbs == ["StartUnit"]
+
+
+# --- [410] a failed ActiveState read: the verbs raise (above), every listing path keeps the task ---------
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
+def test_the_listing_keeps_an_unloaded_timer_whose_active_state_read_fails(
+    monkeypatch: pytest.MonkeyPatch, strict: bool
+) -> None:
+    """One failed read on one disabled timer must not end the generator and lose every timer after it."""
+    files = frozenset({"job.timer", "next.timer"})
+    conn = _lookup_conn(
+        files=files,
+        extra_props={("next.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "inactive"},
+        file_states={"job.timer": "disabled", "next.timer": "disabled"},
+        unloaded=files,
+        broken_reads=frozenset({("job.timer", "ActiveState")}),
+    )
+    use_bus(monkeypatch, conn)
+    assert sorted(t.task_name for t in iter_timers(strict=strict)) == ["job", "next"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
+def test_a_lookup_by_name_keeps_a_timer_whose_active_state_read_fails(
+    monkeypatch: pytest.MonkeyPatch, strict: bool
+) -> None:
+    conn = _lookup_conn(broken_reads=frozenset({("job.timer", "ActiveState")}))
+    use_bus(monkeypatch, conn)
+    assert [t.task_name for t in iter_timers(task_name="job", strict=strict)] == ["job"]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
+def test_a_lookup_by_name_keeps_an_on_demand_task_whose_active_state_read_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, strict: bool
+) -> None:
+    _write_owned(tmp_path, "adhoc.service")
+    conn = _lookup_conn(fragments=tmp_path, broken_reads=frozenset({("adhoc.service", "ActiveState")}))
+    use_bus(monkeypatch, conn)
+    assert [t.task_name for t in iter_timers(task_name="adhoc", strict=strict)] == ["adhoc"]

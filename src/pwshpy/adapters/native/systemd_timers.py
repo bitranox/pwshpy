@@ -471,6 +471,17 @@ class _RunInfo(NamedTuple):
     settings: TaskSettings
 
 
+#: How a record builder reads ActiveState; the choice decides what a failed read does (:func:`_timer_task_at`).
+_ActiveStateRead = Callable[[_dbus.Bus, str | None], ActiveState]
+
+
+class _TimerHeader(NamedTuple):
+    """The two fields ``ListUnits`` already answers for a loaded timer; otherwise read from its object."""
+
+    active_state: ActiveState
+    description: str
+
+
 def _timer_run_info(bus: _dbus.Bus, timer_path: str | None, base: str) -> _RunInfo:
     """A timer task's last run, next realtime elapse, and its triggered service's result and user.
 
@@ -498,35 +509,33 @@ def _timer_run_info(bus: _dbus.Bus, timer_path: str | None, base: str) -> _RunIn
     )
 
 
-def _timer_task(
-    bus: _dbus.Bus,
-    name: str,
-    path: str | None,
-    *,
-    file_state: UnitFileState,
-    listed: _dbus.ListedUnit | None = None,
+def _timer_task_at(
+    bus: _dbus.Bus, name: str, path: str | None, *, file_state: UnitFileState, read_state: _ActiveStateRead
 ) -> ScheduledTaskInfo:
-    """The record for timer ``name`` at its resolved object ``path`` (None: unreadable, fields default).
+    """The record for timer ``name`` with no ``ListUnits`` entry: its state and description read from ``path``.
 
-    ``listed`` is the timer's ``ListUnits`` entry, whose ActiveState and Description no property
-    read repeats; without it (a verb's read-back, through ``LoadUnit``) both are read from ``path``, and a
-    failed ActiveState read raises.
+    ``read_state`` is the caller's answer to a failed read, and has no default so that a new caller has to
+    give one: a listing keeps the task (:func:`_dbus.path_active_state`), a verb raises, since the state it
+    returns is its outcome (:func:`_dbus.live_active_state`).
     """
-    if listed is None:
-        active_state = _dbus.live_active_state(bus, path)
-        description = str(_dbus.path_property(bus, path, "Description", ""))
-    else:
-        active_state, description = listed.active_state, listed.description
+    description = str(_dbus.path_property(bus, path, "Description", ""))
+    return _timer_task(bus, name, path, file_state=file_state, header=_TimerHeader(read_state(bus, path), description))
+
+
+def _timer_task(
+    bus: _dbus.Bus, name: str, path: str | None, *, file_state: UnitFileState, header: _TimerHeader
+) -> ScheduledTaskInfo:
+    """The record for timer ``name`` at its resolved object ``path`` (None: unreadable, fields default)."""
     base = name[: -len(".timer")]
     run = _timer_run_info(bus, path, base)
     enabled = timer_enabled(file_state)
     return ScheduledTaskInfo.model_construct(
         task_name=base,
         task_path=_ROOT,
-        state=timer_task_state(active_state, enabled=enabled),
+        state=timer_task_state(header.active_state, enabled=enabled),
         enabled=enabled,
         author="",
-        description=description,
+        description=header.description,
         user_id=run.user_id,
         run_level=None,  # systemd has no split token, so no run level to report
         last_run_time=run.last_run_time,
@@ -536,17 +545,17 @@ def _timer_task(
     )
 
 
-def _service_task(bus: _dbus.Bus, base: str, path: str | None) -> ScheduledTaskInfo:
-    """A verb's record for the on-demand task ``base``: its ``.service`` at object ``path`` (None: fields default).
+def _service_task(bus: _dbus.Bus, base: str, path: str | None, *, read_state: _ActiveStateRead) -> ScheduledTaskInfo:
+    """The record for the on-demand task ``base``: its ``.service`` at object ``path`` (None: fields default).
 
     A task with no ``.timer`` runs only when started, so it is always enabled, has nothing
-    scheduled, and its last run is the service's own last start. A failed ActiveState read raises.
+    scheduled, and its last run is the service's own last start. ``read_state`` as in :func:`_timer_task_at`.
     """
     result, started = _service_run(bus, path)
     return ScheduledTaskInfo.model_construct(
         task_name=base,
         task_path=_ROOT,
-        state=service_task_state(_dbus.live_active_state(bus, path)),
+        state=service_task_state(read_state(bus, path)),
         enabled=True,  # an on-demand oneshot has no schedule to disable; it can always be run
         author="",
         description=str(_dbus.path_property(bus, path, "Description", "")),
@@ -696,7 +705,8 @@ def _unless_refused(read: Callable[[], ScheduledTaskInfo], unit: str, *, strict:
 def _listed_timer(bus: _dbus.Bus, unit: _dbus.ListedUnit) -> ScheduledTaskInfo:
     """The record of a loaded timer from its ``ListUnits`` entry plus its unit file state."""
     state = _dbus.unit_file_state(bus, unit.name) or UnitFileState.EMPTY
-    return _timer_task(bus, unit.name, unit.path, file_state=state, listed=unit)
+    header = _TimerHeader(unit.active_state, unit.description)
+    return _timer_task(bus, unit.name, unit.path, file_state=state, header=header)
 
 
 def _resolve_named(bus: _dbus.Bus, unit: str) -> tuple[_dbus.LoadedUnit, UnitFileState] | None:
@@ -740,10 +750,16 @@ def _lookup_unit(bus: _dbus.Bus, base: str, *, strict: bool) -> Iterator[Schedul
         loaded, state = resolved
         if unit.endswith(".timer"):
             yield from _unless_refused(
-                partial(_timer_task, bus, unit, loaded.path, file_state=state), unit, strict=strict
+                partial(_timer_task_at, bus, unit, loaded.path, file_state=state, read_state=_dbus.path_active_state),
+                unit,
+                strict=strict,
             )
         elif _owned_service(bus, unit, loaded.path, strict=strict):
-            yield from _unless_refused(partial(_service_task, bus, base, loaded.path), unit, strict=strict)
+            yield from _unless_refused(
+                partial(_service_task, bus, base, loaded.path, read_state=_dbus.path_active_state),
+                unit,
+                strict=strict,
+            )
         return
 
 
@@ -865,7 +881,11 @@ def iter_timers(
             path = _timer_file_path(bus, name, strict=strict)
             if path is None:  # a stale or broken file (no unit behind the name), or a refused load
                 continue
-            yield from _unless_refused(partial(_timer_task, bus, name, path, file_state=state), name, strict=strict)
+            yield from _unless_refused(
+                partial(_timer_task_at, bus, name, path, file_state=state, read_state=_dbus.path_active_state),
+                name,
+                strict=strict,
+            )
     finally:
         bus.conn.close()
 
@@ -1605,13 +1625,17 @@ class SystemdScheduledTaskController:
         (enabled, not started), a disabled timer and a finished oneshot are all unloaded, and
         ``GetUnit`` would read each of their fields as a default (description and user ``""``).
         Each unit is resolved once for every property read from it. This is what a verb reports as its
-        outcome, so a lookup or state read systemd does not answer raises rather than read as a default.
+        outcome, so a failed read of the unit's lookup, unit file state or ActiveState raises rather than
+        read as a default. The other fields (a timer's service, its run history) describe the task, not
+        the outcome, and keep their defaults.
         """
         if _has_timer(bus, base):
             unit = f"{base}.timer"
             state = _dbus.live_unit_file_state(bus, unit) or UnitFileState.EMPTY
-            return _timer_task(bus, unit, _dbus.load_unit(bus, unit), file_state=state)
-        return _service_task(bus, base, _dbus.load_unit(bus, f"{base}.service"))
+            path = _dbus.load_unit(bus, unit)
+            return _timer_task_at(bus, unit, path, file_state=state, read_state=_dbus.live_active_state)
+        path = _dbus.load_unit(bus, f"{base}.service")
+        return _service_task(bus, base, path, read_state=_dbus.live_active_state)
 
 
 __all__ = [

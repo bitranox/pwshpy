@@ -232,8 +232,8 @@ catch a subclass before its parent:
   failure: on Linux branch on that, never on the message text. Catch `NativeAccessDeniedError` and
   `OperationTimeoutError` first, then `NativeCallError`. The wait and read-back of a Linux service verb (`stop_service(wait=False)` reads back too) raise
   `NativeCallError` when systemd does not answer (only `NoSuchUnit` reads as a stopped unit), while the `get_service`
-  listing keeps a field's default. `register_scheduled_task`, `enable_scheduled_task` and `disable_scheduled_task` raise the
-  same way when a read of the unit file state, the unit or its `ActiveState` fails, while the `get_scheduled_task` listing
+  listing keeps a field's default. `register_scheduled_task`, `enable_scheduled_task` and `disable_scheduled_task` raise
+  `NativeCallError` when a read of the unit file state, the unit or its `ActiveState` fails, while the `get_scheduled_task` listing
   keeps a field's default.
 - `ElevationDirectoryError` (Windows, not a `NativeCallError`): `elevate()` called from, or given, a directory on
   a `net use` drive, raised before any prompt and naming the drive's UNC path, because the elevated child would
@@ -272,7 +272,7 @@ call reported), 22 a refused value
 (`ValueError`; 87 on Windows), 64 a relative or empty `-PwshPyUv` / `--pwshpy-uv`, 70 the runner failed before the script ran
 (the elevated `.ps1` child, an elevated run that cannot return to the caller's directory, or a
 `.ps1` `-PwshPyElevate` on Linux or macOS with no home for root or no `/bin/sh`: `pwshpy: cannot
-elevate:`), or `pwshpy --elevate` refused a directory on a `net use` drive (same line), 77
+elevate:`), or `pwshpy --elevate` refused a directory on a `net use` drive (that `pwshpy: cannot elevate:` line too), 77
 elevation declined (`pwshpy --elevate`, `-PwshPyElevate`, `--pwshpy-elevate`; stderr line `pwshpy:
 elevation declined`), 110 `OperationTimeoutError`, 127 a missing or untrusted `uv` (an install
 of uv that failed, or found no curl or wget, counts as missing; run elevated, also an untrusted

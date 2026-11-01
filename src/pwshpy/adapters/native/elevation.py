@@ -289,9 +289,8 @@ def refuse_a_mapped_drive(directory: str, *, connection_of: Callable[[str], str 
 def _network_connection(drive: str) -> str | None:
     """The share a drive letter is mapped to; None when the answer is anything else.
 
-    Every failed answer reads as "not mapped", because a host with the Workstation service stopped fails
-    this call for ``C:`` too, and an elevation from a local disk must not stop there. So a remembered drive
-    that is disconnected gets the prompt, as before the refusal existed.
+    pywin32 raises on every non-zero answer, so a remembered drive that is disconnected yields no share for
+    the refusal to name; such a drive gets the prompt, as before the refusal existed.
     """
     win32wnet = _load("win32wnet")
     try:

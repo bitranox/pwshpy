@@ -39,7 +39,8 @@ On Windows `ps.elevate()` and `pwshpy --elevate` refuse a directory on a `net us
 child from that path, with or without `EnableLinkedConnections`, and from a UNC directory an elevated `cmd.exe`
 works in `C:\Windows` instead and a bare program name can run an executable on the share as administrator.
 Change to a local path, or to the UNC path if you mean it: a process already there, or an explicit UNC `cwd=`,
-goes on as before.
+goes on as before. A remembered drive that is currently disconnected is not refused, because Windows then answers
+with no share to name; it gets the prompt.
 
 A refused prompt raises `ElevationDeclinedError`, a `NativeCallError` subclass, so a caller can carry on
 unelevated after a refusal and still treat any other failure as one. On Windows that is a declined UAC
@@ -361,7 +362,7 @@ to your script untouched. The `.ps1` spells them `-PwshPy...`; the `.sh` spells 
 | `-PwshPyClean`       | `--pwshpy-clean`         | discard the cached extraction and unpack again                                                                                      |
 | `-PwshPyNoInstallUv` | `--pwshpy-no-install-uv` | fail with exit 127 instead of installing uv                                                                                         |
 | `-PwshPyElevate`     | `--pwshpy-elevate`       | relaunch elevated first (UAC on Windows, `sudo` on POSIX); exit 77 if refused                                                       |
-| `-PwshPyUv PATH`     | `--pwshpy-uv PATH`       | run the uv at this absolute path, no search and no install; exit 64 if relative or empty                                                     |
+| `-PwshPyUv PATH`     | `--pwshpy-uv PATH`       | run the uv at this absolute path, no search and no install; exit 64 if relative or empty                                            |
 | `-PwshPyHelp`        | `--pwshpy-help`          | show the artefact's own help                                                                                                        |
 
 Details worth knowing:

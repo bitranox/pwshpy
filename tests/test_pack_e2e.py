@@ -3053,6 +3053,23 @@ def test_the_real_connection_of_a_mapped_drive_is_refused_naming_its_share(mappe
 @pytest.mark.local_only
 @pytest.mark.os_windows
 @_WINDOWS_ONLY
+def test_a_drive_relative_directory_is_refused_naming_a_rooted_unc_path(
+    mapped_drive: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[390] ``Z:sub`` must name ``\\\\srv\\share\\...``, never the different share ``\\\\srv\\sharesub``."""
+    drive = mapped_drive[0][:2]
+    monkeypatch.setattr(elevation, "is_elevated", lambda: False)  # this box's session is elevated already
+    share = elevation._network_connection(drive)  # pyright: ignore[reportPrivateUsage] - white-box test
+    assert share is not None
+    rooted = share.rstrip("\\") + "\\"
+    with pytest.raises(ElevationDirectoryError) as raised:
+        elevation.elevate(cwd=f"{drive}sub")
+    assert f"as {rooted}" in str(raised.value)
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
 def test_the_relaunch_from_a_mapped_drive_keeps_the_letter_and_names_the_unc_path(
     tmp_path: Path, mapped_drive: tuple[str, Path]
 ) -> None:

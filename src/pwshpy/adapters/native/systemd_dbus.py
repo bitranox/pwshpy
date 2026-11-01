@@ -428,17 +428,42 @@ def path_property(bus: Bus, path: str | None, prop: str, default: Any, *, interf
     """
     if path is None:
         return default
-    props = bus.core.DBusAddress(path, bus_name=MANAGER_BUS, interface=_PROPERTIES_IFACE)
-    reply = bus.conn.send_and_get_reply(bus.core.new_method_call(props, "Get", "ss", (interface, prop)))
+    reply = _get_property(bus, path, prop, interface)
     if is_error(reply):
         error = reply_error(f"systemd Get {prop} of {path}", reply)
         if isinstance(error, NativeAccessDeniedError):
             raise error
         return default
+    return _property_value(reply)
+
+
+def _get_property(bus: Bus, path: str, prop: str, interface: str) -> Any:
+    """Send one ``Properties.Get`` and return the reply, an error reply included."""
+    props = bus.core.DBusAddress(path, bus_name=MANAGER_BUS, interface=_PROPERTIES_IFACE)
+    return bus.conn.send_and_get_reply(bus.core.new_method_call(props, "Get", "ss", (interface, prop)))
+
+
+def _property_value(reply: Any) -> Any:
     value: Any = reply.body[0]
     if isinstance(value, tuple):  # a D-Bus variant arrives as (signature, value); take the value
         value = cast("Any", value[-1])
     return value
+
+
+def _live_property(bus: Bus, path: str | None, prop: str, default: Any) -> Any:
+    """A ``Unit`` property a caller's decision rests on: ``default`` only for a None path, any failure raises.
+
+    Unlike :func:`path_property`, whose default suits a listing's field: a failed ``Job`` or
+    ``ActiveState`` read would end a wait early. A unit that unloads between the lookup and this read
+    costs nothing: systemd answers ``Get`` on the path of a unit it has not loaded with the defaults, no
+    error (measured on 259).
+    """
+    if path is None:
+        return default
+    reply = _get_property(bus, path, prop, UNIT_IFACE)
+    if is_error(reply):
+        raise reply_error(f"systemd Get {prop} of {path}", reply)
+    return _property_value(reply)
 
 
 def path_active_state(bus: Bus, path: str | None) -> ActiveState:
@@ -452,8 +477,8 @@ def path_active_state(bus: Bus, path: str | None) -> ActiveState:
 
 
 def active_state(bus: Bus, name: str) -> ActiveState:
-    """The unit's ActiveState, or INACTIVE when it is not loaded; any other lookup failure raises (:func:`unit_path`)."""
-    return path_active_state(bus, unit_path(bus, name))
+    """The unit's ActiveState, or INACTIVE when it is not loaded; any other failed read raises (:func:`unit_path`)."""
+    return ActiveState(str(_live_property(bus, unit_path(bus, name), "ActiveState", ActiveState.INACTIVE.value)))
 
 
 def has_pending_job(bus: Bus, name: str) -> bool:
@@ -461,10 +486,10 @@ def has_pending_job(bus: Bus, name: str) -> bool:
 
     The job, not the ActiveState, says whether a start/stop is still on its way: a Type=oneshot
     unit's start job ends with the unit inactive, and right after RestartUnit an active unit still
-    reads active. An unloaded unit has no job; a lookup that fails any other way raises
-    (:func:`unit_path`), because reading it as "no job" would end a caller's wait early.
+    reads active. An unloaded unit has no job; a lookup or read that fails any other way raises,
+    because reading it as "no job" would end a caller's wait early.
     """
-    job: Any = path_property(bus, unit_path(bus, name), "Job", (0, "/"))
+    job: Any = _live_property(bus, unit_path(bus, name), "Job", (0, "/"))
     if not isinstance(job, tuple) or not job:
         return False
     return int(cast("Any", job[0])) != 0

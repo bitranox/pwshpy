@@ -112,6 +112,10 @@ def test_a_refused_stop_raises_native_access_denied(monkeypatch: pytest.MonkeyPa
 _UNIT = systemd_dbus.UNIT_IFACE
 
 
+def _description_of(bus: systemd_dbus.Bus, unit: str) -> object:
+    return systemd_dbus.unit_property(bus, unit, "Description", "dflt")
+
+
 def _box(**knobs: Any) -> systemd_dbus.Bus:
     """A bus holding one loaded unit, ``x.service`` (Description "X", a unit file), with ``knobs``."""
     conn = FakeConn([], {("x.service", _UNIT, "Description"): "X"}, frozenset({"x.service"}), **knobs)
@@ -169,10 +173,12 @@ def test_an_absent_unit_still_reads_as_none() -> None:
         pytest.param(systemd_dbus.unit_path, id="unit_path"),
         pytest.param(systemd_dbus.active_state, id="active_state"),
         pytest.param(systemd_dbus.has_pending_job, id="has_pending_job"),
-        pytest.param(lambda bus, unit: systemd_dbus.unit_property(bus, unit, "Description", "dflt"), id="unit_property"),
+        pytest.param(_description_of, id="unit_property"),
     ],
 )
-def test_a_get_unit_failing_for_another_reason_never_reads_as_not_loaded(name: str, read: Callable[..., object]) -> None:
+def test_a_get_unit_failing_for_another_reason_never_reads_as_not_loaded(
+    name: str, read: Callable[..., object]
+) -> None:
     """[350] Only systemd's NoSuchUnit says the unit is not loaded. A GetUnit failing any other way (a
     busy systemd that does not answer) says nothing about the unit, so it raises the plain NativeCallError
     instead of reading as an absent, inactive unit with no job. The unit is loaded here: the default
@@ -182,6 +188,24 @@ def test_a_get_unit_failing_for_another_reason_never_reads_as_not_loaded(name: s
         read(bus, "x.service")
     assert not isinstance(caught.value, NativeAccessDeniedError)
     assert caught.value.dbus_error_name == name
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("read", "prop"),
+    [
+        pytest.param(systemd_dbus.has_pending_job, "Job", id="has_pending_job"),
+        pytest.param(systemd_dbus.active_state, "ActiveState", id="active_state"),
+    ],
+)
+def test_a_failed_read_a_wait_rests_on_raises_instead_of_answering_the_default(
+    read: Callable[..., object], prop: str
+) -> None:
+    """[350] The unit is found, then the read gets an error: a "no job" or "inactive" read from that would
+    end a stop's wait while the unit may still be running."""
+    bus = _box(broken_reads=frozenset({("x.service", prop)}))
+    with pytest.raises(NativeCallError, match=prop):
+        read(bus, "x.service")
 
 
 @pytest.mark.os_agnostic

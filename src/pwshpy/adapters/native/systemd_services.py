@@ -95,14 +95,9 @@ def _start_type_of(bus: _dbus.Bus, name: str) -> ServiceStartType | None:
     return None if state is None else to_start_type(state)
 
 
-def _service_at(bus: _dbus.Bus, name: str, path: str | None, *, start_type: ServiceStartType | None) -> ServiceInfo:
-    """The listing's record for service ``name`` at its object ``path``: a failed read keeps a field's default.
-
-    With no ``path`` the state is still read, through ``GetUnit``: ``LoadUnit`` reads a service whose
-    file was deleted under it as not-found, yet it can still run, and GetUnit answers for any loaded
-    unit whatever its LoadState (an absent one reads inactive).
-    """
-    active_state = _dbus.active_state(bus, name) if path is None else _dbus.path_active_state(bus, path)
+def _service_at(bus: _dbus.Bus, name: str, path: str, *, start_type: ServiceStartType | None) -> ServiceInfo:
+    """The listing's record for service ``name`` at its object ``path``: a failed read keeps a field's default."""
+    active_state = _dbus.path_active_state(bus, path)
     return _service_record(bus, name, path, active_state=active_state, start_type=start_type)
 
 
@@ -271,6 +266,10 @@ def _get_one(bus: _dbus.Bus, name: str) -> ServiceInfo:
     and ``GetUnit`` would read its description as ``""``. The unit is resolved once for every
     property read from it. A failed ActiveState read raises: the caller reports this state as the
     verb's outcome, and the default would call a running unit stopped.
+
+    With no path the state is still read, through ``GetUnit``: ``LoadUnit`` reads a service whose file
+    was deleted under it as not-found, yet it can still run, and GetUnit answers for any loaded unit
+    whatever its LoadState (an absent one reads inactive).
     """
     path = _dbus.load_unit_path(bus, name)
     active_state = _dbus.active_state(bus, name) if path is None else _dbus.live_active_state(bus, path)
@@ -287,7 +286,8 @@ class SystemdServiceController:
     ``InteractiveAuthorizationRequired``) raises :class:`~pwshpy.domain.errors.NativeAccessDeniedError`,
     any other D-Bus error reply a plain :class:`NativeCallError` naming that error. A read systemd
     refuses while the verb waits or reads the unit back raises the refusal too, never a default (no
-    job, inactive, no description). Settled means the
+    job, inactive, no description); a job or ActiveState read that fails any other way raises
+    :class:`NativeCallError`, even after systemd took the verb. Settled means the
     unit has no pending job (a stop also settles at inactive/failed). A start or restart whose unit
     settles at ``failed`` raises :class:`NativeCallError` naming systemd's ``Service.Result`` (such as
     ``exit-code``), like Start-Service on a service that fails to start; any other settled state is

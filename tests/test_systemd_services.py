@@ -819,6 +819,23 @@ def test_a_wait_whose_job_lookup_gets_no_reply_raises_instead_of_reporting_it_se
     assert conn.closed is True
 
 
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("strict", [False, True])
+def test_a_listing_keeps_the_default_of_an_active_state_read_that_fails(
+    monkeypatch: pytest.MonkeyPatch, *, strict: bool
+) -> None:
+    """[350] Only a verb's wait and read-back read strictly: one field of one unit must not end a listing."""
+    conn = FakeConn(
+        [],
+        {("good.service", _UNIT, "Description"): "Good"},
+        frozenset({"good.service"}),
+        unloaded=frozenset({"good.service"}),
+        broken_reads=frozenset({("good.service", "ActiveState")}),
+    )
+    use_bus(monkeypatch, conn)
+    assert [(s.name, s.status) for s in iter_services(strict=strict)] == [("good.service", ServiceState.STOPPED)]
+
+
 def _stop_without_wait(controller: SystemdServiceController) -> object:
     return controller.stop("wuauserv.service", wait=False)
 
@@ -848,9 +865,9 @@ def test_a_read_back_whose_active_state_read_fails_raises_instead_of_reporting_s
 
 @pytest.mark.os_agnostic
 def test_a_stop_whose_unit_unloaded_under_the_wait_still_settles(monkeypatch: pytest.MonkeyPatch) -> None:
-    """[350] control: a stopped unit unloads and GetUnit answers NoSuchUnit, which is the ordinary end of
-    a stop: no job, settled, and the absent unit reads back as stopped: LoadUnit hands out an object that
-    answers the not-found defaults (measured on 259)."""
+    """[350] control: with no unit file left, GetUnit answers NoSuchUnit: no job, settled, and the absent unit
+    reads back as stopped, because LoadUnit hands out an object that answers the not-found defaults
+    (measured on 259)."""
     conn = FakeConn([], {})
     use_bus(monkeypatch, conn)
     info = SystemdServiceController().stop("wuauserv.service", timeout=3.0)

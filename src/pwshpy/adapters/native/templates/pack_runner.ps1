@@ -1999,9 +1999,9 @@ function Invoke-PwshPyElevated {
             Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
         }
     }
-    # The child writes .out only when it starts the script, and .err earlier only to say why it
-    # stopped, so a failure with neither means it never ran a line that could tell us (refused by
-    # the execution policy, a window closed early). Its own window is gone by now, so say so
+    # The child empties .err as its first act, writes text there only to say why it stopped, and .out
+    # only when it starts the script, so a failure with no text means nothing could tell us (refused
+    # by the execution policy, a window closed early). Its own window is gone by now, so say so
     # rather than exit with a bare code and nothing on screen. The exit code is left unchanged.
     if ($process.ExitCode -ne 0 -and $null -eq $relayText['out'] -and -not $relayText['err'] -and -not $relayText['note']) {
         # A runner on a mapped drive is the case with a known cause: the child's -File cannot read it (measured).

@@ -801,7 +801,8 @@ class Ps:
             OperationTimeoutError: ``wait=True`` and the service was still not Stopped after
                 ``timeout`` seconds - the stop WAS issued; or a pending start did not end within
                 ``timeout`` seconds and the stop was NOT issued; ``.timeout`` holds the limit.
-            NativeCallError: The stop was refused or the service could not be opened.
+            NativeCallError: The stop was refused or the service could not be opened, or on Linux
+                systemd did not answer a read of the wait or read-back: the stop may have been issued.
 
         Example:
             >>> callable(build_ps().stop_service)

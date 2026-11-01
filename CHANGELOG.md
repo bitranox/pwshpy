@@ -95,8 +95,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   of those and `set_service`, no longer read a `GetUnit`, or a `Job` or `ActiveState` read, that fails
   (no reply from a busy systemd, say) as a stopped unit with no job: they raise `NativeCallError`, so
   such a stop no longer reports a unit as stopped while it may still be running. Only systemd's
-  `org.freedesktop.systemd1.NoSuchUnit` reads as not loaded. `set_service` can raise this way after its
-  change was applied. The `get_service` listing is unchanged.
+  `org.freedesktop.systemd1.NoSuchUnit` reads as not loaded. Every one of them can raise this way after
+  its change was applied. The `get_service` listing is unchanged.
 - `-PwshPyElevate` from Windows PowerShell 5.1 ran the packed script in `C:\Windows\System32`
   instead of the caller's directory (Windows starts an elevated `powershell.exe` there and ignores
   the working directory); the runner now hands the directory over itself, on the elevated child's

@@ -13,6 +13,7 @@ Contents:
     * :func:`call` - one Manager method call, mapping a D-Bus error to :class:`NativeCallError`.
     * :func:`unit_property` / :func:`active_state` - read a ``Unit`` (or, with ``interface``, a
       ``Timer`` / ``Service``) property of a loaded unit.
+    * :func:`live_active_state` - the ``ActiveState`` of a unit object, where a failed read raises.
     * :func:`path_active_state` - the ``ActiveState`` of a unit object already resolved.
     * :func:`has_pending_job` - whether a unit still has a job queued or running.
     * :func:`unit_path` / :func:`path_property` - resolve a unit's object path once, then read
@@ -476,9 +477,19 @@ def path_active_state(bus: Bus, path: str | None) -> ActiveState:
     return ActiveState(str(path_property(bus, path, "ActiveState", ActiveState.INACTIVE.value)))
 
 
+def live_active_state(bus: Bus, path: str | None) -> ActiveState:
+    """The ActiveState of the unit object ``path``, INACTIVE only for a None path; a failed read raises.
+
+    Example:
+        >>> live_active_state(None, None) is ActiveState.INACTIVE
+        True
+    """
+    return ActiveState(str(_live_property(bus, path, "ActiveState", ActiveState.INACTIVE.value)))
+
+
 def active_state(bus: Bus, name: str) -> ActiveState:
     """The unit's ActiveState, or INACTIVE when it is not loaded; any other failed read raises (:func:`unit_path`)."""
-    return ActiveState(str(_live_property(bus, unit_path(bus, name), "ActiveState", ActiveState.INACTIVE.value)))
+    return live_active_state(bus, unit_path(bus, name))
 
 
 def has_pending_job(bus: Bus, name: str) -> bool:
@@ -536,6 +547,7 @@ __all__ = [
     "load_unit_path",
     "load_unit_state",
     "open_bus",
+    "live_active_state",
     "path_active_state",
     "path_property",
     "UnitFile",

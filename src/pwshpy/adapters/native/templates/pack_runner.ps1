@@ -2005,7 +2005,8 @@ function Invoke-PwshPyElevated {
     # rather than exit with a bare code and nothing on screen. The exit code is left unchanged.
     if ($process.ExitCode -ne 0 -and $null -eq $relayText['out'] -and -not $relayText['err'] -and -not $relayText['note']) {
         # A runner on a mapped drive is the case with a known cause: the child's -File cannot read it (measured).
-        $selfUnc = Get-PwshPyMappedUncPath -Path $self
+        # An empty .err exists only if the child read the runner, so then the drive was no cause.
+        $selfUnc = if ($null -eq $relayText['err']) { Get-PwshPyMappedUncPath -Path $self } else { '' }
         if ($selfUnc) {
             [Console]::Error.WriteLine("pwshpy: the elevated child produced no output and exited $($process.ExitCode): an elevated process does not see the mapped drive of $self; run it as $selfUnc or from a local path")
         } else {
@@ -2081,7 +2082,7 @@ try {
     $PwshPyHelp = $false
     $PwshPyRelay = ''
     $PwshPyRelayCwd = $null
-    $PwshPyRelayCwdUnc = ''
+    $PwshPyRelayCwdUnc = $null
     $PwshPyUvPin = ''
     $PwshPyRest = New-Object System.Collections.ArrayList
     # The consumed switches an elevated relaunch must pass on again; every other one is either
@@ -2128,7 +2129,7 @@ try {
     }
     # Only the relaunch writes -PwshPyRelayCwd, beside -PwshPyRelay and with a value; anywhere else it is a
     # usage error rather than a directory change of an ordinary run or an argument the script never asked for.
-    if ($PwshPyExpectRelayCwd -or $PwshPyExpectRelayCwdUnc -or ($PwshPyRelayCwdUnc -and $null -eq $PwshPyRelayCwd) -or ($null -ne $PwshPyRelayCwd -and -not $PwshPyRelay)) {
+    if ($PwshPyExpectRelayCwd -or $PwshPyExpectRelayCwdUnc -or ($null -ne $PwshPyRelayCwdUnc -and $null -eq $PwshPyRelayCwd) -or ($null -ne $PwshPyRelayCwd -and -not $PwshPyRelay)) {
         [Console]::Error.WriteLine('pwshpy: -PwshPyRelayCwd and -PwshPyRelayCwdUnc are set only by the elevated relaunch, next to -PwshPyRelay and with a directory')
         exit 64
     }

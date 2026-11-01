@@ -12,6 +12,7 @@ import importlib.util
 import logging
 import sys
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -818,11 +819,39 @@ def test_a_wait_whose_job_lookup_gets_no_reply_raises_instead_of_reporting_it_se
     assert conn.closed is True
 
 
+def _stop_without_wait(controller: SystemdServiceController) -> object:
+    return controller.stop("wuauserv.service", wait=False)
+
+
+def _disable(controller: SystemdServiceController) -> object:
+    return controller.set_startup("wuauserv.service", ServiceStartType.DISABLED)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("verb", [_stop_without_wait, _disable], ids=["stop-no-wait", "set-startup"])
+def test_a_read_back_whose_active_state_read_fails_raises_instead_of_reporting_stopped(
+    monkeypatch: pytest.MonkeyPatch, verb: Callable[[SystemdServiceController], object]
+) -> None:
+    """[350] The unit is running and systemd does not answer the read: the default would report it as Stopped."""
+    props = {("wuauserv.service", _UNIT, "ActiveState"): "active"}
+    conn = FakeConn(
+        [],
+        props,
+        frozenset({"wuauserv.service"}),
+        broken_reads=frozenset({("wuauserv.service", "ActiveState")}),
+    )
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeCallError, match="ActiveState"):
+        verb(SystemdServiceController())
+    assert conn.closed is True
+
+
 @pytest.mark.os_agnostic
 def test_a_stop_whose_unit_unloaded_under_the_wait_still_settles(monkeypatch: pytest.MonkeyPatch) -> None:
     """[350] control: a stopped unit unloads and GetUnit answers NoSuchUnit, which is the ordinary end of
-    a stop: no job, settled, and the absent unit reads back as stopped."""
-    conn = FakeConn([], {}, frozenset({"wuauserv.service"}))
+    a stop: no job, settled, and the absent unit reads back as stopped: LoadUnit hands out an object that
+    answers the not-found defaults (measured on 259)."""
+    conn = FakeConn([], {})
     use_bus(monkeypatch, conn)
     info = SystemdServiceController().stop("wuauserv.service", timeout=3.0)
     assert info.status is ServiceState.STOPPED

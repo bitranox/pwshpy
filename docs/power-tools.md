@@ -394,8 +394,8 @@ Details worth knowing:
   works in `C:\Windows` instead, with only a line on stderr, and a program started by bare name can
   be an executable on the share, running as administrator. The child reaches a share with your
   account's own credentials, so a drive mapped with `net use /user:...` does not carry over: a UNC
-  directory your account cannot open stops with exit code 70, a runner there as above. Its own console window closes when it
-  exits, so everything it has to say comes back through the parent: the script's stdout and stderr
+  directory your account cannot open stops with exit code 70, and a runner there cannot start either.
+  Its own console window closes when it exits, so everything it has to say comes back through the parent: the script's stdout and stderr
   on the parent's stdout and stderr, and an error it hits before the script starts (a corrupt
   payload, a cache it cannot write, an error the `uv` installer throws) as a `pwshpy: the elevated child failed before running the
   script: <error>` line on stderr with exit code 70. A `uv` that is still missing or refused after

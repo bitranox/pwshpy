@@ -1269,6 +1269,7 @@ $functions = $functions.Replace("'runas'", "''")
 #: switch the relaunch adds) reports its working directory, its script argv and its host's own
 #: argv through the relay file. With PWSHPY_TEST_SILENT set the child exits 3 and writes nothing,
 #: which is what an elevated child refused by the execution policy looks like to the parent.
+#: PWSHPY_TEST_SILENT=after-start also leaves the empty .err a child that did start writes first.
 _RELAUNCH_BODY = r"""
 $PwshPyOnWindows = $true
 # Stands in for a mapped drive, which needs a real share: a function defined here outranks the artefact's.
@@ -1276,6 +1277,10 @@ if ($env:PWSHPY_TEST_MAPPED_TO) {
     function Get-PwshPyMappedUncPath { param([string] $Path) return $env:PWSHPY_TEST_MAPPED_TO }
 }
 $relayAt = [Array]::IndexOf([object[]]$args, '-PwshPyRelay')
+if ($relayAt -ge 0 -and $env:PWSHPY_TEST_SILENT -eq 'after-start') {
+    [IO.File]::WriteAllText($args[$relayAt + 1] + '.err', '')
+    exit 3
+}
 if ($relayAt -ge 0 -and $env:PWSHPY_TEST_SILENT) { exit 3 }
 if ($relayAt -ge 0) {
     $report = ConvertTo-Json -Compress -InputObject ([ordered]@{
@@ -1600,10 +1605,12 @@ def test_an_elevated_child_whose_callers_directory_is_gone_relays_why(tmp_path: 
     assert not marker.exists()
 
 
-def test_the_unc_hint_switch_is_refused_outside_the_elevated_child(tmp_path: Path) -> None:
-    """[330]: -PwshPyRelayCwdUnc is the relaunch's too: without -PwshPyRelayCwd it is a usage error (64)."""
+@pytest.mark.parametrize("value", ["\\\\srv\\share", ""], ids=["path", "empty"])
+def test_the_unc_hint_switch_is_refused_outside_the_elevated_child(tmp_path: Path, value: str) -> None:
+    """[330]: -PwshPyRelayCwdUnc is the relaunch's too: without -PwshPyRelayCwd it is a usage error (64),
+    an empty value included, which must not vanish and run the script."""
     manifest = pack_script(_project(tmp_path))
-    result = _run(Path(manifest.output_path), "-PwshPyRelayCwdUnc", str(tmp_path), env=_isolated_cache(tmp_path))
+    result = _run(Path(manifest.output_path), "-PwshPyRelayCwdUnc", value, env=_isolated_cache(tmp_path))
     assert result.returncode == 64, result.stdout + result.stderr
     assert "pwshpy: -PwshPyRelayCwd" in result.stderr, result.stderr
 
@@ -1648,6 +1655,18 @@ def test_a_runner_on_a_mapped_drive_the_child_cannot_read_is_named_with_its_unc_
     assert "does not see the mapped drive of " in stderr, stderr
     assert f"run it as {unc} or from a local path" in stderr, stderr
     assert "execution policy" not in stderr, stderr
+
+
+def test_a_child_that_started_is_not_blamed_on_the_mapped_drive(tmp_path: Path) -> None:
+    """[330]: on an EnableLinkedConnections host the child reads the runner, writes its empty .err and can
+    still die silently (a window closed during the uv install): that file proves the drive was no cause."""
+    work = tmp_path / "work"
+    work.mkdir()
+    env = {"PWSHPY_TEST_MAPPED_TO": "\\\\srv\\share\\tool.ps1", "PWSHPY_TEST_SILENT": "after-start"}
+    exit_code, _, stderr = _run_relaunch_stand_in(tmp_path, tmp_path / "harness", work, env=env)
+    assert exit_code == 3, stderr
+    assert "does not see the mapped drive" not in stderr, stderr
+    assert "stopped before running the script" in stderr, stderr
 
 
 @pytest.mark.parametrize(
@@ -2903,7 +2922,7 @@ def test_an_elevated_run_leaves_a_link_to_a_network_path_off_uvs_path(tmp_path: 
 
 #: Runs the artefact's Get-PwshPyMappedUncPath over each path in a JSON file, with Get-PSDrive replaced by
 #: a table of drives (a function outranks the cmdlet), so no share is needed: prints a JSON list of answers.
-_ELEVATED_PATH_PROBE = r"""
+_MAPPED_UNC_PROBE = r"""
 param([string] $Artefact, [string] $Paths)
 $ErrorActionPreference = 'Stop'
 $tokens = $null
@@ -2947,7 +2966,7 @@ def test_only_a_path_on_a_mapped_drive_has_a_unc_spelling(tmp_path: Path) -> Non
     assert _PWSH is not None
     manifest = pack_script(_project(tmp_path))
     probe = tmp_path / "probe.ps1"
-    probe.write_text(_ELEVATED_PATH_PROBE, encoding="utf-8")
+    probe.write_text(_MAPPED_UNC_PROBE, encoding="utf-8")
     paths = tmp_path / "paths.json"
     paths.write_text(json.dumps(list(cases)), encoding="utf-8")
     result = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path

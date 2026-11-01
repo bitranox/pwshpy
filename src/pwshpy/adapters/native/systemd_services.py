@@ -96,13 +96,20 @@ def _start_type_of(bus: _dbus.Bus, name: str) -> ServiceStartType | None:
 
 
 def _service_at(bus: _dbus.Bus, name: str, path: str | None, *, start_type: ServiceStartType | None) -> ServiceInfo:
-    """The record for service ``name`` read from its object ``path`` (None: unreadable, fields default).
+    """The listing's record for service ``name`` at its object ``path``: a failed read keeps a field's default.
 
     With no ``path`` the state is still read, through ``GetUnit``: ``LoadUnit`` reads a service whose
     file was deleted under it as not-found, yet it can still run, and GetUnit answers for any loaded
     unit whatever its LoadState (an absent one reads inactive).
     """
     active_state = _dbus.active_state(bus, name) if path is None else _dbus.path_active_state(bus, path)
+    return _service_record(bus, name, path, active_state=active_state, start_type=start_type)
+
+
+def _service_record(
+    bus: _dbus.Bus, name: str, path: str | None, *, active_state: ActiveState, start_type: ServiceStartType | None
+) -> ServiceInfo:
+    """The :class:`ServiceInfo` of ``name`` in ``active_state``; the description is display only, so it may default."""
     return ServiceInfo(
         name=name,
         display_name=str(_dbus.path_property(bus, path, "Description", "")),
@@ -262,9 +269,12 @@ def _get_one(bus: _dbus.Bus, name: str) -> ServiceInfo:
 
     Resolved with ``LoadUnit``, never ``GetUnit``: a stopped or just-disabled service is unloaded,
     and ``GetUnit`` would read its description as ``""``. The unit is resolved once for every
-    property read from it.
+    property read from it. A failed ActiveState read raises: the caller reports this state as the
+    verb's outcome, and the default would call a running unit stopped.
     """
-    return _service_at(bus, name, _dbus.load_unit_path(bus, name), start_type=_start_type_of(bus, name))
+    path = _dbus.load_unit_path(bus, name)
+    active_state = _dbus.active_state(bus, name) if path is None else _dbus.live_active_state(bus, path)
+    return _service_record(bus, name, path, active_state=active_state, start_type=_start_type_of(bus, name))
 
 
 class SystemdServiceController:

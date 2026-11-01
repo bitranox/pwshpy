@@ -69,6 +69,8 @@ FAILED = "org.freedesktop.DBus.Error.Failed"
 #: bus_unit_queue_job). A loaded, inactive unit gets a stop job instead (a success reply). GetUnit of
 #: a unit that is not loaded, or of a name that is no valid unit name, answers it too (measured on 259).
 NO_SUCH_UNIT = "org.freedesktop.systemd1.NoSuchUnit"
+FILE_NOT_FOUND = "org.freedesktop.DBus.Error.FileNotFound"
+INVALID_ARGS = "org.freedesktop.DBus.Error.InvalidArgs"
 
 #: Failures that say nothing about whether the unit runs: no reply within the bus timeout, and a stop
 #: job systemd could not queue beside the unit's pending jobs.
@@ -251,7 +253,7 @@ class FakeConn:
         (name,) = msg.body
         state = self._file_states.get(name, "enabled")
         known = name in self._unit_files and name not in self._pending
-        return Reply((state,)) if known else Reply(("no unit file",), error=True)
+        return Reply((state,)) if known else Reply(("no unit file",), error=True, error_name=FILE_NOT_FOUND)
 
     def _verb(self, msg: Message) -> Reply:
         self.verbs.append(msg.method)
@@ -322,6 +324,8 @@ class FakeConn:
         if key in self._props:
             return Reply((("t", self._props[key]),))
         derived = self._derived(name, prop)
+        if derived is None and prop == "ActiveState":
+            derived = "inactive"  # every real unit object answers this one, a test's props or not
         return Reply(("no prop",), error=True) if derived is None else Reply((("t", derived),))
 
     def _derived(self, name: str, prop: str) -> Any:
@@ -373,6 +377,8 @@ __all__ = [
     "FAILED",
     "INTERACTIVE_AUTHORIZATION_REQUIRED",
     "JOBS_CONFLICTING",
+    "FILE_NOT_FOUND",
+    "INVALID_ARGS",
     "NO_REPLY",
     "NO_SUCH_UNIT",
     "Address",

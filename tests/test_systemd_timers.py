@@ -842,6 +842,73 @@ def test_enable_a_boot_timer_does_not_start_it(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("verb", ["enable", "disable"])
+def test_a_busy_systemd_does_not_turn_a_timer_into_an_on_demand_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, verb: str
+) -> None:
+    """[380] No answer about the timer's file is no answer: read as "no timer" the verb said the task is
+    on-demand, which is false, instead of naming what failed."""
+    conn = FakeConn(
+        [],
+        _enable_props("boot", [("OnBootUSec", 600_000_000, 0)]),
+        frozenset({"boot.timer"}),
+        lookup_errors={("GetUnitFileState", "boot.timer"): NO_REPLY},
+    )
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)  # filesystem edge: no such file here either
+    with pytest.raises(NativeCallError, match="NoReply"):
+        getattr(SystemdScheduledTaskController(), verb)("boot")
+    assert conn.verbs == []
+
+
+@pytest.mark.os_agnostic
+def test_a_timers_read_back_whose_active_state_read_fails_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[410] The state a verb returns is its outcome: the default would report a failed read as READY."""
+    conn = FakeConn(
+        [],
+        _enable_props("boot", [("OnBootUSec", 600_000_000, 0)]),
+        frozenset({"boot.timer"}),
+        broken_reads=frozenset({("boot.timer", "ActiveState")}),
+    )
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeCallError, match="ActiveState"):
+        SystemdScheduledTaskController().enable("boot")
+
+
+@pytest.mark.os_agnostic
+def test_an_on_demand_read_back_whose_active_state_read_fails_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[410] A running on-demand task with a failed read must not read as READY."""
+    conn = FakeConn(
+        [],
+        {**_service_props("adhoc.service", code=1, status=0, started=_T0), ("adhoc.service", systemd_dbus.UNIT_IFACE, "ActiveState"): "active"},
+        unloaded=frozenset({"adhoc.service"}),
+        pending=frozenset({"adhoc.service"}),
+        broken_reads=frozenset({("adhoc.service", "ActiveState")}),
+    )
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)  # filesystem edge: never write /etc here
+    with pytest.raises(NativeCallError, match="ActiveState"):
+        SystemdScheduledTaskController().register("adhoc", program="/bin/true")
+
+
+@pytest.mark.os_agnostic
+def test_a_read_back_whose_load_gets_no_reply_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[410] A LoadUnit with no answer gave no path: the fields' defaults would read as a stopped task."""
+    conn = FakeConn(
+        [],
+        _enable_props("boot", [("OnBootUSec", 600_000_000, 0)]),
+        frozenset({"boot.timer"}),
+        lookup_errors={("LoadUnit", "boot.timer"): NO_REPLY},
+    )
+    use_bus(monkeypatch, conn)
+    with pytest.raises(NativeCallError, match="NoReply"):
+        SystemdScheduledTaskController().enable("boot")
+    assert conn.verbs == ["EnableUnitFiles", "Reload"]
+
+
+@pytest.mark.os_agnostic
 def test_enable_a_calendar_timer_starts_it(monkeypatch: pytest.MonkeyPatch) -> None:
     """A timer with no boot-relative part is enabled AND started, armed from now on."""
     conn = FakeConn([], _enable_props("cal", [("OnUnitActiveUSec", 86_400_000_000, 0)]), frozenset({"cal.timer"}))

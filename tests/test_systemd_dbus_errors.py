@@ -20,6 +20,7 @@ from systemd_fake_bus import (
     ACCESS_DENIED,
     FAILED,
     INTERACTIVE_AUTHORIZATION_REQUIRED,
+    INVALID_ARGS,
     JOBS_CONFLICTING,
     NO_REPLY,
     Address,
@@ -206,6 +207,23 @@ def test_a_failed_read_a_wait_rests_on_raises_instead_of_answering_the_default(
     bus = _box(broken_reads=frozenset({("x.service", prop)}))
     with pytest.raises(NativeCallError, match=prop):
         read(bus, "x.service")
+
+
+@pytest.mark.os_agnostic
+def test_a_live_file_state_answers_none_only_when_systemd_says_there_is_no_file() -> None:
+    """[380] Measured on 259: no file (a transient unit too) is FileNotFound, a bad name InvalidArgs."""
+    assert systemd_dbus.live_unit_file_state(_box(), "absent.timer") is None
+    bad_name = {("GetUnitFileState", "bad!name"): INVALID_ARGS}
+    assert systemd_dbus.live_unit_file_state(_box(lookup_errors=bad_name), "bad!name") is None
+    assert systemd_dbus.live_unit_file_state(_box(), "x.service") is systemd_dbus.UnitFileState.ENABLED
+
+
+@pytest.mark.os_agnostic
+def test_a_live_file_state_raises_when_systemd_does_not_answer() -> None:
+    """[380] A busy systemd is not a missing file: "no timer" from that turns a task into an on-demand one."""
+    bus = _box(lookup_errors={("GetUnitFileState", "x.timer"): NO_REPLY})
+    with pytest.raises(NativeCallError, match="NoReply"):
+        systemd_dbus.live_unit_file_state(bus, "x.timer")
 
 
 @pytest.mark.os_agnostic

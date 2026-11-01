@@ -506,6 +506,10 @@ def has_pending_job(bus: Bus, name: str) -> bool:
     return int(cast("Any", job[0])) != 0
 
 
+#: What GetUnitFileState answers when a name has no unit file (see :func:`live_unit_file_state`).
+_NO_UNIT_FILE = frozenset({"org.freedesktop.DBus.Error.FileNotFound", "org.freedesktop.DBus.Error.InvalidArgs"})
+
+
 def unit_file_state(bus: Bus, name: str) -> UnitFileState | None:
     """GetUnitFileState for one unit; ``None`` for a transient unit that has no unit file.
 
@@ -518,6 +522,25 @@ def unit_file_state(bus: Bus, name: str) -> UnitFileState | None:
         raise
     except NativeCallError:
         return None
+    return UnitFileState(str(state))
+
+
+def live_unit_file_state(bus: Bus, name: str) -> UnitFileState | None:
+    """GetUnitFileState where a decision rests on it: ``None`` only when systemd says there is no file.
+
+    Unlike :func:`unit_file_state`, whose ``None`` suits a listing's field: a busy systemd read as "no file"
+    turns a timer into an on-demand task. systemd answers FileNotFound for a name with no unit file, a
+    transient unit included, and InvalidArgs for an invalid name (both measured on 259).
+
+    Raises:
+        NativeCallError: Any other failure, a refusal as :class:`NativeAccessDeniedError`.
+    """
+    try:
+        (state,) = call(bus, "GetUnitFileState", "s", (name,))
+    except NativeCallError as exc:
+        if exc.dbus_error_name in _NO_UNIT_FILE:
+            return None
+        raise
     return UnitFileState(str(state))
 
 
@@ -548,6 +571,7 @@ __all__ = [
     "load_unit_state",
     "open_bus",
     "live_active_state",
+    "live_unit_file_state",
     "path_active_state",
     "path_property",
     "UnitFile",

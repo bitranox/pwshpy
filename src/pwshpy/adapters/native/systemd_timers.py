@@ -509,10 +509,11 @@ def _timer_task(
     """The record for timer ``name`` at its resolved object ``path`` (None: unreadable, fields default).
 
     ``listed`` is the timer's ``ListUnits`` entry, whose ActiveState and Description no property
-    read repeats; without it (a unit read through ``LoadUnit``) both are read from ``path``.
+    read repeats; without it (a verb's read-back, through ``LoadUnit``) both are read from ``path``, and a
+    failed ActiveState read raises.
     """
     if listed is None:
-        active_state = _dbus.path_active_state(bus, path)
+        active_state = _dbus.live_active_state(bus, path)
         description = str(_dbus.path_property(bus, path, "Description", ""))
     else:
         active_state, description = listed.active_state, listed.description
@@ -536,16 +537,16 @@ def _timer_task(
 
 
 def _service_task(bus: _dbus.Bus, base: str, path: str | None) -> ScheduledTaskInfo:
-    """The record for the on-demand task ``base``: its ``.service`` at object ``path`` (None: fields default).
+    """A verb's record for the on-demand task ``base``: its ``.service`` at object ``path`` (None: fields default).
 
     A task with no ``.timer`` runs only when started, so it is always enabled, has nothing
-    scheduled, and its last run is the service's own last start.
+    scheduled, and its last run is the service's own last start. A failed ActiveState read raises.
     """
     result, started = _service_run(bus, path)
     return ScheduledTaskInfo.model_construct(
         task_name=base,
         task_path=_ROOT,
-        state=service_task_state(_dbus.path_active_state(bus, path)),
+        state=service_task_state(_dbus.live_active_state(bus, path)),
         enabled=True,  # an on-demand oneshot has no schedule to disable; it can always be run
         author="",
         description=str(_dbus.path_property(bus, path, "Description", "")),
@@ -1319,7 +1320,7 @@ def _require_free_or_owned(bus: _dbus.Bus, unit: str) -> None:
 
 def _has_timer(bus: _dbus.Bus, base: str) -> bool:
     """Whether ``base`` names a scheduled (``.timer``) task rather than a plain on-demand service."""
-    return _dbus.unit_file_state(bus, f"{base}.timer") is not None or (_UNIT_DIR / f"{base}.timer").exists()
+    return _dbus.live_unit_file_state(bus, f"{base}.timer") is not None or (_UNIT_DIR / f"{base}.timer").exists()
 
 
 class _ScheduleVerb(str, Enum):
@@ -1577,7 +1578,7 @@ class SystemdScheduledTaskController:
             raise NativeCallError(
                 f"task {base!r} is on-demand (no .timer); nothing to {verb.value} - run it directly, or unregister it."
             )
-        if _dbus.unit_file_state(bus, f"{base}.timer") is UnitFileState.STATIC:
+        if _dbus.live_unit_file_state(bus, f"{base}.timer") is UnitFileState.STATIC:
             # What does work differs by verb: a static timer runs whenever the unit that wants it starts,
             # so only that unit (or an [Install] section) arms it, and only a mask keeps it from running.
             remedy = (
@@ -1603,13 +1604,14 @@ class SystemdScheduledTaskController:
         Units are resolved with ``LoadUnit``, never ``GetUnit``: a just-registered boot timer
         (enabled, not started), a disabled timer and a finished oneshot are all unloaded, and
         ``GetUnit`` would read each of their fields as a default (description and user ``""``).
-        Each unit is resolved once for every property read from it.
+        Each unit is resolved once for every property read from it. This is what a verb reports as its
+        outcome, so a lookup or state read systemd does not answer raises rather than read as a default.
         """
         if _has_timer(bus, base):
             unit = f"{base}.timer"
-            state = _dbus.unit_file_state(bus, unit) or UnitFileState.EMPTY
-            return _timer_task(bus, unit, _dbus.load_unit_path(bus, unit), file_state=state)
-        return _service_task(bus, base, _dbus.load_unit_path(bus, f"{base}.service"))
+            state = _dbus.live_unit_file_state(bus, unit) or UnitFileState.EMPTY
+            return _timer_task(bus, unit, _dbus.load_unit(bus, unit), file_state=state)
+        return _service_task(bus, base, _dbus.load_unit(bus, f"{base}.service"))
 
 
 __all__ = [

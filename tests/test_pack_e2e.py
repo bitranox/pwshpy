@@ -2911,7 +2911,8 @@ $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Artefact, [ref]$tokens, [ref]$errors)
 $found = $ast.Find({
     param($node)
-    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-PwshPyMappedUncPath'
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Get-PwshPyMappedUncPath'
 }, $false)
 . ([ScriptBlock]::Create($found.Extent.Text))
 function Get-PSDrive {

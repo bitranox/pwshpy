@@ -628,6 +628,8 @@ Every failure across both backends raises a subclass of `PwshPyError`, all expor
     such as a 304's, gives None, where `Invoke-RestMethod` returns the body text). `download_file`
     always raises for one. A redirect to a scheme other than `http`/`https` raises before anything
     connects to it, whatever `skip_http_error_check` says.
+  - `ElevationDirectoryError` (not a `NativeCallError`) - on Windows, before any prompt: `ps.elevate()` was
+    called from, or given, a directory on a `net use` drive. The message names the drive's UNC path.
   - `ElevationDeclinedError` - the UAC prompt or sudo's password was refused by `ps.elevate()`,
     or sudo granted root but cached no credential for the command (sudoers `timestamp_timeout=0`):
     on POSIX `ps.elevate()` asks once with `sudo -v`, checks with `sudo -n -v` and runs the command

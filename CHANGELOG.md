@@ -8,6 +8,22 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Changed
 
+- On Windows `ps.elevate()` and `pwshpy --elevate` refuse a directory on a `net use` drive, before any
+  prompt: `ElevationDirectoryError`, exit 70 from the CLI, a `pwshpy: cannot elevate:` line naming the
+  drive's UNC path. They used to start the elevated child in that UNC path without saying so (with and
+  without `EnableLinkedConnections`), where an elevated `cmd.exe` works in `C:\Windows` and a bare program
+  name can run from the share. A caller who ran this way changes to a local path or to the UNC path; an
+  explicit UNC `cwd=` and a process already on a UNC path go on as before.
+- Linux scheduled tasks: `register_scheduled_task`, `enable_scheduled_task` and `disable_scheduled_task`
+  raise `NativeCallError` when a read of the unit file state, the unit or its `ActiveState` fails (no reply
+  from a busy systemd, say). Such a failure used to tell `enable` and `disable` that a timer was an
+  on-demand task, and made the returned record report a task as ready. Only `DBus.Error.FileNotFound` and
+  `DBus.Error.InvalidArgs` read as no unit file. The `get_scheduled_task` listing is unchanged.
+- A packed `.ps1` refuses an empty `-PwshPyUv`, `-PwshPyRelay` or `-PwshPyRelayCwd` with exit 64: an empty
+  `-PwshPyUv` used to behave as if the switch had been left out.
+- An elevated packed `.ps1` on Linux or macOS names an ACL it refuses from the listing it already made. A
+  large tree took most of a minute to refuse, with one `ls` per entry.
+
 - The web verbs open each request through their own opener (redirects to http/https only), so an
   opener a library caller installed with `urllib.request.install_opener` is no longer used; set
   proxies through the environment (`HTTP_PROXY`/`HTTPS_PROXY`) instead.

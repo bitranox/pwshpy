@@ -882,7 +882,10 @@ def test_an_on_demand_read_back_whose_active_state_read_fails_raises(
     """[410] A running on-demand task with a failed read must not read as READY."""
     conn = FakeConn(
         [],
-        {**_service_props("adhoc.service", code=1, status=0, started=_T0), ("adhoc.service", systemd_dbus.UNIT_IFACE, "ActiveState"): "active"},
+        {
+            **_service_props("adhoc.service", code=1, status=0, started=_T0),
+            ("adhoc.service", systemd_dbus.UNIT_IFACE, "ActiveState"): "active",
+        },
         unloaded=frozenset({"adhoc.service"}),
         pending=frozenset({"adhoc.service"}),
         broken_reads=frozenset({("adhoc.service", "ActiveState")}),

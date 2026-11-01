@@ -15,7 +15,7 @@ from click.testing import CliRunner
 from fake_services import services_with_ps
 
 from pwshpy.adapters.cli.root import cli
-from pwshpy.domain.errors import ElevationDeclinedError
+from pwshpy.domain.errors import ElevationDeclinedError, ElevationDirectoryError
 
 
 class _FakePs:
@@ -97,6 +97,15 @@ def test_elevate_flag_is_noop_when_already_elevated() -> None:
     assert result.exit_code == 0
     assert fake.elevate_calls == []
     assert "elevated" in result.output
+
+
+@pytest.mark.os_agnostic
+def test_elevate_flag_exits_70_from_a_mapped_drive() -> None:
+    """[390] The refusal keeps the exit code and the line of the packed runner's own cannot-elevate failure."""
+    fake = _FakePs(elevated=False, raise_on_elevate=ElevationDirectoryError("change to \\\\srv\\share"))
+    result = CliRunner().invoke(cli, ["--elevate", "is-elevated"], obj=_factory(fake))
+    assert result.exit_code == 70
+    assert "pwshpy: cannot elevate: change to \\\\srv\\share" in result.output
 
 
 @pytest.mark.os_agnostic

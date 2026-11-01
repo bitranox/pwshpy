@@ -49,6 +49,7 @@ from .domain.enums import (
 from .domain.errors import (
     ConfigurationError,
     ElevationDeclinedError,
+    ElevationDirectoryError,
     ElevationRequiredError,
     FeatureUnavailableError,
     NativeAccessDeniedError,
@@ -183,6 +184,7 @@ __all__ = [
     "NativeAccessDeniedError",
     "NativeCallError",
     "ElevationDeclinedError",
+    "ElevationDirectoryError",
     "OperationTimeoutError",
     "PowerShellError",
     "FeatureUnavailableError",

@@ -37,6 +37,8 @@ class ExitCode(IntEnum):
         <ExitCode.SUCCESS: 0>
         >>> int(ExitCode.SMTP_FAILURE)
         69
+        >>> int(ExitCode.ELEVATION_DIRECTORY)
+        70
         >>> int(ExitCode.ELEVATION_DECLINED)
         77
     """
@@ -47,6 +49,7 @@ class ExitCode(IntEnum):
     PERMISSION_DENIED = 13
     INVALID_ARGUMENT = 22
     SMTP_FAILURE = 69
+    ELEVATION_DIRECTORY = 70
     ELEVATION_DECLINED = 77
     CONFIG_ERROR = 78
     TIMEOUT = 110

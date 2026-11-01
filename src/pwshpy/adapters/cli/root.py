@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import rich_click as click
 
 from pwshpy import __init__conf__
-from pwshpy.domain.errors import ElevationDeclinedError
+from pwshpy.domain.errors import ElevationDeclinedError, ElevationDirectoryError
 
 from .config_load import load_config, start_logging
 from .constants import CLICK_CONTEXT_SETTINGS
@@ -128,6 +128,10 @@ def cli(
             # itself exits 77, which no exit code alone can tell apart.
             click.echo(f"pwshpy: elevation declined: {exc}", err=True)
             ctx.exit(ExitCode.ELEVATION_DECLINED)
+        except ElevationDirectoryError as exc:
+            # The line and code of the packed runner's own failure to elevate.
+            click.echo(f"pwshpy: cannot elevate: {exc}", err=True)
+            ctx.exit(ExitCode.ELEVATION_DIRECTORY)
         ctx.exit(exit_code if exit_code is not None else 0)
 
     if ctx.invoked_subcommand is None:

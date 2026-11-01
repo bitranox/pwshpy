@@ -34,6 +34,13 @@ never asked to prompt a second time: after the prompt, `sudo -n -v` checks that 
 credential, and a setup that caches nothing (`timestamp_timeout=0` in sudoers) is declined like a
 refused prompt (`ElevationDeclinedError`, exit 77 from `pwshpy --elevate`) instead of asking again.
 
+On Windows `ps.elevate()` and `pwshpy --elevate` refuse a directory on a `net use` drive before any prompt
+(`ElevationDirectoryError`, exit 70 from the CLI), naming the drive's UNC path. Windows would run the elevated
+child from that path, with or without `EnableLinkedConnections`, and from a UNC directory an elevated `cmd.exe`
+works in `C:\Windows` instead and a bare program name can run an executable on the share as administrator.
+Change to a local path, or to the UNC path if you mean it: a process already there, or an explicit UNC `cwd=`,
+goes on as before.
+
 A refused prompt raises `ElevationDeclinedError`, a `NativeCallError` subclass, so a caller can carry on
 unelevated after a refusal and still treat any other failure as one. On Windows that is a declined UAC
 prompt; on Linux and macOS it is any `sudo -v` that does not grant root - a wrong password, an

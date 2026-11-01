@@ -83,7 +83,9 @@ from elevation_doubles import (
     write_recording_uv,
 )
 
+from pwshpy.adapters.native import elevation
 from pwshpy.adapters.native.packer import pack_script, unpack_script
+from pwshpy.domain.errors import ElevationDirectoryError
 from pwshpy.domain.packing import CALLER_ENV_VAR, PackOptions
 
 if sys.platform != "win32":
@@ -3038,6 +3040,19 @@ def mapped_drive(tmp_path: Path) -> Iterator[tuple[str, Path]]:
 @pytest.mark.local_only
 @pytest.mark.os_windows
 @_WINDOWS_ONLY
+def test_the_real_connection_of_a_mapped_drive_is_refused_naming_its_share(mapped_drive: tuple[str, Path]) -> None:
+    """[390] The real WNetGetConnection answers the letter; a local drive answers nothing."""
+    connection_of = elevation._network_connection  # the one call that needs a real drive
+    letter_path, _ = mapped_drive
+    assert connection_of(letter_path[:2]) is not None
+    assert connection_of(os.environ["SYSTEMDRIVE"]) is None
+    with pytest.raises(ElevationDirectoryError, match="mapped network drive"):
+        elevation.refuse_a_mapped_drive(letter_path, connection_of=connection_of)
+
+
+@pytest.mark.local_only
+@pytest.mark.os_windows
+@_WINDOWS_ONLY
 def test_the_relaunch_from_a_mapped_drive_keeps_the_letter_and_names_the_unc_path(
     tmp_path: Path, mapped_drive: tuple[str, Path]
 ) -> None:
@@ -4617,7 +4632,16 @@ def test_naming_the_entry_that_carries_an_acl_does_not_list_the_tree_again(tmp_p
     probe = tmp_path / "probe.ps1"
     probe.write_text(_TREE_ACL_PROBE, encoding="utf-8")
     result = subprocess.run(  # noqa: S603 - fixed argv from a resolved interpreter path
-        [_PWSH, "-NoProfile", "-NonInteractive", "-File", str(probe), str(manifest.output_path), str(tree), str(os.getuid())],
+        [
+            _PWSH,
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(probe),
+            str(manifest.output_path),
+            str(tree),
+            str(os.getuid()),
+        ],
         capture_output=True,
         encoding="utf-8",
         errors="replace",

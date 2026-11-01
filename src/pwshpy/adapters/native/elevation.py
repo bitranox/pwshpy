@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import errno
 import importlib
+import ntpath
 import os
 import shutil
 import subprocess  # nosec B404 - argv quoting (list2cmdline) + the sudo re-exec on POSIX; always a fixed argv, no shell
@@ -33,7 +34,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from ...domain.errors import ElevationDeclinedError, PlatformUnsupportedError
+from ...domain.errors import ElevationDeclinedError, ElevationDirectoryError, PlatformUnsupportedError
 from .marshal import native_error
 
 
@@ -113,6 +114,7 @@ def elevate(
     resolved_exe, resolved_argv = _relaunch_target(executable, argv)
     directory = cwd or str(Path.cwd())
     if sys.platform == "win32":
+        refuse_a_mapped_drive(str(Path(directory).absolute()), connection_of=_network_connection)
         return _shell_execute_runas(resolved_exe, resolved_argv, directory, wait=wait)
     return _sudo_relaunch(resolved_exe, resolved_argv, directory, wait=wait)
 
@@ -250,6 +252,45 @@ def _relaunch_target(executable: str | None, argv: Sequence[str] | None) -> tupl
         package = Path(argv0).parent.name
         return sys.executable, ["-m", package, *tail]
     return sys.executable, list(sys.argv)
+
+
+def refuse_a_mapped_drive(directory: str, *, connection_of: Callable[[str], str | None]) -> None:
+    """Refuse an elevation that would start in the UNC path of ``directory``'s ``net use`` drive.
+
+    ShellExecute hands the elevated child that path (measured, with and without
+    ``EnableLinkedConnections``), so nothing the caller did would tell them they left the drive.
+
+    Args:
+        directory: The absolute directory the child would start in.
+        connection_of: Answers a drive (``"Z:"``) with its share, or None when it is not a network drive.
+
+    Raises:
+        ElevationDirectoryError: ``directory`` is on a network drive.
+
+    Example:
+        >>> refuse_a_mapped_drive("C:\\\\work", connection_of=lambda drive: None)
+    """
+    drive, rest = ntpath.splitdrive(directory)
+    if not drive.endswith(":"):
+        return
+    share = connection_of(drive)
+    if share is None:
+        return
+    unc = share.rstrip("\\") + rest
+    raise ElevationDirectoryError(
+        f"{directory} is on a mapped network drive, which an elevated process runs from as {unc}: there an "
+        "elevated cmd.exe works in C:\\Windows and a bare program name can run from the share. Change to a "
+        f"local path, or to {unc} if you mean it."
+    )
+
+
+def _network_connection(drive: str) -> str | None:
+    """The share a drive letter is mapped to; None for a local, ``subst`` or unreadable drive."""
+    win32wnet = _load("win32wnet")
+    try:
+        return str(win32wnet.WNetGetConnection(drive))
+    except Exception:  # pywintypes.error: not a network drive, or no answer to refuse on
+        return None
 
 
 #: ShellExecuteEx's error when the person refuses the UAC prompt (winerror.h).

@@ -19,6 +19,7 @@ import pytest
 from elevation_doubles import second_prompts, write_fake_sudo
 
 from pwshpy.adapters.native import elevation
+from pwshpy.domain.errors import ElevationDirectoryError
 
 
 @pytest.mark.os_agnostic
@@ -497,3 +498,34 @@ def test_shell_execute_really_starts_a_process_and_returns_its_exit_code() -> No
     shell_execute = elevation._shell_execute  # pyright: ignore[reportPrivateUsage] - white-box test
 
     assert shell_execute(launch, wait=True, verb="open") == 7
+
+
+def _connection_table(drive: str) -> str | None:
+    """The drives of a host with one share mapped: what ``WNetGetConnection`` answers."""
+    return {"Z:": "\\\\srv\\share", "Y:": "\\\\srv\\share\\deep\\"}.get(drive.upper())
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("directory", "unc"),
+    [
+        pytest.param("Z:\\sub dir", "\\\\srv\\share\\sub dir", id="mapped"),
+        pytest.param("z:\\sub", "\\\\srv\\share\\sub", id="lower-case"),
+        pytest.param("Z:\\", "\\\\srv\\share\\", id="drive-root"),
+        pytest.param("Y:\\sub", "\\\\srv\\share\\deep\\sub", id="root-with-a-slash"),
+    ],
+)
+def test_a_directory_on_a_mapped_drive_is_refused_naming_its_unc_path(directory: str, unc: str) -> None:
+    """[390]: ShellExecute moves the elevated child to the share (measured, EnableLinkedConnections or not), where an
+    elevated cmd.exe works in C:\\Windows and a bare name can run from the share. Refused before any prompt."""
+    with pytest.raises(ElevationDirectoryError) as raised:
+        elevation.refuse_a_mapped_drive(directory, connection_of=_connection_table)
+    assert unc in str(raised.value)
+    assert directory in str(raised.value)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("directory", ["C:\\work", "\\\\srv\\share\\sub", "/opt/work"], ids=["local", "unc", "posix"])
+def test_a_directory_off_a_mapped_drive_passes(directory: str) -> None:
+    """[390]: a local directory, and a UNC path the caller chose, go on as before."""
+    elevation.refuse_a_mapped_drive(directory, connection_of=_connection_table)

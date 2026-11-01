@@ -4631,6 +4631,7 @@ ConvertTo-Json -Compress -InputObject ([ordered]@{
 def test_naming_the_entry_that_carries_an_acl_does_not_list_the_tree_again(tmp_path: Path) -> None:
     """[370]: the refusal listed every entry once more to name the one: 2864 forks of pwsh, 43 s of system
     time alone and past the suite's 300 s limit under load. The batched listing already names it."""
+    assert sys.platform != "win32"  # what @_POSIX_ONLY skips; pyright reads os.getuid below from this
     setfacl = shutil.which("setfacl")
     if setfacl is None:
         pytest.skip("setfacl is missing")

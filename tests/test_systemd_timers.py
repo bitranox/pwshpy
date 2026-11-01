@@ -1470,6 +1470,25 @@ def test_register_never_shadows_a_unit_systemd_already_has(
 
 
 @pytest.mark.os_agnostic
+def test_register_never_stops_a_running_vendor_timer_whose_file_lies_in_etc(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[360] A timer file under /etc that pwshpy did not write is the one case where a previous
+    registration could seem to exist: the ownership check refuses before any verb, so a running vendor
+    timer gets no StopUnit and its file stays."""
+    vendor = "[Unit]\nDescription=vendor\n[Timer]\nOnBootSec=1s\n"
+    (tmp_path / "nginx.timer").write_text(vendor, encoding="utf-8")
+    props = {("nginx.timer", systemd_dbus.UNIT_IFACE, "ActiveState"): "active"}
+    conn = FakeConn([], props, frozenset({"nginx.timer"}))
+    use_bus(monkeypatch, conn)
+    monkeypatch.setattr(systemd_timers, "_UNIT_DIR", tmp_path)
+    with pytest.raises(NativeCallError, match="not written by pwshpy"):
+        SystemdScheduledTaskController().register("nginx", program="/bin/true")
+    assert conn.verbs == []
+    assert (tmp_path / "nginx.timer").read_text(encoding="utf-8") == vendor
+
+
+@pytest.mark.os_agnostic
 def test_register_refuses_when_systemd_cannot_say_whether_the_name_is_taken(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

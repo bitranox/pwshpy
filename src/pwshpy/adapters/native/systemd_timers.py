@@ -1455,16 +1455,19 @@ class SystemdScheduledTaskController:
 
     @classmethod
     def _retire_timer(cls, bus: _dbus.Bus, timer: str, *, remove: bool) -> None:
-        """Stop a pwshpy ``.timer``; with ``remove`` also disable it and delete its unit file."""
+        """Stop a ``.timer`` pwshpy wrote; with ``remove`` also disable it and delete its unit file.
+
+        Both callers establish ownership first (:func:`_require_free_or_owned`, :func:`_owned_unit_file`),
+        so a vendor timer never gets here and never receives this StopUnit.
+        """
         cls._stop_if_loaded(bus, timer)
-        path = _UNIT_DIR / timer
-        if not remove or not path.exists():  # no file under /etc: not ours (a vendor timer), never disable it
+        if not remove:
             return
         # Disable while the unit file still exists, so its timers.target.wants link goes with it.
         # Not suppressed: disabling a never-enabled unit succeeds, and "no such unit" cannot occur
         # with the file present, so any error is real and must stop us before the file is deleted.
         _dbus.call(bus, "DisableUnitFiles", "asb", ([timer], False))
-        cls._remove(path)
+        cls._remove(_UNIT_DIR / timer)
 
     def unregister(self, task_path: str) -> None:
         """Stop and delete a task's units, only those pwshpy wrote (under /etc, with :data:`OWNERSHIP_KEY`).

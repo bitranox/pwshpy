@@ -44,8 +44,9 @@ with no share to name; it gets the prompt.
 
 A script on a `net use` drive, started from a local directory, is refused the same way when
 `EnableLinkedConnections` is not set: the elevated process has no such drive letter, so it would ask for consent
-and then fail to open the script. With that policy set the letter is there and the script runs. A program on the
-drive is not refused in either case: Windows hands the elevated process its UNC path, so a console-script `.exe`
+and then fail to open the script. With that policy set and the machine rebooted since, the letter is there and the
+script runs; set but not yet rebooted, it gets the prompt and then returns exit 2. A program on the drive is not
+refused in either case: Windows hands the elevated process its UNC path, so a console-script `.exe`
 or a `python.exe` there runs from the share, and the prompt names a network drive as its source. Only the script
 `elevate` worked out from this process's own start is judged, never a caller's own `argv`.
 

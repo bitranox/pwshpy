@@ -242,7 +242,9 @@ class ElevationDirectoryError(PwshPyError):
     Windows hands an elevated process the UNC path of a ``net use`` drive, whatever
     ``EnableLinkedConnections`` says, and from a UNC directory an elevated ``cmd.exe`` works in
     ``C:\\\\Windows`` while a bare program name can run an executable on the share as administrator.
-    Raised before any prompt, naming that UNC path; the ``pwshpy`` CLI (``--elevate``) exits 70.
+    Also raised for a script on such a drive when ``EnableLinkedConnections`` is not set, because the
+    child could not open it. Raised before any prompt, naming the UNC path; the ``pwshpy`` CLI
+    (``--elevate``) exits 70.
 
     Example:
         >>> issubclass(ElevationDirectoryError, PwshPyError)

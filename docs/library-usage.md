@@ -629,7 +629,8 @@ Every failure across both backends raises a subclass of `PwshPyError`, all expor
     always raises for one. A redirect to a scheme other than `http`/`https` raises before anything
     connects to it, whatever `skip_http_error_check` says.
   - `ElevationDirectoryError` (not a `NativeCallError`) - on Windows, before any prompt: `ps.elevate()` was
-    called from, or given, a directory on a `net use` drive. The message names the drive's UNC path.
+    called from, or given, a directory on a `net use` drive, or it would relaunch a script on such a drive
+    while `EnableLinkedConnections` is not set. The message names the UNC path.
   - `ElevationDeclinedError` - the UAC prompt or sudo's password was refused by `ps.elevate()`,
     or sudo granted root but cached no credential for the command (sudoers `timestamp_timeout=0`):
     on POSIX `ps.elevate()` asks once with `sudo -v`, checks with `sudo -n -v` and runs the command

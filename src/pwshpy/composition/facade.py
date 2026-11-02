@@ -2893,7 +2893,8 @@ class Ps:
             ElevationDeclinedError: The UAC prompt was refused, or sudo did not grant root or
                 cached no credential for the command (sudoers ``timestamp_timeout=0``).
             ElevationDirectoryError: Windows, before any prompt: the directory is on a ``net use`` drive, whose
-                UNC path the elevated child would run from; the message names it.
+                UNC path the elevated child would run from; the message names it. Also the script being
+                relaunched on such a drive when ``EnableLinkedConnections`` is not set: the child could not open it.
             NativeCallError: The relaunch could not be started.
 
         Example:

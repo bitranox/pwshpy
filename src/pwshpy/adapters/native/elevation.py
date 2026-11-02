@@ -101,7 +101,8 @@ def elevate(
         ``None`` when ``wait`` is ``False``.
 
     Raises:
-        ElevationDirectoryError: Windows, before any prompt: the directory is on a ``net use`` drive.
+        ElevationDirectoryError: Windows, before any prompt: the directory is on a ``net use`` drive, or
+            the script being relaunched is and ``EnableLinkedConnections`` is not set.
         ElevationDeclinedError: The UAC prompt was refused, or sudo did not grant root or
             cached no credential for the command (sudoers ``timestamp_timeout=0``).
         NativeCallError: If the elevated relaunch (``ShellExecuteEx`` / ``sudo``) fails.
@@ -117,6 +118,11 @@ def elevate(
     if sys.platform == "win32":
         # ntpath, not Path.absolute(): below Python 3.12 that keeps a drive-relative "Z:sub" as it is.
         refuse_a_mapped_drive(ntpath.abspath(directory), connection_of=_network_connection)
+        script = _script_being_relaunched(resolved_exe, resolved_argv)
+        if script is not None:
+            refuse_a_script_the_child_cannot_open(
+                ntpath.abspath(script), connection_of=_network_connection, linked_connections=_linked_connections
+            )
         return _shell_execute_runas(resolved_exe, resolved_argv, directory, wait=wait)
     return _sudo_relaunch(resolved_exe, resolved_argv, directory, wait=wait)
 
@@ -272,18 +278,85 @@ def refuse_a_mapped_drive(directory: str, *, connection_of: Callable[[str], str 
     Example:
         >>> refuse_a_mapped_drive("C:\\\\work", connection_of=lambda drive: None)
     """
-    drive, rest = ntpath.splitdrive(directory.removeprefix("\\\\?\\").removeprefix("\\\\.\\"))
-    if not drive.endswith(":"):
+    unc = _unc_of(directory, connection_of)
+    if unc is None:
         return
-    share = connection_of(drive)
-    if share is None:
-        return
-    unc = share.rstrip("\\") + rest
     raise ElevationDirectoryError(
         f"{directory} is on a mapped network drive, which an elevated process runs from as {unc}: there an "
         "elevated cmd.exe works in C:\\Windows and a bare program name can run from the share. Change to a "
         f"local path, or to {unc} if you mean it."
     )
+
+
+def refuse_a_script_the_child_cannot_open(
+    script: str, *, connection_of: Callable[[str], str | None], linked_connections: Callable[[], bool]
+) -> None:
+    """Refuse relaunching a script on a ``net use`` drive the elevated child has no letter for.
+
+    The script path travels in the parameters, which ShellExecute leaves as they are, so the child gets
+    the letter while its token has no such drive: consent, then Python's exit 2. A program path is
+    different: ShellExecute makes that one UNC and it runs, so a console-script ``.exe`` or an interpreter
+    on the drive is not refused, and with ``EnableLinkedConnections`` the letter is there and the script
+    opens (all measured with real consent).
+
+    Args:
+        script: The absolute path of the script.
+        connection_of: Answers a drive (``"Z:"``) with its share, or None when it is not a network drive.
+        linked_connections: Whether the elevated token shares the drive letters; only asked for a mapped script.
+
+    Raises:
+        ElevationDirectoryError: ``script`` is on a network drive the child cannot see.
+
+    Example:
+        >>> refuse_a_script_the_child_cannot_open(
+        ...     "C:\\\\work\\\\run.py", connection_of=lambda drive: None, linked_connections=lambda: False
+        ... )
+    """
+    unc = _unc_of(script, connection_of)
+    if unc is None or linked_connections():
+        return
+    raise ElevationDirectoryError(
+        f"{script} is on a mapped network drive that an elevated process cannot see here "
+        f"(EnableLinkedConnections is not set), so it could not open the script after the prompt. Copy the "
+        f"script to a local path, or start it as {unc} if you mean to run it from the share."
+    )
+
+
+def _unc_of(path: str, connection_of: Callable[[str], str | None]) -> str | None:
+    """The UNC spelling of a path on a network drive; None for any other path."""
+    drive, rest = ntpath.splitdrive(path.removeprefix("\\\\?\\").removeprefix("\\\\.\\"))
+    if not drive.endswith(":"):
+        return None
+    share = connection_of(drive)
+    return None if share is None else share.rstrip("\\") + rest
+
+
+def _script_being_relaunched(executable: str, argv: Sequence[str]) -> str | None:
+    """The script of a ``python script.py`` relaunch; None for the other shapes of :func:`_relaunch_target`.
+
+    Compared with this process's own start, because a caller's own ``argv`` is not known to hold a script.
+    Python puts ``""``, ``"-"`` or ``"-c"`` in ``sys.argv[0]`` when no script file was named.
+    """
+    if executable != sys.executable or list(argv) != sys.argv or not argv:
+        return None
+    return None if argv[0] in {"", "-", "-c"} else argv[0]
+
+
+def _linked_connections(load: Callable[[str], Any] | None = None) -> bool:
+    """Whether the ``EnableLinkedConnections`` policy is set, as far as the registry says.
+
+    A value nobody can read answers True: the refusal stands only on a policy known to be unset, and
+    the caller otherwise gets the prompt, as before the refusal existed.
+    """
+    winreg = (load if load is not None else _load)("winreg")
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _POLICIES_SYSTEM_KEY) as key:
+            value, _kind = winreg.QueryValueEx(key, "EnableLinkedConnections")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return isinstance(value, int) and value != 0
 
 
 def _network_connection(drive: str) -> str | None:
@@ -298,6 +371,9 @@ def _network_connection(drive: str) -> str | None:
     except _load("pywintypes").error:
         return None
 
+
+#: Where Windows keeps the ``EnableLinkedConnections`` policy, under HKEY_LOCAL_MACHINE.
+_POLICIES_SYSTEM_KEY = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System"
 
 #: ShellExecuteEx's error when the person refuses the UAC prompt (winerror.h).
 ERROR_CANCELLED = 1223

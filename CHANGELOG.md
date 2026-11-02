@@ -14,6 +14,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   without `EnableLinkedConnections`), where an elevated `cmd.exe` works in `C:\Windows` and a bare program
   name can run from the share. A caller who ran this way changes to a local path or to the UNC path; an
   explicit UNC `cwd=` and a process already on a UNC path go on as before.
+- On Windows `ps.elevate()` and `pwshpy --elevate` refuse a script on a `net use` drive, started from a local
+  directory, before any prompt when `EnableLinkedConnections` is not set: `ElevationDirectoryError`, exit 70 from
+  the CLI, naming the script's UNC path. Such a start used to ask for consent and then return exit 2, because the
+  elevated process has no such drive letter. With the policy set the script runs as before, and a console-script
+  `.exe` or a `python.exe` on the drive is not refused.
 - Linux scheduled tasks: `register_scheduled_task`, `enable_scheduled_task` and `disable_scheduled_task`
   raise `NativeCallError` when a read of the unit file state, the unit or its `ActiveState` fails (no reply
   from a busy systemd, say). Such a failure used to tell `enable` and `disable` that a timer was an

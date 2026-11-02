@@ -386,4 +386,4 @@ ignores = ["E003"]
 
 [tool.uv]
 exclude-newer = "7 days"
-exclude-newer-package = {fake-winreg = false, lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, lib-registry = false}
+exclude-newer-package = {fake-winreg = false, lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, lib-registry = false, grimp = "2026-09-11T10:36:50Z"}

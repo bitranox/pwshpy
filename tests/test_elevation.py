@@ -659,7 +659,8 @@ def _elevate_recording_the_prompt(monkeypatch: pytest.MonkeyPatch, *, links: Any
         return 0
 
     monkeypatch.setattr(elevation, "_shell_execute_runas", _record_prompt)
-    elevation.elevate(**{"cwd": "C:\\work", **kwargs})
+    kwargs.setdefault("cwd", "C:\\work")
+    elevation.elevate(**kwargs)
     return prompted
 
 

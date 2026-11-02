@@ -47,8 +47,8 @@ A script on a `net use` drive, started from a local directory, is refused the sa
 and then fail to open the script. With that policy set and the machine rebooted since, the letter is there and the
 script runs; set but not yet rebooted, it gets the prompt and then returns exit 2. A program on the drive is not
 refused in either case: Windows hands the elevated process its UNC path, so a console-script `.exe`
-or a `python.exe` there runs from the share, and the prompt names a network drive as its source. Only the script
-`elevate` worked out from this process's own start is judged, never a caller's own `argv`.
+or a `python.exe` running a local script there runs from the share, and the prompt names a network drive as its source. Only the script
+of this process's own start is judged: an `argv` that differs from `sys.argv` and a `python -m` start are not.
 
 A refused prompt raises `ElevationDeclinedError`, a `NativeCallError` subclass, so a caller can carry on
 unelevated after a refusal and still treat any other failure as one. On Windows that is a declined UAC

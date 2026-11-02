@@ -37,4 +37,7 @@
       policy known to be unset). The skill text does not state it; docs and the docstring carry it.
 - [x] Description unchanged (frontmatter not edited). Width: added prose wraps at the 118 columns of the surrounding
       bullet rather than 100, keeping the bullet uniform; fences unaffected.
+- [x] Review round: "a caller's own `argv` is not judged" was false for `elevate(argv=sys.argv)`, which is the same
+      relaunch and is refused. Reworded to "an `argv` that differs from `sys.argv`", pinned by a test, and `python -m`
+      named as not judged. The sentence states what the code does; no new behaviour, so no third probe round.
 - [x] ASCII only, present tense, no private host, address or path added; `Z:\tool.py` is an example path.

@@ -121,7 +121,9 @@ def elevate(
         script = _script_being_relaunched(resolved_exe, resolved_argv)
         if script is not None:
             refuse_a_script_the_child_cannot_open(
-                ntpath.abspath(script), connection_of=_network_connection, linked_connections=_linked_connections
+                _path_the_child_opens(script, directory),
+                connection_of=_network_connection,
+                linked_connections=_linked_connections,
             )
         return _shell_execute_runas(resolved_exe, resolved_argv, directory, wait=wait)
     return _sudo_relaunch(resolved_exe, resolved_argv, directory, wait=wait)
@@ -337,9 +339,14 @@ def _script_being_relaunched(executable: str, argv: Sequence[str]) -> str | None
     Compared with this process's own start, because a caller's own ``argv`` is not known to hold a script.
     Python puts ``""``, ``"-"`` or ``"-c"`` in ``sys.argv[0]`` when no script file was named.
     """
-    if executable != sys.executable or list(argv) != sys.argv or not argv:
+    if bool(getattr(sys, "frozen", False)) or executable != sys.executable or list(argv) != sys.argv or not argv:
         return None
     return None if argv[0] in {"", "-", "-c"} else argv[0]
+
+
+def _path_the_child_opens(script: str, directory: str) -> str:
+    """Where a script path leads for a child starting in ``directory``: a relative one is opened from there."""
+    return ntpath.abspath(ntpath.join(directory, script))
 
 
 def _linked_connections(load: Callable[[str], Any] | None = None) -> bool:

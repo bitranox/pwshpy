@@ -243,7 +243,7 @@ catch a subclass before its parent:
   start it by that UNC path, which the elevated account must be able to reach. With the policy set and the machine
   rebooted since, it runs; set but not yet rebooted, it gets the prompt and `elevate(wait=True)` then returns 2. A
   console-script `.exe`, or a `python.exe` running a local script, on the drive is never refused: Windows runs the
-  program from the UNC path. A caller's own `argv` is not judged.
+  program from the UNC path. An `argv` that differs from `sys.argv`, and a `python -m` start, are not judged.
 - `ElevationRequiredError` (`require_elevation()`), `PlatformUnsupportedError` (no analog on this OS),
   `ConfigurationError`, `PowerShellError` / `FeatureUnavailableError` (.NET, `[full]`; `run`, `cmdlet`
   and the module wrappers `get_ad_user`, `get_ad_group`, `get_ad_computer`, `get_mailbox`, `get_az_vm`

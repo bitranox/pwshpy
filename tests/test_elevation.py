@@ -582,14 +582,16 @@ def test_a_script_on_a_mapped_drive_is_refused_when_the_child_cannot_see_the_dri
 
 @pytest.mark.os_agnostic
 def test_a_script_on_a_mapped_drive_passes_when_the_child_can_see_the_drive() -> None:
-    """[420] Measured with EnableLinkedConnections=1: the child opens Z:\\probe.py and runs, so refusing would break it."""
+    """[420] Measured with EnableLinkedConnections=1: the child opens the script and runs; a refusal breaks it."""
     elevation.refuse_a_script_the_child_cannot_open(
         "Z:\\app\\run.py", connection_of=_connection_table, linked_connections=_links_set
     )
 
 
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize("script", ["C:\\work\\run.py", "\\\\srv\\share\\run.py", "/opt/run.py"], ids=["local", "unc", "posix"])
+@pytest.mark.parametrize(
+    "script", ["C:\\work\\run.py", "\\\\srv\\share\\run.py", "/opt/run.py"], ids=["local", "unc", "posix"]
+)
 def test_a_script_off_a_mapped_drive_passes_without_reading_the_registry(script: str) -> None:
     """[420] A local or UNC script is the child's to open; nothing here depends on the policy value."""
     elevation.refuse_a_script_the_child_cannot_open(
@@ -615,10 +617,13 @@ class _FakeWinreg:
     def __init__(self, answer: object) -> None:
         self.answer = answer
 
-    def OpenKey(self, _root: int, _path: str) -> _FakeKey:  # noqa: N802 - winreg's own spelling
+    def OpenKey(self, root: int, path: str) -> _FakeKey:  # noqa: N802 - winreg's own spelling
+        assert root == self.HKEY_LOCAL_MACHINE
+        assert path == "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System"
         return _FakeKey()
 
-    def QueryValueEx(self, _key: _FakeKey, _name: str) -> tuple[object, int]:  # noqa: N802 - winreg's own spelling
+    def QueryValueEx(self, _key: _FakeKey, name: str) -> tuple[object, int]:  # noqa: N802 - winreg's own spelling
+        assert name == "EnableLinkedConnections"
         if isinstance(self.answer, OSError):
             raise self.answer
         return self.answer, 4
@@ -654,7 +659,7 @@ def _elevate_recording_the_prompt(monkeypatch: pytest.MonkeyPatch, *, links: Any
         return 0
 
     monkeypatch.setattr(elevation, "_shell_execute_runas", _record_prompt)
-    elevation.elevate(cwd="C:\\work", **kwargs)
+    elevation.elevate(**{"cwd": "C:\\work", **kwargs})
     return prompted
 
 
@@ -694,7 +699,7 @@ def test_elevate_prompts_for_its_own_script_when_the_child_can_see_the_drive(mon
         pytest.param("-c", {}, id="python-dash-c"),
         pytest.param("", {}, id="interactive"),
         pytest.param("C:\\work\\run.py", {"argv": ["Z:\\data.txt"]}, id="explicit-argv-is-not-a-script"),
-        pytest.param("C:\\work\\run.py", {"executable": "Z:\\bin\\tool.exe"}, id="explicit-program-on-the-drive"),
+        pytest.param("Z:\\app\\run.py", {"executable": "Z:\\bin\\tool.exe"}, id="explicit-program-on-the-drive"),
         pytest.param("Z:\\app\\run.py", {"executable": "C:\\bin\\tool.exe"}, id="explicit-program-is-not-python"),
     ],
 )
@@ -705,6 +710,40 @@ def test_elevate_only_judges_the_script_it_worked_out_itself(
     monkeypatch.setattr(elevation.sys, "frozen", False, raising=False)
     monkeypatch.setattr(elevation.sys, "argv", [argv0])
     assert len(_elevate_recording_the_prompt(monkeypatch, links=_links_unset, **kwargs)) == 1
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("script", "directory", "opened"),
+    [
+        pytest.param("run.py", "\\\\srv\\share\\app", "\\\\srv\\share\\app\\run.py", id="relative-from-a-unc-cwd"),
+        pytest.param("run.py", "C:\\work", "C:\\work\\run.py", id="relative-from-a-local-cwd"),
+        pytest.param("Z:\\app\\run.py", "C:\\work", "Z:\\app\\run.py", id="absolute-stays"),
+    ],
+)
+def test_a_relative_script_is_judged_where_the_child_opens_it(script: str, directory: str, opened: str) -> None:
+    """[420] The remedy for a mapped directory is a UNC ``cwd=``: a relative script then opens from there."""
+    path_the_child_opens = elevation._path_the_child_opens  # pyright: ignore[reportPrivateUsage] - white-box test
+    assert path_the_child_opens(script, directory) == opened
+
+
+@pytest.mark.os_agnostic
+def test_elevate_judges_this_process_own_argv_when_the_caller_passes_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[420] ``elevate(argv=sys.argv)`` is the same relaunch of the same script, so it is refused like the default."""
+    monkeypatch.setattr(elevation.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(elevation.sys, "argv", ["Z:\\app\\run.py"])
+    with pytest.raises(ElevationDirectoryError):
+        _elevate_recording_the_prompt(monkeypatch, links=_links_unset, argv=["Z:\\app\\run.py"])
+
+
+@pytest.mark.os_agnostic
+def test_elevate_never_reads_a_frozen_program_as_its_own_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[420] A frozen build's ``sys.argv[0]`` is the program, which runs from the drive (measured for an exe)."""
+    monkeypatch.setattr(elevation.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(elevation.sys, "executable", "Z:\\bin\\app.exe")
+    monkeypatch.setattr(elevation.sys, "argv", ["Z:\\bin\\app.exe"])
+    prompted = _elevate_recording_the_prompt(monkeypatch, links=_registry_must_not_be_read, argv=["Z:\\bin\\app.exe"])
+    assert prompted == ["Z:\\bin\\app.exe"]
 
 
 @pytest.mark.os_agnostic

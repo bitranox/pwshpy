@@ -15,7 +15,7 @@ dependencies = [
     # Imported directly (adapters/logging/setup.py reads the LOG_* lines of a .env itself).
     "python-dotenv>=1.2.4",
     "lib_layered_config>=7.7.0",
-    "pydantic>=2.14.2",
+    "pydantic>=2.14.3",
     "orjson>=3.13.0",
     "psutil>=7.2.2",
     # Safe XML parsing for the event-log adapter's rendered event XML (pure Python, portable).

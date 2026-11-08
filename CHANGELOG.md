@@ -6,6 +6,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-11-08
+
 ### Changed
 
 - On Windows `ps.elevate()` and `pwshpy --elevate` refuse a directory on a `net use` drive, before any

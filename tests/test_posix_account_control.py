@@ -93,6 +93,22 @@ def test_timeout_is_forwarded(kwargs: dict[str, float], expected: float) -> None
 
 
 @pytest.mark.os_agnostic
+@pytest.mark.parametrize("now", [99.62131848937365, 1e6 + 0.1, 0.0])
+def test_remaining_never_exceeds_the_limit_when_the_clock_has_not_moved(now: float) -> None:
+    """A clock that returns the same reading twice gives back exactly the limit, never more.
+
+    Windows' monotonic clock on Python 3.12 and older ticks about every 15 ms, so creating a
+    deadline and asking what is left often read the same instant. ``(t + 30.0) - t`` rounds above
+    30.0 for some ``t`` (99.62131848937365 gives 30.000000000000014), which handed the child more
+    time than the verb's own limit and failed test_timeout_is_forwarded on windows-latest.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(pac.time, "monotonic", lambda: now)
+        deadline = pac._Deadline(30.0)  # pyright: ignore[reportPrivateUsage] - the unit under test
+        assert deadline.remaining() == 30.0
+
+
+@pytest.mark.os_agnostic
 def test_newline_password_is_rejected_before_running(captured: list[list[str]]) -> None:
     """A newline in the password (a chpasswd second-entry injection) is rejected before any command runs."""
     with pytest.raises(NativeCallError, match="password must not contain"):

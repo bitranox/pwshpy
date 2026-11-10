@@ -15,6 +15,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   log sink such as an unreachable Graylog stalled lib_log_rich's queue, losing the exit code of a
   finished command. It now prints one warning on stderr and keeps the exit code.
 - `display_config` takes its `output_format` as the plain value too (`"json"`), as an untyped caller passes it, instead of failing with `AttributeError: 'str' object has no attribute 'value'`.
+- A Linux local-account verb no longer hands a shadow-utils command a hair more time than its `timeout` (`30.000000000000014` for 30 s) when both clock reads land on the same tick, as Windows' coarse monotonic clock often does: the remaining time is now `timeout` minus the elapsed time, which never exceeds `timeout`.
 
 ### Changed
 

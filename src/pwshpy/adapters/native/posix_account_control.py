@@ -102,11 +102,17 @@ class _Deadline:
 
     def __init__(self, limit: float) -> None:
         self.limit = limit
-        self._ends_at = time.monotonic() + limit
+        self._started = time.monotonic()
 
     def remaining(self) -> float:
-        """Seconds left before the deadline (zero or negative once it has passed)."""
-        return self._ends_at - time.monotonic()
+        """Seconds left before the deadline (zero or negative once it has passed); never above ``limit``.
+
+        Computed as ``limit - elapsed`` rather than ``(start + limit) - now``: the latter rounds above
+        ``limit`` for some start values when both reads return the same instant (Windows' coarse
+        monotonic clock does that often), which would hand a child more time than the verb allows.
+        A zero elapsed gives exactly ``limit``, and subtracting a positive elapsed cannot exceed it.
+        """
+        return self.limit - (time.monotonic() - self._started)
 
 
 class _NewUserProgress:

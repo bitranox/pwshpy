@@ -58,7 +58,8 @@ def display_config(
     if output_format is OutputFormat.JSON:
         _display_json(config, section)
         return
-    lib_format = LibOutputFormat(output_format.value)
+    # Coerced first: an untyped caller passing the plain value "json" gets JSON, not an AttributeError.
+    lib_format = LibOutputFormat(OutputFormat(output_format).value)
     _lib_display(config, output_format=lib_format, section=section, profile=profile, console=console)
 
 

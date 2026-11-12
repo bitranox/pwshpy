@@ -809,7 +809,7 @@ wheels = [
 
 [[package]]
 name = "fake-winreg"
-version = "1.10.3"
+version = "1.10.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -821,9 +821,9 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "rich-click" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e0/1c/ac37d056a4eda7595fdf0887fc71bcaddf8ca2e31904aec17c0e3039020c/fake_winreg-1.10.3.tar.gz", hash = "sha256:a3bb6b487c20b19e0b756e689a1432b562f94d6fcda42e98192bcf10f0a95ac3", size = 177222, upload-time = "2026-10-15T15:50:17.13Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a6/45/774ce37524488ae40376c09f8c19116d235c29ab5e84bde8097ed8f269e5/fake_winreg-1.10.4.tar.gz", hash = "sha256:ff3401557620f4f2f73a08248dd348abc667f906975c8d54b6b0643a79328bb3", size = 183504, upload-time = "2026-11-12T12:23:58.958Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1f/ad/2519bb2e48b75d3bbf76bfd6c0184b56edc3261cee2de75a50a7505622ec/fake_winreg-1.10.3-py3-none-any.whl", hash = "sha256:d951c27c9beb4a2f08c6e5c62800e79478b60bf943027c94f9cfad416ee10e62", size = 109887, upload-time = "2026-10-15T15:50:15.783Z" },
+    { url = "https://files.pythonhosted.org/packages/d7/9c/e00071c79ef8ab5bd85fb63e6bc94c13a0d35e1d0f8a1105b2e7c1612b00/fake_winreg-1.10.4-py3-none-any.whl", hash = "sha256:d148ad9f5f9fbdcbc05b653b7405b96f108013c4de76b69bbb609633632a7294", size = 110909, upload-time = "2026-11-12T12:23:57.534Z" },
 ]
 
 [[package]]
@@ -1485,7 +1485,7 @@ wheels = [
 
 [[package]]
 name = "lib-log-rich"
-version = "8.2.0"
+version = "8.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lib-cli-exit-tools" },
@@ -1495,9 +1495,9 @@ dependencies = [
     { name = "rich" },
     { name = "rich-click" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/71/0f/e333dffc14cd61ea11dc5998ebf474fab33b4afa4f513fd526a493679814/lib_log_rich-8.2.0.tar.gz", hash = "sha256:6e2bedc8033c73d554e5332467da5cec50118dd225a95d351b627656a7387539", size = 423415, upload-time = "2026-11-12T11:24:23.968Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/20/7065b9d732ad74721d7bb0b113cda1dac49d4c494a0ac5854c80d860e780/lib_log_rich-8.2.1.tar.gz", hash = "sha256:fa91472af8f2890098a51a508f6c10f60caa1eb3e7fe502851f1aaf52a869b3c", size = 424993, upload-time = "2026-11-12T13:05:34.82Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bf/71/70e34febeaa3aebdc314348b4e101a1d8dbc2c8aa2b1d9145c3ea3faf8c8/lib_log_rich-8.2.0-py3-none-any.whl", hash = "sha256:148f7d50b4bfff06410dd30176b4ef578282af5077fe8f504ab6fb5a426015cf", size = 245522, upload-time = "2026-11-12T11:24:21.885Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/3f/a559b1ca92a3c7bcef00367fcfba9e27a0a9a29e97ba16aae72aa428becd/lib_log_rich-8.2.1-py3-none-any.whl", hash = "sha256:37beba7ebcc7d89d4dc00eb9c6b3b838dc9d7f510edcf2bdf7d304ad985b5bb6", size = 246200, upload-time = "2026-11-12T13:05:33.095Z" },
 ]
 
 [[package]]
@@ -2038,7 +2038,7 @@ requires-dist = [
     { name = "click", marker = "extra == 'dev'", specifier = ">=8.5.0" },
     { name = "clr-loader", marker = "extra == 'full'", specifier = ">=0.3.1" },
     { name = "defusedxml", specifier = ">=0.7.1" },
-    { name = "fake-winreg", marker = "extra == 'dev'", specifier = ">=1.10.3" },
+    { name = "fake-winreg", marker = "extra == 'dev'", specifier = ">=1.10.4" },
     { name = "hatchling", marker = "extra == 'dev'", specifier = ">=1.33.0" },
     { name = "httpx2", marker = "extra == 'dev'", specifier = ">=2.14.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.168.5" },
@@ -2047,7 +2047,7 @@ requires-dist = [
     { name = "jeepney", marker = "sys_platform == 'linux'", specifier = ">=0.9.0" },
     { name = "lib-cli-exit-tools", specifier = ">=2.4.1" },
     { name = "lib-layered-config", specifier = ">=7.7.0" },
-    { name = "lib-log-rich", specifier = ">=8.2.0" },
+    { name = "lib-log-rich", specifier = ">=8.2.1" },
     { name = "lib-registry", marker = "sys_platform == 'win32'", specifier = ">=3.1.7" },
     { name = "lib-registry", marker = "extra == 'dev'", specifier = ">=3.1.7" },
     { name = "orjson", specifier = ">=3.13.0" },

@@ -5,8 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from lib_layered_config import deploy_config
-from lib_layered_config.examples.deploy import DeployAction
+from lib_layered_config import DeployAction, deploy_config
 
 from pwshpy import __init__conf__
 from pwshpy.adapters.config.loader import get_default_config_path, validate_profile

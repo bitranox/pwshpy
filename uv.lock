@@ -809,7 +809,7 @@ wheels = [
 
 [[package]]
 name = "fake-winreg"
-version = "1.10.4"
+version = "1.10.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -821,9 +821,9 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "rich-click" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a6/45/774ce37524488ae40376c09f8c19116d235c29ab5e84bde8097ed8f269e5/fake_winreg-1.10.4.tar.gz", hash = "sha256:ff3401557620f4f2f73a08248dd348abc667f906975c8d54b6b0643a79328bb3", size = 183504, upload-time = "2026-11-12T12:23:58.958Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ee/d6/9f4e75d370b80373f184feeeb02945a9d63d2005e17b7eae3167b953f26b/fake_winreg-1.10.5.tar.gz", hash = "sha256:e41b7ef4fb6241d06f3643681945bbdbac77f8c71b9addb8da7f82a1afcf9125", size = 183561, upload-time = "2026-11-18T12:54:05.461Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d7/9c/e00071c79ef8ab5bd85fb63e6bc94c13a0d35e1d0f8a1105b2e7c1612b00/fake_winreg-1.10.4-py3-none-any.whl", hash = "sha256:d148ad9f5f9fbdcbc05b653b7405b96f108013c4de76b69bbb609633632a7294", size = 110909, upload-time = "2026-11-12T12:23:57.534Z" },
+    { url = "https://files.pythonhosted.org/packages/59/f0/5c65e70629c4ad26599caf5d72bda9ed6c5cfca3bdc6cd1a4f91741aaa94/fake_winreg-1.10.5-py3-none-any.whl", hash = "sha256:4648538fc0f98b87120cfa1eaf1ab6b5da7a1a4aa4bad970d64b56103d1aa8c6", size = 110896, upload-time = "2026-11-18T12:54:03.874Z" },
 ]
 
 [[package]]
@@ -2178,7 +2178,7 @@ requires-dist = [
     { name = "click", marker = "extra == 'dev'", specifier = ">=8.5.1" },
     { name = "clr-loader", marker = "extra == 'full'", specifier = ">=0.3.1" },
     { name = "defusedxml", specifier = ">=0.7.1" },
-    { name = "fake-winreg", marker = "extra == 'dev'", specifier = ">=1.10.4" },
+    { name = "fake-winreg", marker = "extra == 'dev'", specifier = ">=1.10.5" },
     { name = "hatchling", marker = "extra == 'dev'", specifier = ">=1.33.0" },
     { name = "httpx2", marker = "extra == 'dev'", specifier = ">=2.14.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.168.5" },

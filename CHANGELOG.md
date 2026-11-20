@@ -6,11 +6,17 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.12.3] - 2026-11-20
+
 ### Documentation
 
 - The `using-pwsh` skill says registry keys take the hive form (`HKLM\SOFTWARE\...` or
   `HKLM/SOFTWARE/...`) and that the PowerShell drive form `HKLM:\...` is refused with
   `Unknown registry hive: 'HKLM:'`; the cmdlet table's registry row shows the hive form.
+
+### Changed
+
+- Runtime dependency floor raised: `lib_layered_config >=8.1.0 -> >=9.0.3`.
 
 ## [1.12.2] - 2026-11-18
 

@@ -1,6 +1,6 @@
 [project]
 name = "pwshpy"
-version = "1.12.2"
+version = "1.12.3"
 description = "A genuinely Pythonic PowerShell: typed records and a fluent pipeline over native OS bindings, with an in-process PowerShell 7 SDK fallback - never a pwsh.exe subprocess."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ dependencies = [
     "lib_log_rich>=8.2.2",
     # Imported directly (adapters/logging/setup.py reads the LOG_* lines of a .env itself).
     "python-dotenv>=1.2.4",
-    "lib_layered_config>=8.1.0",
+    "lib_layered_config>=9.0.3",
     "pydantic>=2.14.3",
     "orjson>=3.13.0",
     "psutil>=7.2.2",
@@ -96,7 +96,7 @@ dev = [
   "pytest-cov>=7.1.0",
   "pytest-xdist>=3.8.0",
   "hypothesis>=6.168.5",
-  "ruff>=0.17.4",
+  "ruff>=0.17.5",
   "pyright[nodejs]>=1.1.414",
   "bandit>=1.9.4",
   "build>=1.6.1",
@@ -390,4 +390,4 @@ ignores = ["E003"]
 
 [tool.uv]
 exclude-newer = "7 days"
-exclude-newer-package = {fake-winreg = false, lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, lib-registry = false}
+exclude-newer-package = {fake-winreg = false, lib-cli-exit-tools = false, lib-layered-config = false, lib-log-rich = false, lib-registry = false, pwshpy = false}

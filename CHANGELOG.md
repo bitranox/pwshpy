@@ -6,6 +6,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Documentation
+
+- The `using-pwsh` skill says registry keys take the hive form (`HKLM\SOFTWARE\...` or
+  `HKLM/SOFTWARE/...`) and that the PowerShell drive form `HKLM:\...` is refused with
+  `Unknown registry hive: 'HKLM:'`; the cmdlet table's registry row shows the hive form.
+
 ## [1.12.2] - 2026-11-18
 
 ### Changed

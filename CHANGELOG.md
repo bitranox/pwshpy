@@ -6,6 +6,14 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.12.4] - 2026-11-27
+
+### Changed
+
+- The bundled skill's wide tables use the compact form (no alignment padding past 300
+  columns) that the bitranox table formatter writes since bitranox-skills 11.29.0, matching the
+  marketplace copy. Whitespace only.
+
 ## [1.12.3] - 2026-11-20
 
 ### Documentation

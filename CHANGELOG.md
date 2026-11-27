@@ -6,10 +6,32 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
-## [1.13.1] - 2026-11-27
+### Fixed
+
+- `ps.add_acl_ace(..., access_type="Deny")` wrote an ALLOW entry, and `ps.new_item(path,
+  item_type="directory")` created an empty file: an enum argument given as its value string reached
+  the adapter unparsed, and the adapters decide by member identity. The facade now parses
+  `item_type`, `access_type` (add and remove), `start_type` and `value_type` once: a member passes
+  unchanged, its value string becomes the member, and anything else raises `ConfigurationError`
+  naming the allowed values before anything is changed. `remove_acl_ace` with a string matched
+  nothing before, and `set_service` with a string failed on Linux.
+
+### Added
+
+- `FileItemType` (the `item_type` of `new_item`) and `AclEntryKind` are exported from `pwshpy`.
 
 ### Changed
 
+- `get_service()` and `get_scheduled_task()` on Linux read the unit-file state of most loaded units
+  from the one unit-file listing they fetch anyway, instead of one `GetUnitFileState` call per unit.
+  The first 16 loaded units are still asked one by one, so a short `take(n)` stays cheap. A full
+  service listing on a host with 253 services went from about 660 ms to 485 ms, with the same
+  records.
+- `get_child_item()`, `get_item()` and `new_item()` stat each item once instead of twice (about
+  3.75 to 2.65 us per item).
+- The packer compiles its two location patterns once instead of on every call.
+- Internal: the native adapters pass named records and enums instead of tuples, flags and dicts
+  (systemd, registry, WIM, scheduled tasks, packer). No public signature changed.
 - `ps.get_cim_instance()` reads an instance's properties by name once it knows the instance's class:
   the property names and CIM types come from the first instance of each class in a query, and later
   instances are asked only for their values. Walking every property object made win32com fetch type
@@ -17,6 +39,14 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   0.27 s by name, with the same values in the same order. A class with a property whose name ends in
   `_` (which could clash with an `SWbemObject` member), and any instance whose by-name read COM
   refuses, is still read the old way.
+
+### Documentation
+
+- Corrected README, INSTALL, COMMANDS, the CLI reference, CONFIG, backends, library usage, power
+  tools, the roadmap, the contributor docs and the `using-pwsh` skill against the code: commands,
+  flags, imports and examples that had drifted from what the code does.
+- The exit-code list documents exit 78 (a configuration that cannot load, or a permission setting
+  `config-deploy` refuses), and the skill names the object model (`Pipeline`, `PSRecord`).
 
 ## [1.13.0] - 2026-11-27
 

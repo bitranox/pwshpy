@@ -9,6 +9,8 @@ sends a refused StopUnit for a unit that does not exist, which changes nothing o
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import os
 import pickle
 import sys
@@ -27,6 +29,7 @@ from systemd_fake_bus import (
     FakeConn,
     FakeCore,
     Message,
+    MessageType,
     Reply,
     use_bus,
 )
@@ -257,3 +260,38 @@ def test_a_live_refused_stop_as_non_root_is_native_access_denied() -> None:
     bus.conn.close()
     with pytest.raises(NativeAccessDeniedError):
         SystemdServiceController().stop("pwshpy-refusal-probe-7f3a.service", wait=False)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("message_type", ["method_call", "method_return", "error", "signal"])
+def test_is_error_compares_the_reply_type_against_the_cores_message_type(message_type: str) -> None:
+    """Only ``MessageType.error`` of the core the bus carries is an error; every other D-Bus message type is not."""
+    reply = Reply((), message_type=MessageType[message_type])
+    assert systemd_dbus.is_error(reply, core=FakeCore()) is (message_type == "error")
+
+
+@pytest.mark.os_agnostic
+def test_is_error_does_not_take_a_lookalike_type_for_an_error() -> None:
+    """A reply type that merely NAMES itself "error" is not jeepney's error type, so it is no error reply."""
+    lookalike = type("T", (), {"name": "error"})
+    reply = Reply((), message_type=lookalike)
+    assert systemd_dbus.is_error(reply, core=FakeCore()) is False
+
+
+@pytest.mark.os_linux
+@pytest.mark.skipif(importlib.util.find_spec("jeepney") is None, reason="needs jeepney (a Linux-only dependency)")
+def test_is_error_without_a_core_judges_a_real_jeepney_reply() -> None:
+    """With no core given, the installed jeepney decides, on replies jeepney itself built."""
+    jeepney = importlib.import_module("jeepney")
+    call = jeepney.new_method_call(jeepney.DBusAddress("/x", bus_name="x.y", interface="x.y"), "M")
+    assert systemd_dbus.is_error(jeepney.new_error(call, "x.y.Failed", "s", ("no",))) is True
+    assert systemd_dbus.is_error(jeepney.new_method_return(call)) is False
+
+
+@pytest.mark.os_agnostic
+def test_unit_files_lists_only_the_requested_unit_type() -> None:
+    """``unit_files`` filters the listing by the UnitType's suffix, templates excluded."""
+    files = frozenset({"a.timer", "a.service", "b@.timer", "c.timer"})
+    bus = systemd_dbus.Bus(conn=FakeConn([], {}, files), core=FakeCore(), mgr=Address("/org/freedesktop/systemd1"))
+    assert [f.name for f in systemd_dbus.unit_files(bus, systemd_dbus.UnitType.TIMER)] == ["a.timer", "c.timer"]
+    assert [f.name for f in systemd_dbus.unit_files(bus, systemd_dbus.UnitType.SERVICE)] == ["a.service"]

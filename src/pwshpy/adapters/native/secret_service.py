@@ -22,15 +22,15 @@ Contents:
 
 from __future__ import annotations
 
-import importlib
 from typing import Any, cast
 
 from pydantic import SecretStr
 
-from ...domain.errors import NativeCallError, PlatformUnsupportedError
+from ...domain.errors import NativeCallError
 from ...domain.records import Credential
 from .dbus_errors import reply_error
 from .marshal import native_error
+from .systemd_dbus import is_error, load_jeepney
 
 _BUS = "org.freedesktop.secrets"
 _SERVICE_PATH = "/org/freedesktop/secrets"
@@ -55,16 +55,7 @@ def scoped_attributes(target: str) -> dict[str, str]:
     return {"application": _APP, "target": target}
 
 
-def _load_jeepney() -> tuple[Any, Any]:
-    """Import jeepney (core + blocking io); raise a clear error off Linux (no jeepney installed)."""
-    try:
-        core = importlib.import_module("jeepney")
-        blocking = importlib.import_module("jeepney.io.blocking")
-    except ImportError as exc:  # pragma: no cover - jeepney is a base Linux dep
-        raise PlatformUnsupportedError(
-            "the credential store needs Windows (win32cred), or Linux with a desktop keyring (reinstall pwshpy)."
-        ) from exc
-    return core, blocking
+_UNSUPPORTED = "the credential store needs Windows (win32cred), or Linux with a desktop keyring (reinstall pwshpy)."
 
 
 class _Session:
@@ -84,19 +75,19 @@ class _Session:
         """
         addr = self.core.DBusAddress(path, bus_name=_BUS, interface=iface)
         reply = self.conn.send_and_get_reply(self.core.new_method_call(addr, method, sig, body))
-        if str(reply.header.message_type.name).lower() == "error":
+        if is_error(reply, core=self.core):
             raise reply_error(f"Secret Service {method}", reply)
         return reply.body
 
 
 def _open() -> _Session:
     """Connect to the session bus and open a plain Secret Service session (the caller closes it)."""
-    core, blocking = _load_jeepney()
+    jeepney = load_jeepney(_UNSUPPORTED)
     try:
-        conn = blocking.open_dbus_connection(bus="SESSION")
+        conn = jeepney.blocking.open_dbus_connection(bus="SESSION")
     except Exception as exc:  # no session bus at all (bare server, no login session)
         raise native_error("no session D-Bus is available; the credential store needs a desktop session.", exc) from exc
-    session = _Session(core, conn, "")
+    session = _Session(jeepney.core, conn, "")
     try:
         _out, path = session.call(_SERVICE_PATH, _SERVICE_IFACE, "OpenSession", "sv", ("plain", ("s", "")))
     except NativeCallError as exc:

@@ -20,6 +20,7 @@ from oserror_fakes import WindowsPermissionError
 
 from pwshpy.adapters.native import registry_control as mod
 from pwshpy.adapters.native.marshal import E_ACCESSDENIED, from_registry_value_type
+from pwshpy.adapters.native.registry import RegistryBackend
 from pwshpy.adapters.native.registry_control import NativeRegistryController
 from pwshpy.domain.enums import RegistryValueType
 from pwshpy.domain.errors import NativeAccessDeniedError, NativeCallError
@@ -52,7 +53,7 @@ class _FakeRegistry:
 
 
 def _use(monkeypatch: pytest.MonkeyPatch, fake: _FakeRegistry) -> None:
-    monkeypatch.setattr(mod, "load_registry_backend", lambda: ((lambda: fake), _FakeRegError))
+    monkeypatch.setattr(mod, "load_registry_backend", lambda: RegistryBackend((lambda: fake), _FakeRegError))
 
 
 @pytest.mark.os_agnostic
@@ -131,7 +132,7 @@ def test_denied_open_key_is_typed_access_denied(
     monkeypatch: pytest.MonkeyPatch, call: Callable[[NativeRegistryController], object]
 ) -> None:
     """A raw denied OpenKey surfaces as NativeAccessDeniedError carrying E_ACCESSDENIED."""
-    monkeypatch.setattr(mod, "load_registry_backend", lambda: (_DeniedRegistry, _FakeRegError))
+    monkeypatch.setattr(mod, "load_registry_backend", lambda: RegistryBackend(_DeniedRegistry, _FakeRegError))
     with pytest.raises(NativeAccessDeniedError) as info:
         call(NativeRegistryController())
     assert (info.value.hresult, info.value.errno) == (E_ACCESSDENIED, errno.EACCES)

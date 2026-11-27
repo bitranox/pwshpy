@@ -9,8 +9,9 @@ with no unit file, and the unit-file listings behave the way busctl shows them o
 from __future__ import annotations
 
 import fnmatch
+import importlib
 from collections.abc import Callable
-from enum import IntEnum
+from enum import Enum, IntEnum
 from typing import Any, ClassVar, NamedTuple
 
 import pytest
@@ -34,6 +35,28 @@ class HeaderFields(IntEnum):
     error_name = 4
 
 
+class _MirroredMessageType(Enum):
+    """jeepney's ``MessageType`` (the D-Bus message type codes), for a host without jeepney (Linux-only)."""
+
+    method_call = 1
+    method_return = 2
+    error = 3
+    signal = 4
+
+
+def _message_type_enum() -> Any:
+    """jeepney's own ``MessageType`` where jeepney is installed, else the mirror with the same members."""
+    try:
+        return importlib.import_module("jeepney").MessageType
+    except ImportError:
+        return _MirroredMessageType
+
+
+#: The message-type enum a reply carries and :class:`FakeCore` hands the adapter: the real jeepney one
+#: on Linux, so the adapter's ``MessageType.error`` comparison runs against the type it meets on a host.
+MessageType: Any = _message_type_enum()
+
+
 #: The D-Bus error names systemd answers a refusal with: no polkit or a bus policy refusal, and a
 #: polkit check that would have to ask (measured on a polkit host as a non-root caller).
 ACCESS_DENIED = "org.freedesktop.DBus.Error.AccessDenied"
@@ -43,14 +66,19 @@ INTERACTIVE_AUTHORIZATION_REQUIRED = "org.freedesktop.DBus.Error.InteractiveAuth
 class Reply:
     """A jeepney reply: the error NAME is a header field, the body holds systemd's message text."""
 
-    def __init__(self, body: tuple[Any, ...], *, error: bool = False, error_name: str = "") -> None:
+    def __init__(
+        self, body: tuple[Any, ...], *, error: bool = False, error_name: str = "", message_type: Any = None
+    ) -> None:
+        """``message_type`` overrides the type ``error`` picks (any D-Bus type, or a stand-in object)."""
         self.body = body
+        if message_type is None:
+            message_type = MessageType.error if error else MessageType.method_return
         fields: dict[HeaderFields, str] = {HeaderFields.error_name: error_name} if error_name else {}
         self.header = type(
             "H",
             (),
             {
-                "message_type": type("T", (), {"name": "error" if error else "method_return"}),
+                "message_type": message_type,
                 "fields": fields,
             },
         )
@@ -84,7 +112,9 @@ def broken_reply() -> Reply:
 
 
 class FakeCore:
-    """The two jeepney entry points the adapter uses: DBusAddress and new_method_call."""
+    """The jeepney entry points the adapter uses: DBusAddress, new_method_call and MessageType."""
+
+    MessageType: ClassVar[Any] = MessageType
 
     @staticmethod
     def DBusAddress(path: str, *, bus_name: str, interface: str) -> Address:  # noqa: N802 - jeepney API name
@@ -386,6 +416,7 @@ __all__ = [
     "FakeCore",
     "HeaderFields",
     "Message",
+    "MessageType",
     "Reply",
     "broken_reply",
     "denied_reply",

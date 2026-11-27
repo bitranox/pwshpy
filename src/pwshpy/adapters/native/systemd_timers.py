@@ -42,6 +42,7 @@ Contents:
     * :func:`usec_to_datetime` / :func:`service_last_result` / :func:`latest_usec` - pure run-info
       mappers.
     * :func:`service_user_id` - a service's ``User=`` as a decimal uid.
+    * :class:`ServiceType` - a service's ``Type``, parsed once where it is read off the bus.
     * :func:`battery_start_allowed` / :func:`start_time_limit` - pure settings read-back mappers.
     * :func:`check_settings` - refuse the :class:`TaskSettings` values systemd has no key for.
     * :func:`service_unit` / :func:`timer_unit` / :func:`linux_user` / :func:`arms_on_register` -
@@ -71,7 +72,7 @@ from ...domain.records import ScheduledTaskInfo
 from ...domain.scheduling import BootTrigger, DailyTrigger, OnceTrigger, TaskPrincipal, TaskSettings, TaskTrigger
 from . import systemd_dbus as _dbus
 from .marshal import native_error, skip_or_raise
-from .systemd_dbus import ActiveState, LoadState, UnitFileState
+from .systemd_dbus import ActiveState, JobMethod, LoadState, UnitFileState, UnitType
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,37 @@ class TimerBase(str, Enum):
 
     @classmethod
     def _missing_(cls, value: object) -> TimerBase:
+        return cls.UNKNOWN
+
+
+class ServiceType(str, Enum):
+    """A service's ``Type`` (systemd.service(5)); a value not named here, or an unreadable one, is :attr:`UNKNOWN`.
+
+    Only :attr:`ONESHOT` changes a decision here (its start job lasts the whole run); every other
+    value, UNKNOWN included, reads as "no oneshot", as an unnamed text value did before the type was
+    parsed.
+
+    Example:
+        >>> ServiceType("oneshot") is ServiceType.ONESHOT, ServiceType("from-the-future") is ServiceType.UNKNOWN
+        (True, True)
+        >>> ServiceType(None) is ServiceType.UNKNOWN
+        True
+    """
+
+    SIMPLE = "simple"
+    EXEC = "exec"
+    FORKING = "forking"
+    ONESHOT = "oneshot"
+    DBUS = "dbus"
+    NOTIFY = "notify"
+    NOTIFY_RELOAD = "notify-reload"
+    IDLE = "idle"
+    UNKNOWN = "unknown"  # not a systemd value: the fallback for one this list does not name
+
+    @classmethod
+    def _missing_(cls, value: object) -> ServiceType:
+        # Any value, not only an unnamed string: the property read answers None when it fails and
+        # could carry another D-Bus type, and both must read as "no oneshot", never raise.
         return cls.UNKNOWN
 
 
@@ -382,7 +414,8 @@ def start_time_limit(service_type: object, timeout_start_usec: object) -> timede
     no limit. The microseconds are kept as systemd holds them, a fraction included.
 
     Args:
-        service_type: The ``Type`` property, or None when it could not be read.
+        service_type: The ``Type`` property as a :class:`ServiceType`, or as read (a string, or None
+            when it could not be read); anything that is no ``oneshot`` reads as no oneshot.
         timeout_start_usec: The ``TimeoutStartUSec`` property, or None when it could not be read.
 
     Returns:
@@ -395,7 +428,7 @@ def start_time_limit(service_type: object, timeout_start_usec: object) -> timede
         >>> start_time_limit("simple", 90_000_000) is None
         True
     """
-    if service_type != "oneshot" or type(timeout_start_usec) is not int:
+    if ServiceType(service_type) is not ServiceType.ONESHOT or type(timeout_start_usec) is not int:
         return None
     if timeout_start_usec == _USEC_INFINITY:
         return timedelta(0)
@@ -416,7 +449,7 @@ def _service_settings(bus: _dbus.Bus, service_path: str | None) -> TaskSettings:
     def read(prop: str, interface: str = _dbus.SERVICE_IFACE) -> object:
         return cast("object", _dbus.path_property(bus, service_path, prop, None, interface=interface))
 
-    service_type = read("Type")
+    service_type = ServiceType(read("Type"))
     send_sigkill = read("SendSIGKILL")
     refuse_manual_start = read("RefuseManualStart", _dbus.UNIT_IFACE)
     # model_construct: these are systemd's values, not a caller's; the input bounds describe what
@@ -425,7 +458,7 @@ def _service_settings(bus: _dbus.Bus, service_path: str | None) -> TaskSettings:
         allow_start_if_on_batteries=battery_start_allowed(read("Conditions", _dbus.UNIT_IFACE)),
         stop_if_going_on_batteries=False,
         execution_time_limit=start_time_limit(
-            service_type, read("TimeoutStartUSec") if service_type == "oneshot" else None
+            service_type, read("TimeoutStartUSec") if service_type is ServiceType.ONESHOT else None
         ),
         multiple_instances=None,
         allow_hard_terminate=send_sigkill if isinstance(send_sigkill, bool) else None,
@@ -438,7 +471,14 @@ def _timer_property(bus: _dbus.Bus, timer_path: str | None, prop: str) -> int:
     return int(_dbus.path_property(bus, timer_path, prop, 0, interface=_dbus.TIMER_IFACE))
 
 
-def _service_run(bus: _dbus.Bus, service_path: str | None) -> tuple[int | None, int]:
+class _ServiceRun(NamedTuple):
+    """A service's last run, as :func:`_service_run` reads it."""
+
+    last_result: int | None  # None: it never ran
+    started_usec: int  # its last ExecMainStartTimestamp; 0: none
+
+
+def _service_run(bus: _dbus.Bus, service_path: str | None) -> _ServiceRun:
     """A service's last result (None if it never ran) and its last ``ExecMainStartTimestamp`` (0: none)."""
 
     def read(prop: str) -> int:
@@ -448,7 +488,7 @@ def _service_run(bus: _dbus.Bus, service_path: str | None) -> tuple[int | None, 
     result = service_last_result(
         exec_code=read("ExecMainCode"), exec_status=read("ExecMainStatus"), started_usec=started
     )
-    return result, started
+    return _ServiceRun(last_result=result, started_usec=started)
 
 
 def latest_usec(*values: int) -> int:
@@ -499,10 +539,12 @@ def _timer_run_info(bus: _dbus.Bus, timer_path: str | None, base: str) -> _RunIn
     """
     service = str(_dbus.path_property(bus, timer_path, "Unit", f"{base}.service", interface=_dbus.TIMER_IFACE))
     service_path = _dbus.load_unit_path(bus, service)
-    result, started = _service_run(bus, service_path)
+    service_run = _service_run(bus, service_path)
     return _RunInfo(
-        last_run_time=usec_to_datetime(latest_usec(_timer_property(bus, timer_path, "LastTriggerUSec"), started)),
-        last_task_result=result,
+        last_run_time=usec_to_datetime(
+            latest_usec(_timer_property(bus, timer_path, "LastTriggerUSec"), service_run.started_usec)
+        ),
+        last_task_result=service_run.last_result,
         next_run_time=usec_to_datetime(_timer_property(bus, timer_path, "NextElapseUSecRealtime")),
         user_id=_service_user(bus, service_path),
         settings=_service_settings(bus, service_path),
@@ -551,7 +593,7 @@ def _service_task(bus: _dbus.Bus, base: str, path: str | None, *, read_state: _A
     A task with no ``.timer`` runs only when started, so it is always enabled, has nothing
     scheduled, and its last run is the service's own last start. ``read_state`` as in :func:`_timer_task_at`.
     """
-    result, started = _service_run(bus, path)
+    service_run = _service_run(bus, path)
     return ScheduledTaskInfo.model_construct(
         task_name=base,
         task_path=_ROOT,
@@ -561,8 +603,8 @@ def _service_task(bus: _dbus.Bus, base: str, path: str | None, *, read_state: _A
         description=str(_dbus.path_property(bus, path, "Description", "")),
         user_id=_service_user(bus, path),
         run_level=None,  # systemd has no split token, so no run level to report
-        last_run_time=usec_to_datetime(started),  # no timer: the last run is the service's own last start
-        last_task_result=result,
+        last_run_time=usec_to_datetime(service_run.started_usec),  # no timer: the service's own last start
+        last_task_result=service_run.last_result,
         next_run_time=None,  # on demand: nothing is scheduled
         settings=_service_settings(bus, path),
     )
@@ -739,7 +781,8 @@ def _lookup_unit(bus: _dbus.Bus, base: str, *, strict: bool) -> Iterator[Schedul
     or ``Id`` read, or any read systemd refuses) ends the lookup through the listing's
     skip-or-raise rule: the service must not stand in for a timer that may exist.
     """
-    for unit in (f"{base}.timer", f"{base}.service"):
+    for unit_type in UnitType:
+        unit = f"{base}{unit_type.value}"
         try:
             resolved = _resolve_named(bus, unit)
         except NativeCallError as exc:
@@ -748,7 +791,7 @@ def _lookup_unit(bus: _dbus.Bus, base: str, *, strict: bool) -> Iterator[Schedul
         if resolved is None:
             continue
         loaded, state = resolved
-        if unit.endswith(".timer"):
+        if unit_type is UnitType.TIMER:
             yield from _unless_refused(
                 partial(_timer_task_at, bus, unit, loaded.path, file_state=state, read_state=_dbus.path_active_state),
                 unit,
@@ -770,7 +813,7 @@ def _timer_files(bus: _dbus.Bus, *, strict: bool) -> list[_dbus.UnitFile]:
     unloaded timer is then missing); ``strict`` raises instead.
     """
     try:
-        return _dbus.unit_files(bus, ".timer")
+        return _dbus.unit_files(bus, UnitType.TIMER)
     except NativeCallError as exc:
         skip_or_raise(
             "cannot list the timer unit files, so no unloaded timer is listed", exc, strict=strict, log=logger
@@ -860,7 +903,7 @@ def iter_timers(
         seen: set[str] = set()
         for unit in _dbus.list_units(bus):
             name = unit.name
-            if not name.endswith(".timer"):
+            if not name.endswith(UnitType.TIMER.value):
                 continue
             if _dbus.is_unlisted_unit(unit.load_state, unit.active_state):
                 # Not marked seen: the name is left to the unit-file pass, which lists it when its
@@ -904,9 +947,9 @@ def base_name(task_path: str) -> str:
     """
     path = task_path.strip()
     name = _folder_separator(path).split(path)[-1]
-    for suffix in (".timer", ".service"):
-        if name.endswith(suffix):
-            return name[: -len(suffix)]
+    for unit_type in UnitType:
+        if name.endswith(unit_type.value):
+            return name[: -len(unit_type.value)]
     return name
 
 
@@ -1107,10 +1150,17 @@ def check_settings(settings: TaskSettings | None, triggers: Sequence[TaskTrigger
         )
 
 
-def _settings_keys(settings: TaskSettings | None) -> tuple[str, str]:
+class _SettingsKeys(NamedTuple):
+    """The unit-file lines a :class:`TaskSettings` adds, per section (each ends with a newline, or is empty)."""
+
+    unit: str  # the [Unit] lines
+    service: str  # the [Service] lines
+
+
+def _settings_keys(settings: TaskSettings | None) -> _SettingsKeys:
     """The [Unit] and the [Service] lines ``settings`` add; empty for each field systemd already matches."""
     if settings is None:
-        return "", ""
+        return _SettingsKeys(unit="", service="")
     unit = "ConditionACPower=true\n" if settings.allow_start_if_on_batteries is False else ""
     if settings.allow_demand_start is False:
         # StartUnit (the run verb) is then refused, "Operation refused, unit ... may be requested by
@@ -1126,7 +1176,7 @@ def _settings_keys(settings: TaskSettings | None) -> tuple[str, str]:
         service += f"TimeoutStartSec={seconds if seconds else 'infinity'}\n"
     if settings.allow_hard_terminate is False:
         service += "SendSIGKILL=no\n"
-    return unit, service
+    return _SettingsKeys(unit=unit, service=service)
 
 
 def service_unit(
@@ -1161,9 +1211,9 @@ def service_unit(
     arguments = _unit_value(arguments, "arguments")
     exec_line = program if not arguments else f"{program} {arguments}"
     user_line = f"User={user}\n" if user is not None else ""
-    unit_keys, service_keys = _settings_keys(settings)
+    keys = _settings_keys(settings)
     return (
-        f"{_unit_head(description, unit_keys)}[Service]\nType=oneshot\n{user_line}ExecStart={exec_line}\n{service_keys}"
+        f"{_unit_head(description, keys.unit)}[Service]\nType=oneshot\n{user_line}ExecStart={exec_line}\n{keys.service}"
     )
 
 
@@ -1526,7 +1576,7 @@ class SystemdScheduledTaskController:
                 registered with ``allow_demand_start=False`` it is "Operation refused, unit ...
                 may be requested by dependency only".
         """
-        self._start_stop(existing_unit_base(task_path), "StartUnit")
+        self._start_stop(existing_unit_base(task_path), JobMethod.START)
 
     def stop(self, task_path: str) -> None:
         """Stop the task's running ``.service`` (like Stop-ScheduledTask).
@@ -1535,7 +1585,7 @@ class SystemdScheduledTaskController:
             ConfigurationError: ``task_path`` is no systemd unit name, or a bare template (:func:`existing_unit_base`).
             NativeCallError: the D-Bus call failed.
         """
-        self._start_stop(existing_unit_base(task_path), "StopUnit")
+        self._start_stop(existing_unit_base(task_path), JobMethod.STOP)
 
     def enable(self, task_path: str) -> ScheduledTaskInfo:
         """Arm a task's ``.timer`` so it runs on schedule (like Enable-ScheduledTask).
@@ -1611,10 +1661,10 @@ class SystemdScheduledTaskController:
                 f"has nothing to {verb.value} - {remedy}."
             )
 
-    def _start_stop(self, base: str, method: str) -> None:
+    def _start_stop(self, base: str, method: JobMethod) -> None:
         bus = _dbus.open_bus()
         try:
-            _dbus.call(bus, method, "ss", (f"{base}.service", "replace"))
+            _dbus.call(bus, method.value, "ss", (f"{base}.service", "replace"))
         finally:
             bus.conn.close()
 
@@ -1654,6 +1704,7 @@ __all__ = [
     "service_task_state",
     "service_unit",
     "service_user_id",
+    "ServiceType",
     "start_time_limit",
     "starts_when_armed",
     "TimerBase",

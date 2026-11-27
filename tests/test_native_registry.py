@@ -18,7 +18,7 @@ from oserror_fakes import WindowsPermissionError
 
 from pwshpy.adapters.native import registry as mod
 from pwshpy.adapters.native.marshal import E_ACCESSDENIED
-from pwshpy.adapters.native.registry import iter_registry_keys, iter_registry_values
+from pwshpy.adapters.native.registry import RegistryBackend, iter_registry_keys, iter_registry_values
 from pwshpy.domain.enums import RegistryHive, RegistryValueType
 from pwshpy.domain.errors import NativeAccessDeniedError, NativeCallError
 from pwshpy.domain.records import RegistryKey, RegistryValue
@@ -110,7 +110,7 @@ def test_denied_open_key_is_typed_access_denied(
     monkeypatch: pytest.MonkeyPatch, read: Callable[[str], Iterator[object]]
 ) -> None:
     """A denied OpenKey surfaces as NativeAccessDeniedError carrying E_ACCESSDENIED, not raw."""
-    monkeypatch.setattr(mod, "load_registry_backend", lambda: (_DeniedRegistry, _FakeRegError))
+    monkeypatch.setattr(mod, "load_registry_backend", lambda: RegistryBackend(_DeniedRegistry, _FakeRegError))
     with pytest.raises(NativeAccessDeniedError) as info:
         list(read("HKLM/SAM/SAM"))
     assert (info.value.hresult, info.value.errno) == (E_ACCESSDENIED, errno.EACCES)

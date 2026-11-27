@@ -31,6 +31,8 @@ Contents:
       (:class:`LoadedUnit`).
     * :func:`unit_files` - every unit file of one type with its UnitFileState (:class:`UnitFile`): the units
       ``ListUnits`` omits because nothing has loaded them (a stopped, disabled service or timer).
+    * :class:`UnitFileListing` - one listing's unit files, fetched once, which also answers the file
+      state of its loaded units.
     * :data:`UNLISTED_LOAD_STATES` / :data:`UNLISTED_FILE_STATES` - the states that are no unit
       of their own, so a listing skips them.
     * :func:`is_unlisted_unit` - the one skip rule for a ``ListUnits`` entry: not-found or masked,
@@ -620,6 +622,76 @@ def live_unit_file_state(bus: Bus, name: str) -> UnitFileState | None:
     return UnitFileState(str(state))
 
 
+# How many loaded units a listing asks GetUnitFileState for before it takes the states from the
+# unit-file listing instead. A consumer that stops early (``take(5)``) pays one cheap call per unit;
+# one that goes further almost always reads the unloaded units too, and that pass needs the listing
+# anyway. Measured on a host with 253 services: GetUnitFileState ~1.1 ms per unit, the listing ~0.4 s
+# once, a full listing 903 -> 675 ms.
+_LOOKUPS_BEFORE_LISTING = 16
+
+
+class UnitFileListing:
+    """One iteration's unit-file listing of one type, shared by its loaded-unit and unit-file passes.
+
+    The loaded-unit pass needs each unit's file state and the unit-file pass needs the listing, which
+    carries the same state (``ListUnitFiles`` and ``GetUnitFileState`` both read it from the unit-file
+    lookup). So past :data:`_LOOKUPS_BEFORE_LISTING` loaded units the states come from the listing,
+    fetched once. A name the listing lacks (a transient unit, a template instance, which have no file
+    of their own there) still asks ``GetUnitFileState``, so the answer is the same either way.
+
+    A failed listing is not kept: the loaded-unit pass falls back to ``GetUnitFileState`` without a
+    word, and :meth:`files` asks again for the unit-file pass, whose caller reports the failure.
+
+    Example:
+        >>> UnitFileListing(cast(Bus, None), UnitType.SERVICE).unit_type is UnitType.SERVICE
+        True
+    """
+
+    def __init__(self, bus: Bus, unit_type: UnitType, *, lookups_before_listing: int = _LOOKUPS_BEFORE_LISTING) -> None:
+        self._bus = bus
+        self.unit_type = unit_type
+        self._lookups_left = lookups_before_listing
+        self._files: list[UnitFile] | None = None
+        self._states: dict[str, UnitFileState] | None = None
+        self._listing_failed = False
+
+    def files(self) -> list[UnitFile]:
+        """The unit files of this type (:func:`unit_files`), listed once.
+
+        Raises:
+            NativeCallError: Neither listing answers; the next call asks again.
+        """
+        if self._files is None:
+            self._files = unit_files(self._bus, self.unit_type)
+        return self._files
+
+    def state_of(self, name: str) -> UnitFileState | None:
+        """The file state of loaded unit ``name``, as :func:`unit_file_state` answers it.
+
+        Raises:
+            NativeAccessDeniedError: systemd refused the ``GetUnitFileState`` this falls back to.
+        """
+        states = self._listed_states()
+        if states is not None and name in states:
+            return states[name]
+        return unit_file_state(self._bus, name)
+
+    def _listed_states(self) -> dict[str, UnitFileState] | None:
+        if self._states is not None or self._listing_failed:
+            return self._states
+        if self._lookups_left > 0:
+            self._lookups_left -= 1
+            return None
+        try:
+            files = self.files()
+        except NativeCallError:
+            # Not reported here: the unit-file pass asks again and reports it (warning or strict raise).
+            self._listing_failed = True
+            return None
+        self._states = {unit.name: unit.state for unit in files}
+        return self._states
+
+
 __all__ = [
     "ActiveState",
     "Bus",
@@ -654,6 +726,7 @@ __all__ = [
     "path_active_state",
     "path_property",
     "UnitFile",
+    "UnitFileListing",
     "UnitFileState",
     "UnitType",
     "unit_file_state",

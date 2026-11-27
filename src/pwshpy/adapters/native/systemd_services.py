@@ -106,14 +106,14 @@ def _service_record(
     )
 
 
-def _service_files(bus: _dbus.Bus, *, strict: bool) -> list[_dbus.UnitFile]:
+def _service_files(listing: _dbus.UnitFileListing, *, strict: bool) -> list[_dbus.UnitFile]:
     """Every ``.service`` unit file as a :class:`~.systemd_dbus.UnitFile`; [] when no listing answers.
 
     When no unit-file listing answers, the default keeps the loaded services with a WARNING (every
     unloaded service is then missing); ``strict`` raises instead.
     """
     try:
-        return _dbus.unit_files(bus, UnitType.SERVICE)
+        return listing.files()
     except NativeCallError as exc:
         what = "cannot list the service unit files, so no unloaded service is listed"
         skip_or_raise(what, exc, strict=strict, log=logger)
@@ -144,10 +144,10 @@ def _skip_refused(name: str, exc: NativeAccessDeniedError, *, strict: bool) -> N
     skip_or_raise(f"systemd refused a read of service unit '{name}'", exc, strict=strict, log=logger)
 
 
-def _listed_service(bus: _dbus.Bus, unit: _dbus.ListedUnit, *, strict: bool) -> ServiceInfo | None:
+def _listed_service(listing: _dbus.UnitFileListing, unit: _dbus.ListedUnit, *, strict: bool) -> ServiceInfo | None:
     """The record of a loaded service from its ``ListUnits`` entry; None when systemd refuses its read."""
     try:
-        start_type = _start_type_of(bus, unit.name)
+        state = listing.state_of(unit.name)
     except NativeAccessDeniedError as exc:
         _skip_refused(unit.name, exc, strict=strict)
         return None
@@ -155,7 +155,7 @@ def _listed_service(bus: _dbus.Bus, unit: _dbus.ListedUnit, *, strict: bool) -> 
         name=unit.name,
         display_name=unit.description,
         status=to_service_state(unit.active_state),
-        start_type=start_type,
+        start_type=None if state is None else to_start_type(state),
         can_stop=True,
         can_pause_continue=False,
     )
@@ -189,8 +189,9 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
     older one answers not-found until a daemon-reload, and the name is skipped. Lazy:
     ``GetUnitFileState``, the unit-file listing and each ``LoadUnit`` run only for consumed services, so
     ``get_service().where(...).take(5)`` over loaded services costs one ``ListUnits`` plus five
-    state lookups. Reading an unloaded service loads it transiently; systemd unloads it again when
-    nothing references it.
+    state lookups; past the first loaded services the start types come from the unit-file listing,
+    fetched once for both passes (:class:`~.systemd_dbus.UnitFileListing`). Reading an unloaded
+    service loads it transiently; systemd unloads it again when nothing references it.
 
     Args:
         strict: What happens when systemd does not answer a read the listing needs - the
@@ -217,6 +218,7 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
     """
     bus = _dbus.open_bus()
     try:
+        listing = _dbus.UnitFileListing(bus, UnitType.SERVICE)
         seen: set[str] = set()
         for unit in _dbus.list_units(bus):
             name = unit.name
@@ -233,10 +235,10 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
                 # not-found until a daemon-reload. Nothing here depends on the version.
                 continue
             seen.add(name)
-            listed = _listed_service(bus, unit, strict=strict)
+            listed = _listed_service(listing, unit, strict=strict)
             if listed is not None:
                 yield listed
-        for name, state in _service_files(bus, strict=strict):
+        for name, state in _service_files(listing, strict=strict):
             if name in seen or state in _dbus.UNLISTED_FILE_STATES:
                 continue
             seen.add(name)

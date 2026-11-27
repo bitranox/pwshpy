@@ -744,9 +744,9 @@ def _unless_refused(read: Callable[[], ScheduledTaskInfo], unit: str, *, strict:
     yield task
 
 
-def _listed_timer(bus: _dbus.Bus, unit: _dbus.ListedUnit) -> ScheduledTaskInfo:
+def _listed_timer(bus: _dbus.Bus, listing: _dbus.UnitFileListing, unit: _dbus.ListedUnit) -> ScheduledTaskInfo:
     """The record of a loaded timer from its ``ListUnits`` entry plus its unit file state."""
-    state = _dbus.unit_file_state(bus, unit.name) or UnitFileState.EMPTY
+    state = listing.state_of(unit.name) or UnitFileState.EMPTY
     header = _TimerHeader(unit.active_state, unit.description)
     return _timer_task(bus, unit.name, unit.path, file_state=state, header=header)
 
@@ -806,14 +806,14 @@ def _lookup_unit(bus: _dbus.Bus, base: str, *, strict: bool) -> Iterator[Schedul
         return
 
 
-def _timer_files(bus: _dbus.Bus, *, strict: bool) -> list[_dbus.UnitFile]:
+def _timer_files(listing: _dbus.UnitFileListing, *, strict: bool) -> list[_dbus.UnitFile]:
     """Every ``.timer`` unit file as a :class:`~.systemd_dbus.UnitFile`; [] when no listing answers.
 
     When no unit-file listing answers, the default keeps the loaded timers with a WARNING (every
     unloaded timer is then missing); ``strict`` raises instead.
     """
     try:
-        return _dbus.unit_files(bus, UnitType.TIMER)
+        return listing.files()
     except NativeCallError as exc:
         skip_or_raise(
             "cannot list the timer unit files, so no unloaded timer is listed", exc, strict=strict, log=logger
@@ -853,7 +853,9 @@ def iter_timers(
     listed whenever systemd re-loads it on that call, which per the systemd source (unmeasured) a
     systemd >= 246 does; an older one answers not-found until a daemon-reload, and the name is
     skipped. Lazy: the unit-file listing,
-    ``GetUnitFileState`` and the run-info reads run only for consumed timers. Reading an unloaded
+    ``GetUnitFileState`` and the run-info reads run only for consumed timers; past the first loaded
+    timers the file states come from the unit-file listing, fetched once for both passes
+    (:class:`~.systemd_dbus.UnitFileListing`). Reading an unloaded
     timer loads it transiently; systemd unloads it again when nothing references it.
 
     Args:
@@ -900,6 +902,7 @@ def iter_timers(
         return
     bus = _dbus.open_bus()
     try:
+        listing = _dbus.UnitFileListing(bus, UnitType.TIMER)
         seen: set[str] = set()
         for unit in _dbus.list_units(bus):
             name = unit.name
@@ -916,8 +919,8 @@ def iter_timers(
                 # not-found until a daemon-reload. Nothing here depends on the version.
                 continue
             seen.add(name)
-            yield from _unless_refused(partial(_listed_timer, bus, unit), name, strict=strict)
-        for name, state in _timer_files(bus, strict=strict):
+            yield from _unless_refused(partial(_listed_timer, bus, listing, unit), name, strict=strict)
+        for name, state in _timer_files(listing, strict=strict):
             if name in seen or state in _dbus.UNLISTED_FILE_STATES:
                 continue
             seen.add(name)

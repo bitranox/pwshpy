@@ -2771,3 +2771,24 @@ def test_a_lookup_by_name_keeps_an_on_demand_task_whose_active_state_read_fails(
     conn = _lookup_conn(fragments=tmp_path, broken_reads=frozenset({("adhoc.service", "ActiveState")}))
     use_bus(monkeypatch, conn)
     assert [t.task_name for t in iter_timers(task_name="adhoc", strict=strict)] == ["adhoc"]
+
+
+@pytest.mark.os_agnostic
+def test_iter_timers_takes_late_file_states_from_the_one_unit_file_listing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Past the first loaded timers the file states come from the listing the file pass needs anyway.
+
+    t17 is disabled in the listing and so reads Disabled; the transient timer has no unit file there,
+    so it still asks GetUnitFileState and reads as not enabled, as a per-unit lookup gives.
+    """
+    names = [f"t{i:02d}.timer" for i in range(20)]
+    units = [(name, f"Timer {name}", "inactive") for name in names]
+    units.insert(18, ("run-transient.timer", "A transient timer", "inactive"))
+    conn = FakeConn(units, {}, frozenset(names), file_states={"t17.timer": "disabled"})
+    use_bus(monkeypatch, conn)
+    tasks = {t.task_name: (t.state, t.enabled) for t in iter_timers()}
+    assert len(tasks) == 21
+    assert tasks["t17"] == (TaskState.DISABLED, False)
+    assert tasks["run-transient"] == (TaskState.DISABLED, False)
+    assert all(tasks[f"t{i:02d}"] == (TaskState.READY, True) for i in range(20) if i != 17)
+    assert conn.methods.count("GetUnitFileState") == 17  # the first 16 timers plus the transient one
+    assert conn.methods.count("ListUnitFilesByPatterns") == 1  # one listing serves both passes

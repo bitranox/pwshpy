@@ -892,3 +892,62 @@ def test_a_failed_start_whose_result_cannot_be_read_still_raises(monkeypatch: py
     use_bus(monkeypatch, conn)
     with pytest.raises(NativeCallError, match="failed"):
         SystemdServiceController().start("wuauserv.service", timeout=3.0)
+
+
+def _many_loaded_conn(*, failing: frozenset[str] = frozenset()) -> FakeConn:
+    """Twenty loaded services with unit files (svc17 disabled) plus a transient one with none, listed late."""
+    names = [f"svc{i:02d}.service" for i in range(20)]
+    units = [(name, f"Service {name}", "active") for name in names]
+    units.insert(18, ("run-transient.service", "A transient unit", "active"))
+    return FakeConn(
+        units,
+        {},
+        frozenset(names),
+        file_states={"svc17.service": "disabled"},
+        failing=failing,
+    )
+
+
+@pytest.mark.os_agnostic
+def test_iter_services_takes_late_start_types_from_the_one_unit_file_listing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Past the first loaded services the start types come from the listing the file pass needs anyway.
+
+    The transient service has no unit file in the listing, so it still asks GetUnitFileState (and
+    reads no start type, as before); every other answer equals what a per-unit lookup gives.
+    """
+    conn = _many_loaded_conn()
+    use_bus(monkeypatch, conn)
+    services = {s.name: s.start_type for s in iter_services()}
+    assert len(services) == 21
+    assert services["svc17.service"] is ServiceStartType.DISABLED
+    assert services["run-transient.service"] is None
+    assert all(services[f"svc{i:02d}.service"] is ServiceStartType.AUTOMATIC for i in range(20) if i != 17)
+    assert conn.methods.count("GetUnitFileState") == 17  # the first 16 services plus the transient one
+    assert conn.methods.count("ListUnitFilesByPatterns") == 1  # one listing serves both passes
+
+
+@pytest.mark.os_agnostic
+def test_iter_services_take_five_asks_five_lookups_and_no_listing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A short take stays cheap: no unit-file listing before the lookup budget is spent."""
+    conn = _many_loaded_conn()
+    use_bus(monkeypatch, conn)
+    services = iter_services()
+    assert [next(services).name for _ in range(5)] == [f"svc{i:02d}.service" for i in range(5)]
+    assert conn.methods.count("GetUnitFileState") == 5
+    assert "ListUnitFilesByPatterns" not in conn.methods
+    assert "ListUnitFiles" not in conn.methods
+
+
+@pytest.mark.os_agnostic
+def test_a_failed_listing_falls_back_to_lookups_and_warns_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """With no listing answering, every loaded service asks GetUnitFileState; the file pass warns once."""
+    conn = _many_loaded_conn(failing=frozenset({"ListUnitFilesByPatterns", "ListUnitFiles"}))
+    use_bus(monkeypatch, conn)
+    with caplog.at_level(logging.DEBUG, logger=systemd_services.__name__):
+        services = {s.name: s.start_type for s in iter_services()}
+    assert services["svc17.service"] is ServiceStartType.DISABLED
+    assert len(services) == 21
+    assert conn.methods.count("GetUnitFileState") == 21
+    assert [r.levelno for r in caplog.records if "unit files" in r.getMessage()] == [logging.WARNING]

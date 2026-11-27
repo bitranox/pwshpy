@@ -1030,7 +1030,9 @@ class Ps:
         Read-only by construction: only the methods on
         :data:`pwshpy.domain.cim_methods.READ_ONLY_CIM_METHODS` can be called; any other is
         refused with :class:`CimMethodNotAllowedError` HERE, before WMI is contacted, and there is
-        no switch to bypass the list. A method's non-zero ``ReturnValue`` is data, not an
+        no switch to bypass the list. The list is per namespace, so pass the class's own:
+        ``Win32_Tpm.IsReady`` needs ``namespace="root/cimv2/Security/MicrosoftTpm"`` and is
+        refused under the default ``root/cimv2``. A method's non-zero ``ReturnValue`` is data, not an
         exception (the record's ``return_value``): it is that instance's answer, so one locked
         volume does not hide the others.
 
@@ -1957,6 +1959,9 @@ class Ps:
         Linux, the process group on macOS - where a ``setsid`` grandchild is not covered),
         and ``timeout`` then covers the whole tree and kills it on expiry.
 
+        ``stdout`` and ``stderr`` are captured whole in memory, with no size limit, as
+        ``subprocess.run`` does; send a program's large output to a file through its own options.
+
         Args:
             argv: The program and its arguments as a list, passed verbatim, never through a shell.
             cwd: The working directory for the program; None keeps the caller's.
@@ -2359,6 +2364,9 @@ class Ps:
         5xx) raises, as ``Invoke-WebRequest`` does, unless ``skip_http_error_check`` is True.
         A redirect is followed only to an ``http``/``https`` URL; one to any other scheme is
         refused before anything connects to it, whatever ``skip_http_error_check`` says.
+
+        The whole body is read into memory, with no size limit; for a large file use
+        :meth:`download_file`, which streams it to disk in fixed-size chunks.
 
         Args:
             url: An ``http://`` or ``https://`` URL; any other scheme is refused.
@@ -3002,9 +3010,11 @@ class Ps:
 
         A no-op returning ``0`` when already elevated. Windows uses UAC (and, unlike
         PowerShell's ``Start-Process -Verb RunAs``, the elevated child keeps the current
-        working directory - no ``System32`` surprise); POSIX (Linux/macOS) asks for the
-        password with ``sudo -v`` and then re-execs the command under ``sudo -n``, which
-        never asks a second time. ``argv`` is forwarded in both cases.
+        working directory - no ``System32`` surprise); POSIX (Linux/macOS) re-execs the
+        command under ``sudo -n``, which never prompts: at once when sudo runs the
+        interpreter without a password (a NOPASSWD rule, probed with ``sudo -n``), otherwise
+        after asking for the password with ``sudo -v`` and checking with ``sudo -n -v`` that a
+        credential was cached. ``argv`` is forwarded in both cases.
 
         Args:
             argv: The arguments for the relaunched program, after the executable. None, with

@@ -119,6 +119,8 @@ class _Reader:
     def text(self, drain_deadline: float) -> str:
         """Return the output read so far, after letting the reader reach EOF until ``drain_deadline``."""
         self._thread.join(max(drain_deadline - time.monotonic(), 0.0))
+        # A snapshot, not a needless copy: after a timed-out join the pump thread may still be
+        # appending, and joining the live list would race it.
         return decode_output(b"".join(list(self._chunks)))
 
 

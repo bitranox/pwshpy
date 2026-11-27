@@ -88,7 +88,7 @@ def cli_pack(
 @option("--jsonl", "as_jsonl", is_flag=True, default=False, help="Emit the manifest as one JSON line.")
 @click.pass_context
 def cli_unpack(ctx: click.Context, *, source: str, dest: str, force: bool, as_json: bool, as_jsonl: bool) -> None:
-    """Restore the Python sources embedded in a packed .ps1 (the inverse of ``pack``).
+    """Restore the Python sources embedded in a packed .ps1 or .sh script (the inverse of ``pack``).
 
     \f
     Example:

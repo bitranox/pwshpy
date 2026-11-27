@@ -319,13 +319,14 @@ timeout (`exec --timeout`, a service start, stop or restart that did not settle,
 local-account commands `new_local_user`, `remove_local_user`, `enable_local_user`,
 `disable_local_user`, `new_local_group`, `remove_local_group`, `add_local_group_member` and
 `remove_local_group_member` after 30 s), **13** (5 on Windows) means a call refused for lack of
-rights, and the packed runners add 64, 70 and 127. A `--timeout` on the .NET commands (`run`,
+rights, **70** means `pwshpy --elevate` on Windows cannot elevate from a directory on a mapped
+network drive, and the packed runners add 64, 70 and 127. A `--timeout` on the .NET commands (`run`,
 `cmdlet`, `get_ad_user`, ...) exits 1. The full table is in the [CLI
 Reference](docs/cli-reference.md#exit-codes).
 
 ## The costly part: it stays true
 
-Claims are cheap, so here is the receipt. Every native read command is pinned by an oracle test that
+Claims are cheap, so here is the receipt. Most native read commands are pinned by an oracle test that
 runs the real cmdlet (`Get-Service`, `Get-WinEvent`, `Get-CimInstance`, ...) on Windows and compares
 pwshpy's typed records against it on locale-invariant fields. The gotchas above are not "gone because
 we say so" - there are tests whose entire job is to keep them gone. Principals are identified by SID,

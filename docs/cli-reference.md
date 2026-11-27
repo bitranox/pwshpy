@@ -9,7 +9,8 @@ translation table (grouped by theme, Python API and CLI in separate columns), se
 ## Portable record commands
 
 Every native record command shares `--json` (a streamed array), `--jsonl` (one record per line,
-lazy end to end), and a default human table; most take `--limit N`.
+lazy end to end), and a default human table. `env`, `get_process`, `get_net_tcp_connection` and
+`get_volume` also take `--limit N` / `-n N` to stop after N records.
 
 On an error the exit code is non-zero and the message goes to stderr, after any log lines the
 command already wrote (queued log lines are drained first, so each stays on its own line).
@@ -26,10 +27,10 @@ the pipe decodes it as UTF-8 even from a cp1252 Windows console. The JSON that `
 `get_command`, `invoke_rest_method` and `config --format json` print is written the same way. So is the text that `exec`
 (the program's stdout and stderr), `invoke_web_request` (the response body), `get_content` (the
 file's lines) and `download_file` (its `downloaded URL -> DEST` line) write when piped or redirected:
-a character the console code page cannot hold no longer fails the command after the work was done.
+a character the console code page cannot hold does not fail the command after the work was done.
 Those bytes are the text's own: `exec` output and `get_content` lines have LF line ends (both are
 read with universal newlines), a web body keeps its line ends, and ANSI sequences are not stripped.
-At a terminal they print as before.
+At a terminal they are written in the console's own encoding.
 
 A record field holding a byte that is not valid UTF-8 (a POSIX environment variable, file, process
 or account name) is written with U+FFFD for each such byte, so `--json` / `--jsonl` stay valid UTF-8
@@ -51,10 +52,10 @@ JSON; for a single undecodable byte this is what pwsh 7 shows.
 Every other line the CLI writes to a piped or redirected stdout or stderr is UTF-8 with LF line ends
 too, on every OS: the human table, the status lines (`wrote`, `created`, `copied`, `moved`,
 `removed`, `registered`, ...), `config`, and error messages. A value the
-console code page cannot hold (`pwshpy env | more` with a CJK value on German Windows) used to fail
-the command with exit 22 (87 on Windows) after the work was done. A reader that decodes the pipe in
-a legacy code page sees non-ASCII characters as mojibake rather than as an error. At a terminal
-nothing changes: the console's own encoding is used.
+console code page cannot hold (`pwshpy env | more` with a CJK value on German Windows) is written
+as UTF-8 and the command succeeds. A reader that decodes the pipe in a legacy code page sees
+non-ASCII characters as mojibake rather than as an error. At a terminal the console's own encoding
+is used.
 
 At a terminal the human table fits the terminal's width and may shorten long cells. Piped or
 redirected (`pwshpy env | grep PATH`, `> out.txt`), it is as wide as its content instead, up to
@@ -71,18 +72,26 @@ list or mapping prints as it is.
 
 **Everywhere** - one binding on Windows, macOS and Linux:
 
-| Command                         | Shows                         | Binding                                |
-|---------------------------------|-------------------------------|----------------------------------------|
-| `pwshpy get_process`            | running processes             | psutil                                 |
-| `pwshpy get_net_tcp_connection` | open TCP connections          | psutil                                 |
-| `pwshpy get_volume`             | mounted filesystems and usage | psutil                                 |
-| `pwshpy get_uptime`             | boot time and elapsed uptime  | psutil                                 |
-| `pwshpy resolve_dns_name NAME`  | resolved DNS addresses        | stdlib socket                          |
-| `pwshpy test_connection HOST`   | TCP reachability probe        | stdlib socket                          |
-| `pwshpy env`                    | environment variables         | os.environ                             |
-| `pwshpy get_net_adapter`        | network interfaces            | psutil                                 |
-| `pwshpy get_computer_info`      | machine summary               | stdlib/psutil                          |
-| `pwshpy get_windows_image PATH` | images inside a WIM file      | stdlib + defusedxml (WIM header + XML) |
+| Command                           | Shows                                       | Binding                                |
+|-----------------------------------|---------------------------------------------|----------------------------------------|
+| `pwshpy get_process`              | running processes                           | psutil                                 |
+| `pwshpy get_net_tcp_connection`   | open TCP connections                        | psutil                                 |
+| `pwshpy get_volume`               | mounted filesystems and usage               | psutil                                 |
+| `pwshpy get_uptime`               | boot time and elapsed uptime                | psutil                                 |
+| `pwshpy resolve_dns_name NAME`    | resolved DNS addresses                      | stdlib socket                          |
+| `pwshpy test_connection HOST`     | TCP reachability probe                      | stdlib socket                          |
+| `pwshpy env`                      | environment variables                       | os.environ                             |
+| `pwshpy get_net_adapter`          | network interfaces                          | psutil                                 |
+| `pwshpy get_net_ip_address`       | bound IP addresses                          | psutil                                 |
+| `pwshpy get_net_udp_endpoint`     | UDP sockets                                 | psutil                                 |
+| `pwshpy get_child_item PATH [-r]` | a directory's entries (`-r` walks the tree) | stdlib pathlib                         |
+| `pwshpy get_item PATH`            | one file or directory                       | stdlib pathlib                         |
+| `pwshpy test_path PATH [-q]`      | whether `PATH` exists                       | stdlib pathlib                         |
+| `pwshpy get_computer_info`        | machine summary                             | stdlib/psutil                          |
+| `pwshpy get_windows_image PATH`   | images inside a WIM file                    | stdlib + defusedxml (WIM header + XML) |
+
+`test_path` prints `True` or `False` rather than a record (no `--json`) and exits 0 when `PATH`
+exists, 1 when it does not; `-q` prints nothing, so only the exit code answers.
 
 `get_process` names a process as psutil does, so two Windows pseudo-processes differ from
 `Get-Process`: the memory compression store is `MemCompression` (`Get-Process`:
@@ -221,13 +230,24 @@ pwshpy get_service --jsonl | jq 'select(.status == "Running")'   # same line on 
 These change host state and dispatch to the native backend per OS (need admin on Windows, root or
 polkit on Linux). The library methods (`ps.start_service(...)`) mirror these names exactly.
 
-| Group           | Commands                                                                                                                                                                  | Windows            | Linux                   |
-|-----------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------|-------------------------|
-| Services        | `start_service` `stop_service` `restart_service` `set_service`                                                                                                            | win32service       | systemd                 |
-| Scheduled tasks | `register_scheduled_task` `unregister_scheduled_task` `enable_scheduled_task` `disable_scheduled_task` `start_scheduled_task` `stop_scheduled_task`                       | Task Scheduler     | systemd timers          |
-| ACLs            | `add_acl_ace` `remove_acl_ace` `set_owner`                                                                                                                                | win32security      | POSIX ACL xattr + chown |
-| Credentials     | `save_credential` `load_credential` `delete_credential`                                                                                                                   | Credential Manager | Secret Service keyring  |
-| Local accounts  | `new_local_user` `remove_local_user` `enable_local_user` `disable_local_user` `new_local_group` `remove_local_group` `add_local_group_member` `remove_local_group_member` | win32net           | shadow-utils            |
+| Group           | Commands                                                                                                                                                                  | Windows                  | Linux                    |
+|-----------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|--------------------------|
+| Services        | `start_service` `stop_service` `restart_service` `set_service`                                                                                                            | win32service             | systemd                  |
+| Scheduled tasks | `register_scheduled_task` `unregister_scheduled_task` `enable_scheduled_task` `disable_scheduled_task` `start_scheduled_task` `stop_scheduled_task`                       | Task Scheduler           | systemd timers           |
+| ACLs            | `add_acl_ace` `remove_acl_ace` `set_owner`                                                                                                                                | win32security            | POSIX ACL xattr + chown  |
+| Credentials     | `save_credential` `load_credential` `delete_credential`                                                                                                                   | Credential Manager       | Secret Service keyring   |
+| Local accounts  | `new_local_user` `remove_local_user` `enable_local_user` `disable_local_user` `new_local_group` `remove_local_group` `add_local_group_member` `remove_local_group_member` | win32net                 | shadow-utils             |
+| Files           | `new_item` `copy_item` `move_item` `remove_item` `write_text`                                                                                                             | stdlib (pathlib, shutil) | stdlib (pathlib, shutil) |
+| Processes       | `stop_process`                                                                                                                                                            | psutil                   | psutil                   |
+
+The file and process verbs run on macOS too and need only the rights the path or process itself
+demands: `new_item PATH [--type file|directory]` (default `file`), `copy_item SOURCE DESTINATION
+[-r]` (`-r` copies a directory tree), `move_item SOURCE DESTINATION` (move or rename),
+`remove_item PATH [-r]` (`-r` removes a directory's contents too), `stop_process PID [-f]` (`-f`
+kills instead of a graceful terminate) and `write_text PATH [--encoding E] [--input-encoding E]
+[--bom] [--crlf]`. `write_text` reads stdin and writes it to `PATH` as UTF-8 without a BOM and with
+LF line ends unless `--encoding`, `--bom` or `--crlf` say otherwise; `--input-encoding` names the
+encoding of a piped stdin (default UTF-8, e.g. `cp1252` for a legacy program's output).
 
 `stop_service NAME` waits until the service is Stopped (up to 30 s). `--no-wait` issues the stop and
 returns at once with the state right after it, typically `StopPending`, for a service that takes
@@ -251,8 +271,10 @@ account API), and a POSIX group has no description so `new_local_group`'s is ign
 attribute macOS does not offer.
 
 **Windows only** (no honest Linux analog): the registry verbs (`set_item_property`,
-`remove_item_property`, `new_registry_key`, `remove_registry_key`), `clear_event_log` and
-`new_shortcut`. See [COMMANDS.md](../COMMANDS.md) for the full cmdlet-by-cmdlet table.
+`remove_item_property`, `new_registry_key`, `remove_registry_key`), `clear_event_log`,
+`new_shortcut`, and the destructive `restart_computer [--delay N] --yes` and
+`stop_computer [--delay N] --yes`, which restart or shut the machine down after `N` seconds
+(default 0) and refuse to act without `--yes` (exit 1). See [COMMANDS.md](../COMMANDS.md) for the full cmdlet-by-cmdlet table.
 
 `pwshpy new_shortcut PATH --target TARGET [--working-directory D] [--icon I] [--icon-index N]
 [--description T] [--run-as-administrator] [-f] [-- ARGS...]` writes a shortcut (`.lnk`). The target's arguments go after
@@ -371,6 +393,16 @@ pwshpy pack tool.py -o dist/tool.sh                          # ...or a POSIX .sh
 pwshpy unpack dist/tool.ps1 -o src/                          # get the sources back out (reads .ps1 or .sh)
 ```
 
+Their options: `exec [--cwd DIR] [--timeout S] [--wait-tree] [--json] -- PROGRAM ARGS...` runs in
+`DIR` and exits with the program's code; `--json` prints the `ProcessResult` record (argv, exit
+code, captured stdout and stderr, duration) instead of the program's output; `get_content PATH [--encoding E]` reads the file in encoding `E` (default UTF-8);
+`invoke_web_request URL [-X METHOD] [-H 'Name: value' ...] [--body TEXT] [--timeout S] [--json]`
+prints the response body, or with `--json` the whole `WebResponse` record;
+`invoke_rest_method URL [-X METHOD] [-H 'Name: value' ...] [--body-json JSON] [--timeout S]` sends
+`--body-json` as `application/json` and prints the parsed JSON answer (`-X` defaults to `GET`, `-H`
+repeats); `wait_process PID [--timeout S]` waits for the process to exit and prints
+`PID <pid> exited with <code>`.
+
 Exit code 110 (ETIMEDOUT) means an `OperationTimeoutError` on every OS: `exec --timeout N` exits
 110, not 1, when the child outlives `N` seconds, as a service wait that hits its deadline does, and
 so do `wait_process --timeout`, `resolve_dns_name --timeout`, `download_file`, `invoke_web_request`
@@ -408,7 +440,8 @@ names. The `.ps1` runs on Windows PowerShell 5.1 / pwsh 7; the `.sh` runs under 
 (dash, busybox ash, macOS `sh`, bash). Both pack and unpack are pure Python, so a `.sh` can be built
 on Windows and a `.ps1` on Linux, and `unpack` sniffs the format on either OS. `unpack` restores the
 packed sources (`-o DIR`, `--force`) so a pack can be edited and packed again. See
-[Power Tools](power-tools.md) for the artefact's own switches (`-PwshPyInfo` / `--pwshpy-info`,
+[Power Tools](power-tools.md) for the artefact's own switches (`-PwshPyHelp` / `--pwshpy-help`,
+`-PwshPyInfo` / `--pwshpy-info`,
 `-PwshPyClean` / `--pwshpy-clean`, `-PwshPyNoInstallUv` / `--pwshpy-no-install-uv`,
 `-PwshPyElevate` / `--pwshpy-elevate`, `-PwshPyUv PATH` / `--pwshpy-uv PATH`). Run elevated (an
 administrator token, SYSTEM or root) a runner only executes a `uv` that no account other than the
@@ -446,19 +479,23 @@ The `pwshpy` command and the packed runners share one set of exit codes, so a ca
 refusal, a timeout and a missing tool from an ordinary failure without parsing stderr. Each error
 also writes one `ErrorName: message` line (or a `pwshpy: ...` line from a runner) to stderr.
 
-| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Raised by                                                                                                                                                                                                                                                                                                                                                                   |
-|------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 0    | success                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | every command                                                                                                                                                                                                                                                                                                                                                               |
-| 1    | any other failure: a `PwshPyError` (`NativeCallError`, `PlatformUnsupportedError`, `ConfigurationError`, ...), including a missing `sudo` behind `pwshpy --elevate`                                                                                                                                                                                                                                                                                                                                                                                           | every command                                                                                                                                                                                                                                                                                                                                                               |
-| 2    | a usage error: an unknown option, a value out of range (`--index 0`), an offset-less `--at` time                                                                                                                                                                                                                                                                                                                                                                                                                                                              | every command (click)                                                                                                                                                                                                                                                                                                                                                       |
-| 13   | a refused native call (`NativeAccessDeniedError`, also a `PermissionError`; 5 on Windows), whatever the failed call reported (`EACCES`, `EPERM`, a pywin32 or COM `E_ACCESSDENIED`, a psutil `AccessDenied`, a systemd D-Bus `AccessDenied` or `InteractiveAuthorizationRequired`, a Secret Service D-Bus `AccessDenied` or `InteractiveAuthorizationRequired`), e.g. `get_acl` on a file in a directory the caller cannot enter, or `stop_service` as a non-root user                                                                                        | native commands; a shadow-utils refusal exits 1                                                                                                                                                                                                                                                                                                                             |
-| 22   | a value the command accepted but the call refused (`ValueError`; 87 on Windows), e.g. `get_windows_update --timeout nan`                                                                                                                                                                                                                                                                                                                                                                                                                                      | every command                                                                                                                                                                                                                                                                                                                                                               |
-| 64   | a relative or empty `-PwshPyUv` / `--pwshpy-uv` path                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | packed runners                                                                                                                                                                                                                                                                                                                                                              |
-| 70   | the runner failed before it ran the script: the elevated `.ps1` child (relayed with a `pwshpy: the elevated child failed before running the script` line), an elevated run that cannot return to the caller's working directory (`pwshpy pack: cannot return to the working directory`), a root `.sh` run that cannot read the account's home from the passwd database, or a `.ps1` `-PwshPyElevate` on Linux or macOS whose passwd database names no home for root or that finds no `/bin/sh` (`pwshpy: cannot elevate: ...`, before sudo is asked anything) | packed runners                                                                                                                                                                                                                                                                                                                                                              |
-| 70   | `--elevate` on Windows from a directory on a `net use` drive, or relaunching a script on one without `EnableLinkedConnections` (`ElevationDirectoryError`), with a `pwshpy: cannot elevate:` line naming the UNC path, before any prompt                                                                                                                                                                                                                                                                                                                      | `pwshpy`                                                                                                                                                                                                                                                                                                                                                                    |
-| 77   | an elevation was refused or declined (`ElevationDeclinedError`), with a `pwshpy: elevation declined` line on stderr; on POSIX also a sudo that caches no credential (`timestamp_timeout=0`)                                                                                                                                                                                                                                                                                                                                                                   | `pwshpy --elevate`, `-PwshPyElevate`, `--pwshpy-elevate`                                                                                                                                                                                                                                                                                                                    |
-| 110  | a timeout (`OperationTimeoutError`, ETIMEDOUT): `exec --timeout`, a service start, stop or restart that did not settle, `get_windows_update --timeout`, `wait_process --timeout`, `resolve_dns_name --timeout`, a web request or download whose connect or read stalls past `--timeout`, a Linux local-account command whose shadow-utils commands together outlast 30 s                                                                                                                                                                                      | `exec`, `start_service`, `stop_service`, `restart_service`, `get_windows_update`, `wait_process`, `resolve_dns_name`, `invoke_web_request`, `invoke_rest_method`, `download_file`, `new_local_user`, `remove_local_user`, `enable_local_user`, `disable_local_user`, `new_local_group`, `remove_local_group`, `add_local_group_member`, `remove_local_group_member` (Linux) |
-| 127  | a missing or untrusted tool or directory: no `uv` and `-PwshPyNoInstallUv` / `--pwshpy-no-install-uv`, no `uv` an elevated run can trust, a refused `-PwshPyUv` pin, a managed Python an elevated run cannot trust (`refusing the Python uv found at`), a pack cache an elevated run cannot trust (`refusing the cache directory`), a git older than 2.32 (or of no readable version) for an elevated `.ps1` or root `.sh` run of a script with a git source (`refusing git`), or no `sudo` for `-PwshPyElevate` / `--pwshpy-elevate` on POSIX                | packed runners                                                                                                                                                                                                                                                                                                                                                              |
+| Code | Meaning | Raised by |
+|---|---|---|
+| 0 | success | every command |
+| 1 | any other failure: a `PwshPyError` (`NativeCallError`, `PlatformUnsupportedError`, `ConfigurationError`, ...), including a missing `sudo` behind `pwshpy --elevate` | every command |
+| 2 | a usage error: an unknown option, a value out of range (`--index 0`), an offset-less `--at` time | every command (click) |
+| 13 | a refused native call (`NativeAccessDeniedError`, also a `PermissionError`; 5 on Windows), whatever the failed call reported (`EACCES`, `EPERM`, a pywin32 or COM `E_ACCESSDENIED`, a psutil `AccessDenied`, a systemd D-Bus `AccessDenied` or `InteractiveAuthorizationRequired`, a Secret Service D-Bus `AccessDenied` or `InteractiveAuthorizationRequired`), e.g. `get_acl` on a file in a directory the caller cannot enter, or `stop_service` as a non-root user | native commands; a shadow-utils refusal exits 1 |
+| 22 | a value the command accepted but the call refused (`ValueError`; 87 on Windows), e.g. `get_windows_update --timeout nan` | every command |
+| 64 | a relative or empty `-PwshPyUv` / `--pwshpy-uv` path | packed runners |
+| 70 | the runner failed before it ran the script: the elevated `.ps1` child (relayed with a `pwshpy: the elevated child failed before running the script` line), an elevated run that cannot return to the caller's working directory (`pwshpy pack: cannot return to the working directory`), a root `.sh` run that cannot read the account's home from the passwd database, or a `.ps1` `-PwshPyElevate` on Linux or macOS whose passwd database names no home for root or that finds no `/bin/sh` (`pwshpy: cannot elevate: ...`, before sudo is asked anything) | packed runners |
+| 70 | `--elevate` on Windows from a directory on a `net use` drive, or relaunching a script on one without `EnableLinkedConnections` (`ElevationDirectoryError`), with a `pwshpy: cannot elevate:` line naming the UNC path, before any prompt | `pwshpy` |
+| 77 | an elevation was refused or declined (`ElevationDeclinedError`), with a `pwshpy: elevation declined` line on stderr; on POSIX also a sudo that caches no credential (`timestamp_timeout=0`) | `pwshpy --elevate`, `-PwshPyElevate`, `--pwshpy-elevate` |
+| 78 | a configuration problem (`EX_CONFIG`), with an `Error:` line naming it: the layered configuration cannot be loaded, a `LOG_*` variable lib_log_rich refuses, or `config-deploy` refuses the permission settings (a `[lib_layered_config.default_permissions]` value or `--set` it cannot use) and deploys nothing | `config`, `config-deploy`, `logdemo` |
+| 110 | a timeout (`OperationTimeoutError`, ETIMEDOUT): `exec --timeout`, a service start, stop or restart that did not settle, `get_windows_update --timeout`, `wait_process --timeout`, `resolve_dns_name --timeout`, a web request or download whose connect or read stalls past `--timeout`, a Linux local-account command whose shadow-utils commands together outlast 30 s | `exec`, `start_service`, `stop_service`, `restart_service`, `get_windows_update`, `wait_process`, `resolve_dns_name`, `invoke_web_request`, `invoke_rest_method`, `download_file`, `new_local_user`, `remove_local_user`, `enable_local_user`, `disable_local_user`, `new_local_group`, `remove_local_group`, `add_local_group_member`, `remove_local_group_member` (Linux) |
+| 127 | a missing or untrusted tool or directory: no `uv` and `-PwshPyNoInstallUv` / `--pwshpy-no-install-uv`, no `uv` an elevated run can trust, a refused `-PwshPyUv` pin, a managed Python an elevated run cannot trust (`refusing the Python uv found at`), a pack cache an elevated run cannot trust (`refusing the cache directory`), a git older than 2.32 (or of no readable version) for an elevated `.ps1` or root `.sh` run of a script with a git source (`refusing git`), or no `sudo` for `-PwshPyElevate` / `--pwshpy-elevate` on POSIX | packed runners |
+
+`config-deploy` exits 13 on every OS, Windows included, when it may not write a configuration file;
+its error line is followed by a hint that `--target app` and `--target host` may need elevation.
 
 A refusal systemd sends over D-Bus (`org.freedesktop.DBus.Error.AccessDenied`, or
 `InteractiveAuthorizationRequired`, which a non-root caller gets where polkit is installed) is a
@@ -486,11 +523,26 @@ pwshpy config --section lib_log_rich  # show a specific section
 pwshpy config --profile production    # use a named profile
 
 pwshpy config-deploy --target app     # system-wide config
-pwshpy config-deploy --target user    # ~/.config/{slug}/config.toml
+pwshpy config-deploy --target host    # system-wide config for this host (hosts/<hostname>.toml)
+pwshpy config-deploy --target user    # ~/.config/pwshpy/config.toml on Linux
+pwshpy config-deploy --target app --target user --force   # several targets; replace changed files
 pwshpy config-generate-examples --destination ./examples
 
 pwshpy --set lib_log_rich.console_level=DEBUG config   # repeatable runtime override
 pwshpy --env-file ./environments/production.env config # explicit .env
+```
+
+`config-deploy` takes `--target app|host|user` (required, repeatable). An existing file is kept
+unless `--force` is given; then a file whose content differs is replaced and the old one is kept as
+`<name>.bak` (`<name>.bak.1` and so on when a backup already exists). `--profile NAME` deploys a
+named profile. On POSIX `--permissions` / `--no-permissions` turn mode setting on or off (default:
+the configured setting, on when unset), and `--dir-mode` and `--file-mode` set the modes in octal
+(`750`, `0o640`); `--no-permissions` cannot be combined with either. On Windows the permission
+options do nothing.
+
+```bash
+pwshpy info                     # package name, version, homepage and author
+pwshpy logdemo --theme neon     # preview log output: classic, dark, neon or pastel
 ```
 
 See [CONFIG.md](../CONFIG.md) for the layered configuration system (precedence, profiles,

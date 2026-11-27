@@ -16,6 +16,7 @@ from pwshpy.domain.packing import (
     ARGV_ENCODING_TAG,
     SHIM_MODULE,
     FileDigest,
+    RelativeRequirement,
     RunnerContent,
     candidate_relative_paths,
     chunk_base64,
@@ -418,7 +419,8 @@ def test_a_placeholder_spelled_in_a_value_is_not_substituted_again() -> None:
 )
 def test_a_relative_with_path_is_split_for_re_anchoring(spec: str, expected: tuple[str, str]) -> None:
     """[57]: what uv reads as a path relative to its working directory is split off its ``name @``."""
-    assert split_relative_requirement(spec) == expected
+    head, location = expected
+    assert split_relative_requirement(spec) == RelativeRequirement(head=head, location=location)
 
 
 @pytest.mark.os_agnostic

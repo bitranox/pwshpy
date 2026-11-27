@@ -21,6 +21,7 @@ from pwshpy.adapters.native.known_folders import (
     _foundation_standardized,  # pyright: ignore[reportPrivateUsage] - white-box: /private and /var/automount cannot be created on a test host
     posix_known_folder,
 )
+from pwshpy.adapters.native.os_family import OsFamily
 from pwshpy.domain.enums import KnownFolder
 from pwshpy.domain.errors import PlatformUnsupportedError
 
@@ -469,9 +470,19 @@ def test_macos_home_is_the_passwd_entry_before_home(tmp_path: Path) -> None:
 
 
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize("platform", ["linux", "darwin"])
-def test_programs_is_platform_unsupported_and_names_the_member(platform: str) -> None:
+@pytest.mark.parametrize("platform", ["linux", "darwin", OsFamily.LINUX, OsFamily.MACOS])
+def test_programs_is_platform_unsupported_and_names_the_member(platform: OsFamily | str) -> None:
     with pytest.raises(PlatformUnsupportedError, match="Programs"):
+        posix_known_folder(KnownFolder.PROGRAMS, environ={}, platform=platform)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("platform", "system"), [("darwin", "macOS"), (OsFamily.MACOS, "macOS"), ("freebsd14", "Linux")]
+)
+def test_the_platform_seam_picks_the_rule_set_by_os_family(platform: OsFamily | str, system: str) -> None:
+    """``"darwin"`` and ``OsFamily.MACOS`` select the macOS rules; any other platform the Linux ones."""
+    with pytest.raises(PlatformUnsupportedError, match=f"no folder on {system}:"):
         posix_known_folder(KnownFolder.PROGRAMS, environ={}, platform=platform)
 
 

@@ -2,6 +2,7 @@
 
 Contents:
     * :func:`resolve_format` - map the mutually-exclusive output flags to a format.
+    * :class:`PairSyntax` - the two option-pair syntaxes the CLI parses.
     * :func:`parse_pairs` - parse repeatable ``KEY=VALUE`` / ``Name: value`` options.
     * :data:`TIMEOUT_RANGE` - the ``--timeout`` range the facade accepts.
     * :func:`enum_by_value` - map a case-insensitive ``click.Choice`` answer to its enum member.
@@ -16,7 +17,7 @@ from contextlib import AbstractContextManager
 from enum import Enum
 from gettext import gettext as _
 from gettext import ngettext
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 
 import lib_log_rich.runtime
 import rich_click as click
@@ -58,28 +59,72 @@ def bind_command(
 TIMEOUT_RANGE = click.FloatRange(min=0, min_open=True, max=2147483)
 
 
-def parse_pairs(pairs: Iterable[str], separator: str, label: str, *, strip: bool = False) -> dict[str, str]:
+class PairSyntax(str, Enum):
+    """The option-pair syntaxes :func:`parse_pairs` reads; the value is the form a refusal names.
+
+    One member per syntax, so the separator, the label and the whitespace rule always travel
+    together: a caller cannot pair ``=`` with the header label or strip a ``KEY=VALUE`` value.
+
+    Attributes:
+        KEY_VALUE: ``KEY=VALUE`` (``cmdlet -p``); key and value kept exactly as typed.
+        HTTP_HEADER: ``Name: value`` (``invoke_web_request -H``); whitespace around both stripped.
+    """
+
+    KEY_VALUE = "KEY=VALUE"
+    HTTP_HEADER = "'Name: value'"
+
+
+class _PairRule(NamedTuple):
+    """How one :class:`PairSyntax` splits a pair.
+
+    Attributes:
+        separator: What separates the key from the value (the first occurrence splits).
+        strip: Whether whitespace around the key and the value is removed.
+    """
+
+    separator: str
+    strip: bool
+
+
+_PAIR_RULES: dict[PairSyntax, _PairRule] = {
+    PairSyntax.KEY_VALUE: _PairRule(separator="=", strip=False),
+    PairSyntax.HTTP_HEADER: _PairRule(separator=":", strip=True),
+}
+
+
+def parse_pairs(pairs: Iterable[str], syntax: PairSyntax) -> dict[str, str]:
     """Parse repeatable ``KEY<sep>VALUE`` CLI options into a dict (last wins on a repeated key).
 
     Used for ``cmdlet -p KEY=VALUE`` and ``invoke_web_request -H 'Name: value'``. A pair with
-    no separator or an empty key raises :class:`click.BadParameter` naming ``label``.
+    no separator or an empty key raises :class:`click.BadParameter` naming the syntax.
+
+    Args:
+        pairs: The option values as typed.
+        syntax: Which pair syntax they are written in.
+
+    Returns:
+        The pairs as a dict, a repeated key keeping its last value.
+
+    Raises:
+        click.BadParameter: A pair has no separator or an empty key.
 
     Example:
-        >>> parse_pairs(["Path=C:/", "Recurse=true"], "=", "KEY=VALUE")
+        >>> parse_pairs(["Path=C:/", "Recurse=true"], PairSyntax.KEY_VALUE)
         {'Path': 'C:/', 'Recurse': 'true'}
-        >>> parse_pairs(["Accept: application/json"], ":", "'Name: value'", strip=True)
+        >>> parse_pairs(["Accept: application/json"], PairSyntax.HTTP_HEADER)
         {'Accept': 'application/json'}
-        >>> parse_pairs(["oops"], "=", "KEY=VALUE")
+        >>> parse_pairs(["oops"], PairSyntax.KEY_VALUE)
         Traceback (most recent call last):
         click.exceptions.BadParameter: expected KEY=VALUE, got 'oops'
     """
+    rule = _PAIR_RULES[syntax]
     result: dict[str, str] = {}
     for pair in pairs:
-        key, separator_found, value = pair.partition(separator)
-        clean_key = key.strip() if strip else key
+        key, separator_found, value = pair.partition(rule.separator)
+        clean_key = key.strip() if rule.strip else key
         if not separator_found or not clean_key:
-            raise click.BadParameter(f"expected {label}, got {pair!r}")
-        result[clean_key] = value.strip() if strip else value
+            raise click.BadParameter(f"expected {syntax.value}, got {pair!r}")
+        result[clean_key] = value.strip() if rule.strip else value
     return result
 
 
@@ -195,4 +240,4 @@ class CaseInsensitiveChoice(click.Choice[str]):
         return [CompletionItem(choice) for choice in self._shown() if choice.casefold().startswith(folded)]
 
 
-__all__ = ["CaseInsensitiveChoice", "bind_command", "enum_by_value", "parse_pairs", "resolve_format"]
+__all__ = ["CaseInsensitiveChoice", "PairSyntax", "bind_command", "enum_by_value", "parse_pairs", "resolve_format"]

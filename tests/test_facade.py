@@ -14,6 +14,7 @@ from pydantic import SecretStr, ValidationError
 import pwshpy
 from pwshpy import ps
 from pwshpy.adapters.native.known_folders import posix_known_folder, windows_known_folder
+from pwshpy.adapters.native.os_family import OsFamily
 from pwshpy.application.ports import AclSource, WindowsImageSource
 from pwshpy.composition import Ps, build_ps
 from pwshpy.domain.cim_methods import CimArgumentValue
@@ -712,7 +713,7 @@ class _InjectedPs:
     shortcut_controller: _FakeShortcutController | None = field(default_factory=_FakeShortcutController)
     acl_source: AclSource = field(default=_fake_acl)
     #: An OS with ACL support, named so the fakes are reached on the macOS CI cell too.
-    platform: str = "linux"
+    platform: OsFamily | str = "linux"
     facade: Ps = field(init=False)
 
     def __post_init__(self) -> None:
@@ -1105,8 +1106,17 @@ def test_acl_verbs_on_another_posix_os_are_platform_unsupported_naming_it() -> N
 
 
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize("platform", ["win32", "linux"])
-def test_acl_verbs_reach_the_adapters_on_windows_and_linux(platform: str) -> None:
+def test_acl_verbs_judge_an_injected_os_family_member_like_its_platform_string() -> None:
+    """The ``platform=`` seam takes an OsFamily member too; the refusal names it by its value."""
+    injected = _InjectedPs(platform=OsFamily.MACOS)
+    for verb, error in _call_each_acl_verb(injected.facade):
+        assert str(error) == f"ps.{verb} needs Windows or Linux: macOS ACLs are not supported (got macos)"
+    assert injected.acl_controller.calls == []
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("platform", ["win32", "linux", "linux2", OsFamily.WINDOWS, OsFamily.LINUX])
+def test_acl_verbs_reach_the_adapters_on_windows_and_linux(platform: OsFamily | str) -> None:
     """The guard lets both supported OSes through to the injected adapters."""
     injected = _InjectedPs(platform=platform)
     assert injected.facade.get_acl("P").select(lambda e: e.trustee_sid).to_list() == ["S-1-5-32-544"]

@@ -19,12 +19,12 @@ from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..output import emit, emit_json, emit_text
 from ..typed_click import argument, option
-from ._common import parse_pairs, resolve_format
+from ._common import PairSyntax, parse_pairs, resolve_format
 
 
 def _parse_headers(pairs: tuple[str, ...]) -> dict[str, str]:
     """Parse curl-style ``('Accept: application/json',)`` headers into a dict."""
-    return parse_pairs(pairs, ":", "'Name: value'", strip=True)
+    return parse_pairs(pairs, PairSyntax.HTTP_HEADER)
 
 
 @click.command("invoke_web_request", context_settings=CLICK_CONTEXT_SETTINGS)

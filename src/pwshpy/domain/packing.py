@@ -28,6 +28,7 @@ Contents:
     * :func:`render_shim` - the generated ``__main__`` shim for one entry.
     * :func:`render_runner` - substitute a payload into the runner template.
     * :func:`split_relative_requirement` - a ``--with`` path an elevated run re-anchors.
+    * :class:`RelativeRequirement` - that path split into its ``name @`` head and its location.
     * :func:`chunk_base64` - wrap a base64 blob to a fixed line width.
     * :func:`unquote_powershell_literal` - read back a name the PowerShell runner holds quoted.
 """
@@ -519,7 +520,19 @@ _MULTI_LINE_DELIMITER = 3
 _LONGEST_CLOSING_RUN = 5
 
 
-def _scan_toml_line(line: str, open_string: str = "") -> tuple[int, str]:
+class _TomlLineDepth(NamedTuple):
+    """What one TOML line does to the array depth, as :func:`_scan_toml_line` reads it.
+
+    Attributes:
+        change: The count of ``[`` minus the count of ``]`` outside strings and before any comment.
+        open_string: The multi-line string delimiter still open at the line's end, or ``""``.
+    """
+
+    change: int
+    open_string: str
+
+
+def _scan_toml_line(line: str, open_string: str = "") -> _TomlLineDepth:
     """Scan one TOML line: arrays opened minus closed, and the multi-line string still open at its end.
 
     Brackets inside a string or after a comment do not count. ``open_string`` is the delimiter
@@ -533,25 +546,25 @@ def _scan_toml_line(line: str, open_string: str = "") -> tuple[int, str]:
             (default) when it starts outside every string.
 
     Returns:
-        ``(change, open_string)``: the count of ``[`` minus the count of ``]`` outside strings and
-        before any comment, and the multi-line string delimiter still open at the line's end, or
-        ``""``.
+        A :class:`_TomlLineDepth`: ``change`` is the count of ``[`` minus the count of ``]`` outside
+        strings and before any comment, ``open_string`` the multi-line string delimiter still open at
+        the line's end, or ``""``.
 
     Example:
         >>> _scan_toml_line('dependencies = [  # "]" in a comment')
-        (1, '')
+        _TomlLineDepth(change=1, open_string='')
         >>> _scan_toml_line('  "a[1]", ["b\\\\"]"],')
-        (0, '')
-        >>> _scan_toml_line("]")
-        (-1, '')
+        _TomlLineDepth(change=0, open_string='')
+        >>> _scan_toml_line("]").change
+        -1
         >>> _scan_toml_line('x = \"\"\" [')
-        (0, '\"\"\"')
+        _TomlLineDepth(change=0, open_string='\"\"\"')
         >>> _scan_toml_line("[x] ''', [", "'''")
-        (1, '')
+        _TomlLineDepth(change=1, open_string='')
     """
     scan = _scan_toml_characters(line, open_string)
     change = sum({"[": 1, "]": -1}.get(line[index], 0) for index in scan.code)
-    return change, scan.open_string
+    return _TomlLineDepth(change=change, open_string=scan.open_string)
 
 
 class _TomlLineScan(NamedTuple):
@@ -585,7 +598,8 @@ def _scan_toml_characters(line: str, open_string: str = "") -> _TomlLineScan:
     quote = open_string
     while index < len(line):
         if quote:
-            index, quote = _string_end(line, index, quote)
+            closing = _string_end(line, index, quote)
+            index, quote = closing.end, closing.open_string
             continue
         character = line[index]
         if character == "#":
@@ -601,7 +615,20 @@ def _scan_toml_characters(line: str, open_string: str = "") -> _TomlLineScan:
     return _TomlLineScan(tuple(code), len(line), quote if len(quote) == _MULTI_LINE_DELIMITER else "")
 
 
-def _string_end(line: str, start: int, quote: str) -> tuple[int, str]:
+class _StringEnd(NamedTuple):
+    """Where a TOML string ends on its line, as :func:`_string_end` finds it.
+
+    Attributes:
+        end: The index just past the closing delimiter, or ``len(line)`` when the string runs on.
+        open_string: The delimiter still open at the line's end, or ``""`` when the string closed.
+    """
+
+    # Not ``index``: that name would shadow tuple.index on a NamedTuple.
+    end: int
+    open_string: str
+
+
+def _string_end(line: str, start: int, quote: str) -> _StringEnd:
     """Where the ``quote``-delimited string that ``line[start:]`` is inside ends, and the quote still open.
 
     Only a basic string (``"``) has backslash escapes; a literal one (``'``) ends at its next
@@ -615,8 +642,14 @@ def _string_end(line: str, start: int, quote: str) -> tuple[int, str]:
             for a multi-line one.
 
     Returns:
-        ``(index past its closing delimiter, "")``, or ``(len(line), quote)`` when it runs past the
-        line.
+        A :class:`_StringEnd`: the index past its closing delimiter with ``open_string`` ``""``, or
+        ``len(line)`` with ``open_string`` set to ``quote`` when it runs past the line.
+
+    Example:
+        >>> _string_end('ab" x', 0, '"')
+        _StringEnd(end=3, open_string='')
+        >>> _string_end("ab", 0, "'''")
+        _StringEnd(end=2, open_string="'''")
     """
     mark = quote[0]
     index = start
@@ -629,11 +662,11 @@ def _string_end(line: str, start: int, quote: str) -> tuple[int, str]:
             continue
         run = len(line[index:]) - len(line[index:].lstrip(mark))
         if len(quote) == 1:
-            return index + 1, ""
+            return _StringEnd(index + 1, "")
         if run >= _MULTI_LINE_DELIMITER:
-            return index + min(run, _LONGEST_CLOSING_RUN), ""
+            return _StringEnd(index + min(run, _LONGEST_CLOSING_RUN), "")
         index += run
-    return len(line), quote
+    return _StringEnd(len(line), quote)
 
 
 def extract_requires_python(metadata: str) -> str:
@@ -670,8 +703,9 @@ def extract_requires_python(metadata: str) -> str:
             return ""
         if not open_string and _REQUIRES_PYTHON_KEY.match(line):
             return _requires_python_value(line)
-        change, open_string = _scan_toml_line(line, open_string)
-        depth = max(depth + change, 0)
+        scan = _scan_toml_line(line, open_string)
+        open_string = scan.open_string
+        depth = max(depth + scan.change, 0)
     return ""
 
 
@@ -1031,11 +1065,23 @@ def _posix_shell_word(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
 
 
-def split_relative_requirement(spec: str) -> tuple[str, str] | None:
+class RelativeRequirement(NamedTuple):
+    """A ``--with`` value split where an elevated run puts the caller's directory.
+
+    Attributes:
+        head: The ``name @ `` in front of a direct reference, empty for a bare path.
+        location: The relative path and anything after it (a marker, extras).
+    """
+
+    head: str
+    location: str
+
+
+def split_relative_requirement(spec: str) -> RelativeRequirement | None:
     """Split a ``--with`` value that names a path relative to the working directory, else ``None``.
 
-    Returns ``(head, location)``: ``head`` is the ``name @ `` in front of a direct reference (empty
-    for a bare path), ``location`` the relative path and anything after it. An elevated run starts
+    Returns a :class:`RelativeRequirement`: ``head`` is the ``name @ `` in front of a direct reference
+    (empty for a bare path), ``location`` the relative path and anything after it. An elevated run starts
     uv in another directory, so the runner puts the caller's directory between the two and the
     value means what it means unelevated. Relative is what uv reads as a local path that is not
     absolute: ``./x``, ``../x``, anything with a directory separator, or a bare distribution file
@@ -1044,18 +1090,18 @@ def split_relative_requirement(spec: str) -> tuple[str, str] | None:
 
     Example:
         >>> split_relative_requirement("./dist/tool-1.0-py3-none-any.whl")
-        ('', './dist/tool-1.0-py3-none-any.whl')
+        RelativeRequirement(head='', location='./dist/tool-1.0-py3-none-any.whl')
         >>> split_relative_requirement("tool @ ../tool")
-        ('tool @ ', '../tool')
-        >>> split_relative_requirement("tool-1.0.tar.gz")
-        ('', 'tool-1.0.tar.gz')
+        RelativeRequirement(head='tool @ ', location='../tool')
+        >>> split_relative_requirement("tool-1.0.tar.gz").location
+        'tool-1.0.tar.gz'
         >>> [split_relative_requirement(s) for s in ("rich>=13", "/abs/x.whl", "file:./x", "~/x.whl")]
         [None, None, None, None]
     """
     named = _NAMED_REFERENCE.match(spec)
     head = named.group(0) if named and not spec.lstrip().startswith(".") else ""
     location = spec[len(head) :]
-    return (head, location) if _is_relative_location(location) else None
+    return RelativeRequirement(head=head, location=location) if _is_relative_location(location) else None
 
 
 def _is_relative_location(location: str) -> bool:
@@ -1068,7 +1114,7 @@ def _is_relative_location(location: str) -> bool:
     return "/" in token or "\\" in token or token in {".", ".."} or token.lower().endswith(_DISTRIBUTION_SUFFIXES)
 
 
-def _anchored_values(values: Sequence[str]) -> Iterator[tuple[str, tuple[str, str] | None]]:
+def _anchored_values(values: Sequence[str]) -> Iterator[tuple[str, RelativeRequirement | None]]:
     """Yield each uv arg with its relative-path split when it is a ``--with`` value, else ``None``."""
     previous = ""
     for value in values:
@@ -1087,7 +1133,7 @@ def _powershell_relative_suffixes(values: Sequence[str]) -> str:
         >>> print(_powershell_relative_suffixes(["--with", "tool @ ./x.whl", "--with", "rich"]))
         '','./x.whl','',''
     """
-    return ",".join(_powershell_literal(split[1] if split else "") for _, split in _anchored_values(values))
+    return ",".join(_powershell_literal(split.location if split else "") for _, split in _anchored_values(values))
 
 
 def _posix_anchored_args(values: Sequence[str]) -> str:
@@ -1105,8 +1151,7 @@ def _posix_anchored_args(values: Sequence[str]) -> str:
         if split is None:
             rendered.append(_posix_shell_word(value))
             continue
-        head, location = split
-        rendered.append(_posix_shell_word(head) + _POSIX_PREFIX_VARIABLE + _posix_shell_word(location))
+        rendered.append(_posix_shell_word(split.head) + _POSIX_PREFIX_VARIABLE + _posix_shell_word(split.location))
     return " ".join(rendered)
 
 
@@ -1120,6 +1165,7 @@ __all__ = [
     "PATH_ENV_VAR",
     "FileDigest",
     "PackOptions",
+    "RelativeRequirement",
     "RunnerContent",
     "SHIM_MODULE",
     "SHIM_CWD_EXIT",

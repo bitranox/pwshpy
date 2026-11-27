@@ -24,7 +24,7 @@ from ..constants import CLICK_CONTEXT_SETTINGS
 from ..context import get_cli_context
 from ..output import emit, emit_json
 from ..typed_click import argument, option
-from ._common import parse_pairs, resolve_format
+from ._common import PairSyntax, parse_pairs, resolve_format
 
 
 @click.command("run", context_settings=CLICK_CONTEXT_SETTINGS)
@@ -54,7 +54,7 @@ def cli_cmdlet(ctx: click.Context, name: str, params: tuple[str, ...], timeout: 
 
     Values are bound as strings (PowerShell coerces most); for typed/switch parameters use ``run``.
     """
-    result = get_cli_context(ctx).services.ps.cmdlet(name, timeout=timeout, **parse_pairs(params, "=", "KEY=VALUE"))
+    result = get_cli_context(ctx).services.ps.cmdlet(name, timeout=timeout, **parse_pairs(params, PairSyntax.KEY_VALUE))
     # Keys kept as they are, so emit_json repairs and names a bad key like a bad value.
     emit_json(to_dict_keeping_surrogate_keys(result) if streams else result.output)
 
@@ -93,7 +93,7 @@ def _emit_cmdlet(result: PSInvocationResult, *, streams: bool) -> None:
 @click.pass_context
 def cli_get_ad_user(ctx: click.Context, params: tuple[str, ...], timeout: float | None, streams: bool) -> None:
     """Query Active Directory users (.NET; Get-ADUser, needs [full] + the ActiveDirectory module)."""
-    result = get_cli_context(ctx).services.ps.get_ad_user(timeout=timeout, **parse_pairs(params, "=", "KEY=VALUE"))
+    result = get_cli_context(ctx).services.ps.get_ad_user(timeout=timeout, **parse_pairs(params, PairSyntax.KEY_VALUE))
     _emit_cmdlet(result, streams=streams)
 
 
@@ -102,7 +102,7 @@ def cli_get_ad_user(ctx: click.Context, params: tuple[str, ...], timeout: float 
 @click.pass_context
 def cli_get_ad_group(ctx: click.Context, params: tuple[str, ...], timeout: float | None, streams: bool) -> None:
     """Query Active Directory groups (.NET; Get-ADGroup, needs [full] + the ActiveDirectory module)."""
-    result = get_cli_context(ctx).services.ps.get_ad_group(timeout=timeout, **parse_pairs(params, "=", "KEY=VALUE"))
+    result = get_cli_context(ctx).services.ps.get_ad_group(timeout=timeout, **parse_pairs(params, PairSyntax.KEY_VALUE))
     _emit_cmdlet(result, streams=streams)
 
 
@@ -111,7 +111,9 @@ def cli_get_ad_group(ctx: click.Context, params: tuple[str, ...], timeout: float
 @click.pass_context
 def cli_get_ad_computer(ctx: click.Context, params: tuple[str, ...], timeout: float | None, streams: bool) -> None:
     """Query Active Directory computers (.NET; Get-ADComputer, needs [full] + the ActiveDirectory module)."""
-    result = get_cli_context(ctx).services.ps.get_ad_computer(timeout=timeout, **parse_pairs(params, "=", "KEY=VALUE"))
+    result = get_cli_context(ctx).services.ps.get_ad_computer(
+        timeout=timeout, **parse_pairs(params, PairSyntax.KEY_VALUE)
+    )
     _emit_cmdlet(result, streams=streams)
 
 
@@ -120,7 +122,7 @@ def cli_get_ad_computer(ctx: click.Context, params: tuple[str, ...], timeout: fl
 @click.pass_context
 def cli_get_mailbox(ctx: click.Context, params: tuple[str, ...], timeout: float | None, streams: bool) -> None:
     """Query Exchange mailboxes (.NET; Get-Mailbox, needs [full] + the Exchange module)."""
-    result = get_cli_context(ctx).services.ps.get_mailbox(timeout=timeout, **parse_pairs(params, "=", "KEY=VALUE"))
+    result = get_cli_context(ctx).services.ps.get_mailbox(timeout=timeout, **parse_pairs(params, PairSyntax.KEY_VALUE))
     _emit_cmdlet(result, streams=streams)
 
 
@@ -129,7 +131,7 @@ def cli_get_mailbox(ctx: click.Context, params: tuple[str, ...], timeout: float 
 @click.pass_context
 def cli_get_az_vm(ctx: click.Context, params: tuple[str, ...], timeout: float | None, streams: bool) -> None:
     """Query Azure virtual machines (.NET; Get-AzVM, needs [full] + the Az.Compute module)."""
-    result = get_cli_context(ctx).services.ps.get_az_vm(timeout=timeout, **parse_pairs(params, "=", "KEY=VALUE"))
+    result = get_cli_context(ctx).services.ps.get_az_vm(timeout=timeout, **parse_pairs(params, PairSyntax.KEY_VALUE))
     _emit_cmdlet(result, streams=streams)
 
 
@@ -141,7 +143,7 @@ def cli_get_az_resource_group(
 ) -> None:
     """Query Azure resource groups (.NET; Get-AzResourceGroup, needs [full] + the Az.Resources module)."""
     result = get_cli_context(ctx).services.ps.get_az_resource_group(
-        timeout=timeout, **parse_pairs(params, "=", "KEY=VALUE")
+        timeout=timeout, **parse_pairs(params, PairSyntax.KEY_VALUE)
     )
     _emit_cmdlet(result, streams=streams)
 

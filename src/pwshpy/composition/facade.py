@@ -80,6 +80,7 @@ from ..adapters.native import windows_known_folder as _windows_known_folder
 from ..adapters.native import write_records as _write_records
 from ..adapters.native import write_text as _write_text
 from ..adapters.native import write_text_stream as _write_text_stream
+from ..adapters.native.os_family import OsFamily, os_family_of
 from ..adapters.powershell import get_command as _ps_get_command
 from ..adapters.powershell import invoke as _ps_invoke
 from ..adapters.powershell import run as _ps_run
@@ -181,18 +182,35 @@ from ..domain.shortcuts import ShortcutSpec
 
 #: Platform switch for the local-accounts backend. Stored as an opaque bool so the type
 #: checker does not statically prune the "other OS" branch (and flag its import unused).
-_ON_WINDOWS: bool = sys.platform == "win32"
+_ON_WINDOWS: bool = os_family_of(sys.platform) is OsFamily.WINDOWS
 
 
 class _AclPorts(NamedTuple):
     """The ACL ports and the OS that decides whether they may be used (Windows and Linux only).
 
     Held together so no verb can reach a port without :meth:`Ps._require_acl` judging the OS.
+
+    Attributes:
+        source: The ACL reader.
+        controller: The ACL writer.
+        family: The OS family :meth:`Ps._require_acl` decides on.
+        platform: The platform as the caller named it, for the refusal message only.
     """
 
     source: AclSource
     controller: AclController
+    family: OsFamily
     platform: str
+
+    @classmethod
+    def judged_for(cls, source: AclSource, controller: AclController, platform: OsFamily | str) -> _AclPorts:
+        """Bundle the ports with the OS family ``platform`` names, parsed once here.
+
+        A member's label is its value: a str-mixin enum formats as ``OsFamily.MACOS`` on newer
+        Pythons, which would put the class name into the refusal message.
+        """
+        label = platform.value if isinstance(platform, OsFamily) else platform
+        return cls(source, controller, os_family_of(platform), label)
 
 
 #: Windows Update's own default query: software updates that are not installed yet.
@@ -294,8 +312,9 @@ def _absolute_windows_path(path: str | os.PathLike[str]) -> str:
 class Ps:
     """Fluent facade over both backends, returning the same typed pipeline.
 
-    Every port is injected by keyword. ``platform`` (default ``sys.platform``) names the OS the
-    ACL verbs are judged for: anything but Windows and Linux refuses them with
+    Every port is injected by keyword. ``platform`` (default ``sys.platform``, or an
+    :class:`~pwshpy.adapters.native.os_family.OsFamily` member) names the OS the ACL verbs are
+    judged for: anything but Windows and Linux refuses them with
     :class:`PlatformUnsupportedError` before an ACL port is reached.
 
     Example:
@@ -358,7 +377,7 @@ class Ps:
         elevator: Elevator,
         script_packer: ScriptPacker,
         script_unpacker: ScriptUnpacker,
-        platform: str = sys.platform,
+        platform: OsFamily | str = sys.platform,
     ) -> None:
         self._process_source = process_source
         self._connection_source = connection_source
@@ -384,7 +403,7 @@ class Ps:
         self._local_user_source = local_user_source
         self._local_group_source = local_group_source
         self._local_account_controller = local_account_controller
-        self._acl = _AclPorts(acl_source, acl_controller, platform)
+        self._acl = _AclPorts.judged_for(acl_source, acl_controller, platform)
         self._ps_runner = ps_runner
         self._cmdlet_runner = cmdlet_runner
         self._command_introspector = command_introspector
@@ -2782,11 +2801,13 @@ class Ps:
         The Linux backend reads the POSIX ACL xattr through ``os.getxattr``, which exists on
         Linux only, so macOS would otherwise fail with a raw ``AttributeError``.
         """
-        platform = self._acl.platform
-        if platform == "win32" or platform.startswith("linux"):
+        family = self._acl.family
+        if family in (OsFamily.WINDOWS, OsFamily.LINUX):
             return self._acl
-        what = "macOS ACLs are" if platform == "darwin" else "ACLs are"
-        raise PlatformUnsupportedError(f"ps.{verb} needs Windows or Linux: {what} not supported (got {platform})")
+        what = "macOS ACLs are" if family is OsFamily.MACOS else "ACLs are"
+        raise PlatformUnsupportedError(
+            f"ps.{verb} needs Windows or Linux: {what} not supported (got {self._acl.platform})"
+        )
 
     def _require_shortcuts(self, verb: str) -> ShortcutController:
         """Return the shortcut controller, or refuse ``verb`` on an OS that has none."""

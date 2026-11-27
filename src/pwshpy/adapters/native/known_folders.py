@@ -47,6 +47,7 @@ from typing import Any
 from ...domain.enums import KnownFolder
 from ...domain.errors import PlatformUnsupportedError
 from .marshal import com_hresult, is_com_error, native_error
+from .os_family import OsFamily, os_family_of
 
 if sys.platform != "win32":
     import pwd
@@ -113,7 +114,7 @@ def posix_known_folder(
     folder: KnownFolder,
     *,
     environ: Mapping[str, str] | None = None,
-    platform: str | None = None,
+    platform: OsFamily | str | None = None,
 ) -> Path | None:
     """Return the folder pwsh's ``[Environment]::GetFolderPath`` names on Linux or macOS.
 
@@ -125,8 +126,9 @@ def posix_known_folder(
         folder: The known folder to resolve.
         environ: The environment to read ``HOME`` / ``XDG_*`` / ``CFFIXED_USER_HOME`` from;
             ``None`` reads :data:`os.environ` at call time.
-        platform: ``"darwin"`` for the macOS rules, any other value for the Linux (XDG) rules;
-            ``None`` reads :data:`sys.platform` at call time.
+        platform: A ``sys.platform`` value or an :class:`OsFamily` member: macOS (``"darwin"``)
+            for the macOS rules, any other value for the Linux (XDG) rules; ``None`` reads
+            :data:`sys.platform` at call time.
 
     Returns:
         The folder path, or ``None`` when it is missing or not readable (pwsh answers ``""``).
@@ -147,7 +149,7 @@ def posix_known_folder(
         True
     """
     env = os.environ if environ is None else environ
-    on_macos = (sys.platform if platform is None else platform) == "darwin"
+    on_macos = os_family_of(sys.platform if platform is None else platform) is OsFamily.MACOS
     if folder is KnownFolder.PROGRAMS:
         system = "macOS" if on_macos else "Linux"
         raise PlatformUnsupportedError(

@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import lib_log_rich
 import lib_log_rich.runtime
@@ -155,25 +155,41 @@ def _nearest_dotenv() -> Path | None:
     except OSError:
         return None
     for directory in (start, *start.parents):
-        found, stop = _dotenv_in(directory)
-        if found is not None or stop:
-            return found
+        look = _dotenv_in(directory)
+        if look.found is not None or look.stop:
+            return look.found
     return None
 
 
-def _dotenv_in(directory: Path) -> tuple[Path | None, bool]:
+class _DotenvLook(NamedTuple):
+    """What :func:`_dotenv_in` finds in one directory of the upward ``.env`` search.
+
+    Attributes:
+        found: The directory's ``.env`` file, or ``None``.
+        stop: Whether the search ends at this directory (a ``.env`` or a project root marker).
+    """
+
+    found: Path | None
+    stop: bool
+
+
+def _dotenv_in(directory: Path) -> _DotenvLook:
     """The ``.env`` in ``directory``, and whether the search stops there (a project root).
 
     A directory that cannot be read is passed over: Python before 3.14 raises for a path
     behind a directory without search permission instead of answering False.
+
+    Returns:
+        A :class:`_DotenvLook`: the ``.env`` (stop ``True``), or ``None`` with ``stop`` telling
+        whether a project root marker is there; ``None`` and ``False`` for an unreadable directory.
     """
     try:
         candidate = directory / ".env"
         if candidate.is_file():
-            return candidate, True
-        return None, any((directory / marker).exists() for marker in _PROJECT_MARKERS)
+            return _DotenvLook(found=candidate, stop=True)
+        return _DotenvLook(found=None, stop=any((directory / marker).exists() for marker in _PROJECT_MARKERS))
     except OSError:
-        return None, False
+        return _DotenvLook(found=None, stop=False)
 
 
 def _load_log_variables(dotenv_path: str | None) -> None:

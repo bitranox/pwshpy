@@ -1,97 +1,86 @@
 # Development
 
+The `Makefile` is a thin wrapper around [bmk](https://pypi.org/project/bmk/), installed once per
+machine with `uv tool`. Every target runs bmk against the project's own `.venv`, which bmk creates
+and syncs from `pyproject.toml` and `uv.lock`.
+
 ## Make Targets
 
-| Target                | Description                                                                                |
-|-----------------------|--------------------------------------------------------------------------------------------|
-| `help`                | Show help                                                                                  |
-| `install`             | Install package editable                                                                   |
-| `dev`                 | Install package with dev extras                                                            |
-| `test`                | Lint, type-check, run tests with coverage, upload to Codecov                               |
-| `run`                 | Run module CLI (requires dev install or src on PYTHONPATH)                                 |
-| `version-current`     | Print current version from pyproject.toml                                                  |
-| `bump`                | Bump version (updates pyproject.toml and CHANGELOG.md)                                     |
-| `bump-patch`          | Bump patch version (X.Y.Z -> X.Y.(Z+1))                                                    |
-| `bump-minor`          | Bump minor version (X.Y.Z -> X.(Y+1).0)                                                    |
-| `bump-major`          | Bump major version ((X+1).0.0)                                                             |
-| `clean`               | Remove caches, build artifacts, and coverage                                               |
-| `push`                | Run tests, prompt for/accept a commit message, create (allow-empty) commit, push to remote |
-| `build`               | Build wheel/sdist artifacts via `python -m build`                                          |
-| `coverage`            | Generate coverage reports                                                                  |
-| `testintegration`     | Run `@pytest.mark.integration` tests only (`-m integration`; long-running / external)      |
-| `dependencies`        | Check and list project dependencies                                                        |
-| `dependencies-update` | Update dependencies to latest versions                                                     |
-| `menu`                | Interactive TUI to run targets and edit parameters (requires dev dep: textual)             |
+The table is the output of `make help`:
 
-### Target Parameters (env vars)
+| Target                     | Description                                                            |
+|----------------------------|------------------------------------------------------------------------|
+| `build`                    | Build wheel and sdist artifacts [alias: bld]                           |
+| `bump`                     | Bump patch version (default for bump)                                  |
+| `bump-major`               | Bump major version (X+1).0.0                                           |
+| `bump-minor`               | Bump minor version X.(Y+1).0                                           |
+| `bump-patch`               | Bump patch version X.Y.(Z+1)                                           |
+| `clean`                    | Remove build artifacts and caches [aliases: cln, cl]                   |
+| `clean-all`                | Remove build artifacts, caches AND every virtual environment (.venv*)  |
+| `codecov`                  | Upload coverage report to Codecov [aliases: coverage, cov]             |
+| `commit`                   | Create a git commit with timestamped message [alias: c]                |
+| `config`                   | Show current merged configuration                                      |
+| `config-deploy`            | Deploy configuration to system/user directories                        |
+| `config-generate-examples` | Generate example configuration files                                   |
+| `custom`                   | Run a custom command (make custom <name> [args...])                    |
+| `dependencies`             | Check and list project dependencies [aliases: deps, d]                 |
+| `dependencies-update`      | Update dependencies to latest versions                                 |
+| `dev`                      | Install package with dev extras (editable)                             |
+| `ensure`                   | Install missing external tools for this OS                             |
+| `help`                     | Show this help                                                         |
+| `info`                     | Print resolved package metadata                                        |
+| `install`                  | Editable install (no dev extras)                                       |
+| `logdemo`                  | Run logging demonstration                                              |
+| `push`                     | Run tests, commit, and push to remote [aliases: psh, p]                |
+| `release`                  | Create a versioned release (tag + GitHub release) [aliases: rel, r]    |
+| `run`                      | Run the project CLI                                                    |
+| `send-email`               | Send an email via configured SMTP                                      |
+| `send-notification`        | Send a plain-text notification email                                   |
+| `ship`                     | Push, wait for CI, release, wait for release CI (CI-gated) [alias: sh] |
+| `test`                     | Run test suite [alias: t]                                              |
+| `test-all`                 | Run pytest + pyright on every declared Python version (matrix)         |
+| `test-human`               | Run test suite with human-readable output [alias: th]                  |
+| `testintegration`          | Run integration tests only [aliases: testi, ti]                        |
+| `testintegration-human`    | Run integration tests with human-readable output [alias: tih]          |
+| `version-current`          | Print current version                                                  |
 
-- **Global**
-  - `PY` (default: `python3`) -- interpreter used to run scripts
-  - `PIP` (default: `pip`) -- pip executable used by bootstrap/install
+### Target Parameters
 
-- **install**
-  - No specific parameters (respects `PY`, `PIP`).
-
-- **dev**
-  - No specific parameters (respects `PY`, `PIP`).
-
-- **test**
-  - `COVERAGE=on|auto|off` (default: `on`) -- controls pytest coverage run and Codecov upload
-  - `SKIP_BOOTSTRAP=1` -- skip auto-install of dev tools if missing
-  - `TEST_VERBOSE=1` -- echo each command executed by the test harness
-  - Also respects `CODECOV_TOKEN` when uploading to Codecov
-
-- **run**
-  - No parameters via `make` (always shows `--help`). For custom args: `python scripts/run_cli.py -- <args>`.
-
-- **version-current**
-  - No parameters
-
-- **bump**
-  - `VERSION=X.Y.Z` -- explicit target version
-  - `PART=major|minor|patch` -- semantic part to bump (default if `VERSION` not set: `patch`)
-
-- **bump-patch** / **bump-minor** / **bump-major**
-  - No parameters; shorthand for `make bump PART=...`
-
-- **clean**
-  - No parameters
-
-- **push**
-  - `REMOTE=<name>` (default: `origin`) -- git remote to push to
-  - `COMMIT_MESSAGE="..."` -- optional commit message used by the automation; if unset, the target prompts (or uses the default `chore: update` when non-interactive).
-
-- **build**
-  - No parameters via `make`. Advanced: call the script directly, e.g. `python scripts/build.py --no-conda --no-nix`.
-
-- **release**
-  - `REMOTE=<name>` (default: `origin`) -- git remote to push to
-  - Advanced (via script): `python scripts/release.py --retries 5 --retry-wait 3.0`
-
-## Interactive Menu (Textual)
-
-`make menu` launches a Textual-powered TUI to browse targets, edit parameters, and run them with live output.
-
-Install dev extras if you haven't:
-
-```bash
-pip install -e .[dev]
-```
-
-Run the menu:
-
-```bash
-make menu
-```
+- **Every target**
+  - Words after the target name are forwarded to bmk (`make push fix login bug`). An option such as
+    `--verbose` would be parsed by make itself, so pass options as `ARGS="--verbose"`.
+- **commit** / **push**
+  - `MSG="..."` - the commit message. It reaches bmk through the environment, so punctuation, `$`
+    and newlines are safe; a multi-line `MSG` becomes a subject plus body. Prefer it over words or
+    `ARGS`, which bash re-parses (a newline in `ARGS` is refused).
+  - Without a message, bmk prompts at a terminal and uses `chores` when not run from one. The
+    subject is prefixed with the local date and time (`2026-11-27 14:05:00 - fix login bug`).
+  - `BMK_GIT_REMOTE` (default `origin`) and `BMK_GIT_BRANCH` (default: the current branch) choose
+    where `push` pushes.
+- **codecov**
+  - `CODECOV_TOKEN` (from the environment or `.env`, see `.env.example`) for the upload.
 
 ### Target Details
 
-- `test`: single entry point for local CI -- runs ruff lint + format check, pyright, pytest (including doctests) with coverage (enabled by default), and uploads coverage to Codecov if configured (reads `.env`).
-  - Auto-bootstrap: `make test` will try to install dev tools (`pip install -e .[dev]`) if `ruff`/`pyright`/`pytest` are missing. Set `SKIP_BOOTSTRAP=1` to skip this behavior.
-- `build`: creates wheel/sdist artifacts.
-- `version-current`: prints current version from `pyproject.toml`.
-- `bump`: updates `pyproject.toml` version and inserts a new section in `CHANGELOG.md`. Use `VERSION=X.Y.Z make bump` or `make bump-minor`/`bump-major`/`bump-patch`.
-- Additional scripts (`pipx-*`, `uv-*`, `which-cmd`, `verify-install`) provide install/run diagnostics.
+- `test`: the local gate. It refreshes outdated dependency floors in `pyproject.toml` and the
+  `uv.lock`, applies `ruff format` and `ruff check --fix`, then runs bandit, import-linter,
+  pip-audit, pyright, pytest with coverage (doctests included), the ruff format and lint checks,
+  PSScriptAnalyzer on `.ps1` files and shellcheck on shell scripts. It skips the markers listed in
+  `[tool.scripts.test].exclude-markers` (here `mutating`) and tries a Codecov upload of the coverage
+  report, which is skipped when no token or uploader is available. Output is JSON by default;
+  `make test-human` prints it for reading.
+- `push`: checks the dependencies against PyPI, builds the wheel and sdist and runs `test` in
+  parallel, cleans, stages every change (`git add -A`), commits (an empty commit when nothing is
+  staged) and pushes with `git push -u`.
+- `bump` (the same as `bump-patch`), `bump-minor`, `bump-major`: raise the version in
+  `pyproject.toml`, rename the `[Unreleased]` section of `CHANGELOG.md` to the new version and date,
+  and write the new version into `src/pwshpy/__init__conf__.py`.
+- `release`: tags the version in `pyproject.toml` (`vX.Y.Z`), pushes the tag and creates a GitHub
+  release when `gh` is available. The tag push starts the release workflow.
+- `ship`: `push`, wait for CI, `release`, wait for the release workflow.
+- `codecov`: runs the tests with coverage and uploads the report to Codecov.
+- `test-all`: pytest and pyright on every Python version the classifiers declare.
+- `ensure`: installs missing external tools (such as shellcheck) for this OS.
 
 ## Test Markers and What Each Command Runs
 
@@ -177,7 +166,7 @@ directory changed during the run:
 ### Adding a host-mutating test
 
 Mark it `mutating` (alongside `local_only` and the OS marker) so `make test` skips it and only the
-throwaway host runs it - see the "Development Safety" note in CLAUDE.md:
+throwaway host runs it. Never run a `mutating` test on a machine you care about:
 
 ```python
 @pytest.mark.local_only
@@ -191,22 +180,18 @@ def test_real_windows_mutation(...):
 ## Development Workflow
 
 ```bash
-make test                 # ruff + pyright + pytest + coverage (default ON)
-SKIP_BOOTSTRAP=1 make test  # skip auto-install of dev deps
-COVERAGE=off make test       # disable coverage locally
-COVERAGE=on make test        # force coverage and generate coverage.xml/codecov.xml
+make test                          # the full local gate, JSON output
+make test-human                    # the same gate, human-readable output
+make push MSG="fix(cli): subject"  # gate, commit everything, push
 ```
-
-**Automation notes**
-
-- `make push` runs the full test suite (`python -m scripts.test`), checks pip and dependency versions, prompts for a commit message (or reads `COMMIT_MESSAGE="..."`), and always pushes, creating an empty commit when there are no staged changes. The Textual menu (`make menu -> push`) shows the same behaviour via an input field.
 
 ### Versioning & Metadata
 
 - Single source of truth for package metadata is `pyproject.toml` (`[project]`).
 - The library reads its own metadata from static constants (see `src/pwshpy/__init__conf__.py`).
-- Do not duplicate the version in code; bump only `pyproject.toml` and update `CHANGELOG.md`.
-- Console script name is discovered from entry points; defaults to `pwshpy`.
+- Change the version only with `make bump-patch`, `make bump-minor` or `make bump-major`, which
+  update `pyproject.toml`, `CHANGELOG.md` and `__init__conf__.py` together.
+- The console script is `pwshpy`, declared in `[project.scripts]`.
 
 ### Dependency Auditing
 
@@ -216,18 +201,25 @@ COVERAGE=on make test        # force coverage and generate coverage.xml/codecov.
 
 GitHub Actions workflows are included:
 
-- `.github/workflows/ci.yml` -- lint/type/test, build wheel/sdist, and verify pipx and uv installs (CI-only; no local install required).
-- `.github/workflows/release.yml` -- on tags `v*.*.*`, builds artifacts and publishes to PyPI when `PYPI_API_TOKEN` secret is set.
+- `.github/workflows/default_cicd_public.yml` (CI) - on push, pull request and a nightly schedule:
+  ruff, pyright, pytest with coverage and a Codecov upload, import-linter, bandit and pip-audit
+  across the Python versions and OSes `pyproject.toml` declares, then a wheel/sdist build, a clean
+  install of the wheel, pipx and uv tool installs, and the notebook run.
+- `.github/workflows/default_release_public.yml` (Release) - on a pushed `v*` tag (or a manual
+  run), builds the wheel and sdist and publishes them to PyPI, through OIDC Trusted Publishing or
+  a `PYPI_API_TOKEN` secret when one is set.
+- `.github/workflows/codeql.yml` (CodeQL) - code scanning on push, pull request and weekly.
 
 To publish a release:
-1. Bump `pyproject.toml` version and update `CHANGELOG.md`.
-2. Tag the commit (`git tag v0.1.1 && git push --tags`).
-3. Ensure `PYPI_API_TOKEN` secret is configured in the repo.
-4. Release workflow uploads wheel/sdist to PyPI.
+1. Add the changes under `[Unreleased]` in `CHANGELOG.md` and bump the version (`make bump-patch`,
+   `make bump-minor` or `make bump-major`).
+2. Run `make ship`: it pushes, waits for CI, tags `vX.Y.Z` and creates the GitHub release, then
+   waits for the release workflow, which uploads the wheel and sdist to PyPI.
 
 ### Local Codecov uploads
 
-- `make test` (with coverage enabled) generates `coverage.xml` and `codecov.xml`, then attempts to upload via the Codecov CLI or the bash uploader.
-- For private repos, set `CODECOV_TOKEN` (see `.env.example`) or export it in your shell.
-- For public repos, a token is typically not required.
-- Because Codecov requires a revision, the test harness commits (allow-empty) immediately before uploading. Remove or amend that commit after the run if you do not intend to keep it.
+- `make test` and `make codecov` write `coverage.xml` and then try to upload it with the Codecov CLI
+  (`codecovcli` on `PATH`). Without the CLI or a token the upload is skipped with a warning and the
+  gate still passes.
+- Set `CODECOV_TOKEN` in `.env` (see `.env.example`) or export it in your shell.
+- The upload makes no commit; it reports the current git commit.

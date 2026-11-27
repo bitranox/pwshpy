@@ -17,19 +17,19 @@ native read commands return typed records through the lazy pipeline (`.where` / 
 
 ## Processes & system  *(portable)*
 
-| PowerShell                                                          | pwshpy - Python (API)                                                      | pwshpy - CLI                                             |
-|---------------------------------------------------------------------|----------------------------------------------------------------------------|----------------------------------------------------------|
-| `Get-Process`                                                       | `ps.get_process()`                                                         | `pwshpy get_process`                                     |
-| `Get-Uptime`                                                        | `ps.get_uptime()`                                                          | `pwshpy get_uptime`                                      |
-| `Get-ChildItem Env:` / `$env:X`                                     | `ps.environment()`                                                         | `pwshpy env`                                             |
-| `Get-ComputerInfo`                                                  | `ps.get_computer_info()`                                                   | `pwshpy get_computer_info`                               |
-| `whoami /user`                                                      | `ps.get_current_identity()`                                                | `pwshpy get_current_identity`                            |
-| `Get-Hotfix`                                                        | `ps.get_hotfix()`  *(Windows)*                                             | `pwshpy get_hotfix`                                      |
-| `Get-WindowsImage -ImagePath P [-Index N]`                          | `ps.get_windows_image("P", index=None)`                                    | `pwshpy get_windows_image P [--index N]`                 |
-| `IUpdateSearcher.Search(C)` / `Get-WindowsUpdate` (PSWindowsUpdate) | `ps.get_windows_update(criteria=C, timeout=300.0)`  *(Windows, read-only)* | `pwshpy get_windows_update [--criteria C] [--timeout S]` |
-| `Stop-Process -Id N`                                                | `ps.stop_process(N, force=False)`  *(mutating)*                            | `pwshpy stop_process N [-f]`                             |
-| `Wait-Process -Id N`                                                | `ps.wait_process(N, timeout=None)`                                         | `pwshpy wait_process N`                                  |
-| `Restart-Computer` / `Stop-Computer`                                | `ps.restart_computer()` / `ps.stop_computer()`  *(Windows, destructive)*   | `pwshpy restart_computer --yes` / `stop_computer --yes`  |
+| PowerShell                                                          | pwshpy - Python (API)                                                                                  | pwshpy - CLI                                                                    |
+|---------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------|
+| `Get-Process`                                                       | `ps.get_process()`                                                                                     | `pwshpy get_process`                                                            |
+| `Get-Uptime`                                                        | `ps.get_uptime()`                                                                                      | `pwshpy get_uptime`                                                             |
+| `Get-ChildItem Env:` / `$env:X`                                     | `ps.environment()`                                                                                     | `pwshpy env`                                                                    |
+| `Get-ComputerInfo`                                                  | `ps.get_computer_info()`                                                                               | `pwshpy get_computer_info`                                                      |
+| `whoami /user`                                                      | `ps.get_current_identity()`                                                                            | `pwshpy get_current_identity`                                                   |
+| `Get-Hotfix`                                                        | `ps.get_hotfix()`  *(Windows)*                                                                         | `pwshpy get_hotfix`                                                             |
+| `Get-WindowsImage -ImagePath P [-Index N]`                          | `ps.get_windows_image("P", index=None)`                                                                | `pwshpy get_windows_image P [--index N]`                                        |
+| `IUpdateSearcher.Search(C)` / `Get-WindowsUpdate` (PSWindowsUpdate) | `ps.get_windows_update(criteria=C, timeout=300.0)`  *(Windows, read-only)*                             | `pwshpy get_windows_update [--criteria C] [--timeout S]`                        |
+| `Stop-Process -Id N`                                                | `ps.stop_process(N, force=False)`  *(mutating)*                                                        | `pwshpy stop_process N [-f]`                                                    |
+| `Wait-Process -Id N`                                                | `ps.wait_process(N, timeout=None)`                                                                     | `pwshpy wait_process N`                                                         |
+| `Restart-Computer` / `Stop-Computer`                                | `ps.restart_computer(delay_seconds=0)` / `ps.stop_computer(delay_seconds=0)`  *(Windows, destructive)* | `pwshpy restart_computer [--delay N] --yes` / `stop_computer [--delay N] --yes` |
 
 Filtering: in Python use `.where(predicate)` (or a plain `for`/`if`); on the CLI pipe `--jsonl` to `jq`.
 `Get-EventLog` (the classic API) is covered by `ps.get_win_event` (Get-WinEvent). The CLI's
@@ -70,18 +70,20 @@ sockets come from `get_net_udp_endpoint`.
 
 ## Filesystem  *(portable)*
 
-| PowerShell                            | pwshpy - Python (API)                                   | pwshpy - CLI                      |
-|---------------------------------------|---------------------------------------------------------|-----------------------------------|
-| `Get-ChildItem -Path P [-Recurse]`    | `ps.get_child_item("P", recurse=False)`                 | `pwshpy get_child_item P [-r]`    |
-| `Get-Item -Path P`                    | `ps.get_item("P")`                                      | `pwshpy get_item P`               |
-| `Get-Content -Path P -Raw`            | `ps.get_content("P", encoding="utf-8")`  (whole file)   | *library only*                    |
-| `Get-Content -Path P`                 | `ps.get_content_lines("P")`  (streamed, memory-bounded) | `pwshpy get_content P`  (streams) |
-| `Test-Path -Path P`                   | `ps.test_path("P")`  -> `bool`                          | `pwshpy test_path P`  (exit 0/1)  |
-| `New-Item -Path P -ItemType File/Dir` | `ps.new_item("P", item_type="file")`                    | `pwshpy new_item P --type file`   |
-| `Copy-Item S D [-Recurse]`            | `ps.copy_item("S", "D", recurse=False)`                 | `pwshpy copy_item S D [-r]`       |
-| `Move-Item S D`                       | `ps.move_item("S", "D")`                                | `pwshpy move_item S D`            |
-| `Remove-Item P [-Recurse]`            | `ps.remove_item("P", recurse=False)`                    | `pwshpy remove_item P [-r]`       |
+| PowerShell                            | pwshpy - Python (API)                                   | pwshpy - CLI                                 |
+|---------------------------------------|---------------------------------------------------------|----------------------------------------------|
+| `Get-ChildItem -Path P [-Recurse]`    | `ps.get_child_item("P", recurse=False)`                 | `pwshpy get_child_item P [-r]`               |
+| `Get-Item -Path P`                    | `ps.get_item("P")`                                      | `pwshpy get_item P`                          |
+| `Get-Content -Path P -Raw`            | `ps.get_content("P", encoding="utf-8")`  (whole file)   | *library only*                               |
+| `Get-Content -Path P`                 | `ps.get_content_lines("P")`  (streamed, memory-bounded) | `pwshpy get_content P`  (streams)            |
+| `Test-Path -Path P`                   | `ps.test_path("P")`  -> `bool`                          | `pwshpy test_path P`  (exit 0/1)             |
+| `New-Item -Path P -ItemType File/Dir` | `ps.new_item("P", item_type=FileItemType.DIRECTORY)`    | `pwshpy new_item P [--type file\|directory]` |
+| `Copy-Item S D [-Recurse]`            | `ps.copy_item("S", "D", recurse=False)`                 | `pwshpy copy_item S D [-r]`                  |
+| `Move-Item S D`                       | `ps.move_item("S", "D")`                                | `pwshpy move_item S D`                       |
+| `Remove-Item P [-Recurse]`            | `ps.remove_item("P", recurse=False)`                    | `pwshpy remove_item P [-r]`                  |
 
+`item_type` takes the enum, `from pwshpy.domain.enums import FileItemType` (`FileItemType.FILE`, the
+default, or `FileItemType.DIRECTORY`).
 Returns typed `FileSystemItem` records (path/name/is_directory/size/modified); backed by
 `pathlib`/`shutil`, so it works on every OS.
 
@@ -179,6 +181,7 @@ WARNING, a folder, task or unit the caller cannot read; `strict=True` (CLI `--st
 | PowerShell                                                                                              | pwshpy - Python (API)                                                                | pwshpy - CLI                                                      |
 |---------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------|-------------------------------------------------------------------|
 | `Get-ScheduledTask`                                                                                     | `ps.get_scheduled_task(folder_path="\\")`                                            | `pwshpy get_scheduled_task`                                       |
+| `Get-ScheduledTask -TaskName T -TaskPath F`                                                             | `ps.get_scheduled_task("F", task_name="T")`                                          | `pwshpy get_scheduled_task --task-name T [--folder F]`            |
 | *(fail on an unreadable task, never skip it)*                                                           | `ps.get_scheduled_task(strict=True)`                                                 | `pwshpy get_scheduled_task --strict`                              |
 | `Register-ScheduledTask -TaskName T -Action (New-ScheduledTaskAction -Execute P -Argument A)`           | `ps.register_scheduled_task("\\T", program="P", arguments="A", description="D")`     | `pwshpy register_scheduled_task \T --program P --arguments A`     |
 | `Register-ScheduledTask ... -Principal (New-ScheduledTaskPrincipal -UserId S-1-5-18 -RunLevel Highest)` | `principal=TaskPrincipal.system()`                                                   | `--run-as local_system --run-level highest`                       |
@@ -283,10 +286,11 @@ token.
 
 ## Files & output  *(portable)*
 
-| PowerShell                                        | pwshpy - Python (API)                                                     | pwshpy - CLI                                                                             |
-|---------------------------------------------------|---------------------------------------------------------------------------|------------------------------------------------------------------------------------------|
-| `Out-File -Encoding utf8` / `Set-Content`         | `ps.write_text(path, text, encoding="utf-8", newline="\n", bom=False)`    | `pwshpy write_text PATH` (reads stdin, UTF-8 when piped; `--input-encoding` for another) |
-| `.. \| ConvertTo-Json \| Out-File` / `Export-Csv` | `ps.write_records(path, records, jsonl=True)`  (streams record-by-record) | *library only*                                                                           |
+| PowerShell                                        | pwshpy - Python (API)                                                                             | pwshpy - CLI                                                                                                             |
+|---------------------------------------------------|---------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|
+| `Out-File -Encoding utf8` / `Set-Content`         | `ps.write_text(path, text, encoding="utf-8", newline="\n", bom=False)`                            | `pwshpy write_text PATH [--encoding E] [--bom] [--crlf]` (reads stdin, UTF-8 when piped; `--input-encoding` for another) |
+| `.. \| Out-File` (a large or unbounded stream)    | `ps.write_text_stream(path, chunks, encoding="utf-8", newline="\n", bom=False)`  (memory-bounded) | *library only*                                                                                                           |
+| `.. \| ConvertTo-Json \| Out-File` / `Export-Csv` | `ps.write_records(path, records, jsonl=True)`  (streams record-by-record)                         | *library only*                                                                                                           |
 
 Always UTF-8, no BOM, LF by default - the same bytes on every OS (no `Out-File` UTF-16/BOM surprise).
 

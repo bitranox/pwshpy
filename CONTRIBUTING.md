@@ -13,32 +13,31 @@ Thanks for helping improve **pwshpy**. The sections below summarise the day-to-d
 ## 2. Commits & Pushes
 
 - Commit messages should be imperative (`Add rich handler`, `Fix CLI exit codes`).
-- The test harness (`make test`) runs the full lint/type/test pipeline but leaves the repository untouched; create commits yourself before pushing or uploading coverage artifacts.
-- `make push` always performs a commit before pushing. It prompts for a message when run interactively, honours `COMMIT_MESSAGE="..."` when provided, and creates an empty commit if nothing is staged. The Textual menu (`make menu -> push`) exposes the same behaviour via an input field.
+- The test harness (`make test`) makes no commit. It does rewrite files: it raises outdated dependency floors in `pyproject.toml`, refreshes `uv.lock` and applies `ruff format` and `ruff check --fix`, so review `git diff` after a run.
+- `make push` always performs a commit before pushing: it stages every change (`git add -A`) and creates an empty commit if nothing is staged. Pass the message as `MSG="..."` (safe for any punctuation and for newlines); without one it prompts at a terminal and uses `chores` otherwise.
 
 ## 3. Coding Standards
 
-- Apply the repository's Clean Architecture / SOLID rules (see `CLAUDE.md` and the system prompts listed there).
+- Keep the Clean Architecture layering (domain, application, adapters, composition). The import-linter contracts under `[tool.importlinter]` in `pyproject.toml` define which layer may import which, and `make test` enforces them.
 - Prefer small, single-purpose modules and functions; avoid mixing orthogonal concerns.
 - Free functions and modules use `snake_case`; classes are `PascalCase`.
 - Keep runtime dependencies minimal. Use the standard library where practical.
 
 ## 4. Tests & Tooling
 
-- `make test` runs Ruff (lint + format check), Pyright, and Pytest with coverage. Coverage is `on` by default; override with `COVERAGE=off` if you explicitly need a no-coverage run.
-- The harness auto-installs dev tools with `pip install -e .[dev]` when Ruff, Pyright, or Pytest are missing. Skip this by exporting `SKIP_BOOTSTRAP=1`.
-- Codecov uploads require a commit (provided by the automatic commit described above). For private repositories set `CODECOV_TOKEN` in your environment or `.env`.
+- `make test` runs Ruff (lint + format check), Pyright, import-linter, pip-audit, bandit and Pytest with coverage (see [DEVELOPMENT.md](DEVELOPMENT.md#target-details) for the full list). bmk provisions the project's `.venv` with the dev extras itself, so no separate install step is needed.
+- The Codecov upload makes no commit. It runs when `CODECOV_TOKEN` is set in your environment or `.env` and `codecovcli` is on `PATH`; otherwise it is skipped.
 - Tests follow a narrative style: prefer names like `test_when_<condition>_<outcome>()`, keep each case laser-focused, and mark OS constraints with the provided markers (`@pytest.mark.os_agnostic`, `@pytest.mark.os_windows`, etc.).
-- Whenever you add a CLI behaviour or change metadata fallbacks, update the relevant story in `tests/test_cli.py` or `tests/test_metadata.py` so the specification remains complete.
+- Whenever you add a CLI behaviour or change metadata fallbacks, update the relevant story in the matching `tests/test_cli_*.py` module or `tests/test_metadata.py` so the specification remains complete.
 
 ## 5. Documentation Checklist
 
 Before opening a PR, confirm the following:
 
-- [ ] `make test` passes locally (and you removed the auto-created Codecov commit if you do not want to keep it).
-- [ ] Relevant documentation (`README.md`, `DEVELOPMENT.md`, `docs/systemdesign/*`) is updated.
+- [ ] `make test` passes locally.
+- [ ] Relevant documentation (`README.md`, `COMMANDS.md`, `docs/*.md`, `CHANGELOG.md`, `skills/using-pwsh/SKILL.md`) is updated.
 - [ ] No generated artefacts or virtual environments are committed.
-- [ ] Version bumps, when required, touch **only** `pyproject.toml` and `CHANGELOG.md`.
+- [ ] Version bumps, when required, go through `make bump-patch`, `make bump-minor` or `make bump-major`, which update `pyproject.toml`, `CHANGELOG.md` and `src/pwshpy/__init__conf__.py` together.
 
 ## 6. Security & Configuration
 

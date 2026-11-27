@@ -50,6 +50,23 @@ uv venv && source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
 uv pip install pwshpy
 ```
 
+## Optional extras
+
+Two features need extra dependencies. Add the extra in brackets to any install method above:
+
+```bash
+uv tool install "pwshpy[full]"        # or: uv pip install "pwshpy[full]", pip install "pwshpy[full]"
+uv tool install "pwshpy[journald]"
+```
+
+- `[full]` adds `pythonnet` and `clr-loader` for the .NET commands (`run`, `cmdlet`, `get_command`,
+  `get_ad_user` and the other module shortcuts), which host PowerShell 7.6 in-process. The machine
+  also needs the .NET 10 runtime and PowerShell 7.6 installed (or `PWSHPY_POWERSHELL_HOME` set to
+  the PowerShell directory). Without the extra, a .NET call fails with `FeatureUnavailableError`.
+- `[journald]` adds `systemd-python` for `get_win_event` on Linux. It builds a C extension, so it
+  needs `libsystemd-dev` (or your distribution's equivalent) and a C compiler. Without it,
+  `get_win_event` on Linux fails with `PlatformUnsupportedError`.
+
 ## Verify installation
 
 After any install method, confirm the CLI is available:
@@ -96,7 +113,7 @@ pip install --user .
 # install pipx via pip
 python -m pip install pipx
 # optional install pipx via apt
-sudo apt install python-pipx
+sudo apt install pipx
 # install via pipx from PyPI
 pipx install pwshpy
 # optional install via pipx from GitHub
@@ -138,8 +155,7 @@ pip install "git+https://github.com/bitranox/pwshpy"
 
 - Use [fpm](https://fpm.readthedocs.io/) to repackage the Python wheel into `.deb` or `.rpm` for distribution via `apt` or `yum`/`dnf`.
 
-All methods register both the `pwshpy` and
-`pwshpy` commands on your PATH.
+All methods register the `pwshpy` command on your PATH.
 
 ## Why we recommend uv: supply-chain protection
 

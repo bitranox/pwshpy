@@ -18,6 +18,7 @@ Contents:
     * :class:`ElevationRequiredError` - an operation needs administrative rights it lacks.
     * :class:`ConfigurationError` - missing, invalid, or incomplete configuration.
     * :class:`PackError` - a script could not be packed into a self-extracting runner.
+    * :class:`CimMethodNotAllowedError` - a CIM method outside the read-only allowlist was refused.
 """
 
 from __future__ import annotations
@@ -284,6 +285,19 @@ class ConfigurationError(PwshPyError):
     """
 
 
+class CimMethodNotAllowedError(PwshPyError):
+    """A CIM/WMI method is not on pwshpy's read-only allowlist, so it was not called.
+
+    ``invoke_cim_method`` calls only the methods named in
+    :data:`pwshpy.domain.cim_methods.READ_ONLY_CIM_METHODS`, which are known to change nothing;
+    every other method is refused before WMI is contacted. There is no switch to bypass the list.
+
+    Example:
+        >>> issubclass(CimMethodNotAllowedError, PwshPyError)
+        True
+    """
+
+
 class PackError(PwshPyError):
     """A script could not be packed into a self-extracting runner.
 
@@ -298,6 +312,7 @@ class PackError(PwshPyError):
 
 
 __all__ = [
+    "CimMethodNotAllowedError",
     "ConfigurationError",
     "PackError",
     "ElevationDeclinedError",

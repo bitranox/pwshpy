@@ -249,6 +249,11 @@ full cmdlet-by-cmdlet table.
 pwshpy get_windows_image install.wim --jsonl
 pwshpy get_windows_image install.wim --index 6
 
+# Invoke-CimMethod, read-only methods only: BitLocker status, TPM readiness (any other is refused)
+pwshpy invoke_cim_method Win32_EncryptableVolume GetConversionStatus \
+    --namespace root/cimv2/Security/MicrosoftVolumeEncryption --jsonl
+pwshpy invoke_cim_method Win32_Tpm IsReady --namespace root/cimv2/Security/MicrosoftTpm --jsonl
+
 # a Windows Update search that cannot hang: read-only, killed after --timeout (then exit 110)
 pwshpy get_windows_update --timeout 600 --jsonl
 

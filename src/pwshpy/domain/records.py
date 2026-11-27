@@ -685,6 +685,41 @@ class CimInstance(PSRecord):
     properties: dict[str, Any] = Field(default_factory=dict)
 
 
+class CimMethodResult(PSRecord):
+    """The answer of one CIM/WMI method call (the native ``Invoke-CimMethod`` record).
+
+    One record per instance the method ran on (one for a static method, run on the class).
+    ``return_value`` is the method's own ``ReturnValue``: 0 means it succeeded, anything else is
+    the provider's documented error or status code (an HRESULT such as ``0x80310000`` for the
+    BitLocker methods), and the out-parameters are then usually unset. It is data, not an
+    exception, because it is the method's answer for that one instance, as ``Invoke-CimMethod``
+    reports it: a locked or unencrypted volume answers with a code while the other volumes still
+    answer. A call that WMI itself could not make raises instead. ``None`` means the method
+    declares no ``ReturnValue``.
+
+    Values are marshaled like :class:`CimInstance` properties, except that unsigned integers are
+    reported unsigned (WMI hands a ``uint32`` over as a signed 32-bit int).
+
+    Example:
+        >>> r = CimMethodResult(
+        ...     class_name="Win32_Tpm",
+        ...     method_name="IsReady",
+        ...     instance_path="Win32_Tpm=@",
+        ...     return_value=0,
+        ...     out_parameters={"IsReady": True},
+        ... )
+        >>> r.return_value, r.out_parameters["IsReady"]
+        (0, True)
+    """
+
+    class_name: str
+    method_name: str
+    #: The relative WMI path of the instance the method ran on (the class name for a static method).
+    instance_path: str
+    return_value: int | None
+    out_parameters: dict[str, Any] = Field(default_factory=dict)
+
+
 class PSObjectRecord(PSRecord):
     """A marshaled .NET PowerShell object - what ``ps.run`` yields for a structured result.
 
@@ -1113,6 +1148,7 @@ class ShortcutInfo(PSRecord):
 __all__ = [
     "AclEntry",
     "CimInstance",
+    "CimMethodResult",
     "CommandInfo",
     "CommandParameter",
     "ComputerInfo",

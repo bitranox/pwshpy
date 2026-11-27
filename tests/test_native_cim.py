@@ -22,16 +22,20 @@ from pwshpy.adapters.native.cim import iter_cim
 from pwshpy.domain.errors import NativeCallError
 from pwshpy.domain.records import CimInstance
 
+_CIM_STRING = 8  # every real WBEM property carries a CIMType; a plain fake value is a string
+
 
 class _FakeProp:
-    def __init__(self, name: str, value: Any) -> None:
+    def __init__(self, name: str, value: Any, cim_type: int = _CIM_STRING) -> None:
         self.Name = name
         self.Value = value
+        self.CIMType = cim_type
 
 
 class _FakeObj:
-    def __init__(self, props: dict[str, Any]) -> None:
-        self.Properties_ = [_FakeProp(name, value) for name, value in props.items()]
+    def __init__(self, props: dict[str, Any], cim_types: dict[str, int] | None = None) -> None:
+        types = cim_types or {}
+        self.Properties_ = [_FakeProp(name, value, types.get(name, _CIM_STRING)) for name, value in props.items()]
 
 
 class _FakeService:
@@ -74,6 +78,37 @@ def test_iter_cim_marshals_properties_and_builds_wql(monkeypatch: pytest.MonkeyP
     assert service.last_wql == "SELECT * FROM Win32_Thing WHERE Count = 3"
     # the open bag serializes as a plain nested dict
     assert instance.to_dict()["properties"]["Langs"] == ["de", "en"]
+
+
+@pytest.mark.os_agnostic
+def test_iter_cim_reports_unsigned_integers_unsigned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WBEM scripting hands a uint8/16/32 over signed; the record carries the unsigned value.
+
+    Measured on Windows: GetConversionStatus's uint32 WipingStatus of 0xFFFFFFFF arrived as -1.
+    Signed types keep their sign, and a uint64 (a string in WBEM scripting) is left as is.
+    """
+    props = {
+        "U32": -1,
+        "U16": -2,
+        "U8": -128,
+        "U32s": (-1, 7),
+        "S32": -5,
+        "U64": "18446744073709551615",
+        "Ok": 42,
+    }
+    types = {"U32": 19, "U16": 18, "U8": 17, "U32s": 19, "S32": 3, "U64": 21, "Ok": 19}
+    service = _FakeService([_FakeObj(props, types)])
+    monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(service))
+    instance = next(iter_cim("Win32_Thing"))
+    assert instance.properties == {
+        "U32": 0xFFFFFFFF,
+        "U16": 0xFFFE,
+        "U8": 0x80,
+        "U32s": [0xFFFFFFFF, 7],
+        "S32": -5,
+        "U64": "18446744073709551615",
+        "Ok": 42,
+    }
 
 
 @pytest.mark.os_agnostic

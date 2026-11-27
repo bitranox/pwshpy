@@ -16,6 +16,7 @@ from pwshpy import ps
 from pwshpy.adapters.native.known_folders import posix_known_folder, windows_known_folder
 from pwshpy.application.ports import AclSource, WindowsImageSource
 from pwshpy.composition import Ps, build_ps
+from pwshpy.domain.cim_methods import CimArgumentValue
 from pwshpy.domain.enums import (
     AceType,
     AddressFamily,
@@ -33,6 +34,7 @@ from pwshpy.domain.enums import (
     TransportProtocol,
 )
 from pwshpy.domain.errors import (
+    CimMethodNotAllowedError,
     ConfigurationError,
     ElevationRequiredError,
     FeatureUnavailableError,
@@ -44,6 +46,7 @@ from pwshpy.domain.pipeline import Pipeline
 from pwshpy.domain.records import (
     AclEntry,
     CimInstance,
+    CimMethodResult,
     CommandInfo,
     CommandParameter,
     ComputerInfo,
@@ -418,6 +421,24 @@ def _fake_cim(class_name: str, *, where: str | None = None, namespace: str = "ro
     yield CimInstance(class_name=class_name, properties={"where": where, "namespace": namespace})
 
 
+def _fake_cim_method(
+    class_name: str,
+    method_name: str,
+    *,
+    where: str | None = None,
+    namespace: str = "root/cimv2",
+    arguments: Mapping[str, CimArgumentValue] | None = None,
+) -> Iterator[CimMethodResult]:
+    # The out-parameters echo what the facade forwarded.
+    yield CimMethodResult(
+        class_name=class_name,
+        method_name=method_name,
+        instance_path=f"{class_name}=@",
+        return_value=0,
+        out_parameters={"where": where, "namespace": namespace, "arguments": dict(arguments or {})},
+    )
+
+
 def _fake_scheduled_tasks(
     folder_path: str = "\\", *, strict: bool = False, task_name: str | None = None
 ) -> Iterator[ScheduledTaskInfo]:
@@ -715,6 +736,7 @@ class _InjectedPs:
             event_log_source=_fake_event_log,
             event_log_controller=self.event_log_controller,
             cim_source=_fake_cim,
+            cim_method_source=_fake_cim_method,
             scheduled_task_source=_fake_scheduled_tasks,
             scheduled_task_controller=self.scheduled_task_controller,
             local_user_source=_fake_local_users,
@@ -879,6 +901,36 @@ def test_injected_event_log_and_cim_adapters(injected: _InjectedPs) -> None:
     cim_first = facade.get_cim_instance("Win32_Bios", where="x=1").first()
     assert cim_first is not None
     assert cim_first.properties == {"where": "x=1", "namespace": "root/cimv2"}
+
+
+@pytest.mark.os_agnostic
+def test_invoke_cim_method_forwards_every_argument(injected: _InjectedPs) -> None:
+    """The method call reaches its injected source with class, method, filter, namespace and arguments."""
+    result = injected.facade.invoke_cim_method(
+        "Win32_EncryptableVolume",
+        "GetKeyProtectors",
+        where="DriveLetter = 'C:'",
+        namespace="root/cimv2/Security/MicrosoftVolumeEncryption",
+        arguments={"KeyProtectorType": 3},
+    ).first()
+    assert result is not None
+    assert (result.class_name, result.method_name, result.return_value) == (
+        "Win32_EncryptableVolume",
+        "GetKeyProtectors",
+        0,
+    )
+    assert result.out_parameters == {
+        "where": "DriveLetter = 'C:'",
+        "namespace": "root/cimv2/Security/MicrosoftVolumeEncryption",
+        "arguments": {"KeyProtectorType": 3},
+    }
+
+
+@pytest.mark.os_agnostic
+def test_production_invoke_cim_method_refuses_a_mutating_method_at_call_time() -> None:
+    """The real adapter refuses a method off the allowlist when called, on any OS and before WMI."""
+    with pytest.raises(CimMethodNotAllowedError, match=r"Win32_Process\.Terminate"):
+        build_ps().invoke_cim_method("Win32_Process", "Terminate", where="ProcessId = 0")
 
 
 @pytest.mark.os_agnostic

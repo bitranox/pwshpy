@@ -6,6 +6,27 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-11-27
+
+### Added
+
+- `ps.invoke_cim_method(class_name, method_name, *, where=None, namespace="root/cimv2",
+  arguments=None)` and `pwshpy invoke_cim_method CLASS METHOD [--where] [--namespace] [--arg NAME=VALUE]`:
+  the native `Invoke-CimMethod` for READ-ONLY methods, for values WMI exposes only as method results
+  (BitLocker's `GetConversionStatus`, `GetLockStatus`, `GetKeyProtectors`, `GetKeyProtectorType`;
+  `Win32_Tpm`'s `IsReady`, `IsOwned`, `IsActivated`, `IsEnabled`, `GetDictionaryAttackParameters`; a few
+  more listed in docs/library-usage.md). One `CimMethodResult` record per instance (`class_name`,
+  `method_name`, `instance_path`, `return_value`, `out_parameters`); a static method runs once, on the
+  class. Only methods on the fixed allowlist `pwshpy.domain.cim_methods.READ_ONLY_CIM_METHODS` run; any
+  other raises the new `CimMethodNotAllowedError` when called, before WMI is contacted, with no bypass.
+  A non-zero `ReturnValue` is the record's `return_value`, not an exception. Arguments are typed from
+  the method's schema, and no error message repeats an argument value.
+
+### Fixed
+
+- `get_cim_instance` reports `uint8`/`uint16`/`uint32` properties unsigned, as `Get-CimInstance` does:
+  WMI's scripting API hands them over as signed ints, so a `uint32` of `0xFFFFFFFF` read as `-1`.
+
 ## [1.12.4] - 2026-11-27
 
 ### Changed

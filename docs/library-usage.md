@@ -36,7 +36,7 @@ Records include `ProcessInfo`, `NetConnection`, `NetAdapter`, `NetIpAddress`, `D
 `SystemUptime`, `DnsRecord`, `ConnectionTest`, `EnvVar`, `FileSystemItem`, `ComputerInfo`,
 `CurrentIdentity`, `WindowsImage`, `ProcessResult` (from `ps.exec`), the portable admin set
 (`ServiceInfo`, `EventLogEntry`, `ScheduledTaskInfo`, `LocalUser`, `LocalGroup`, `AclEntry`,
-`Credential`) and the Windows set (`RegistryValue`, `RegistryKey`, `CimInstance`, `Hotfix`,
+`Credential`) and the Windows set (`RegistryValue`, `RegistryKey`, `CimInstance`, `CimMethodResult`, `Hotfix`,
 `WindowsUpdate`, `ShortcutInfo`, ...). They serialize to JSON directly (`record.to_dict()`), and enum fields carry
 canonical values regardless of the host locale. `to_dict()` writes a mapping key holding a byte
 that is not valid UTF-8 (in an open property bag such as `CimInstance.properties`, decoded with
@@ -519,6 +519,74 @@ What each refusal raises, all before anything is written unless noted:
   0x80004005 while writing nothing; the expansion depends on the host, so pwshpy cannot check it
   first). `get_shortcut` raises it for a missing file, an empty file or one that is no shortcut.
 
+## Read-only CIM methods: `invoke_cim_method`
+
+Some WMI values exist only as method results: BitLocker's conversion and lock status and key
+protectors, the TPM's readiness and lockout parameters. `ps.invoke_cim_method` is the native
+`Invoke-CimMethod` for those, with the shape of `get_cim_instance`:
+
+```python
+from pwshpy import ps
+
+BL = "root/cimv2/Security/MicrosoftVolumeEncryption"
+for r in ps.invoke_cim_method("Win32_EncryptableVolume", "GetConversionStatus", namespace=BL):
+    print(r.instance_path, r.return_value, r.out_parameters)
+ready = ps.invoke_cim_method("Win32_Tpm", "IsReady", namespace="root/cimv2/Security/MicrosoftTpm").first()
+```
+
+It calls the method on each instance `where` selects and yields one `CimMethodResult` per call:
+`class_name`, `method_name`, `instance_path` (the instance's relative WMI path), `return_value` and
+`out_parameters`. A static method (`StdRegProv.GetStringValue`) runs once, on the class, and its
+`instance_path` is the class name; it takes no `where`. Unsigned integers are reported unsigned (WMI
+hands a `uint32` such as `0xFFFFFFFF` over as `-1`).
+
+**Read-only by construction.** WMI marks no method as read-only, and a `Get`/`Is` name is only a
+convention, so pwshpy keeps a fixed allowlist (`pwshpy.domain.cim_methods.READ_ONLY_CIM_METHODS`)
+and refuses every other method with `CimMethodNotAllowedError` when `invoke_cim_method` is called,
+before WMI is contacted. There is no switch to bypass it; a new method is added to the list in a
+reviewed change, once a real call shows it changes nothing. Names match in any case, and the
+namespace may use `/` or `\`.
+
+| Namespace                                       | Class                     | Methods                                                                                                                                       |
+|-------------------------------------------------|---------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `root/cimv2/Security/MicrosoftVolumeEncryption` | `Win32_EncryptableVolume` | `GetConversionStatus`, `GetLockStatus`, `GetKeyProtectors`, `GetKeyProtectorType`, `GetProtectionStatus`, `GetEncryptionMethod`, `GetVersion` |
+| `root/cimv2/Security/MicrosoftTpm`              | `Win32_Tpm`               | `IsReady`, `IsOwned`, `IsActivated`, `IsEnabled`, `IsEndorsementKeyPairPresent`, `GetDictionaryAttackParameters`, `GetCapLockoutInfo`         |
+| `root/cimv2`                                    | `Win32_Process`           | `GetOwner`, `GetOwnerSid`                                                                                                                     |
+| `root/default`                                  | `StdRegProv` (static)     | `GetStringValue`, `GetDWORDValue`, `EnumKey`, `EnumValues`                                                                                    |
+
+Readers that return secret material change nothing but are left out on purpose: the BitLocker
+recovery password (`GetKeyProtectorNumericalPassword`), external keys and key packages, and
+`Win32_Tpm.GetOwnerAuth`.
+
+**A non-zero `ReturnValue` is data, not an exception.** It is the method's own answer for that
+one instance, as `Invoke-CimMethod` reports it: `GetKeyProtectorType` on a volume without BitLocker
+answers `0x80310008` (FVE_E_NOT_ACTIVATED), a locked volume answers its own code, and the other
+volumes still answer. Check `return_value == 0` before reading `out_parameters`. What raises is a
+call WMI could not make at all: a namespace, class or method that cannot be read, a refused call
+(`NativeAccessDeniedError`; BitLocker needs an elevated process), or an argument that does not fit
+(`NativeCallError`).
+
+**Arguments** are passed by name in `arguments` (any case) as `str`, `int` or `bool`, and each is
+checked against the parameter's CIM type: a decimal `str` fits an integer (range-checked), `"true"` or
+`"false"` a boolean. An error message names the argument, never its value, because some values
+identify secrets (a key protector ID). A protector ID belongs to one volume, so select that volume:
+
+```python
+for vol in ps.get_cim_instance("Win32_EncryptableVolume", namespace=BL):
+    one = "DeviceID = '{}'".format(vol.properties["DeviceID"].replace("\\", "\\\\"))  # WQL doubles a backslash
+    found = ps.invoke_cim_method("Win32_EncryptableVolume", "GetKeyProtectors", namespace=BL, where=one).first()
+    if found is None or found.return_value != 0:
+        continue
+    for pid in found.out_parameters.get("VolumeKeyProtectorID") or []:
+        kind = ps.invoke_cim_method(
+            "Win32_EncryptableVolume",
+            "GetKeyProtectorType",
+            namespace=BL,
+            where=one,
+            arguments={"VolumeKeyProtectorID": pid},
+        ).first()
+```
+
 ## Deadlines and long waits
 
 Calls that can wait take a `timeout` in seconds. What running out of it raises depends on the call:
@@ -646,6 +714,8 @@ Every failure across both backends raises a subclass of `PwshPyError`, all expor
 - `ConfigurationError` - invalid configuration, scheduled-task inputs that contradict each other, or
   a shortcut value a `.lnk` cannot store exactly.
 - `PackError` - a script could not be packed or unpacked.
+- `CimMethodNotAllowedError` - `ps.invoke_cim_method` was asked for a method outside the read-only
+  allowlist; raised by the call itself, before WMI is contacted.
 
 No terminating-vs-non-terminating distinction, no `-ErrorAction Stop` to remember, no silently
 swallowed error. Catch a subclass before its parent (`NativeAccessDeniedError`,

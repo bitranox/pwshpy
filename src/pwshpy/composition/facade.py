@@ -38,6 +38,7 @@ from ..adapters.native import download_file as _download_file
 from ..adapters.native import elevate as _elevate
 from ..adapters.native import get_computer_info as _get_computer_info
 from ..adapters.native import get_uptime as _get_uptime
+from ..adapters.native import invoke_cim_method as _invoke_cim_method
 from ..adapters.native import invoke_rest_method as _invoke_rest_method
 from ..adapters.native import invoke_web_request as _invoke_web_request
 from ..adapters.native import is_elevated as _is_elevated
@@ -85,6 +86,7 @@ from ..adapters.powershell import run as _ps_run
 from ..application.ports import (
     AclController,
     AclSource,
+    CimMethodSource,
     CimSource,
     CmdletRunner,
     CommandIntrospector,
@@ -134,6 +136,7 @@ from ..application.ports import (
     WindowsImageSource,
     WindowsUpdateSource,
 )
+from ..domain.cim_methods import CimArgumentValue
 from ..domain.enums import AceType, FileItemType, KnownFolder, RegistryValueType, ServiceStartType
 from ..domain.errors import ElevationRequiredError, NativeCallError, PlatformUnsupportedError
 from ..domain.packing import DEFAULT_PACK_OPTIONS, PackOptions
@@ -141,6 +144,7 @@ from ..domain.pipeline import Pipeline
 from ..domain.records import (
     AclEntry,
     CimInstance,
+    CimMethodResult,
     CommandInfo,
     ComputerInfo,
     ConnectionTest,
@@ -321,6 +325,7 @@ class Ps:
         event_log_source: EventLogSource,
         event_log_controller: EventLogController,
         cim_source: CimSource,
+        cim_method_source: CimMethodSource,
         scheduled_task_source: ScheduledTaskSource,
         scheduled_task_controller: ScheduledTaskController,
         local_user_source: LocalUserSource,
@@ -373,6 +378,7 @@ class Ps:
         self._event_log_source = event_log_source
         self._event_log_controller = event_log_controller
         self._cim_source = cim_source
+        self._cim_method_source = cim_method_source
         self._scheduled_task_source = scheduled_task_source
         self._scheduled_task_controller = scheduled_task_controller
         self._local_user_source = local_user_source
@@ -950,6 +956,68 @@ class Ps:
             True
         """
         return Pipeline(self._cim_source(class_name, where=where, namespace=namespace))
+
+    def invoke_cim_method(
+        self,
+        class_name: str,
+        method_name: str,
+        *,
+        where: str | None = None,
+        namespace: str = "root/cimv2",
+        arguments: Mapping[str, CimArgumentValue] | None = None,
+    ) -> Pipeline[CimMethodResult]:
+        """Call a READ-ONLY CIM/WMI method on each matching instance (native, Windows; like Invoke-CimMethod).
+
+        Reads values WMI exposes only as method results (BitLocker's ``GetConversionStatus``,
+        ``Win32_Tpm.IsReady``, ...). Same ``class_name``/``where``/``namespace`` shape as
+        :meth:`get_cim_instance`; one :class:`CimMethodResult` per instance the method ran on,
+        or one for a static method, which runs on the class.
+
+        Read-only by construction: only the methods on
+        :data:`pwshpy.domain.cim_methods.READ_ONLY_CIM_METHODS` can be called; any other is
+        refused with :class:`CimMethodNotAllowedError` HERE, before WMI is contacted, and there is
+        no switch to bypass the list. A method's non-zero ``ReturnValue`` is data, not an
+        exception (the record's ``return_value``): it is that instance's answer, so one locked
+        volume does not hide the others.
+
+        Args:
+            class_name: The WMI class (``"Win32_EncryptableVolume"``); letters, digits and
+                underscores only.
+            method_name: The method (``"GetConversionStatus"``); letters, digits and underscores
+                only.
+            where: A WQL condition placed verbatim after ``WHERE`` to pick the instances; None
+                (default) calls the method on every instance. It is not escaped, so never build it
+                from untrusted input. A static method takes none.
+            namespace: The WMI namespace (default ``"root/cimv2"``; BitLocker is
+                ``"root/cimv2/Security/MicrosoftVolumeEncryption"``, the TPM
+                ``"root/cimv2/Security/MicrosoftTpm"``).
+            arguments: In-parameters by name, any case; None (default) passes none. A value is a
+                ``str``, ``int`` or ``bool``, checked against the parameter's CIM type (a decimal
+                ``str`` fits an integer, ``"true"``/``"false"`` a boolean). No error message
+                repeats a value, since some identify secrets (a key protector ID).
+
+        Returns:
+            A lazy :class:`~pwshpy.domain.pipeline.Pipeline` of :class:`CimMethodResult` records.
+
+        Raises:
+            CimMethodNotAllowedError: the method is not on the read-only allowlist (raised by this
+                call, not on iteration).
+            NativeCallError: a name is not an identifier, or an argument value is not a str, int or
+                bool (raised by this call); while iterating, the namespace, class or method cannot
+                be read (a :class:`NativeAccessDeniedError` without the rights, e.g. BitLocker when
+                not elevated), an argument does not fit the method's schema, or WMI could not make
+                the call.
+            PlatformUnsupportedError: pywin32 is not installed (any OS but Windows), on iteration.
+
+        Example:
+            >>> from pwshpy.domain.pipeline import Pipeline
+            >>> isinstance(build_ps().invoke_cim_method("Win32_Tpm", "IsReady",
+            ...     namespace="root/cimv2/Security/MicrosoftTpm"), Pipeline)
+            True
+        """
+        return Pipeline(
+            self._cim_method_source(class_name, method_name, where=where, namespace=namespace, arguments=arguments)
+        )
 
     def get_scheduled_task(
         self, folder_path: str = "\\", *, task_name: str | None = None, strict: bool = False
@@ -2939,6 +3007,7 @@ def build_ps() -> Ps:
         # Event log is portable: win32evtlog on Windows, journald on Linux (macOS raises).
         event_log_source=_iter_event_log if _ON_WINDOWS else _journald_iter_event_log,
         cim_source=_iter_cim,
+        cim_method_source=_invoke_cim_method,
         scheduled_task_source=_iter_scheduled_tasks if _ON_WINDOWS else _systemd_iter_timers,
         # Local accounts are portable: win32net on Windows, stdlib pwd/grp on POSIX (Linux/macOS).
         local_user_source=_iter_local_users if _ON_WINDOWS else _posix_iter_local_users,

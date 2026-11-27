@@ -12,7 +12,7 @@ Contents:
 from __future__ import annotations
 
 from .acl import cli_acl
-from .cim import cli_cim
+from .cim import cli_cim, cli_invoke_cim_method
 from .config import cli_config, cli_config_deploy, cli_config_generate_examples
 from .connections import cli_connections
 from .credentials import CREDENTIAL_COMMANDS
@@ -55,6 +55,7 @@ __all__ = [
     "WEB_COMMANDS",
     "cli_acl",
     "cli_cim",
+    "cli_invoke_cim_method",
     "cli_config",
     "cli_config_deploy",
     "cli_config_generate_examples",

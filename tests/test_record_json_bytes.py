@@ -65,6 +65,7 @@ from pwshpy.domain.enums import (
 from pwshpy.domain.records import (
     AclEntry,
     CimInstance,
+    CimMethodResult,
     CommandInfo,
     CommandParameter,
     ComputerInfo,
@@ -239,6 +240,10 @@ _RECORDS: list[PSRecord] = [
     ),
     CimInstance(class_name="Win32_Thing", properties=_open_bag()),
     CimInstance(class_name="Empty"),
+    CimMethodResult(
+        class_name="Win32_Thing", method_name="GetX", instance_path=_TEXT, return_value=0, out_parameters=_open_bag()
+    ),
+    CimMethodResult(class_name="Win32_Thing", method_name="GetX", instance_path="p", return_value=None),
     PSObjectRecord(type_name="System.Object", properties=_open_bag()),
     PSInvocationResult(
         output=[42, _TEXT, None, PSObjectRecord(type_name="T", properties={"n": 1}), 0.1, [], {}],

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from .acl import iter_acl
 from .acl_control import NativeAclController
-from .cim import iter_cim
+from .cim import invoke_cim_method, iter_cim
 from .credentials import NativeCredentialStore, prompt_credential
 from .dns import resolve
 from .elevation import elevate, is_elevated
@@ -93,6 +93,7 @@ __all__ = [
     "iter_hotfixes",
     "journald_iter_event_log",
     "iter_acl",
+    "invoke_cim_method",
     "iter_cim",
     "iter_connections",
     "iter_disks",

@@ -16,6 +16,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from ..domain.cim_methods import CimArgumentValue
 from ..domain.enums import (
     AceType,
     DeployTarget,
@@ -29,6 +30,7 @@ from ..domain.packing import PackOptions
 from ..domain.records import (
     AclEntry,
     CimInstance,
+    CimMethodResult,
     CommandInfo,
     ComputerInfo,
     ConnectionTest,
@@ -362,6 +364,25 @@ class CimSource(Protocol):
     ) -> Iterator[CimInstance]: ...
 
 
+class CimMethodSource(Protocol):
+    """Call a read-only CIM/WMI method and stream its answers as :class:`CimMethodResult` records.
+
+    Refuses a method outside the read-only allowlist with
+    :class:`~pwshpy.domain.errors.CimMethodNotAllowedError` when CALLED, before WMI is contacted;
+    the method itself runs only while the returned iterator is consumed.
+    """
+
+    def __call__(
+        self,
+        class_name: str,
+        method_name: str,
+        *,
+        where: str | None = None,
+        namespace: str = "root/cimv2",
+        arguments: Mapping[str, CimArgumentValue] | None = None,
+    ) -> Iterator[CimMethodResult]: ...
+
+
 class ScheduledTaskSource(Protocol):
     """Stream scheduled tasks as :class:`ScheduledTaskInfo` records (native).
 
@@ -574,6 +595,7 @@ __all__ = [
     "TextWriter",
     "WebRequester",
     "CimSource",
+    "CimMethodSource",
     "EventLogSource",
     "LocalGroupSource",
     "LocalUserSource",

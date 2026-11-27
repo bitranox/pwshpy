@@ -180,8 +180,16 @@ with `PlatformUnsupportedError`. The per-OS rules are in
 [Backends & Platforms](backends-and-platforms.md#known-folders).
 
 **Windows only** - no honest Linux analog: `pwshpy get_item_property KEY` / `pwshpy registry_keys KEY`,
-`pwshpy get_cim_instance CLASS`, `pwshpy get_hotfix`, `pwshpy get_windows_update`,
-`pwshpy get_shortcut PATH`.
+`pwshpy get_cim_instance CLASS`, `pwshpy invoke_cim_method CLASS METHOD`, `pwshpy get_hotfix`,
+`pwshpy get_windows_update`, `pwshpy get_shortcut PATH`.
+
+`pwshpy invoke_cim_method CLASS METHOD [--where W] [--namespace NS] [--arg NAME=VALUE ...]` calls a
+read-only WMI method on each instance `--where` selects (a static method once, on the class) and
+streams one record per call: `class_name`, `method_name`, `instance_path`, `return_value` and
+`out_parameters`. Only the methods on pwshpy's read-only allowlist run (see
+[Library usage](library-usage.md#read-only-cim-methods-invoke_cim_method)); any other exits non-zero
+with `CimMethodNotAllowedError` before WMI is contacted. An `--arg` value is typed from the method's
+schema, and a malformed `--arg` is a usage error (exit 2) that does not repeat the given text.
 
 `pwshpy get_shortcut PATH` shows a shortcut (`.lnk`) as Windows reads it: `target` with environment
 references expanded (`%SystemRoot%\notepad.exe` reads back as `C:\Windows\notepad.exe`),

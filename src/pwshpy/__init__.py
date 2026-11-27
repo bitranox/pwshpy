@@ -47,6 +47,7 @@ from .domain.enums import (
     WellKnownSid,
 )
 from .domain.errors import (
+    CimMethodNotAllowedError,
     ConfigurationError,
     ElevationDeclinedError,
     ElevationDirectoryError,
@@ -65,6 +66,7 @@ from .domain.pipeline import Pipeline
 from .domain.records import (
     AclEntry,
     CimInstance,
+    CimMethodResult,
     CommandInfo,
     CommandParameter,
     ComputerInfo,
@@ -145,6 +147,7 @@ __all__ = [
     "ShortcutInfo",
     "EventLogEntry",
     "CimInstance",
+    "CimMethodResult",
     "CommandInfo",
     "CommandParameter",
     "ScheduledTaskInfo",
@@ -192,6 +195,7 @@ __all__ = [
     "ElevationRequiredError",
     "ConfigurationError",
     "PackError",
+    "CimMethodNotAllowedError",
     # Config + metadata
     "get_config",
     "print_info",

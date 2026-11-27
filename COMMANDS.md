@@ -145,9 +145,17 @@ their own journal files. Clearing the log is Windows-only.
 
 ## CIM / WMI  *(Windows)*
 
-| PowerShell                                             | pwshpy - Python (API)                                         | pwshpy - CLI                                         |
-|--------------------------------------------------------|---------------------------------------------------------------|------------------------------------------------------|
-| `Get-CimInstance -ClassName C -Filter F -Namespace NS` | `ps.get_cim_instance("C", where="F", namespace="root/cimv2")` | `pwshpy get_cim_instance C --where F --namespace NS` |
+| PowerShell                                                                                                               | pwshpy - Python (API)                                                           | pwshpy - CLI                                                      |
+|--------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------|-------------------------------------------------------------------|
+| `Get-CimInstance -ClassName C -Filter F -Namespace NS`                                                                   | `ps.get_cim_instance("C", where="F", namespace="root/cimv2")`                   | `pwshpy get_cim_instance C --where F --namespace NS`              |
+| `Get-CimInstance C -Filter F -Namespace NS \| Invoke-CimMethod -MethodName M -Arguments @{P=V}` (read-only methods only) | `ps.invoke_cim_method("C", "M", where="F", namespace="NS", arguments={"P": V})` | `pwshpy invoke_cim_method C M --where F --namespace NS --arg P=V` |
+
+`invoke_cim_method` calls only the read-only methods pwshpy lists (BitLocker's `GetConversionStatus`,
+`GetLockStatus`, `GetKeyProtectors`, `GetKeyProtectorType`, ...; `Win32_Tpm`'s `IsReady`, `IsOwned`,
+`IsActivated`, `IsEnabled`, `GetDictionaryAttackParameters`, ...; the full list is in
+[docs/library-usage.md](docs/library-usage.md#read-only-cim-methods-invoke_cim_method)); any other method
+raises `CimMethodNotAllowedError` before WMI is contacted. A method's non-zero `ReturnValue` comes back as
+the record's `return_value`, not as an exception.
 
 ## Scheduled tasks  *(portable: read + mutation)*
 

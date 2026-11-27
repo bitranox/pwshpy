@@ -6,6 +6,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.13.2] - 2026-11-27
+
 ### Fixed
 
 - `ps.add_acl_ace(..., access_type="Deny")` wrote an ALLOW entry, and `ps.new_item(path,

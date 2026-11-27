@@ -23,6 +23,10 @@ from pwshpy.domain.errors import NativeCallError
 from pwshpy.domain.records import CimInstance
 
 _CIM_STRING = 8  # every real WBEM property carries a CIMType; a plain fake value is a string
+# The by-name reader is checked against the list read on real WMI, so the test names both.
+_PropertyReader = cim_mod._PropertyReader  # pyright: ignore[reportPrivateUsage]
+_properties = cim_mod._properties  # pyright: ignore[reportPrivateUsage]
+_load_wbem_service = cim_mod._load_wbem_service  # pyright: ignore[reportPrivateUsage]
 
 
 class _FakeProp:
@@ -297,3 +301,136 @@ def test_iter_cim_reads_real_os_class() -> None:
     assert isinstance(instance, CimInstance)
     assert instance.class_name == "Win32_OperatingSystem"
     assert "Version" in instance.properties
+
+
+# --- reading values by name: each class's property list is read once per query -------------
+
+_DISP_E_UNKNOWNNAME = 0x80020006
+
+
+class _FakeRawDispatch:
+    """A raw IDispatch (what ``_oleobj_`` holds): dispids by name, a property get by dispid."""
+
+    def __init__(self, members: dict[str, Any], *, refuse: frozenset[str] = frozenset()) -> None:
+        self._names = list(members)
+        self._members = members
+        self._refuse = refuse
+
+    def GetIDsOfNames(self, name: str) -> int:  # noqa: N802 - IDispatch API name
+        if name in self._refuse or name not in self._members:
+            raise com_error_for(_DISP_E_UNKNOWNNAME)
+        return self._names.index(name)
+
+    def Invoke(self, dispid: int, lcid: int, flags: int, want_result: bool, *args: Any) -> Any:  # noqa: N802
+        return self._members[self._names[dispid]]
+
+
+class _CountingObj:
+    """A WBEM object of class ``class_name`` that counts each walk of its ``Properties_`` list."""
+
+    def __init__(
+        self,
+        class_name: str,
+        props: dict[str, Any],
+        cim_types: dict[str, int] | None = None,
+        *,
+        refuse: frozenset[str] = frozenset(),
+        dispatch_type: type[_FakeRawDispatch] = _FakeRawDispatch,
+    ) -> None:
+        self._listed = _FakeObj(props, cim_types).Properties_
+        self.walks = 0
+        path = _FakeRawDispatch({"Class": class_name})
+        self._oleobj_ = dispatch_type({**props, "Path_": path}, refuse=refuse)
+
+    @property
+    def Properties_(self) -> list[_FakeProp]:  # noqa: N802 - WBEM API name
+        self.walks += 1
+        return self._listed
+
+
+@pytest.mark.os_agnostic
+def test_iter_cim_walks_the_property_list_once_per_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Later instances of a class are read by name: the costly per-property list is walked once.
+
+    Measured on a Windows VM: walking Properties_ (a COM object per property, each wrapped with
+    its type information) took 7.7 s for 279 Win32_Service instances; by name, 0.27 s.
+    """
+    objs = [_CountingObj("Win32_Thing", {"Name": f"n{i}", "Count": -1}, {"Count": 19}) for i in range(4)]
+    monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(_FakeService(objs)))  # type: ignore[arg-type]
+    items = list(iter_cim("Win32_Thing"))
+    assert [i.properties for i in items] == [{"Name": f"n{i}", "Count": 0xFFFFFFFF} for i in range(4)]
+    assert [o.walks for o in objs] == [1, 0, 0, 0]
+
+
+@pytest.mark.os_agnostic
+def test_iter_cim_learns_each_class_of_a_mixed_query_on_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A query over a base class returns several classes; each keeps its own properties and order."""
+    objs = [
+        _CountingObj("Win32_DiskDrive", {"Model": "m", "Size": "10"}),
+        _CountingObj("Win32_Keyboard", {"Layout": "de", "Model": "k", "Keys": 102}),
+        _CountingObj("Win32_DiskDrive", {"Model": "m2", "Size": "20"}),
+    ]
+    monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(_FakeService(objs)))  # type: ignore[arg-type]
+    items = list(iter_cim("CIM_LogicalDevice"))
+    assert [list(i.properties.items()) for i in items] == [
+        [("Model", "m"), ("Size", "10")],
+        [("Layout", "de"), ("Model", "k"), ("Keys", 102)],
+        [("Model", "m2"), ("Size", "20")],
+    ]
+    assert [o.walks for o in objs] == [1, 1, 0]
+
+
+@pytest.mark.os_agnostic
+def test_a_property_named_like_a_wbem_member_is_read_from_the_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A name ending in "_" may be an SWbemObject member (Path_), so such a class is never read by name."""
+    objs = [_CountingObj("Odd_Class", {"Path_": "mine", "Name": f"n{i}"}) for i in range(2)]
+    monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(_FakeService(objs)))  # type: ignore[arg-type]
+    items = list(iter_cim("Odd_Class"))
+    assert [i.properties for i in items] == [{"Path_": "mine", "Name": "n0"}, {"Path_": "mine", "Name": "n1"}]
+    assert [o.walks for o in objs] == [2, 1]
+
+
+@pytest.mark.os_agnostic
+def test_an_instance_whose_name_lookup_fails_is_read_from_the_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A COM refusal on the by-name path costs speed, never the value: that instance takes the list."""
+    objs = [
+        _CountingObj("Win32_Thing", {"Name": "a"}),
+        _CountingObj("Win32_Thing", {"Name": "b"}, refuse=frozenset({"Name"})),
+    ]
+    monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(_FakeService(objs)))  # type: ignore[arg-type]
+    assert [i.properties for i in iter_cim("Win32_Thing")] == [{"Name": "a"}, {"Name": "b"}]
+    assert [o.walks for o in objs] == [1, 1]
+
+
+@pytest.mark.os_agnostic
+def test_a_non_com_failure_on_the_by_name_path_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a COM refusal falls back; a defect in the read itself surfaces with its own type."""
+
+    class _Broken(_FakeRawDispatch):
+        def Invoke(self, dispid: int, lcid: int, flags: int, want_result: bool, *args: Any) -> Any:  # noqa: N802
+            raise RuntimeError("marshaling defect")
+
+    obj = _CountingObj("Win32_Thing", {"Name": "a"}, dispatch_type=_Broken)
+    monkeypatch.setattr(cim_mod, "_load_wbem_service", _loader(_FakeService([obj])))  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="marshaling defect"):
+        list(iter_cim("Win32_Thing"))
+
+
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="WMI is Windows-only")
+@pytest.mark.parametrize(
+    "wql", ["SELECT * FROM Win32_Service", "SELECT * FROM CIM_LogicalDevice", "SELECT * FROM Win32_Processor"]
+)
+def test_reading_by_name_matches_the_property_list_on_real_wmi(wql: str) -> None:
+    """On the same fetched object, the by-name read gives the list's values in the list's order.
+
+    CIM_LogicalDevice returns several classes, so it also checks one schema per class.
+    """
+    service = _load_wbem_service("root/cimv2")
+    reader = _PropertyReader()
+    compared = 0
+    for obj in service.ExecQuery(wql, "WQL", 0x30):
+        expected = _properties(obj)
+        assert list(reader.read(obj).items()) == list(expected.items())
+        compared += 1
+    assert compared > 0

@@ -6,6 +6,16 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Changed
+
+- `ps.get_cim_instance()` reads an instance's properties by name once it knows the instance's class:
+  the property names and CIM types come from the first instance of each class in a query, and later
+  instances are asked only for their values. Walking every property object made win32com fetch type
+  information for each one; on a Windows VM, 279 `Win32_Service` instances took 7.7 s that way and
+  0.27 s by name, with the same values in the same order. A class with a property whose name ends in
+  `_` (which could clash with an `SWbemObject` member), and any instance whose by-name read COM
+  refuses, is still read the old way.
+
 ## [1.13.0] - 2026-11-27
 
 ### Added

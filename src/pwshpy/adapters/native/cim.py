@@ -37,7 +37,7 @@ from __future__ import annotations
 import importlib
 import re
 from collections.abc import Iterator, Mapping
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from ...domain.cim_methods import CimArgumentValue, is_read_only_cim_method
 from ...domain.errors import CimMethodNotAllowedError, NativeCallError, PlatformUnsupportedError
@@ -116,6 +116,92 @@ def _properties(obj: Any) -> dict[str, Any]:
     return {prop.Name: _marshal_property(prop) for prop in obj.Properties_}
 
 
+class _PropertySlot(NamedTuple):
+    """One property of a WMI class: its name, and the bit width it is unsigned at (None: as is)."""
+
+    name: str
+    unsigned_bits: int | None
+
+
+# DISPATCH_PROPERTYGET: an IDispatch property read.
+_PROPERTY_GET = 2
+# IDispatch.Invoke's bResultWanted: return the property's value.
+_RESULT_WANTED = True
+
+
+def _get(dispatch: Any, name: str) -> Any:
+    """Read property ``name`` of a raw IDispatch, late-bound by its dispid."""
+    return dispatch.Invoke(dispatch.GetIDsOfNames(name), 0, _PROPERTY_GET, _RESULT_WANTED)
+
+
+def _from_com(value: Any) -> Any:
+    """``value`` as win32com's own wrapper hands it over: a raw object wrapped, arrays element-wise.
+
+    A raw read returns an embedded object as a bare PyIDispatch, whose str() is an address; the
+    win32com wrapper the list path returns renders its text, so the two paths agree only wrapped.
+    """
+    if isinstance(value, tuple):
+        return tuple(_from_com(item) for item in cast("tuple[Any, ...]", value))
+    if hasattr(value, "GetIDsOfNames") and hasattr(value, "Invoke"):
+        return importlib.import_module("win32com.client").Dispatch(value)
+    return value
+
+
+class _PropertyReader:
+    """Reads the instances of one query, walking each class's property list only once.
+
+    Walking ``Properties_`` makes a COM object per property, and win32com fetches type
+    information to wrap each one: measured on a Windows VM, 7.7 s for 279 Win32_Service
+    instances, where reading the same values by name took 0.27 s. A property's name and CIM
+    type belong to its class, so the reader takes them from the first instance of each class
+    (a query over a base class returns several) and then asks each instance only for its values,
+    by name through its raw IDispatch. The schemas live as long as one query, so memory grows
+    with the number of classes it returns, never with the number of instances.
+    """
+
+    def __init__(self) -> None:
+        # None marks a class that must be read from its list (see _schema).
+        self._schemas: dict[str, tuple[_PropertySlot, ...] | None] = {}
+
+    def read(self, obj: Any) -> dict[str, Any]:
+        """The properties of one instance, in the order its class lists them."""
+        dispatch = getattr(obj, "_oleobj_", None)
+        if dispatch is None:
+            return _properties(obj)
+        try:
+            return self._read_by_name(obj, dispatch)
+        except Exception as exc:
+            if not is_com_error(exc):
+                raise
+            # A refusal on this path costs speed, never the value: the list still answers.
+            return _properties(obj)
+
+    def _read_by_name(self, obj: Any, dispatch: Any) -> dict[str, Any]:
+        class_name = _get(_get(dispatch, "Path_"), "Class")
+        if class_name not in self._schemas:
+            self._schemas[class_name] = _schema(obj)
+        slots = self._schemas[class_name]
+        if slots is None:
+            return _properties(obj)
+        return {slot.name: _marshal_slot(_get(dispatch, slot.name), slot.unsigned_bits) for slot in slots}
+
+
+def _schema(obj: Any) -> tuple[_PropertySlot, ...] | None:
+    """The property slots of ``obj``'s class, or None when one must not be read by name.
+
+    Every SWbemObject member ends in "_" (Path_, Properties_) so that it cannot clash with a
+    property; a property whose own name ends in "_" could, and by name it would read the member.
+    """
+    slots = tuple(_PropertySlot(prop.Name, _UNSIGNED_BITS.get(prop.CIMType)) for prop in obj.Properties_)
+    return None if any(slot.name.endswith("_") for slot in slots) else slots
+
+
+def _marshal_slot(raw: Any, unsigned_bits: int | None) -> Any:
+    """A by-name value, marshalled exactly as :func:`_marshal_property` marshals the list's."""
+    value = _marshal_value(_from_com(raw))
+    return value if unsigned_bits is None else _unsigned(value, unsigned_bits)
+
+
 def iter_cim(
     class_name: str, *, where: str | None = None, namespace: str = _DEFAULT_NAMESPACE
 ) -> Iterator[CimInstance]:
@@ -137,9 +223,10 @@ def iter_cim(
     service = _load_wbem_service(namespace)
     # Read-only WQL; class_name is validated above and `where` is a documented trust boundary.
     wql = f"SELECT * FROM {class_name}" + (f" WHERE {where}" if where else "")  # noqa: S608 # nosec B608
+    reader = _PropertyReader()
     try:
         for obj in service.ExecQuery(wql, "WQL", _LAZY_FLAGS):
-            yield CimInstance.model_construct(class_name=class_name, properties=_properties(obj))
+            yield CimInstance.model_construct(class_name=class_name, properties=reader.read(obj))
     except Exception as exc:
         if not is_com_error(exc):
             raise

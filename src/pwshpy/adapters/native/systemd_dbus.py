@@ -8,8 +8,13 @@ safe on Windows/macOS; calling it without jeepney raises :class:`PlatformUnsuppo
 Contents:
     * :class:`LoadState` / :class:`ActiveState` / :class:`UnitFileState` - the systemd unit states,
       parsed once where they are read off the bus; a value systemd adds later reads as ``UNKNOWN``.
+    * :class:`UnitType` - the unit-file suffix of the unit types the adapters list (``.timer``, ``.service``).
+    * :class:`JobMethod` - the Manager method that queues a unit's start, stop or restart job.
+    * :class:`Jeepney` / :func:`load_jeepney` - the lazily imported jeepney modules, shared by every
+      jeepney adapter (systemd, Secret Service).
     * :class:`Bus` - a live system-bus connection plus the jeepney handles.
     * :func:`open_bus` - open the system bus (the caller closes it).
+    * :func:`is_error` - whether a reply is a D-Bus error, by jeepney's own ``MessageType``.
     * :func:`call` - one Manager method call, mapping a D-Bus error to :class:`NativeCallError`.
     * :func:`unit_property` / :func:`active_state` - read a ``Unit`` (or, with ``interface``, a
       ``Timer`` / ``Service``) property of a loaded unit.
@@ -184,6 +189,64 @@ def is_unlisted_unit(load_state: LoadState, active_state: ActiveState) -> bool:
     return load_state in UNLISTED_LOAD_STATES and active_state not in RUNNING_ACTIVE_STATES
 
 
+class UnitType(str, Enum):
+    """The unit-file suffix of a unit type the adapters list or address (systemd.unit(5)).
+
+    A closed choice made by the code (which listing, which unit of a task), never parsed from what
+    systemd answers, so it has no UNKNOWN fallback. Iteration order is timer first, then service:
+    a task is its ``.timer`` when it has one.
+
+    Example:
+        >>> [unit_type.value for unit_type in UnitType]
+        ['.timer', '.service']
+    """
+
+    TIMER = ".timer"
+    SERVICE = ".service"
+
+
+class JobMethod(str, Enum):
+    """The systemd Manager method that queues a unit's start, stop or restart job.
+
+    Example:
+        >>> JobMethod.STOP.value
+        'StopUnit'
+    """
+
+    START = "StartUnit"
+    STOP = "StopUnit"
+    RESTART = "RestartUnit"
+
+
+class Jeepney(NamedTuple):
+    """The two jeepney modules a D-Bus adapter uses: the core (messages, addresses) and its blocking io."""
+
+    core: Any
+    blocking: Any
+
+
+def load_jeepney(unsupported: str) -> Jeepney:
+    """Import jeepney (core + blocking io) lazily, so importing an adapter is safe off Linux.
+
+    Args:
+        unsupported: The message of the :class:`PlatformUnsupportedError` raised without jeepney,
+            naming what the caller needed it for (jeepney is a base Linux dependency, so only an
+            odd Linux install, or another OS, lacks it).
+
+    Returns:
+        The imported modules.
+
+    Raises:
+        PlatformUnsupportedError: jeepney is not installed.
+    """
+    try:
+        core = importlib.import_module("jeepney")
+        blocking = importlib.import_module("jeepney.io.blocking")
+    except ImportError as exc:  # pragma: no cover - jeepney is a base Linux dep
+        raise PlatformUnsupportedError(unsupported) from exc
+    return Jeepney(core=core, blocking=blocking)
+
+
 class Bus(NamedTuple):
     """A live system-bus connection plus the jeepney handles needed to call the Manager."""
 
@@ -192,32 +255,40 @@ class Bus(NamedTuple):
     mgr: Any
 
 
-def _load_dbus() -> tuple[Any, Any]:
-    """Import jeepney (core + blocking io); raise a clear error without it (only an odd Linux install lacks it)."""
-    try:
-        core = importlib.import_module("jeepney")
-        blocking = importlib.import_module("jeepney.io.blocking")
-    except ImportError as exc:  # pragma: no cover - jeepney is a base Linux dep
-        raise PlatformUnsupportedError(
-            "systemd needs Windows (win32), or Linux with jeepney (a base Linux dependency; reinstall pwshpy)."
-        ) from exc
-    return core, blocking
+_SYSTEMD_UNSUPPORTED = (
+    "systemd needs Windows (win32), or Linux with jeepney (a base Linux dependency; reinstall pwshpy)."
+)
 
 
 def open_bus() -> Bus:
     """Open a system-bus connection (the caller closes ``bus.conn``); jeepney is loaded lazily."""
-    core, blocking = _load_dbus()
+    jeepney = load_jeepney(_SYSTEMD_UNSUPPORTED)
     try:
-        conn = blocking.open_dbus_connection(bus="SYSTEM")
+        conn = jeepney.blocking.open_dbus_connection(bus="SYSTEM")
     except OSError as exc:
         raise native_error(f"cannot connect to the system D-Bus: {exc}", exc) from exc
-    mgr = core.DBusAddress(MANAGER_PATH, bus_name=MANAGER_BUS, interface=MANAGER_IFACE)
-    return Bus(conn=conn, core=core, mgr=mgr)
+    mgr = jeepney.core.DBusAddress(MANAGER_PATH, bus_name=MANAGER_BUS, interface=MANAGER_IFACE)
+    return Bus(conn=conn, core=jeepney.core, mgr=mgr)
 
 
-def is_error(reply: Any) -> bool:
-    """Whether a D-Bus reply is an error (jeepney names the type ``error``, lowercased)."""
-    return str(reply.header.message_type.name).lower() == "error"
+def is_error(reply: Any, *, core: Any = None) -> bool:
+    """Whether a D-Bus ``reply`` is an error reply, judged by jeepney's own ``MessageType``.
+
+    Args:
+        reply: A reply as jeepney's ``send_and_get_reply`` returns it.
+        core: The jeepney core module the reply came from (``Bus.core``). Passed by every adapter
+            call, so the module the connection was opened with decides, and a test bus that stands in
+            for jeepney (which is Linux-only) supplies its ``MessageType`` the same way. Omitted, the
+            installed jeepney is loaded.
+
+    Returns:
+        True when the reply's message type is ``MessageType.error``.
+
+    Raises:
+        PlatformUnsupportedError: ``core`` is omitted and jeepney is not installed.
+    """
+    jeepney_core: Any = core if core is not None else load_jeepney(_SYSTEMD_UNSUPPORTED).core
+    return bool(reply.header.message_type is jeepney_core.MessageType.error)
 
 
 def call(bus: Bus, method: str, signature: str = "", body: tuple[Any, ...] = ()) -> Any:
@@ -228,7 +299,7 @@ def call(bus: Bus, method: str, signature: str = "", body: tuple[Any, ...] = ())
     a ``PermissionError`` (13 on POSIX), like every other refused native call.
     """
     reply = bus.conn.send_and_get_reply(bus.core.new_method_call(bus.mgr, method, signature, body))
-    if is_error(reply):
+    if is_error(reply, core=bus.core):
         raise reply_error(f"systemd {method}", reply)
     return reply.body
 
@@ -373,23 +444,28 @@ class UnitFile(NamedTuple):
     state: UnitFileState
 
 
-def unit_files(bus: Bus, suffix: str) -> list[UnitFile]:
-    """Every unit file named ``*<suffix>`` as a :class:`UnitFile`, templates excluded.
+def unit_files(bus: Bus, suffix: UnitType) -> list[UnitFile]:
+    """Every unit file of type ``suffix`` (``*.timer`` / ``*.service``) as a :class:`UnitFile`, templates excluded.
 
     ``ListUnitFilesByPatterns`` lets systemd filter (systemd >= 230); an older manager lacks it, so
     the full ``ListUnitFiles`` is filtered here instead. A template (``name@.service``) is no unit
     until instantiated: ``LoadUnit`` cannot load it. Raises :class:`NativeCallError` when neither
     listing answers; a caller that lists loaded units first can fall back to those alone.
+
+    Args:
+        bus: The open system-bus connection.
+        suffix: The unit type to list.
     """
+    suffix_text = suffix.value
     try:
-        (files,) = call(bus, "ListUnitFilesByPatterns", "asas", ([], [f"*{suffix}"]))
+        (files,) = call(bus, "ListUnitFilesByPatterns", "asas", ([], [f"*{suffix_text}"]))
     except NativeCallError:
         (files,) = call(bus, "ListUnitFiles")
     named = ((str(path).rsplit("/", 1)[-1], state) for path, state in files)
     return [
         UnitFile(name, UnitFileState(str(state)))
         for name, state in named
-        if name.endswith(suffix) and not name.endswith(f"@{suffix}")
+        if name.endswith(suffix_text) and not name.endswith(f"@{suffix_text}")
     ]
 
 
@@ -430,7 +506,7 @@ def path_property(bus: Bus, path: str | None, prop: str, default: Any, *, interf
     if path is None:
         return default
     reply = _get_property(bus, path, prop, interface)
-    if is_error(reply):
+    if is_error(reply, core=bus.core):
         error = reply_error(f"systemd Get {prop} of {path}", reply)
         if isinstance(error, NativeAccessDeniedError):
             raise error
@@ -462,7 +538,7 @@ def _live_property(bus: Bus, path: str | None, prop: str, default: Any) -> Any:
     if path is None:
         return default
     reply = _get_property(bus, path, prop, UNIT_IFACE)
-    if is_error(reply):
+    if is_error(reply, core=bus.core):
         raise reply_error(f"systemd Get {prop} of {path}", reply)
     return _property_value(reply)
 
@@ -559,6 +635,9 @@ __all__ = [
     "call",
     "has_pending_job",
     "is_error",
+    "Jeepney",
+    "JobMethod",
+    "load_jeepney",
     "is_unlisted_unit",
     "error_name",
     "reply_error",
@@ -576,6 +655,7 @@ __all__ = [
     "path_property",
     "UnitFile",
     "UnitFileState",
+    "UnitType",
     "unit_file_state",
     "unit_files",
     "unit_path",

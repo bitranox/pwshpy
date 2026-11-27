@@ -20,7 +20,7 @@ import importlib
 import re
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any, NoReturn
+from typing import Any, NamedTuple, NoReturn
 
 from ...domain.enums import TaskLogonType, TaskRunLevel
 from ...domain.errors import ConfigurationError, PlatformUnsupportedError
@@ -70,10 +70,24 @@ def _connect_scheduler() -> Any:
     return service
 
 
-def _split_path(task_path: str) -> tuple[str, str]:
-    """Split ``\\Folder\\Name`` into ``(folder_path, name)`` (root folder for a bare name)."""
+class _TaskPath(NamedTuple):
+    """A task path split into the folder that holds the task and the task's own name."""
+
+    folder_path: str
+    name: str
+
+
+class _FetchedTask(NamedTuple):
+    """A registered task and the path of the folder it was read from."""
+
+    folder_path: str
+    task: Any  # the IRegisteredTask COM object
+
+
+def _split_path(task_path: str) -> _TaskPath:
+    """Split ``\\Folder\\Name`` into its folder path and name (root folder for a bare name)."""
     folder_path, _, name = task_path.rstrip("\\").rpartition("\\")
-    return (folder_path or _ROOT), name
+    return _TaskPath(folder_path=folder_path or _ROOT, name=name)
 
 
 def _task_info(task: Any, folder_path: str) -> ScheduledTaskInfo:
@@ -286,18 +300,18 @@ def _allow_demand_start(settings: TaskSettings | None) -> bool:
 class NativeScheduledTaskController:
     """Mutating scheduled-task control over the Task Scheduler COM API."""
 
-    def _fetch(self, service: Any, task_path: str) -> tuple[str, Any]:
-        folder_path, name = _split_path(task_path)
-        folder = service.GetFolder(folder_path)
-        return folder_path, folder.GetTask(name)
+    def _fetch(self, service: Any, task_path: str) -> _FetchedTask:
+        path = _split_path(task_path)
+        folder = service.GetFolder(path.folder_path)
+        return _FetchedTask(folder_path=path.folder_path, task=folder.GetTask(path.name))
 
     def enable(self, task_path: str) -> ScheduledTaskInfo:
         """Enable a scheduled task; return its new state."""
         service = _connect_scheduler()
         try:
-            folder_path, task = self._fetch(service, task_path)
-            task.Enabled = True
-            return _task_info(task, folder_path)
+            fetched = self._fetch(service, task_path)
+            fetched.task.Enabled = True
+            return _task_info(fetched.task, fetched.folder_path)
         except Exception as exc:
             raise native_error(str(exc) or f"cannot enable task {task_path!r}", exc) from exc
 
@@ -305,9 +319,9 @@ class NativeScheduledTaskController:
         """Disable a scheduled task; return its new state."""
         service = _connect_scheduler()
         try:
-            folder_path, task = self._fetch(service, task_path)
-            task.Enabled = False
-            return _task_info(task, folder_path)
+            fetched = self._fetch(service, task_path)
+            fetched.task.Enabled = False
+            return _task_info(fetched.task, fetched.folder_path)
         except Exception as exc:
             raise native_error(str(exc) or f"cannot disable task {task_path!r}", exc) from exc
 
@@ -315,8 +329,7 @@ class NativeScheduledTaskController:
         """Start a scheduled task now (on demand)."""
         service = _connect_scheduler()
         try:
-            _folder_path, task = self._fetch(service, task_path)
-            task.Run(None)
+            self._fetch(service, task_path).task.Run(None)
         except Exception as exc:
             raise native_error(str(exc) or f"cannot run task {task_path!r}", exc) from exc
 
@@ -324,8 +337,7 @@ class NativeScheduledTaskController:
         """Stop a running scheduled task."""
         service = _connect_scheduler()
         try:
-            _folder_path, task = self._fetch(service, task_path)
-            task.Stop(0)
+            self._fetch(service, task_path).task.Stop(0)
         except Exception as exc:
             raise native_error(str(exc) or f"cannot stop task {task_path!r}", exc) from exc
 
@@ -333,8 +345,8 @@ class NativeScheduledTaskController:
         """Delete (unregister) a scheduled task."""
         service = _connect_scheduler()
         try:
-            folder_path, name = _split_path(task_path)
-            service.GetFolder(folder_path).DeleteTask(name, 0)
+            path = _split_path(task_path)
+            service.GetFolder(path.folder_path).DeleteTask(path.name, 0)
         except Exception as exc:
             raise native_error(str(exc) or f"cannot unregister task {task_path!r}", exc) from exc
 
@@ -390,8 +402,8 @@ class NativeScheduledTaskController:
         _check_triggers(triggers)
         service = _connect_scheduler()
         try:
-            folder_path, name = _split_path(task_path)
-            folder = service.GetFolder(folder_path)
+            path = _split_path(task_path)
+            folder = service.GetFolder(path.folder_path)
             definition = service.NewTask(0)
             definition.RegistrationInfo.Description = description
             definition.Settings.Enabled = True
@@ -405,9 +417,9 @@ class NativeScheduledTaskController:
             if settings is not None:
                 _apply_settings(definition, settings)
             task = folder.RegisterTaskDefinition(
-                name, definition, _TASK_CREATE_OR_UPDATE, principal.user_id, None, logon
+                path.name, definition, _TASK_CREATE_OR_UPDATE, principal.user_id, None, logon
             )
-            return _task_info(task, folder_path)
+            return _task_info(task, path.folder_path)
         except Exception as exc:
             raise native_error(str(exc) or f"cannot register task {task_path!r}", exc) from exc
 

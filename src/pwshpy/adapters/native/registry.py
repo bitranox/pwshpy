@@ -16,13 +16,15 @@ so the whole subsystem is tested hermetically (even on Linux).
 Contents:
     * :func:`iter_registry_values` - yield one :class:`RegistryValue` per value under a key.
     * :func:`iter_registry_keys` - yield one :class:`RegistryKey` per immediate subkey.
+    * :func:`load_registry_backend` / :class:`RegistryBackend` - the lazily imported ``lib_registry``.
+    * :func:`split_hive` / :class:`HiveKey` - a normalized key split into its hive and the path below it.
 """
 
 from __future__ import annotations
 
 import importlib
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, NamedTuple
 
 from ...domain.enums import RegistryHive
 from ...domain.errors import PlatformUnsupportedError
@@ -30,11 +32,29 @@ from ...domain.records import RegistryKey, RegistryValue
 from .marshal import native_error, normalize_registry_data, to_registry_hive, to_registry_value_type
 
 
-def load_registry_backend() -> tuple[Any, type[BaseException]]:
+class RegistryBackend(NamedTuple):
+    """The two ``lib_registry`` names a registry adapter needs."""
+
+    registry_cls: Any  # the Registry class (real winreg on Windows, fake_winreg elsewhere)
+    registry_error: type[BaseException]  # RegistryError, the base of every lib_registry failure
+
+
+class HiveKey(NamedTuple):
+    """A normalized registry key split into its hive and the path below it (``""`` for the hive root)."""
+
+    hive: RegistryHive
+    sub_key: str
+
+
+def load_registry_backend() -> RegistryBackend:
     """Import ``lib_registry`` lazily; absent means a portable (non-Windows) install.
 
-    Returns the ``Registry`` class plus the ``RegistryError`` base so callers can
-    map any native registry failure into a :class:`NativeCallError`.
+    Returns:
+        The ``Registry`` class plus the ``RegistryError`` base, so callers can map any native
+        registry failure into a :class:`NativeCallError`.
+
+    Raises:
+        PlatformUnsupportedError: ``lib_registry`` is not installed.
     """
     try:
         lib: Any = importlib.import_module("lib_registry")
@@ -44,7 +64,7 @@ def load_registry_backend() -> tuple[Any, type[BaseException]]:
             "The registry subsystem requires lib_registry (Windows only). Install "
             "pwshpy on Windows, or add the [dev] extra for hermetic fake_winreg tests."
         ) from exc
-    return lib.Registry, exceptions.RegistryError
+    return RegistryBackend(registry_cls=lib.Registry, registry_error=exceptions.RegistryError)
 
 
 def normalize_key(key: str) -> str:
@@ -52,14 +72,19 @@ def normalize_key(key: str) -> str:
     return key.replace("/", "\\").strip("\\")
 
 
-def split_hive(normalized: str) -> tuple[RegistryHive, str]:
-    """Split ``HKLM\\SOFTWARE\\X`` into its :class:`RegistryHive` and the path below it."""
+def split_hive(normalized: str) -> HiveKey:
+    """Split ``HKLM\\SOFTWARE\\X`` into its :class:`RegistryHive` and the path below it.
+
+    Example:
+        >>> split_hive("HKLM/SOFTWARE".replace("/", chr(92))).sub_key
+        'SOFTWARE'
+    """
     hive_token, _, sub_key = normalized.partition("\\")
     try:
         hive = to_registry_hive(hive_token)
     except KeyError as exc:
         raise native_error(f"Unknown registry hive: {hive_token!r}", exc) from exc
-    return hive, sub_key
+    return HiveKey(hive=hive, sub_key=sub_key)
 
 
 def iter_registry_values(key: str) -> Iterator[RegistryValue]:
@@ -74,21 +99,21 @@ def iter_registry_values(key: str) -> Iterator[RegistryValue]:
         >>> all(isinstance(v, RegistryValue) for v in iter_registry_values(key))
         True
     """
-    registry_cls, registry_error = load_registry_backend()
+    backend = load_registry_backend()
     normalized = normalize_key(key)
-    hive, sub_key = split_hive(normalized)
-    reg: Any = registry_cls()
+    split = split_hive(normalized)
+    reg: Any = backend.registry_cls()
     try:
         for value_name, value_data, value_type in reg.values(normalized):
             yield RegistryValue.model_construct(
-                hive=hive,
-                key=sub_key,
+                hive=split.hive,
+                key=split.sub_key,
                 name=str(value_name),
                 type=to_registry_value_type(int(value_type)),
                 data=normalize_registry_data(value_data),
             )
     # OSError too: lib_registry lets a denied winreg.OpenKey escape raw, past RegistryError.
-    except (registry_error, OSError) as exc:
+    except (backend.registry_error, OSError) as exc:
         raise native_error(str(exc) or type(exc).__name__, exc) from exc
 
 
@@ -100,16 +125,24 @@ def iter_registry_keys(key: str) -> Iterator[RegistryKey]:
         >>> all(isinstance(k, RegistryKey) for k in iter_registry_keys("HKLM/SOFTWARE"))
         True
     """
-    registry_cls, registry_error = load_registry_backend()
+    backend = load_registry_backend()
     normalized = normalize_key(key)
-    hive, sub_key = split_hive(normalized)
-    reg: Any = registry_cls()
+    split = split_hive(normalized)
+    reg: Any = backend.registry_cls()
     try:
         for subkey_name in reg.subkeys(normalized):
-            yield RegistryKey.model_construct(hive=hive, key=sub_key, name=str(subkey_name))
+            yield RegistryKey.model_construct(hive=split.hive, key=split.sub_key, name=str(subkey_name))
     # OSError too: lib_registry lets a denied winreg.OpenKey escape raw, past RegistryError.
-    except (registry_error, OSError) as exc:
+    except (backend.registry_error, OSError) as exc:
         raise native_error(str(exc) or type(exc).__name__, exc) from exc
 
 
-__all__ = ["iter_registry_keys", "iter_registry_values", "load_registry_backend", "normalize_key", "split_hive"]
+__all__ = [
+    "HiveKey",
+    "RegistryBackend",
+    "iter_registry_keys",
+    "iter_registry_values",
+    "load_registry_backend",
+    "normalize_key",
+    "split_hive",
+]

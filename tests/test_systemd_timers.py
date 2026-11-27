@@ -33,6 +33,7 @@ from pwshpy import __init__conf__
 from pwshpy.adapters.native import systemd_dbus, systemd_timers
 from pwshpy.adapters.native.systemd_dbus import ActiveState, UnitFileState
 from pwshpy.adapters.native.systemd_timers import (
+    ServiceType,
     SystemdScheduledTaskController,
     TimerBase,
     arms_on_register,
@@ -2651,6 +2652,30 @@ def test_battery_start_allowed_reads_only_the_configured_ac_power_condition(
 )
 def test_start_time_limit_is_the_oneshot_start_timeout(service_type: Any, usec: Any, limit: timedelta | None) -> None:
     assert start_time_limit(service_type, usec) == limit
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    "service_type",
+    ["simple", "exec", "forking", "oneshot", "dbus", "notify", "notify-reload", "idle", "from-the-future", None, 7],
+)
+def test_the_parsed_service_type_decides_like_the_text_it_was_read_as(service_type: Any) -> None:
+    """Every systemd Type, an unnamed one and an unreadable one decide as the raw value did: only oneshot has a limit.
+
+    The member is what ``_service_settings`` passes after parsing at the read step; the raw value is
+    what a caller of the public mapper may still pass. Both must agree, value for value.
+    """
+    parsed = ServiceType(service_type)
+    expected = timedelta(seconds=2) if service_type == "oneshot" else None
+    assert start_time_limit(parsed, 2_000_000) == expected
+    assert start_time_limit(service_type, 2_000_000) == expected
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("raw", ["from-the-future", "", None, 7, b"oneshot"])
+def test_a_service_type_systemd_does_not_name_reads_unknown(raw: Any) -> None:
+    """A value no member names, or one of another type (a failed read is None), parses to UNKNOWN, never raises."""
+    assert ServiceType(raw) is ServiceType.UNKNOWN
 
 
 @pytest.mark.os_agnostic

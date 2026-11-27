@@ -20,28 +20,19 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterator
-from enum import Enum
 
 from ...domain.enums import ServiceStartType, ServiceState
 from ...domain.errors import NativeAccessDeniedError, NativeCallError, OperationTimeoutError
 from ...domain.records import ServiceInfo
 from . import systemd_dbus as _dbus
 from .marshal import skip_or_raise
-from .systemd_dbus import ActiveState, UnitFileState
+from .systemd_dbus import ActiveState, JobMethod, UnitFileState, UnitType
 
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 0.1  # seconds between polls while a start/stop/restart settles
 #: A stop also counts as settled at these ActiveStates, even with its job record not yet gone.
 _STOPPED_STATES = frozenset({ActiveState.INACTIVE, ActiveState.FAILED})
-
-
-class _Job(str, Enum):
-    """The systemd Manager method that queues a unit's start, stop or restart job."""
-
-    START = "StartUnit"
-    STOP = "StopUnit"
-    RESTART = "RestartUnit"
 
 
 #: systemd ActiveState -> canonical ServiceState (Windows has no failed/reloading, mapped to nearest).
@@ -122,7 +113,7 @@ def _service_files(bus: _dbus.Bus, *, strict: bool) -> list[_dbus.UnitFile]:
     unloaded service is then missing); ``strict`` raises instead.
     """
     try:
-        return _dbus.unit_files(bus, ".service")
+        return _dbus.unit_files(bus, UnitType.SERVICE)
     except NativeCallError as exc:
         what = "cannot list the service unit files, so no unloaded service is listed"
         skip_or_raise(what, exc, strict=strict, log=logger)
@@ -229,7 +220,7 @@ def iter_services(*, strict: bool = False) -> Iterator[ServiceInfo]:
         seen: set[str] = set()
         for unit in _dbus.list_units(bus):
             name = unit.name
-            if not name.endswith(".service"):
+            if not name.endswith(UnitType.SERVICE.value):
                 continue
             if _dbus.is_unlisted_unit(unit.load_state, unit.active_state):
                 # Not marked seen: the name is left to the unit-file pass, which lists it when its
@@ -306,7 +297,7 @@ class SystemdServiceController:
             NativeCallError: systemd refused the job, or the unit settled at ``failed``.
             OperationTimeoutError: the unit did not settle within ``timeout`` seconds.
         """
-        return self._transition(name, _Job.START, timeout)
+        return self._transition(name, JobMethod.START, timeout)
 
     def stop(self, name: str, *, timeout: float = 30.0, wait: bool = True) -> ServiceInfo:
         """Stop a unit; wait until inactive/failed or its job is done; return its state (like Stop-Service).
@@ -314,7 +305,7 @@ class SystemdServiceController:
         With ``wait=False`` the StopUnit job is queued and the unit is read back at once
         (typically ``deactivating``, so ``StopPending``) without polling; ``timeout`` is unused.
         """
-        return self._transition(name, _Job.STOP, timeout, wait=wait)
+        return self._transition(name, JobMethod.STOP, timeout, wait=wait)
 
     def restart(self, name: str, *, timeout: float = 30.0) -> ServiceInfo:
         """Restart a unit; wait until its restart job is done; return its state (like Restart-Service).
@@ -323,7 +314,7 @@ class SystemdServiceController:
             NativeCallError: systemd refused the job, or the unit settled at ``failed``.
             OperationTimeoutError: the unit did not settle within ``timeout`` seconds.
         """
-        return self._transition(name, _Job.RESTART, timeout)
+        return self._transition(name, JobMethod.RESTART, timeout)
 
     def set_startup(self, name: str, start_type: ServiceStartType) -> ServiceInfo:
         """Enable/disable a unit to match ``start_type`` (like Set-Service -StartupType)."""
@@ -345,7 +336,7 @@ class SystemdServiceController:
     def _transition(
         self,
         name: str,
-        job: _Job,
+        job: JobMethod,
         timeout: float,
         *,
         wait: bool = True,
@@ -355,7 +346,7 @@ class SystemdServiceController:
         A stop also settles at inactive or failed (both mean stopped); a start or restart that
         settles at ``failed`` raises instead (:func:`_refuse_a_failed_unit`).
         """
-        stopping = job is _Job.STOP
+        stopping = job is JobMethod.STOP
         bus = _dbus.open_bus()
         try:
             _dbus.call(bus, job.value, "ss", (name, "replace"))

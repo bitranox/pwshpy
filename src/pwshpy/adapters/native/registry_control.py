@@ -31,51 +31,51 @@ class NativeRegistryController:
 
     def set_value(self, key: str, name: str, data: _RegistryData, value_type: RegistryValueType) -> RegistryValue:
         """Create or overwrite the value ``name`` under ``key``; return the written record."""
-        registry_cls, registry_error = load_registry_backend()
+        backend = load_registry_backend()
         normalized = normalize_key(key)
-        hive, sub_key = split_hive(normalized)
-        reg: Any = registry_cls()
+        split = split_hive(normalized)
+        reg: Any = backend.registry_cls()
         try:
             reg.set_value(normalized, name, data, from_registry_value_type(value_type))
         # OSError too: lib_registry lets a denied winreg.OpenKey escape raw, past RegistryError.
-        except (registry_error, OSError) as exc:
+        except (backend.registry_error, OSError) as exc:
             raise native_error(str(exc) or type(exc).__name__, exc) from exc
-        return RegistryValue.model_construct(hive=hive, key=sub_key, name=name, type=value_type, data=data)
+        return RegistryValue.model_construct(hive=split.hive, key=split.sub_key, name=name, type=value_type, data=data)
 
     def remove_value(self, key: str, name: str) -> None:
         """Delete the value ``name`` under ``key``."""
-        registry_cls, registry_error = load_registry_backend()
+        backend = load_registry_backend()
         normalized = normalize_key(key)
-        reg: Any = registry_cls()
+        reg: Any = backend.registry_cls()
         try:
             reg.delete_value(normalized, name)
         # OSError too: lib_registry lets a denied winreg.OpenKey escape raw, past RegistryError.
-        except (registry_error, OSError) as exc:
+        except (backend.registry_error, OSError) as exc:
             raise native_error(str(exc) or type(exc).__name__, exc) from exc
 
     def create_key(self, key: str) -> RegistryKey:
         """Create registry ``key`` (with any missing parents); return the created key."""
-        registry_cls, registry_error = load_registry_backend()
+        backend = load_registry_backend()
         normalized = normalize_key(key)
-        hive, sub_key = split_hive(normalized)
-        reg: Any = registry_cls()
+        split = split_hive(normalized)
+        reg: Any = backend.registry_cls()
         try:
             reg.create_key(normalized, parents=True)
         # OSError too: lib_registry lets a denied winreg.OpenKey escape raw, past RegistryError.
-        except (registry_error, OSError) as exc:
+        except (backend.registry_error, OSError) as exc:
             raise native_error(str(exc) or type(exc).__name__, exc) from exc
-        parent, _, name = sub_key.rpartition("\\")
-        return RegistryKey.model_construct(hive=hive, key=parent, name=name)
+        parent, _, name = split.sub_key.rpartition("\\")
+        return RegistryKey.model_construct(hive=split.hive, key=parent, name=name)
 
     def remove_key(self, key: str, *, recursive: bool = False) -> None:
         """Delete registry ``key`` (``recursive`` also removes its subkeys)."""
-        registry_cls, registry_error = load_registry_backend()
+        backend = load_registry_backend()
         normalized = normalize_key(key)
-        reg: Any = registry_cls()
+        reg: Any = backend.registry_cls()
         try:
             reg.delete_key(normalized, delete_subkeys=recursive)
         # OSError too: lib_registry lets a denied winreg.OpenKey escape raw, past RegistryError.
-        except (registry_error, OSError) as exc:
+        except (backend.registry_error, OSError) as exc:
             raise native_error(str(exc) or type(exc).__name__, exc) from exc
 
 

@@ -32,7 +32,7 @@ import re
 import struct
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from defusedxml import DefusedXmlException
 from defusedxml.ElementTree import ParseError
@@ -86,8 +86,15 @@ class _XmlNode(Protocol):
     def clear(self) -> None: ...
 
 
-def _xml_location(header: bytes, path: Path) -> tuple[int, int]:
-    """Return ``(offset, size)`` of the XML resource after checking the header that names it."""
+class _XmlLocation(NamedTuple):
+    """Where the XML resource sits in a WIM file, as its header names it."""
+
+    offset: int  # bytes from the start of the file
+    size: int  # the resource's original (stored, uncompressed) size in bytes
+
+
+def _xml_location(header: bytes, path: Path) -> _XmlLocation:
+    """Return the offset and size of the XML resource after checking the header that names it."""
     if len(header) < _HEADER_SIZE:
         raise NativeCallError(f"{path}: not a WIM file (shorter than the {_HEADER_SIZE}-byte header)")
     if header[:8] != _MAGIC:
@@ -104,7 +111,7 @@ def _xml_location(header: bytes, path: Path) -> tuple[int, int]:
         raise NativeCallError(f"{path}: XML resource of {size} bytes exceeds the {MAX_XML_BYTES}-byte limit")
     if offset < _HEADER_SIZE:
         raise NativeCallError(f"{path}: XML resource offset {offset} lies inside the header")
-    return offset, size
+    return _XmlLocation(offset=offset, size=size)
 
 
 def _truncated(path: Path, offset: int, size: int, remaining: int) -> NativeCallError:

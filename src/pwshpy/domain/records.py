@@ -671,9 +671,12 @@ class CimInstance(PSRecord):
     """A generic CIM/WMI instance (the native ``Get-CimInstance`` record).
 
     A class name plus a bag of properties: WMI classes have wildly different
-    shapes, so the properties are an open dict rather than fixed fields.  Values
-    are normalized to JSON-friendly types (arrays become lists); CIM_DATETIME and
-    64-bit numerics stay as the strings WMI reports.
+    shapes, so the properties are an open dict rather than fixed fields, kept in the
+    order the instance's class lists them.  Values are normalized to JSON-friendly
+    types: arrays become lists; ``uint8``/``uint16``/``uint32`` are reported unsigned
+    (WMI hands them over as signed ints of the same width); CIM_DATETIME and 64-bit
+    integers stay as the strings WMI reports; an embedded object, or any other value
+    with no JSON type, becomes its text.
 
     Example:
         >>> ci = CimInstance(class_name="Win32_OperatingSystem", properties={"Version": "10.0.26200"})
@@ -697,8 +700,7 @@ class CimMethodResult(PSRecord):
     answer. A call that WMI itself could not make raises instead. ``None`` means the method
     declares no ``ReturnValue``.
 
-    Values are marshaled like :class:`CimInstance` properties, except that unsigned integers are
-    reported unsigned (WMI hands a ``uint32`` over as a signed 32-bit int).
+    Out-parameter values are marshaled exactly like :class:`CimInstance` properties.
 
     Example:
         >>> r = CimMethodResult(

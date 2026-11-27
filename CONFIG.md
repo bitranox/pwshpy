@@ -7,7 +7,10 @@ This project uses [`lib_layered_config`](https://github.com/bitranox/lib_layered
 - **Layered merging**: Configuration is assembled from multiple files and sources, with later layers overriding earlier ones
 - **Cross-platform paths**: Follows XDG conventions on Linux, standard locations on macOS and Windows
 - **Profile support**: Named profiles allow environment-specific configurations (e.g., `production`, `staging`, `test`)
-- **TOML format**: All configuration files use TOML syntax
+- **File formats**: `config.toml` and the host files (`hosts/{hostname}.toml`) are TOML. A file in a
+  `config.d/` directory may be TOML (`.toml`), JSON (`.json`) or YAML (`.yaml`, `.yml`); YAML needs
+  PyYAML installed beside pwshpy, which pwshpy does not install; without it a YAML file is refused
+  with an error that says so
 - **Runtime overrides**: Values can be overridden via environment variables or CLI flags without modifying files
 
 ---
@@ -16,15 +19,15 @@ This project uses [`lib_layered_config`](https://github.com/bitranox/lib_layered
 
 Configuration is loaded and merged in the following order (lowest to highest precedence):
 
-| Priority | Layer        | Description                                     |
-|:--------:|--------------|-------------------------------------------------|
-| 1        | **defaults** | Bundled with the package (`defaultconfig.toml`) |
-| 2        | **app**      | System-wide settings for all machines           |
-| 3        | **host**     | Machine-specific overrides                      |
-| 4        | **user**     | User's personal settings                        |
-| 5        | **.env**     | Project directory dotenv file                   |
-| 6        | **env vars** | Environment variables                           |
-| 7        | **CLI**      | Command-line `--set` flags (highest priority)   |
+| Priority | Layer        | Description                                                  |
+|:--------:|--------------|--------------------------------------------------------------|
+| 1        | **defaults** | Bundled with the package (`defaultconfig.toml`)              |
+| 2        | **app**      | System-wide settings for all machines                        |
+| 3        | **host**     | Machine-specific overrides                                   |
+| 4        | **user**     | User's personal settings                                     |
+| 5        | **.env**     | One dotenv file (see [.env File Support](#env-file-support)) |
+| 6        | **env vars** | Environment variables                                        |
+| 7        | **CLI**      | Command-line `--set` flags (highest priority)                |
 
 **Merge behavior**: Each layer only needs to specify values it wants to override. Unspecified values inherit from lower layers.
 
@@ -40,6 +43,12 @@ Configuration is loaded and merged in the following order (lowest to highest pre
 | app      | `/etc/xdg/{slug}/config.toml`           | `/Library/Application Support/{vendor}/{app}/config.toml`           | `C:\ProgramData\{vendor}\{app}\config.toml`           |
 | host     | `/etc/xdg/{slug}/hosts/{hostname}.toml` | `/Library/Application Support/{vendor}/{app}/hosts/{hostname}.toml` | `C:\ProgramData\{vendor}\{app}\hosts\{hostname}.toml` |
 | user     | `~/.config/{slug}/config.toml`          | `~/Library/Application Support/{vendor}/{app}/config.toml`          | `%APPDATA%\{vendor}\{app}\config.toml`                |
+
+On Linux the app layer reads two directories, `/etc/xdg/{slug}/` and then `/etc/{slug}/`; a key set
+in both takes the `/etc/{slug}/` value. The host layer reads `hosts/{hostname}.toml` under each of
+the two, in the same order. `config-deploy --target app` and `--target host` write to the first,
+`/etc/xdg/{slug}/`. The Linux user layer reads `$XDG_CONFIG_HOME/{slug}/` when `XDG_CONFIG_HOME`
+holds an absolute path, and `~/.config/{slug}/` when it is unset, empty or relative.
 
 ### Path Placeholders
 
@@ -71,14 +80,15 @@ Configuration is loaded and merged in the following order (lowest to highest pre
 
 These options apply to all commands and must be specified **before** the command name:
 
-| Option                    | Description                                                               |
-|---------------------------|---------------------------------------------------------------------------|
-| `--version`               | Show version and exit.                                                    |
-| `--profile NAME`          | Load configuration from a named profile (e.g., `production`, `test`).     |
-| `--set SECTION.KEY=VALUE` | Override a configuration setting. Can be repeated for multiple overrides. |
-| `--env-file PATH`         | Explicit `.env` file path. Skips the default upward directory search.     |
-| `--traceback`             | Show full Python traceback on errors (useful for debugging).              |
-| `--no-traceback`          | Hide traceback, show only error message (default).                        |
+| Option                    | Description                                                                                                          |
+|---------------------------|----------------------------------------------------------------------------------------------------------------------|
+| `--version`               | Show version and exit.                                                                                               |
+| `--profile NAME`          | Load configuration from a named profile (e.g., `production`, `test`).                                                |
+| `--set SECTION.KEY=VALUE` | Override a configuration setting. Can be repeated for multiple overrides.                                            |
+| `--env-file PATH`         | Explicit `.env` file path. Skips the default upward directory search.                                                |
+| `--traceback`             | Show full Python traceback on errors (useful for debugging).                                                         |
+| `--no-traceback`          | Hide traceback, show only error message (default).                                                                   |
+| `--elevate`               | Relaunch the command elevated (UAC on Windows, sudo on POSIX) unless it already is; exit 77 if elevation is refused. |
 
 **Example usage:**
 
@@ -88,7 +98,7 @@ pwshpy --profile production config
 
 # Override settings at runtime (repeatable)
 pwshpy --set lib_log_rich.console_level=DEBUG config
-pwshpy --set lib_log_rich.console_level=DEBUG processes --jsonl
+pwshpy --set lib_log_rich.console_level=DEBUG get_process --jsonl
 
 # Load configuration from an explicit .env file
 pwshpy --env-file /etc/myapp/.env config
@@ -307,7 +317,12 @@ replaces a destination that carries a bad value, or does not parse at all, witho
 
 ### Generate Example Configuration Files
 
-Create example TOML files showing all available options with default values and documentation comments. Useful for learning the configuration structure or creating initial configuration files.
+Write a small skeleton of example files that shows where each layer's files go and how a later
+layer overrides an earlier one. The files hold a generic `[service]` section with placeholder keys
+(`endpoint`, `timeout`, `retry`) and a `.env` example; they do not list pwshpy's own settings and
+pwshpy reads none of them. For pwshpy's real options and their defaults, read the bundled
+`defaultconfig.toml` and `defaultconfig.d/*.toml` (see
+[Default Configuration](#default-configuration)) or run `pwshpy config`.
 
 #### Options Reference
 
@@ -331,12 +346,19 @@ pwshpy config-generate-examples --destination .
 
 #### Generated Files
 
-| File              | Description                                 |
-|-------------------|---------------------------------------------|
-| `config.toml`     | Main configuration file with all sections   |
-| `config.d/*.toml` | Modular configuration files (logging, etc.) |
+On Linux and macOS:
 
-Each file contains commented documentation explaining available options and their default values.
+| File                                    | Shows                                                        |
+|-----------------------------------------|--------------------------------------------------------------|
+| `xdg/pwshpy/config.toml`                | An app-layer file (`[service]` `endpoint` and `timeout`)     |
+| `xdg/pwshpy/hosts/your-hostname.toml`   | A host-layer file; rename it to the machine's hostname       |
+| `home/pwshpy/config.toml`               | A user-layer file (`[service]` `retry`)                      |
+| `home/pwshpy/config.d/10-override.toml` | A `config.d/` file overriding the user file's `retry`        |
+| `.env.example`                          | A `.env` key (`SERVICE__PASSWORD`), written without a prefix |
+
+On Windows the app and host files go under `ProgramData\bitranox\pwshpy\` and the user files under
+`AppData\Roaming\bitranox\pwshpy\`, with the same names and content; `.env.example` is written at
+the top of the destination on every platform.
 
 ### Runtime Overrides
 
@@ -362,7 +384,7 @@ pwshpy --set lib_log_rich.console_level=DEBUG config
 pwshpy --set lib_log_rich.console_level=DEBUG --set lib_log_rich.console_format_preset=short config
 
 # Override nested values
-pwshpy --set lib_log_rich.payload_limits.truncate_message=2048 config
+pwshpy --set lib_log_rich.payload_limits.message_max_chars=2048 config
 
 # Override with JSON values (use single quotes around the value)
 pwshpy --set lib_log_rich.console_level='"DEBUG"' config
@@ -392,29 +414,31 @@ Profiles provide isolated configuration namespaces for different environments (e
 
 Profile names are validated for security and cross-platform compatibility:
 
-| Rule                   | Description                                                                               |
-|------------------------|-------------------------------------------------------------------------------------------|
-| **Maximum length**     | 64 characters                                                                             |
-| **Allowed characters** | ASCII letters (`a-z`, `A-Z`), digits (`0-9`), hyphens (`-`), underscores (`_`)            |
-| **Start character**    | Must start with a letter or digit (not `-` or `_`)                                        |
-| **Reserved names**     | Windows reserved names rejected: `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9` |
-| **Path safety**        | No path separators (`/`, `\`) or traversal sequences (`..`)                               |
+| Rule                   | Description                                                                                                                                   |
+|------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| **Maximum length**     | 64 characters                                                                                                                                 |
+| **Allowed characters** | ASCII letters (`a-z`, `A-Z`), digits (`0-9`), dots (`.`), hyphens (`-`), underscores (`_`)                                                    |
+| **Start character**    | Must start with a letter or digit (not `.`, `-` or `_`), so `.` and `..` are refused                                                          |
+| **End character**      | Must not end with a dot                                                                                                                       |
+| **Reserved names**     | Windows reserved names rejected, in any case and also with an extension (`con.txt`): `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9` |
+| **Path safety**        | No path separators (`/`, `\`)                                                                                                                 |
 
-**Valid examples:** `production`, `staging-v2`, `test_env`, `dev01`
+**Valid examples:** `production`, `staging-v2`, `test_env`, `dev01`, `release.2`
 
-**Invalid examples:** `../etc` (path traversal), `-invalid` (starts with hyphen), `CON` (Windows reserved)
+**Invalid examples:** `../etc` (starts with a dot, holds a separator), `-invalid` (starts with hyphen), `CON` and `con.txt` (Windows reserved), `prod.` (ends with a dot)
 
 ### Which Layers Are Affected?
 
-| Layer    | Affected by Profile? | Notes                               |
-|----------|:--------------------:|-------------------------------------|
-| defaults | No                   | Always loaded from package          |
-| app      | Yes                  | Uses `profile/<name>/` subdirectory |
-| host     | Yes                  | Uses `profile/<name>/` subdirectory |
-| user     | Yes                  | Uses `profile/<name>/` subdirectory |
-| .env     | No                   | Project directory                   |
-| env vars | No                   | Environment                         |
-| CLI      | No                   | Command line                        |
+| Layer                        | Affected by Profile? | Notes                                                 |
+|------------------------------|:--------------------:|-------------------------------------------------------|
+| defaults                     | No                   | Always loaded from package                            |
+| app                          | Yes                  | Uses `profile/<name>/` subdirectory                   |
+| host                         | Yes                  | Uses `profile/<name>/` subdirectory                   |
+| user                         | Yes                  | Uses `profile/<name>/` subdirectory                   |
+| .env (project)               | No                   | Found by the upward search from the working directory |
+| .env (user config directory) | Yes                  | The fallback `.env` is read from `profile/<name>/`    |
+| env vars                     | No                   | Environment                                           |
+| CLI                          | No                   | Command line                                          |
 
 ### Profile Path Examples
 
@@ -486,7 +510,32 @@ LOG_CONSOLE_FORMAT_PRESET=short
 LOG_ENABLE_GRAYLOG=false
 ```
 
-By default, the application searches upward from the current directory to discover `.env` files.
+Besides the `LOG_*` variables, a `.env` line can set any configuration key as `SECTION__KEY=value`,
+with no `PWSHPY___` prefix (the prefix belongs to environment variables only):
+
+```bash
+# .env
+LIB_LOG_RICH__CONSOLE_STREAM=stdout
+```
+
+An unquoted value is converted like an environment variable (`5432` becomes a number, `true` a
+boolean, `[1, 2]` a list); quote it (`"5432"`) to keep it as text.
+
+Only one `.env` file is read. Without `--env-file`, pwshpy looks for `.env` in the current
+directory and then in each parent directory up to the filesystem root, and uses the first one it
+finds. When none of them holds one, it falls back to a `.env` in the user configuration directory:
+
+| Platform | Fallback `.env`                                                                       |
+|----------|---------------------------------------------------------------------------------------|
+| Linux    | `$XDG_CONFIG_HOME/pwshpy/.env` (`~/.config/pwshpy/.env` when it is unset or relative) |
+| macOS    | `~/Library/Application Support/bitranox/pwshpy/.env`                                  |
+| Windows  | `%APPDATA%\bitranox\pwshpy\.env`                                                      |
+
+With `--profile NAME` the fallback file is read from `profile/NAME/` in that directory; the upward
+search does not change. The search passes over a `.env` that has more than one hard link, and on
+Linux and macOS also one owned by a user other than you or root (for a symlink, the owner of the
+link or of its target), and logs a warning for each; it then goes on looking. Name such a file
+with `--env-file` to read it anyway.
 
 To load a specific `.env` file instead, use `--env-file`:
 

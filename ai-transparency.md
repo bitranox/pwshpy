@@ -32,8 +32,9 @@ and own the result.
   marketplace), and the skill's name and framing. The AI wrote the skill and the manifests to that
   brief.
 - The human reviewed and corrected the work at each step; what ships is what they signed off on.
-- Every commit went out under the human's name and authority, with no AI co-author line. The human is
-  responsible for what is published.
+- Every commit went out under the human's name and authority. Seven commits made on 2026-10-23
+  (`313d46a` through `9938d65`) carry a `Co-Authored-By` line naming Claude; no other commit has an
+  AI co-author line. The human is responsible for what is published.
 
 ## Where the AI was used
 
@@ -55,12 +56,14 @@ the human directed and approved every action and owns the result.
 
 ## What's been checked, and what hasn't
 
-The full gate is green on CI across ubuntu / macOS / windows and CPython 3.10 through 3.14: `ruff`,
+The full gate is green on CI across ubuntu / macOS / windows and CPython 3.10 through 3.15: `ruff`,
 `ruff format`, `pyright --strict` (zero errors), `import-linter` (the domain-is-pure, layer-order and
 library-never-imports-the-CLI contracts), `bandit`, `pip-audit`, and the `pytest` suite (well over 900 tests, with an 80% coverage
-floor). Every native read command is pinned by an oracle test that runs the equivalent real cmdlet
+floor). Most native read commands are pinned by an oracle test that runs the equivalent real cmdlet
 (`Get-Service`, `Get-WinEvent`, `Get-CimInstance`, `Get-ScheduledTask`, `Get-LocalUser`, `Get-Acl`,
-...) and compares pwshpy's typed records against it on locale-invariant fields.
+...) and compares pwshpy's typed records against it on locale-invariant fields. `invoke_cim_method`,
+`get_hotfix`, `get_net_adapter`, `get_net_ip_address` and `get_net_udp_endpoint` have no oracle
+test yet.
 
 The cross-OS work was verified live on a real Linux box, not asserted: the systemd service and timer
 controllers on root scratch units, the credential round-trip against gnome-keyring, the POSIX ACL read
@@ -69,8 +72,9 @@ account creation/removal via shadow-utils - each cleaned up afterward.
 
 What has not been checked: the .NET backend needs the `[full]` extra plus a .NET 10 runtime present;
 the registry, CIM/WMI, hotfixes, the Windows Update search, clearing an event log and `.lnk`
-shortcuts stay Windows-only because there is no honest Linux analog; and the mutating Windows verbs
-are exercised on a disposable VM, not on every host or Windows build.
+shortcuts stay Windows-only because there is no honest Linux analog; `restart_computer` and
+`stop_computer` are Windows-only too, since they run Windows `shutdown`; and the mutating Windows
+verbs are exercised on a disposable VM, not on every host or Windows build.
 
 ## Checking it yourself
 
@@ -88,8 +92,8 @@ one-script-every-machine portability story in
 It isn't a Microsoft or PowerShell product, and neither Microsoft nor the PowerShell team has reviewed
 or endorsed it. It is a young project. The .NET backend is optional and off by default (`[full]`), and
 a few subsystems (the registry, CIM/WMI, hotfixes, the Windows Update search, clearing an event log,
-`.lnk` shortcuts) are deliberately Windows-only. And it isn't a way to
-avoid understanding the OS you are automating: pwshpy makes the honest call to the native API instead
+`.lnk` shortcuts, `restart_computer`/`stop_computer`) are deliberately Windows-only. And it isn't a
+way to avoid understanding the OS you are automating: pwshpy makes the honest call to the native API instead
 of a text-scraped subprocess, but the call it makes is the one you would have had to make yourself.
 
 ## License and attribution

@@ -18,6 +18,7 @@ from __future__ import annotations
 import errno
 import logging
 import shutil
+import stat
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,16 +72,18 @@ def _exists(target: Path) -> bool:
 def _to_item(entry: Path) -> FileSystemItem:
     """Marshal a path into a typed FileSystemItem (size ``None`` for a directory)."""
     try:
-        stat = entry.stat()
-        is_dir = entry.is_dir()
+        info = entry.stat()
     except OSError as exc:
         raise native_error(f"cannot stat {str(entry)!r}: {exc}", exc) from exc
+    # The kind comes from the same stat result: Path.is_dir() would stat the entry a second time
+    # (both follow symlinks, so the answer is the same), which is a third of the cost per item.
+    is_dir = stat.S_ISDIR(info.st_mode)
     return FileSystemItem(
         path=str(entry),
         name=entry.name,
         is_directory=is_dir,
-        size=None if is_dir else stat.st_size,
-        modified=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+        size=None if is_dir else info.st_size,
+        modified=datetime.fromtimestamp(info.st_mtime, tz=timezone.utc),
     )
 
 

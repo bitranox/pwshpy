@@ -1104,12 +1104,19 @@ def split_relative_requirement(spec: str) -> RelativeRequirement | None:
     return RelativeRequirement(head=head, location=location) if _is_relative_location(location) else None
 
 
+#: Where a requirement's location token ends: whitespace, or the ``;`` that starts an environment marker.
+_LOCATION_TOKEN_END = re.compile(r"[\s;]")
+
+#: A Windows drive prefix (``C:``), which makes a location absolute.
+_DRIVE_PREFIX = re.compile(r"[A-Za-z]:")
+
+
 def _is_relative_location(location: str) -> bool:
     """Whether ``location`` is a local path relative to the working directory (see the caller)."""
-    token = re.split(r"[\s;]", location.strip(), maxsplit=1)[0]
+    token = _LOCATION_TOKEN_END.split(location.strip(), maxsplit=1)[0]
     if not token or "://" in token or token.lower().startswith("file:"):
         return False
-    if token[0] in "/\\~$" or re.match(r"^[A-Za-z]:", token):
+    if token[0] in "/\\~$" or _DRIVE_PREFIX.match(token):
         return False
     return "/" in token or "\\" in token or token in {".", ".."} or token.lower().endswith(_DISTRIBUTION_SUFFIXES)
 

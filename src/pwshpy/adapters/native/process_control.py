@@ -15,6 +15,7 @@ import ntpath
 import subprocess  # nosec B404 - used only to invoke the Windows shutdown command with a fixed argv
 import sys
 from collections.abc import Callable
+from enum import Enum
 from typing import Any
 
 import psutil as _psutil_module  # pyright: ignore[reportMissingTypeStubs]
@@ -27,6 +28,14 @@ _MAX_DELAY_SECONDS = 315_360_000
 
 #: Characters GetSystemDirectoryW is first offered; it reports the size it needs when that is short.
 _SYSTEM_DIRECTORY_BUFFER = 260
+
+
+class _ShutdownAction(str, Enum):
+    """What ``shutdown.exe`` is asked to do; each value is the flag that asks for it."""
+
+    RESTART = "/r"
+    POWER_OFF = "/s"
+
 
 _psutil: Any = _psutil_module
 _NO_SUCH_PROCESS: type[BaseException] = _psutil.NoSuchProcess
@@ -88,13 +97,13 @@ class NativeProcessControl:
 
     def restart_computer(self, *, delay_seconds: int = 0, force: bool = True) -> None:
         """Restart the computer (Windows ``shutdown /r``) (**destructive**, Windows-only)."""
-        self._shutdown("/r", delay_seconds, force=force)
+        self._shutdown(_ShutdownAction.RESTART, delay_seconds, force=force)
 
     def stop_computer(self, *, delay_seconds: int = 0, force: bool = True) -> None:
         """Shut the computer down (Windows ``shutdown /s``) (**destructive**, Windows-only)."""
-        self._shutdown("/s", delay_seconds, force=force)
+        self._shutdown(_ShutdownAction.POWER_OFF, delay_seconds, force=force)
 
-    def _shutdown(self, flag: str, delay_seconds: object, *, force: bool) -> None:
+    def _shutdown(self, action: _ShutdownAction, delay_seconds: object, *, force: bool) -> None:
         # delay_seconds is typed object here because a library caller can pass anything, and a bool
         # is an int to isinstance: True would pass the range check and schedule /t 1.
         if sys.platform != "win32":
@@ -109,7 +118,7 @@ class NativeProcessControl:
                 f"delay_seconds must be 0-{_MAX_DELAY_SECONDS} whole seconds as an int (shutdown /t), "
                 f"got {delay_seconds!r}"
             )
-        argv = [self._shutdown_exe(), flag, "/t", str(delay_seconds)]
+        argv = [self._shutdown_exe(), action.value, "/t", str(delay_seconds)]
         if force:
             argv.append("/f")
         try:

@@ -15,10 +15,21 @@ import pytest
 
 from pwshpy.adapters.native import local_accounts as la_mod
 from pwshpy.adapters.native.local_accounts import iter_local_groups, iter_local_users
-from pwshpy.domain.errors import NativeCallError
+from pwshpy.domain.errors import NativeCallError, PlatformUnsupportedError
 from pwshpy.domain.records import LocalGroup, LocalUser
 
 _SID_BY_OBJ = {"sid-obj-Alice": "S-1-5-21-1", "sid-obj-Guest": "S-1-5-21-501", "sid-obj-Admins": "S-1-5-32-544"}
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.skipif(sys.platform == "win32", reason="pywin32 is installed on Windows, so the loader succeeds")
+def test_without_pywin32_the_source_names_itself_in_the_refusal() -> None:
+    """The loader is shared with the controller; the refusal still names the local-accounts subsystem."""
+    with pytest.raises(PlatformUnsupportedError) as refused:
+        la_mod._load()  # pyright: ignore[reportPrivateUsage] - white-box test
+    assert str(refused.value) == (
+        "The local-accounts subsystem requires pywin32 (Windows only); install pwshpy on Windows."
+    )
 
 
 class _FakeNet:
@@ -51,7 +62,7 @@ class _FakeSec:
 @pytest.mark.os_agnostic
 def test_iter_local_users_marshals(monkeypatch: pytest.MonkeyPatch) -> None:
     """Users are marshaled with the resolved SID and the UF_ACCOUNTDISABLE-derived enabled flag."""
-    monkeypatch.setattr(la_mod, "_load", lambda: (_FakeNet(), _FakeSec()))
+    monkeypatch.setattr(la_mod, "_load", lambda: la_mod.AccountModules(net=_FakeNet(), security=_FakeSec()))
     users = list(iter_local_users())
     assert [u.name for u in users] == ["Alice", "Guest"]
 
@@ -69,7 +80,7 @@ def test_iter_local_users_marshals(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.os_agnostic
 def test_iter_local_groups_marshals(monkeypatch: pytest.MonkeyPatch) -> None:
     """Groups are marshaled with the resolved SID and comment."""
-    monkeypatch.setattr(la_mod, "_load", lambda: (_FakeNet(), _FakeSec()))
+    monkeypatch.setattr(la_mod, "_load", lambda: la_mod.AccountModules(net=_FakeNet(), security=_FakeSec()))
     groups = list(iter_local_groups())
     assert [g.name for g in groups] == ["Admins"]
     assert groups[0].sid == "S-1-5-32-544"
@@ -87,7 +98,7 @@ def test_sid_lookup_degrades_when_unresolvable(monkeypatch: pytest.MonkeyPatch) 
         def ConvertSidToStringSid(self, sid: Any) -> str:  # noqa: N802 - win32 API name
             return ""
 
-    monkeypatch.setattr(la_mod, "_load", lambda: (_FakeNet(), _BadSec()))
+    monkeypatch.setattr(la_mod, "_load", lambda: la_mod.AccountModules(net=_FakeNet(), security=_BadSec()))
     users = list(iter_local_users())
     assert users[0].sid == ""
 
@@ -127,7 +138,7 @@ def test_iter_local_users_wraps_enum_failure(monkeypatch: pytest.MonkeyPatch) ->
         ) -> tuple[list[dict[str, Any]], int, int]:
             raise OSError("access denied")
 
-    monkeypatch.setattr(la_mod, "_load", lambda: (_BadNet(), _FakeSec()))
+    monkeypatch.setattr(la_mod, "_load", lambda: la_mod.AccountModules(net=_BadNet(), security=_FakeSec()))
     with pytest.raises(NativeCallError):
         list(iter_local_users())
 
@@ -136,7 +147,7 @@ def test_iter_local_users_wraps_enum_failure(monkeypatch: pytest.MonkeyPatch) ->
 def test_iter_local_users_follows_resume_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
     """The resume handle drives a second enumeration call until it returns 0."""
     net = _PagedNet()
-    monkeypatch.setattr(la_mod, "_load", lambda: (net, _FakeSec()))
+    monkeypatch.setattr(la_mod, "_load", lambda: la_mod.AccountModules(net=net, security=_FakeSec()))
     names = [user.name for user in iter_local_users()]
     assert names == ["Page1", "Page2"]
     assert net.calls == 2

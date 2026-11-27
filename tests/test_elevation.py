@@ -278,8 +278,8 @@ def test_elevate_posix_hands_the_target_to_sudo(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(elevation, "is_elevated", lambda: False)
     monkeypatch.setattr(elevation.sys, "platform", "linux")
 
-    def _target(_executable: str | None, _argv: Any) -> tuple[str, list[str]]:
-        return ("/opt/app", ["--flag"])
+    def _target(_executable: str | None, _argv: Any) -> Any:
+        return _relaunch_target_record("/opt/app", ["--flag"])
 
     monkeypatch.setattr(elevation, "_relaunch_target", _target)
     captured: dict[str, Any] = {}
@@ -299,14 +299,14 @@ def test_elevate_windows_forwards_target_and_cwd(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(elevation, "is_elevated", lambda: False)
     monkeypatch.setattr(elevation.sys, "platform", "win32")
 
-    def _fake_target(_executable: str | None, _argv: Any) -> tuple[str, list[str]]:
-        return "py.exe", ["-m", "pwshpy", "services"]
+    def _fake_target(_executable: str | None, _argv: Any) -> Any:
+        return _relaunch_target_record("py.exe", ["-m", "pwshpy", "services"])
 
     monkeypatch.setattr(elevation, "_relaunch_target", _fake_target)
     captured: dict[str, Any] = {}
 
-    def _fake_runas(executable: str, argv: Any, cwd: str, *, wait: bool) -> int:
-        captured.update(executable=executable, argv=argv, cwd=cwd, wait=wait)
+    def _fake_runas(launch: Any, *, wait: bool) -> int:
+        captured.update(executable=launch.executable, argv=launch.argv, cwd=launch.cwd, wait=wait)
         return 3
 
     monkeypatch.setattr(elevation, "_shell_execute_runas", _fake_runas)
@@ -322,15 +322,15 @@ def test_elevate_refuses_a_mapped_drive_before_any_prompt(monkeypatch: pytest.Mo
     monkeypatch.setattr(elevation, "is_elevated", lambda: False)
     monkeypatch.setattr(elevation.sys, "platform", "win32")
 
-    def _fake_target(_executable: str | None, _argv: Any) -> tuple[str, list[str]]:
-        return "py.exe", []
+    def _fake_target(_executable: str | None, _argv: Any) -> Any:
+        return _relaunch_target_record("py.exe", [])
 
     monkeypatch.setattr(elevation, "_relaunch_target", _fake_target)
     monkeypatch.setattr(elevation, "_network_connection", _connection_table)
     prompted: list[str] = []
 
-    def _record_prompt(_executable: str, _argv: Any, directory: str, *, wait: bool) -> int:
-        prompted.append(directory)
+    def _record_prompt(launch: Any, *, wait: bool) -> int:
+        prompted.append(launch.cwd)
         return 0
 
     monkeypatch.setattr(elevation, "_shell_execute_runas", _record_prompt)
@@ -345,7 +345,8 @@ def test_relaunch_target_console_exe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(elevation.sys, "argv", [r"C:\Scripts\pwshpy.exe", "services", "--json"])
     monkeypatch.setattr(elevation.sys, "frozen", False, raising=False)
     relaunch_target = elevation._relaunch_target  # pyright: ignore[reportPrivateUsage] - white-box test
-    assert relaunch_target(None, None) == (r"C:\Scripts\pwshpy.exe", ["services", "--json"])
+    target = relaunch_target(None, None)
+    assert (target.executable, target.argv) == (r"C:\Scripts\pwshpy.exe", ["services", "--json"])
 
 
 @pytest.mark.os_agnostic
@@ -357,14 +358,16 @@ def test_relaunch_target_dash_m(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delattr(elevation.sys, "frozen", raising=False)
     monkeypatch.setattr(elevation.sys, "executable", "python.exe")
     relaunch_target = elevation._relaunch_target  # pyright: ignore[reportPrivateUsage] - white-box test
-    assert relaunch_target(None, None) == ("python.exe", ["-m", "pwshpy", "services"])
+    target = relaunch_target(None, None)
+    assert (target.executable, target.argv) == ("python.exe", ["-m", "pwshpy", "services"])
 
 
 @pytest.mark.os_agnostic
 def test_relaunch_target_explicit_override() -> None:
     """An explicit executable + argv is used verbatim."""
     relaunch_target = elevation._relaunch_target  # pyright: ignore[reportPrivateUsage] - white-box test
-    assert relaunch_target("my.exe", ["a", "b"]) == ("my.exe", ["a", "b"])
+    target = relaunch_target("my.exe", ["a", "b"])
+    assert (target.executable, target.argv) == ("my.exe", ["a", "b"])
 
 
 @pytest.mark.os_windows
@@ -401,7 +404,8 @@ def test_relaunch_target_uv_console_launcher_has_no_exe_suffix(tmp_path: Path, m
     monkeypatch.setattr(elevation.sys, "argv", [str(launcher), "services", "--json"])
     monkeypatch.setattr(elevation.sys, "frozen", False, raising=False)
     relaunch_target = elevation._relaunch_target  # pyright: ignore[reportPrivateUsage] - white-box test
-    assert relaunch_target(None, None) == (str(tmp_path / "pwshpy.exe"), ["services", "--json"])
+    target = relaunch_target(None, None)
+    assert (target.executable, target.argv) == (str(tmp_path / "pwshpy.exe"), ["services", "--json"])
 
 
 class _ShellDoubles:
@@ -456,6 +460,11 @@ class _WinError(Exception):
         self.winerror = code
 
 
+def _relaunch_target_record(executable: str, argv: list[str]) -> Any:
+    """The record ``_relaunch_target`` returns, for a test that replaces it."""
+    return elevation._RelaunchTarget(executable, argv)  # pyright: ignore[reportPrivateUsage] - white-box test
+
+
 def _launch() -> Any:
     return elevation._Launch("C:\\Python\\python.exe", ["-m", "tool", "a b"], "C:\\work")  # pyright: ignore[reportPrivateUsage] - white-box test
 
@@ -501,6 +510,8 @@ def test_the_request_never_lets_windows_show_an_error_box() -> None:
     assert request["fMask"] & 0x400, "no SEE_MASK_FLAG_NO_UI"
     assert request["fMask"] & 0x40, "no SEE_MASK_NOCLOSEPROCESS, so nothing to wait on"
     assert request["lpVerb"] == "runas"
+    # The verb travels as its plain string value, exactly what the call sent before the enum existed.
+    assert type(request["lpVerb"]) is str
     assert request["lpFile"] == "C:\\Python\\python.exe"
     assert request["lpParameters"] == '-m tool "a b"'
     assert request["lpDirectory"] == "C:\\work"
@@ -522,7 +533,8 @@ def test_shell_execute_really_starts_a_process_and_returns_its_exit_code() -> No
     launch = elevation._Launch(cmd, ["/c", "exit", "7"], str(Path.cwd()))  # pyright: ignore[reportPrivateUsage] - white-box test
     shell_execute = elevation._shell_execute  # pyright: ignore[reportPrivateUsage] - white-box test
 
-    assert shell_execute(launch, wait=True, verb="open") == 7
+    open_verb = elevation._ShellVerb.OPEN  # pyright: ignore[reportPrivateUsage] - white-box test
+    assert shell_execute(launch, wait=True, verb=open_verb) == 7
 
 
 def _connection_table(drive: str) -> str | None:
@@ -654,8 +666,8 @@ def _elevate_recording_the_prompt(monkeypatch: pytest.MonkeyPatch, *, links: Any
     monkeypatch.setattr(elevation, "_linked_connections", links)
     prompted: list[str] = []
 
-    def _record_prompt(executable: str, _argv: Any, _directory: str, *, wait: bool) -> int:
-        prompted.append(executable)
+    def _record_prompt(launch: Any, *, wait: bool) -> int:
+        prompted.append(launch.executable)
         return 0
 
     monkeypatch.setattr(elevation, "_shell_execute_runas", _record_prompt)

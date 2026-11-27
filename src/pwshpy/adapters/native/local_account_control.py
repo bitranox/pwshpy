@@ -17,11 +17,10 @@ Contents:
 
 from __future__ import annotations
 
-import importlib
 from typing import Any
 
-from ...domain.errors import PlatformUnsupportedError
 from ...domain.records import LocalGroup, LocalUser
+from .local_accounts import AccountModules, load_account_modules, sid_for
 from .marshal import native_error
 
 _UF_SCRIPT = 0x0001
@@ -30,25 +29,9 @@ _UF_NORMAL_ACCOUNT = 0x0200
 _USER_PRIV_USER = 1
 
 
-def _load() -> tuple[Any, Any]:
-    """Import ``win32net`` + ``win32security`` lazily (absent on a portable install)."""
-    try:
-        net: Any = importlib.import_module("win32net")
-        security: Any = importlib.import_module("win32security")
-    except ImportError as exc:  # pragma: no cover - only on a portable (non-Windows) install
-        raise PlatformUnsupportedError(
-            "Local-account control requires pywin32 (Windows only); install pwshpy on Windows."
-        ) from exc
-    return net, security
-
-
-def _sid_for(security: Any, name: str) -> str:
-    """Resolve a principal name to its string SID, or ``""`` if it cannot be looked up."""
-    try:
-        sid, _domain, _type = security.LookupAccountName(None, name)
-        return str(security.ConvertSidToStringSid(sid))
-    except Exception:
-        return ""
+def _load() -> AccountModules:
+    """The controller's pywin32 modules; the seam a test replaces with doubles."""
+    return load_account_modules("Local-account control")
 
 
 def _get_user(net: Any, security: Any, name: str) -> LocalUser:
@@ -59,7 +42,7 @@ def _get_user(net: Any, security: Any, name: str) -> LocalUser:
         raise native_error(str(exc) or f"cannot read user {name!r}", exc) from exc
     return LocalUser.model_construct(
         name=name,
-        sid=_sid_for(security, name),
+        sid=sid_for(security, name),
         enabled=not (int(info["flags"]) & _UF_ACCOUNTDISABLE),
         full_name=str(info.get("full_name") or ""),
         description=str(info.get("comment") or ""),
@@ -84,7 +67,8 @@ class NativeLocalAccountController:
         timeout: float = 30.0,  # accepted for protocol parity; win32net is synchronous so it is unused
     ) -> LocalUser:
         """Create a local user (``NetUserAdd``); return the created :class:`LocalUser`."""
-        net, security = _load()
+        modules = _load()
+        net, security = modules.net, modules.security
         flags = _UF_SCRIPT | _UF_NORMAL_ACCOUNT | (_UF_ACCOUNTDISABLE if disabled else 0)
         info = {
             "name": name,
@@ -105,7 +89,7 @@ class NativeLocalAccountController:
 
     def remove_user(self, name: str, *, timeout: float = 30.0) -> None:
         """Delete a local user (``NetUserDel``; ``timeout`` unused - synchronous, parity only)."""
-        net, _ = _load()
+        net = _load().net
         try:
             net.NetUserDel(None, name)
         except Exception as exc:
@@ -113,7 +97,8 @@ class NativeLocalAccountController:
 
     def set_user_enabled(self, name: str, *, enabled: bool, timeout: float = 30.0) -> LocalUser:
         """Enable or disable a local user (toggles ``UF_ACCOUNTDISABLE``); return the new state."""
-        net, security = _load()
+        modules = _load()
+        net, security = modules.net, modules.security
         try:
             current: Any = net.NetUserGetInfo(None, name, 1)
             flags = int(current["flags"])
@@ -125,16 +110,17 @@ class NativeLocalAccountController:
 
     def new_group(self, name: str, *, description: str = "", timeout: float = 30.0) -> LocalGroup:
         """Create a local group (``NetLocalGroupAdd``); return the created :class:`LocalGroup`."""
-        net, security = _load()
+        modules = _load()
+        net, security = modules.net, modules.security
         try:
             net.NetLocalGroupAdd(None, 1, {"name": name, "comment": description})
         except Exception as exc:
             raise native_error(str(exc) or f"cannot create group {name!r}", exc) from exc
-        return LocalGroup.model_construct(name=name, sid=_sid_for(security, name), description=description)
+        return LocalGroup.model_construct(name=name, sid=sid_for(security, name), description=description)
 
     def remove_group(self, name: str, *, timeout: float = 30.0) -> None:
         """Delete a local group (``NetLocalGroupDel``; ``timeout`` unused - synchronous, parity only)."""
-        net, _ = _load()
+        net = _load().net
         try:
             net.NetLocalGroupDel(None, name)
         except Exception as exc:
@@ -142,7 +128,7 @@ class NativeLocalAccountController:
 
     def add_group_member(self, group: str, member: str, *, timeout: float = 30.0) -> None:
         """Add ``member`` (a user/group name) to ``group`` (``NetLocalGroupAddMembers``)."""
-        net, _ = _load()
+        net = _load().net
         try:
             net.NetLocalGroupAddMembers(None, group, 3, [{"domainandname": member}])
         except Exception as exc:
@@ -150,7 +136,7 @@ class NativeLocalAccountController:
 
     def remove_group_member(self, group: str, member: str, *, timeout: float = 30.0) -> None:
         """Remove ``member`` from ``group`` (``NetLocalGroupDelMembers``)."""
-        net, _ = _load()
+        net = _load().net
         try:
             net.NetLocalGroupDelMembers(None, group, [member])
         except Exception as exc:

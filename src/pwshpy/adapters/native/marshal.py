@@ -32,7 +32,7 @@ import logging
 import re
 import socket
 from datetime import datetime, timedelta, timezone
-from typing import Final, cast
+from typing import Final, NamedTuple, cast
 
 from ...domain.enums import (
     AceType,
@@ -891,7 +891,14 @@ def _is_psutil_denied(exc: BaseException) -> bool:
     return cls.__name__ == _PSUTIL_DENIED and cls.__module__.split(".")[0] == _PSUTIL_MODULE
 
 
-def _judge(native: BaseException) -> tuple[int | None, bool]:
+class _Verdict(NamedTuple):
+    """What :func:`_judge` read off a native error: its HRESULT and whether it is a refusal for rights."""
+
+    hresult: int | None
+    denied: bool
+
+
+def _judge(native: BaseException) -> _Verdict:
     """The HRESULT ``native`` carries and whether it is a refusal for lack of rights, by code only.
 
     A pwshpy NativeCallError was typed when it was built and is taken as is: a COM-built
@@ -900,11 +907,11 @@ def _judge(native: BaseException) -> tuple[int | None, bool]:
     EACCES is not a denial), and the errno when there is none.
     """
     if isinstance(native, NativeCallError):
-        return native.hresult, isinstance(native, NativeAccessDeniedError)
+        return _Verdict(native.hresult, isinstance(native, NativeAccessDeniedError))
     hresult = _cause_hresult(native)
     if hresult is not None:
-        return hresult, hresult == E_ACCESSDENIED
-    return None, isinstance(native, OSError) and native.errno in _DENIED_ERRNOS
+        return _Verdict(hresult, hresult == E_ACCESSDENIED)
+    return _Verdict(None, isinstance(native, OSError) and native.errno in _DENIED_ERRNOS)
 
 
 def native_error(
@@ -957,8 +964,9 @@ def native_error(
     """
     links = _walked_links(cause)
     native = links[-1] if _is_code_carrier(links[-1]) else cause
-    hresult, denied = _judge(native)
-    denied = denied or any(_is_psutil_denied(link) for link in links)
+    verdict = _judge(native)
+    hresult = verdict.hresult
+    denied = verdict.denied or any(_is_psutil_denied(link) for link in links)
     # An explicit kind is the call site's own judgement (a declined UAC prompt is a decision,
     # not a missing right), so only the default is ever upgraded.
     if kind is not NativeCallError or not denied:

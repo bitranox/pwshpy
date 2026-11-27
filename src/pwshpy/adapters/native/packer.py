@@ -34,6 +34,7 @@ import tarfile
 import zipfile
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
+from typing import NamedTuple
 
 from ...domain.enums import ImportKind, RunnerFormat
 from ...domain.errors import PackError
@@ -57,6 +58,23 @@ from ...domain.packing import (
 )
 from ...domain.records import PackedScript
 from .fileio import write_text
+
+
+class _CollectedSources(NamedTuple):
+    """What :func:`_collect_sources` found: each file's bytes, and the third-party import roots."""
+
+    #: Every file to pack, keyed by its resolved path, with the bytes read once.
+    files: dict[Path, bytes]
+    #: The top-level names of the imports that resolve to no local file, sorted.
+    external: list[str]
+
+
+class _ExtractedPayload(NamedTuple):
+    """A runner's decoded payload and the runner format its payload bracket identified."""
+
+    payload: bytes
+    runner_format: RunnerFormat
+
 
 #: The runner templates, shipped as package data next to this module (one per format).
 _TEMPLATE_DIR = Path(__file__).with_name("templates")
@@ -118,7 +136,8 @@ def pack_script(
     fmt = _resolve_format(options.format, dest)
     default_suffix = ".sh" if fmt is RunnerFormat.SH else ".ps1"
     destination = Path(dest).expanduser() if dest is not None else entry_path.with_suffix(default_suffix)
-    sources, external = _collect_sources(entry_path, root_path, options.include)
+    collected = _collect_sources(entry_path, root_path, options.include)
+    sources = collected.files
     _guard_destination(destination, sources, force=options.force)
 
     entry_arc = _archive_name(entry_path, root_path)
@@ -158,7 +177,7 @@ def pack_script(
         payload_sha256=payload_sha,
         payload_bytes=len(payload),
         uv_args=uv_args,
-        external_imports=external,
+        external_imports=collected.external,
         has_script_metadata=bool(metadata),
     )
 
@@ -193,9 +212,10 @@ def unpack_script(source: str | Path, dest: str | Path, *, force: bool = False) 
     packed = _existing_file(Path(source), "packed script")
     # utf-8-sig: a .ps1 starts with a byte-order mark (see _write_runner).
     text = _read_bytes(packed).decode("utf-8-sig", "replace")
-    payload, fmt = _extract_payload(text, packed)
+    extracted = _extract_payload(text, packed)
+    payload = extracted.payload
     target = Path(dest).expanduser()
-    extract = _extract_zip_members if fmt is RunnerFormat.PS1 else _extract_tar_members
+    extract = _extract_zip_members if extracted.runner_format is RunnerFormat.PS1 else _extract_tar_members
     try:
         written = extract(payload, target, force=force)
     except (zipfile.BadZipFile, tarfile.TarError, OSError) as exc:
@@ -209,7 +229,7 @@ def unpack_script(source: str | Path, dest: str | Path, *, force: bool = False) 
     )
 
 
-def _collect_sources(entry: Path, root: Path, include: Iterable[str | Path]) -> tuple[dict[Path, bytes], list[str]]:
+def _collect_sources(entry: Path, root: Path, include: Iterable[str | Path]) -> _CollectedSources:
     """Walk ``entry``'s local imports breadth-first; return the files and the external names.
 
     A dotted name counts as local when a file for it exists under ``root``.  Resolution is
@@ -249,7 +269,7 @@ def _collect_sources(entry: Path, root: Path, include: Iterable[str | Path]) -> 
     # when ``thing`` is a function or a constant. Its root would then look external even though
     # ``pkg`` was just packed, so drop any name whose root does resolve locally.
     external = {name for name in external if _resolve_local(name, root) is None}
-    return found, sorted(external)
+    return _CollectedSources(files=found, external=sorted(external))
 
 
 def _resolve_local(dotted: str, root: Path) -> Path | None:
@@ -385,7 +405,7 @@ def _build_tar_archive(members: Mapping[str, bytes]) -> bytes:
     return buffer.getvalue()
 
 
-def _extract_payload(text: str, source: Path) -> tuple[bytes, RunnerFormat]:
+def _extract_payload(text: str, source: Path) -> _ExtractedPayload:
     """Pull the base64 payload out of a generated runner; return its bytes and the runner format.
 
     A PowerShell runner brackets the payload in a here-string (``$PwshPyPayload = @'`` ...
@@ -395,10 +415,10 @@ def _extract_payload(text: str, source: Path) -> tuple[bytes, RunnerFormat]:
     lines = text.splitlines()
     ps1 = _slice_payload(lines, lambda s: s == _PAYLOAD_OPEN, lambda s: s == _PAYLOAD_CLOSE)
     if ps1 is not None:
-        return _decode_payload(ps1, source), RunnerFormat.PS1
+        return _ExtractedPayload(_decode_payload(ps1, source), RunnerFormat.PS1)
     sh = _slice_payload(lines, lambda s: s.endswith(f"<<'{_SH_HEREDOC}'"), lambda s: s == _SH_HEREDOC)
     if sh is not None:
-        return _decode_payload(sh, source), RunnerFormat.SH
+        return _ExtractedPayload(_decode_payload(sh, source), RunnerFormat.SH)
     raise PackError(f"{source} does not look like a pwshpy pack (no payload block found)")
 
 

@@ -31,6 +31,7 @@ import shutil
 import subprocess  # nosec B404 - argv quoting (list2cmdline) + the sudo re-exec on POSIX; always a fixed argv, no shell
 import sys
 from collections.abc import Callable, Sequence
+from enum import Enum
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -113,20 +114,19 @@ def elevate(
     """
     if is_elevated():
         return 0
-    resolved_exe, resolved_argv = _relaunch_target(executable, argv)
-    directory = cwd or str(Path.cwd())
+    launch = _relaunch_target(executable, argv).starting_in(cwd or str(Path.cwd()))
     if sys.platform == "win32":
         # ntpath, not Path.absolute(): below Python 3.12 that keeps a drive-relative "Z:sub" as it is.
-        refuse_a_mapped_drive(ntpath.abspath(directory), connection_of=_network_connection)
-        script = _script_being_relaunched(resolved_exe, resolved_argv)
+        refuse_a_mapped_drive(ntpath.abspath(launch.cwd), connection_of=_network_connection)
+        script = _script_being_relaunched(launch.executable, launch.argv)
         if script is not None:
             refuse_a_script_the_child_cannot_open(
-                _path_the_child_opens(script, directory),
+                _path_the_child_opens(script, launch.cwd),
                 connection_of=_network_connection,
                 linked_connections=_linked_connections,
             )
-        return _shell_execute_runas(resolved_exe, resolved_argv, directory, wait=wait)
-    return _sudo_relaunch(resolved_exe, resolved_argv, directory, wait=wait)
+        return _shell_execute_runas(launch, wait=wait)
+    return _sudo_relaunch(launch.executable, launch.argv, launch.cwd, wait=wait)
 
 
 def _sudo_relaunch(executable: str, argv: Sequence[str], cwd: str, *, wait: bool) -> int | None:
@@ -237,31 +237,34 @@ def _ask_sudo_for_root(sudo: str, cwd: str) -> None:
         )
 
 
-def _relaunch_target(executable: str | None, argv: Sequence[str] | None) -> tuple[str, list[str]]:
-    """Resolve the ``(executable, argv)`` that faithfully reproduces this invocation.
+def _relaunch_target(executable: str | None, argv: Sequence[str] | None) -> _RelaunchTarget:
+    """Resolve the program and arguments that faithfully reproduce this invocation.
 
     Handles the three ways the current process may have been started:
     a frozen build or a console-script ``.exe`` (re-run the exe with its own args);
     ``python -m pkg`` (re-run as ``python -m pkg <args>``); and a plain
     ``python script.py`` (re-run ``python <sys.argv>``).  An explicit ``executable``
     or ``argv`` overrides the detection.
+
+    Returns:
+        The program to start and its arguments; the directory is added by the caller.
     """
     if executable is not None or argv is not None:
-        return (executable or sys.executable), (list(argv) if argv is not None else list(sys.argv))
+        return _RelaunchTarget(executable or sys.executable, list(argv) if argv is not None else list(sys.argv))
     argv0 = sys.argv[0] if sys.argv else ""
     tail = list(sys.argv[1:])
     if bool(getattr(sys, "frozen", False)):
-        return sys.executable, tail
+        return _RelaunchTarget(sys.executable, tail)
     if argv0.lower().endswith(".exe"):
-        return argv0, tail
+        return _RelaunchTarget(argv0, tail)
     # A uv-built console-script launcher reports argv0 WITHOUT ".exe" (measured on
     # Windows): only the .exe sibling exists, and `python <argv0>` cannot open it.
     if argv0 and Path(argv0 + ".exe").is_file():
-        return argv0 + ".exe", tail
+        return _RelaunchTarget(argv0 + ".exe", tail)
     if Path(argv0).name == "__main__.py":
         package = Path(argv0).parent.name
-        return sys.executable, ["-m", package, *tail]
-    return sys.executable, list(sys.argv)
+        return _RelaunchTarget(sys.executable, ["-m", package, *tail])
+    return _RelaunchTarget(sys.executable, list(sys.argv))
 
 
 def refuse_a_mapped_drive(directory: str, *, connection_of: Callable[[str], str | None]) -> None:
@@ -394,18 +397,43 @@ class _Launch(NamedTuple):
     cwd: str
 
 
-def _shell_execute_runas(executable: str, argv: Sequence[str], cwd: str, *, wait: bool) -> int | None:
-    """Launch ``executable`` elevated via ``ShellExecuteEx`` ``"runas"`` (UAC prompt)."""
-    return _shell_execute(_Launch(executable, argv, cwd), wait=wait)
+class _RelaunchTarget(NamedTuple):
+    """The program and arguments that reproduce this invocation, before a directory is chosen."""
+
+    executable: str
+    argv: list[str]
+
+    def starting_in(self, cwd: str) -> _Launch:
+        """The launch request for this target started in ``cwd``.
+
+        Example:
+            >>> _RelaunchTarget("app", ["--flag"]).starting_in("/work").cwd
+            '/work'
+        """
+        return _Launch(self.executable, self.argv, cwd)
+
+
+class _ShellVerb(str, Enum):
+    """The ``ShellExecuteEx`` verbs (``lpVerb``) this module asks for."""
+
+    #: Start elevated, behind the UAC prompt.
+    RUNAS = "runas"
+    #: Start without elevation; only a test uses it, so the real call runs without a prompt.
+    OPEN = "open"
+
+
+def _shell_execute_runas(launch: _Launch, *, wait: bool) -> int | None:
+    """Launch ``launch`` elevated via ``ShellExecuteEx`` ``"runas"`` (UAC prompt)."""
+    return _shell_execute(launch, wait=wait)
 
 
 def _shell_execute(
-    launch: _Launch, *, wait: bool, verb: str = "runas", load: Callable[[str], Any] | None = None
+    launch: _Launch, *, wait: bool, verb: _ShellVerb = _ShellVerb.RUNAS, load: Callable[[str], Any] | None = None
 ) -> int | None:
     """Start ``launch`` through ``ShellExecuteEx`` and optionally wait for its exit code.
 
-    ``verb`` is ``"runas"`` for every caller; a test passes ``"open"`` so the real
-    call runs on Windows without a UAC prompt. ``SEE_MASK_FLAG_NO_UI`` is
+    ``verb`` is :attr:`_ShellVerb.RUNAS` for every caller; a test passes :attr:`_ShellVerb.OPEN`
+    so the real call runs on Windows without a UAC prompt. ``SEE_MASK_FLAG_NO_UI`` is
     load-bearing: measured on Windows, a request it could not satisfy otherwise
     waited on an error box, which never returns where no desktop shows it; with
     the flag the same request failed at once with error 2.
@@ -427,7 +455,7 @@ def _shell_execute(
         result = shell.ShellExecuteEx(
             nShow=win32con.SW_SHOWNORMAL,
             fMask=shellcon.SEE_MASK_NOCLOSEPROCESS | shellcon.SEE_MASK_FLAG_NO_UI,
-            lpVerb=verb,
+            lpVerb=verb.value,
             lpFile=launch.executable,
             lpParameters=parameters,
             lpDirectory=launch.cwd,
@@ -435,7 +463,7 @@ def _shell_execute(
     except Exception as exc:  # pywintypes.error, its Windows code on .winerror
         if getattr(exc, "winerror", None) == ERROR_CANCELLED:
             raise native_error("The Administrator prompt was declined.", exc, kind=ElevationDeclinedError) from exc
-        raise native_error(f"Elevated relaunch (ShellExecuteEx {verb}) failed: {exc}", exc) from exc
+        raise native_error(f"Elevated relaunch (ShellExecuteEx {verb.value}) failed: {exc}", exc) from exc
     handle = result["hProcess"]
     if not wait:
         return None

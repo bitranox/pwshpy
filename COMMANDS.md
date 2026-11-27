@@ -82,8 +82,9 @@ sockets come from `get_net_udp_endpoint`.
 | `Move-Item S D`                       | `ps.move_item("S", "D")`                                | `pwshpy move_item S D`                       |
 | `Remove-Item P [-Recurse]`            | `ps.remove_item("P", recurse=False)`                    | `pwshpy remove_item P [-r]`                  |
 
-`item_type` takes the enum, `from pwshpy.domain.enums import FileItemType` (`FileItemType.FILE`, the
-default, or `FileItemType.DIRECTORY`).
+`item_type` takes the enum, `from pwshpy import FileItemType` (`FileItemType.FILE`, the default, or
+`FileItemType.DIRECTORY`), or its value string (`"file"`, `"directory"`); any other value raises
+`ConfigurationError` before anything is created.
 Returns typed `FileSystemItem` records (path/name/is_directory/size/modified); backed by
 `pathlib`/`shutil`, so it works on every OS.
 

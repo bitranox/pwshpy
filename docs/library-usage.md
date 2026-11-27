@@ -6,9 +6,11 @@
 from pwshpy import ps
 ```
 
-That one import is the whole library. Every method on `ps` is the PowerShell cmdlet, lowercased
-with `-` turned into `_`: `Get-Service` is `ps.get_service()`, `Get-WinEvent` is
-`ps.get_win_event(...)`. Porting a script is close to mechanical (see [COMMANDS.md](../COMMANDS.md)).
+That one import is the whole library. Most read and admin methods on `ps` are the PowerShell
+cmdlet, lowercased with `-` turned into `_`: `Get-Service` is `ps.get_service()`, `Get-WinEvent` is
+`ps.get_win_event(...)`. The rest have names of their own (`ps.exec`, `ps.write_records`,
+`ps.pack_script`, ...), and [COMMANDS.md](../COMMANDS.md) maps every cmdlet to its method, so
+porting a script is close to mechanical.
 
 ## Typed records, not text
 
@@ -48,8 +50,9 @@ it (below).
 Compare an enum field with its member, never with a display string. All are exported from `pwshpy`:
 `ProcessStatus` (psutil's lowercase values, `running`), `ConnectionState` (`LISTEN`),
 `TransportProtocol`, `AddressFamily`, `ServiceState` (`Running`), `ServiceStartType`, `ServiceKind`,
-`EventLevel` (`Error`), `TaskState`, `TaskRunLevel`, `TaskLogonType`, `RegistryHive`,
-`RegistryValueType`, `AceType`, `WellKnownSid` (the SID strings, `S-1-5-18`), `IntegrityLevel`,
+`EventLevel` (`Error`), `TaskState`, `TaskRunLevel`, `TaskLogonType`, `TaskMultipleInstances`,
+`RegistryHive`, `RegistryValueType`, `AceType`, `AclEntryKind` (the category of an `AclEntry`,
+`Owner`), `WellKnownSid` (the SID strings, `S-1-5-18`), `IntegrityLevel`,
 `ImageArchitecture`, `KnownFolder` (the .NET `SpecialFolder` names, `MyDocuments`) and
 `RunnerFormat`. In JSON an enum field is its value, so a `jq` filter on
 `--jsonl` output compares `.status == "Running"` for a service and `.status == "running"` for a
@@ -67,14 +70,14 @@ Every other name matches `Get-Process`'s `ProcessName` (psutil's `.exe` is strip
 
 Every read command returns a lazy `Pipeline`:
 
-| Operator            | Kind      | What it does                                            |
-|---------------------|-----------|---------------------------------------------------------|
-| `.where(pred)`      | streaming | keep matching records                                   |
-| `.select(fn)`       | streaming | project each record                                     |
-| `.take(n)`          | streaming | first `n` records                                       |
-| `.first(pred=None)` | terminal  | first match (or `default`); **stops early**             |
-| `.sort_by(key)`     | terminal  | sorted; **buffers every item** (sorting needs them all) |
-| `.to_list()`        | terminal  | the whole thing as a list; **pulls the entire source**  |
+| Operator                             | Kind      | What it does                                                                             |
+|--------------------------------------|-----------|------------------------------------------------------------------------------------------|
+| `.where(pred)`                       | streaming | keep matching records                                                                    |
+| `.select(fn)`                        | streaming | project each record                                                                      |
+| `.take(n)`                           | streaming | first `n` records                                                                        |
+| `.first(pred=None, *, default=None)` | terminal  | first match, else `default`; **stops early**                                             |
+| `.sort_by(key, *, reverse=False)`    | buffering | a new, sorted `Pipeline` that chains on; **buffers every item** (sorting needs them all) |
+| `.to_list()`                         | terminal  | the whole thing as a list; **pulls the entire source**                                   |
 
 ## Memory model (read this once)
 
@@ -85,9 +88,11 @@ memory cost:
   pulls until the first match and then stops. `ps.get_win_event("System").where(is_error).take(10)`
   touches at most a handful of events no matter how large the log.
 - **Iterating terminal, O(1):** `for x in pipeline` consumes one item at a time.
-- **Materializing terminal, O(n):** `to_list()` pulls the entire source into a list, and `sort_by()`
-  must buffer every item first. On an unbounded source (millions of event-log rows, a giant
-  directory tree) these hold everything in memory at once.
+- **Materializing, O(n):** `to_list()` pulls the entire source into a list, and `sort_by()` must
+  buffer every item before its new pipeline yields the first one (it still chains, so
+  `.sort_by(key).take(5)` is valid, but the sort has read everything by then). On an unbounded
+  source (millions of event-log rows, a giant directory tree) these hold everything in memory at
+  once.
 
 Rule of thumb: keep it lazy. Narrow with `.where(...)`, cap with `.take(N)` or `.first()`, and only
 then `.to_list()` or `.sort_by()`. On the CLI prefer `--jsonl` (streams) over the human table (which
@@ -166,7 +171,7 @@ The Linux call writes these two units under `/etc/systemd/system`, enables the t
 # nightly-backup.service
 [Unit]
 Description=Nightly backup
-X-PwshPy=1.6.0
+X-PwshPy=<pwshpy version>
 
 [Service]
 Type=oneshot
@@ -176,7 +181,7 @@ ExecStart="/usr/local/bin/backup" --full
 # nightly-backup.timer
 [Unit]
 Description=Nightly backup
-X-PwshPy=1.6.0
+X-PwshPy=<pwshpy version>
 
 [Timer]
 OnCalendar=*-*-* 02:00:00 UTC
@@ -210,7 +215,8 @@ How each input maps, and what each OS refuses before touching the scheduler:
 On Linux every timer pwshpy writes carries `AccuracySec=1s` (systemd's default window would let it
 fire up to a minute late). `program`, `arguments` and `description` go into the unit file, so a line
 break, NUL or any other control character (a tab, an escape, DEL; systemd allows none in a command
-line) in any of them is a `ConfigurationError` and `%` is escaped. The `ExecStart=` line is
+line) in any of them is a `ConfigurationError` and `%` is escaped. An empty `description` is
+written as `Description=pwshpy task`. The `ExecStart=` line is
 `program`, written as one double-quoted word (so a path with a space stays one path), followed by
 `arguments`, which systemd reads with its own rules, not a shell's: it splits and unquotes them
 itself and expands `$VAR` / `${VAR}` from the unit's environment (write `$$` for a literal dollar).
@@ -383,8 +389,8 @@ nothing: Windows does not start the run, and on Linux systemd skips the unit on 
 
 ### Listing tasks: skipped versus strict
 
-`ps.get_scheduled_task(folder_path="\\", *, strict=False)` streams the tasks under a folder
-(Windows) or every systemd timer (Linux). Something the caller cannot read - on Windows a folder
+`ps.get_scheduled_task(folder_path="\\", *, task_name=None, strict=False)` streams the tasks under
+a folder (Windows) or every systemd timer (Linux). Something the caller cannot read - on Windows a folder
 whose tasks or subfolders it may not list, or a protected or corrupt task; on Linux a refused
 unit-file listing or a timer unit systemd will not load or read - is skipped by default, so a non-elevated
 caller still gets everything it can read, and each skip logs a WARNING through the `logging`
@@ -407,6 +413,18 @@ The pipeline is lazy, so the error is raised when iteration reaches the unreadab
 before it have already been yielded. Systemd timers that are not-found or masked (and stopped),
 aliases and templates are no tasks in either mode, while a running one is still listed; a single field that cannot be read (a run time, a principal)
 falls back to its documented default and the task stays listed.
+
+To ask about one task, pass its name: `ps.get_scheduled_task("\\Maintenance\\", task_name="Old")`
+lists nothing and looks up only that task in `folder_path` (a trailing backslash, the form a record's
+`task_path` carries, is accepted), so an unreadable task elsewhere cannot affect the answer. A task
+or folder that does not exist gives an empty pipeline, with `strict=True` too; any other failure
+follows the `strict` rule above. `task_name` is the task's own name: an empty name or one with a
+folder part raises `ConfigurationError` (during iteration). Windows matches the name without regard
+to case and the record carries the spelling you passed, so compare it case-insensitively with a
+listed one. On Linux the lookup finds the timer task, else an on-demand task pwshpy registered: a
+`.service` with no `.timer` counts only when its unit file carries the `X-PwshPy` marker, so a
+system daemon such as `ssh` is no task, and the listing, which shows timers only, leaves such a task
+out. A `.timer` or `.service` suffix on the name is optional.
 
 ## Listing services: skipped versus strict
 

@@ -21,6 +21,7 @@ from pwshpy.composition import Ps, build_ps
 from pwshpy.domain.cim_methods import CimArgumentValue
 from pwshpy.domain.enums import (
     AceType,
+    AclEntryKind,
     AddressFamily,
     EventLevel,
     FileItemType,
@@ -1547,3 +1548,10 @@ def test_an_unknown_enum_value_is_refused_before_the_adapter_is_called(
     assert injected.acl_controller.calls == []
     assert injected.service_controller.calls == []
     assert injected.registry_controller.calls == []
+
+
+@pytest.mark.os_agnostic
+def test_the_package_exports_the_acl_entry_kind() -> None:
+    """AclEntry.kind is typed AclEntryKind, so a caller comparing it needs the enum from pwshpy."""
+    assert pwshpy.AclEntryKind is AclEntryKind
+    assert "AclEntryKind" in pwshpy.__all__

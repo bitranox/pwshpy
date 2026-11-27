@@ -17,6 +17,13 @@ ps.require_elevation()  # raises ElevationRequiredError if not admin (an honest 
 ps.elevate()  # relaunch THIS process elevated (UAC / sudo), preserving cwd + argv
 ```
 
+The full signature is `ps.elevate(argv=None, *, executable=None, cwd=None, wait=True)`. With no
+arguments it relaunches this invocation (a console-script or frozen executable, `python -m package`
+or `python script.py`); `argv` replaces the arguments, `executable` the program (given alone, it
+gets the current `sys.argv`), and `cwd` the working directory. It returns `0` at once when the
+process is already elevated (nothing is launched), the elevated child's exit code when `wait` is
+true, and `None` right after the launch when `wait=False`.
+
 On Linux and macOS a user sudo lets run the relaunch's own program without a password (a
 `NOPASSWD` sudoers rule) is asked nothing: `sudo -n` is first asked to run that program (the current
 Python for `ps.elevate()`, `/bin/sh` for a `.sh` runner, and for a `.ps1` the relaunch's whole
@@ -268,14 +275,23 @@ No more UTF-16LE-with-a-BOM surprises from `Out-File`; the bytes are identical o
 Python version. And every write path streams, so a huge source never buffers:
 
 ```python
-ps.write_text("report.txt", text)  # UTF-8, no BOM, LF - guaranteed
-ps.write_text_stream("out.txt", chunks)  # same guarantee, streamed chunk-by-chunk
+ps.write_text("report.txt", text)  # UTF-8, no BOM, LF by default
+ps.write_text_stream("out.txt", chunks)  # same defaults, streamed chunk-by-chunk
 ps.write_records("procs.jsonl", ps.get_process())  # typed records -> UTF-8 JSONL, one at a time
 
 for line in ps.get_content_lines("huge.log"):  # reads one line at a time (vs whole-file get_content)
     ...
 ps.download_file("https://host/big.iso", "big.iso")  # copies to disk in chunks; never buffers the body
 ```
+
+Those are defaults, not fixed: `write_text` and `write_text_stream` take `encoding="utf-8"`,
+`newline="\n"` (every CRLF, CR and LF in the text becomes it; pass `"\r\n"` for CRLF) and
+`bom=False` (True prepends the encoding's byte-order mark). `write_records` writes one JSON object
+per line by default; `jsonl=False` writes a single JSON array instead, still UTF-8 without a BOM.
+
+`get_content_lines` keeps each line's line end (`"\n"` after Python's universal-newline
+translation), where `Get-Content` strips it, so use `line.rstrip("\n")` when you want the bare
+text.
 
 CLI: `pwshpy write_text PATH` (reads stdin), `pwshpy get_content PATH` (streams; UTF-8 bytes when
 piped, see [CLI Reference](cli-reference.md#portable-record-commands)), `pwshpy download_file URL
@@ -284,13 +300,19 @@ is what pwsh 7 and pwshpy itself send into a pipe; a leading UTF-8 BOM in the in
 `--input-encoding cp1252` (or any text encoding name) for a piped source that writes another
 encoding. Bytes that are not valid in that encoding stop the command with an error naming
 `--input-encoding`, and PATH then holds part of the text before them. A terminal stdin keeps its own
-encoding, with or without the option. `--encoding` names the encoding of the file written.
+encoding, with or without the option. `--encoding` names the encoding of the file written, `--bom`
+writes a byte-order mark and `--crlf` writes CRLF line ends instead of LF.
 
 ## Credential vault - typed, secret-safe, unattended-friendly
 
-`get_credential` is the typed `Get-Credential`; the store is the Windows Credential Manager (the
-unattended-safe alternative to a DPAPI file that will not decrypt under another account). The secret
-is a `SecretStr` - masked in repr / JSON / logs:
+`get_credential` is the typed `Get-Credential`. The store is portable: the Windows Credential
+Manager on Windows (the unattended-safe alternative to a DPAPI file that will not decrypt under
+another account) and the freedesktop Secret Service (the desktop keyring, over the session D-Bus) on
+Linux. macOS has no Secret Service, so the store calls raise `PlatformUnsupportedError` there. On
+Linux, no session bus, no keyring daemon, no default collection or a locked keyring (there is no
+headless unlock prompt) raises `NativeCallError`. Deleting a target with nothing stored under it is
+a `NativeCallError` on Windows and not an error on Linux. The secret is a `SecretStr` - masked in
+repr / JSON / logs:
 
 ```python
 cred = ps.get_credential("svc")  # non-echoing prompt
@@ -364,14 +386,14 @@ On the recipient's side the artefact takes a few switches of its own; everything
 to your script untouched. The `.ps1` spells them `-PwshPy...`; the `.sh` spells the same switches
 `--pwshpy-...`:
 
-| `.ps1` switch        | `.sh` switch             | Effect                                                                                                                              |
-|----------------------|--------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
-| `-PwshPyInfo`        | `--pwshpy-info`          | print the manifest (entry, hash, file list, cache dir; the `.sh` also prints its uv args and `git source`) without running anything |
-| `-PwshPyClean`       | `--pwshpy-clean`         | discard the cached extraction and unpack again                                                                                      |
-| `-PwshPyNoInstallUv` | `--pwshpy-no-install-uv` | fail with exit 127 instead of installing uv                                                                                         |
-| `-PwshPyElevate`     | `--pwshpy-elevate`       | relaunch elevated first (UAC on Windows, `sudo` on POSIX); exit 77 if refused                                                       |
-| `-PwshPyUv PATH`     | `--pwshpy-uv PATH`       | run the uv at this absolute path, no search and no install; exit 64 if relative or empty                                            |
-| `-PwshPyHelp`        | `--pwshpy-help`          | show the artefact's own help                                                                                                        |
+| `.ps1` switch        | `.sh` switch             | Effect                                                                                                                                                 |
+|----------------------|--------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `-PwshPyInfo`        | `--pwshpy-info`          | print the manifest (entry, payload hash, uv args, `git source`, cache dir, file list; both runners print the same six fields) without running anything |
+| `-PwshPyClean`       | `--pwshpy-clean`         | discard the cached extraction and unpack again                                                                                                         |
+| `-PwshPyNoInstallUv` | `--pwshpy-no-install-uv` | fail with exit 127 instead of installing uv                                                                                                            |
+| `-PwshPyElevate`     | `--pwshpy-elevate`       | relaunch elevated first (UAC on Windows, `sudo` on POSIX); exit 77 if refused                                                                          |
+| `-PwshPyUv PATH`     | `--pwshpy-uv PATH`       | run the uv at this absolute path, no search and no install; exit 64 if relative or empty                                                               |
+| `-PwshPyHelp`        | `--pwshpy-help`          | show the artefact's own help                                                                                                                           |
 
 Details worth knowing:
 

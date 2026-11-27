@@ -16,9 +16,10 @@ common cmdlets.
 - **Known folders** (`get_known_folder`) are portable too, with one resolver per OS that answers
   what pwsh's `[Environment]::GetFolderPath` answers there (see [Known folders](#known-folders)).
 - The **portable native subsystems** dispatch by OS - win32 on Windows, an honest Linux backend
-  on Linux: services (systemd D-Bus), event log (journald), scheduled tasks (systemd timers),
-  local accounts (pwd / grp / shadow-utils), ACLs (POSIX ACL xattr; Linux only, so macOS raises
-  `PlatformUnsupportedError`) - read and mutating verbs.
+  on Linux: services (systemd D-Bus), scheduled tasks (systemd timers), local accounts (pwd / grp /
+  shadow-utils), ACLs (POSIX ACL xattr; Linux only, so macOS raises `PlatformUnsupportedError`) -
+  read and mutating verbs - and the event log (journald), for reading only: clearing an event log
+  (`clear_event_log`) is Windows-only and raises `PlatformUnsupportedError` elsewhere.
   Where the two OS models differ, the mapping is documented rather than faked; a field the Linux
   model lacks is dropped where nothing depends on it (a POSIX group has no description, so
   `new_local_group`'s is ignored). Scheduled tasks are the widest gap, and there an input with no
@@ -27,9 +28,10 @@ common cmdlets.
   Windows and as root on Linux, and logon triggers, every-N-days daily triggers and logon types are
   Windows-only (the full table is in
   [Library & Pipeline](library-usage.md#scheduled-tasks-principal-run-level-and-triggers)).
-- Only five are **Windows-only**, having no honest Linux analog: the registry (Linux config is
-  files), CIM/WMI, hotfixes, the Windows Update search, and shortcuts (`.lnk`, a Windows shell
-  file format: `get_shortcut` / `new_shortcut`).
+- Only six are **Windows-only**, having no honest Linux analog: the registry (Linux config is
+  files), CIM/WMI, hotfixes, the Windows Update search, clearing an event log (journald has no
+  per-log clear), and shortcuts (`.lnk`, a Windows shell file format: `get_shortcut` /
+  `new_shortcut`).
 
 ## Known folders
 
@@ -74,31 +76,57 @@ for the Linux home. An oracle test runs pwsh on each OS and compares its answers
 
 ## .NET (hosts PowerShell 7.6 in-process)
 
-`Microsoft.PowerShell.SDK` on .NET 10, hosted **in-process** via pythonnet, behind the optional
+The PowerShell 7.6 engine on .NET 10, hosted **in-process** via pythonnet, behind the optional
 `[full]` extra. It covers the long tail (AD / Exchange / Azure / any module-only cmdlet) and runs
 existing `.ps1` at full fidelity - never as a subprocess. Without `[full]`, any .NET call raises a
 clear `FeatureUnavailableError` and loads no .NET.
 
+The engine's assemblies come from an **installed PowerShell 7.6**, not from a package: pwshpy loads
+`System.Management.Automation.dll` and its dependencies from `PWSHPY_POWERSHELL_HOME` when set,
+else from the directory of the `pwsh` found on `PATH`, else from `%ProgramFiles%\PowerShell\7`. So
+a .NET call needs three things: the `[full]` extra, the .NET 10 runtime, and PowerShell 7.6. When
+the assemblies are not found, the call raises `FeatureUnavailableError` naming the directory it
+looked in.
+
+By default one shared runspace serves every call behind a lock, so `$global:` state persists from
+one call to the next. Setting `PWSHPY_RUNSPACE_POOL_SIZE` to an integer above 1 opens a
+`RunspacePool` of that size instead and runs calls without the lock: calls can run concurrently,
+and `$global:` state is no longer shared between them.
+
 ## Platform support
 
-- **Linux / macOS:** the portable native subset, the portable native subsystems on their Linux
-  backends (systemd, journald, pwd/grp, POSIX ACL, Secret Service, sudo), and .NET when `[full]`
-  and the .NET 10 runtime are present. The ACL commands are Linux only: on macOS they raise
-  `PlatformUnsupportedError`.
-- **Windows:** the same surface on win32 backends, plus the five Windows-only subsystems
-  (registry, CIM/WMI, hotfixes, Windows Update search, shortcuts), and .NET.
+- **Linux:** the portable native subset, the portable native subsystems on their Linux backends
+  (systemd over D-Bus for services and scheduled tasks, journald for reading the event log, pwd/grp
+  and shadow-utils for local accounts, POSIX ACLs, the Secret Service for the credential store, sudo
+  for elevation), and .NET when `[full]`, the .NET 10 runtime and PowerShell 7.6 are present.
+  Reading the event log also needs the `[journald]` extra.
+- **macOS:** the portable native subset, reading local users and groups (pwd/grp), sudo elevation,
+  known folders, the current identity, and .NET as on Linux. Services, scheduled tasks and the event
+  log raise `PlatformUnsupportedError` (their backends are systemd and journald, and the `jeepney`
+  and `systemd-python` packages they use install on Linux only), and so do the credential store
+  (macOS has no Secret Service) and the ACL commands. Creating or changing local accounts runs
+  shadow-utils (`useradd`, `groupadd`, `usermod`, `gpasswd`), which macOS does not ship.
+- **Windows:** the same surface on win32 backends, plus the six Windows-only subsystems
+  (registry, CIM/WMI, hotfixes, Windows Update search, clearing an event log, shortcuts), and .NET.
 - **Every OS:** the portable power tools `ps.exec`, `ps.write_text` / `ps.write_text_stream` /
-  `ps.write_records`, `ps.get_content_lines`, `ps.download_file`, `ps.is_elevated`, and
-  `ps.get_credential`.
+  `ps.write_records`, `ps.get_content_lines`, `ps.download_file`, `ps.invoke_web_request` /
+  `ps.invoke_rest_method`, `ps.pack_script` / `ps.unpack_script`, `ps.is_elevated`,
+  `ps.require_elevation`, `ps.elevate` (UAC on Windows, sudo elsewhere), and `ps.get_credential`.
 
 ## Python baseline
 
 - Targets **Python 3.10 and newer**.
-- Base runtime deps: `psutil`, `rich-click`, `lib_cli_exit_tools`, `lib_log_rich`,
-  `lib_layered_config`, `pydantic`, `orjson` (plus `pywin32` / `wmi` on Windows only). The `[full]`
-  extra adds `pythonnet` + `clr-loader` for .NET and requires the .NET 10 runtime.
-- CI exercises GitHub's rolling runner images (`ubuntu-latest`, `macos-latest`, `windows-latest`)
-  across CPython 3.10 through 3.15.
+- Base runtime deps: `psutil`, `rich-click`, `click`, `rich`, `lib_cli_exit_tools`, `lib_log_rich`,
+  `python-dotenv`, `lib_layered_config`, `pydantic`, `orjson` and `defusedxml`, plus `pywin32` /
+  `wmi` / `lib_registry` on Windows only and `jeepney` (systemd and Secret Service over D-Bus) on
+  Linux only.
+- The `[full]` extra adds `pythonnet` + `clr-loader` for .NET; a .NET call also needs the .NET 10
+  runtime and an installed PowerShell 7.6.
+- The `[journald]` extra adds `systemd-python` (Linux only) for reading the event log. It builds a C
+  extension, so installing it needs a compiler and `libsystemd-dev`; without it `get_win_event` on
+  Linux raises `PlatformUnsupportedError` naming the extra.
+- CI exercises GitHub's rolling runner images: `ubuntu-latest` and `windows-latest` across CPython
+  3.10 through 3.15, and `macos-latest` on the newest declared Python only (3.15).
 
 ## Status
 
@@ -108,6 +136,6 @@ backends and real .NET, since neither installs on Linux.
 
 Making services, event log, scheduled tasks, local accounts, ACLs, elevation relaunch and the
 credential store portable to Linux is **done** - each dispatches by OS. Only the registry, CIM/WMI,
-hotfixes, the Windows Update search and shortcuts remain Windows-only, deliberately: they have no
-honest Linux equivalent. The
+hotfixes, the Windows Update search, clearing an event log and shortcuts remain Windows-only,
+deliberately: they have no honest Linux equivalent. The
 [portability roadmap](portability-roadmap.md) tracks the detail.

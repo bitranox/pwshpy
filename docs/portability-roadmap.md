@@ -12,8 +12,8 @@ because text-scraping a subprocess is the exact thing pwshpy exists to avoid.
 - **Native, not subprocess.** Talk to systemd/journald over D-Bus or their libraries, read accounts
   from `pwd`/`grp`. The one accepted exception is account *mutation* (`useradd` et al.), which has no
   stable native API - it goes through `ps.exec` (shell-free argv), documented as such.
-- **D-Bus lib:** `jeepney` (pure-Python, zero external deps), imported Linux-only, exactly like
-  `pywin32` is Windows-only. Add as `jeepney; sys_platform == "linux"`.
+- **D-Bus lib:** `jeepney` (pure-Python, zero external deps), a base dependency on Linux only
+  (`jeepney; sys_platform == 'linux'`), exactly like `pywin32` is Windows-only.
 - **Platform dispatch** lives in composition/`build_ps`: pick the win32 adapter on Windows, the
   systemd/journald/posix adapter on Linux, else an adapter that raises `PlatformUnsupportedError`.
   Same pattern the psutil-portable vs win32-Windows split already uses.
@@ -26,10 +26,13 @@ because text-scraping a subprocess is the exact thing pwshpy exists to avoid.
 
 ## Already portable today (the shipping core)
 
-Processes, TCP connections, volumes, uptime, DNS resolve, TCP reachability, env vars, the whole
-filesystem subsystem, `exec`, `write_text` / `write_text_stream` / `write_records`,
-`get_content_lines`, `download_file`, `is_elevated`, `require_elevation`, `get_credential` (the
-prompt), and `get_computer_info`. These are the same bytes on Windows, macOS, and Linux now.
+Processes, TCP connections, UDP endpoints, network adapters, IP addresses, volumes, uptime, DNS
+resolve, TCP reachability, env vars, the whole filesystem subsystem, `exec`, `write_text` /
+`write_text_stream` / `write_records`, `get_content_lines`, `download_file`, `invoke_web_request` /
+`invoke_rest_method`, `pack_script` / `unpack_script`, `is_elevated`, `require_elevation`,
+`get_credential` (the prompt), `get_computer_info`, `get_current_identity`, `get_known_folder` and
+`get_windows_image` (it reads the WIM file itself). These are the same bytes on Windows, macOS, and
+Linux now.
 
 ## Build order
 
@@ -44,7 +47,7 @@ box (like the Windows mutating tests need a throwaway Windows VM).
    read lists `.timer` units with principal and run info, register writes a oneshot service plus a
    `.timer` for its triggers, run/unregister, enable/disable a `.timer`; verified live on root
    scratch units).
-5. **`elevate()` relaunch -> sudo/pkexec** - **DONE** (sudo re-exec; verified on Linux).
+5. **`elevate()` relaunch -> sudo** - **DONE** (sudo relaunch; verified on Linux).
 6. **Credential store -> Secret Service** - **DONE** (`secret_service.py`, D-Bus, plain algorithm;
    save/load/delete verified live against gnome-keyring; locked/absent keyring gives a clear error).
 7. **ACLs -> POSIX ACLs** (read + mutating) - **DONE** (`posix_acl.py`, kernel ACL xattr + chown;
@@ -63,12 +66,17 @@ box (like the Windows mutating tests need a throwaway Windows VM).
   reference, so it is unaffected).
 - **Mechanism:** `systemd.journal.Reader` (python-systemd) - a cursor you seek + iterate, so it fits
   the memory-bounded streaming discipline exactly (no read-all). Filter with `add_match(...)`.
-- **Field map -> `EventLogEntry`:** `__REALTIME_TIMESTAMP` -> time; `PRIORITY` (0-7) -> level;
-  `_SYSTEMD_UNIT` or `SYSLOG_IDENTIFIER` -> source; `MESSAGE` -> message; `_PID`/`_UID` as extras.
-- **`PRIORITY` -> `EventLevel`:** 0-3 (emerg/alert/crit/err) -> ERROR; 4 (warning) -> WARNING;
-  5-6 (notice/info) -> INFORMATION; 7 (debug) -> VERBOSE. (Decide the exact split when built.)
-- **Log-name arg:** a Windows channel ("System") maps to a unit/identifier match or the whole journal;
-  define the convention (e.g. `get_win_event("sshd")` -> `add_match(_SYSTEMD_UNIT="sshd.service")`).
+- **Field map -> `EventLogEntry`:** `__REALTIME_TIMESTAMP` -> `time_created` (normalized to aware
+  UTC); `PRIORITY` -> `level` (an entry with no `PRIORITY` counts as 6, info); `SYSLOG_IDENTIFIER`,
+  else `_SYSTEMD_UNIT`, else `_COMM` -> `provider_name`; `_HOSTNAME` -> `machine_name`; `_UID` ->
+  `user_id`; `MESSAGE` -> `message`; `log_name` is the name the caller passed. journald has no stable
+  numeric id (its identity is the string cursor), so `record_id` and `event_id` are 0. `_PID` and
+  other journal fields are not carried.
+- **`PRIORITY` -> `EventLevel`:** 0-2 (emerg/alert/crit) -> CRITICAL; 3 (err) -> ERROR; 4 (warning)
+  -> WARNING; 5-6 (notice/info) -> INFORMATION; 7 (debug) -> VERBOSE.
+- **Log-name arg:** `"System"`, `"*"` or an empty string reads the whole journal. Any other name is a
+  unit filter, `add_match(_SYSTEMD_UNIT=...)`, with `.service` appended when the name has no dot:
+  `get_win_event("sshd")` matches `sshd.service`, `get_win_event("nginx.service")` matches as given.
 - **Dep:** `systemd-python` (or read the journal via `jeepney` is not viable - use python-systemd).
   Linux-only. **Privilege:** the whole system journal is readable by root and members of `systemd-journal`, `adm` or `wheel` (per journalctl(1)); anyone else reads only their own journal files.
 
@@ -79,17 +87,20 @@ box (like the Windows mutating tests need a throwaway Windows VM).
   live (58 users / 103 groups, root at uid 0); the mutating verbs verified live on a root scratch
   user + group (`tests/test_posix_account_controller.py`).
 - **Read mechanism (stdlib, no dep):** `pwd.getpwall()` / `grp.getgrall()`.
-- **`LocalUser` map:** `pw_name` -> name; `pw_uid` -> the canonical id (the Linux "SID"); `pw_gecos`
-  -> full name/description; `pw_dir`/`pw_shell` as extras; "enabled" is inferred (shell not
-  `/usr/sbin/nologin`, no `!`/`*` password lock).
-- **`LocalGroup` map:** `gr_name` -> name; `gr_gid` -> id; `gr_mem` -> members.
+- **`LocalUser` map:** `pw_name` -> `name`; `pw_uid` -> `sid` (the canonical id, the Linux "SID");
+  the first comma-separated field of `pw_gecos` -> `full_name`; `description` is empty. `enabled`
+  is inferred from the login shell alone (not `/usr/sbin/nologin`, `/sbin/nologin`, `/bin/false`,
+  `/usr/bin/false`, `/dev/null` or empty), since the password lock lives in root-only `/etc/shadow`.
+  `pw_dir` and `pw_shell` are not carried.
+- **`LocalGroup` map:** `gr_name` -> `name`; `gr_gid` -> `sid`; `description` is empty. Members
+  (`gr_mem`) are not carried.
 - **Carry the uid/gid as the canonical id field** (mirrors carrying the SID on Windows) so scripts
   match on the number, not a name.
 - **Mutation (shell-free argv, the documented exception - no stable native account API):**
   `useradd` (+ `chpasswd` for the password) / `userdel` / `usermod -L/-U` for enable-disable,
   `groupadd`/`groupdel`, `gpasswd --add/--delete` for membership. Needs root. The returned record is
   read back from `pwd`/`grp`, with `enabled` set to the value the verb applied (the real lock state
-  is in root-only `/etc/shadow`). A POSIX group has no description, so `new_group`'s is ignored.
+  is in root-only `/etc/shadow`). A POSIX group has no description, so `new_local_group`'s is ignored.
 
 ## 3. Services -> systemd  `get_service` + start/stop/restart/set  [DONE]
 
@@ -175,16 +186,21 @@ box (like the Windows mutating tests need a throwaway Windows VM).
   else READY.
 - **Privilege:** system units need root (like the Windows verbs need admin); user timers are future work.
 
-## 5. `elevate()` relaunch -> sudo / pkexec  [DONE]
+## 5. `elevate()` relaunch -> sudo  [DONE]
 
 - **Status:** implemented in `adapters/native/elevation.py` (`_sudo_relaunch`), dispatched inside
   `elevate` by platform; verified on Linux (root -> no-op returns 0; the sudo argv build is unit-tested).
 - `is_elevated()` / `require_elevation()` were **already portable** (euid 0). Only the *relaunch* was
   Windows-only (UAC).
-- **Linux relaunch:** re-exec via `sudo` (or `pkexec` for a GUI polkit prompt), preserving argv + cwd:
-  roughly `os.execvp("sudo", ["sudo", executable, *argv])`. Decide sudo-vs-pkexec (or try pkexec then
-  fall back to sudo). **Testable logic:** building the argv is `os_agnostic`; the actual re-exec needs
-  a Linux TTY.
+- **Linux relaunch (as built):** `sudo` only, no `pkexec`, and no `exec`: the elevated program runs
+  as a child process with the same argv and cwd, and `elevate()` returns its exit code (or None with
+  `wait=False`). When the relaunched program is the current interpreter, a silent `sudo -n` probe
+  first checks whether sudo runs it without a password (a `NOPASSWD` rule); if so nothing is asked.
+  Otherwise `sudo -v` asks for the password and `sudo -n -v` checks that sudo cached the credential.
+  A refused or interrupted prompt, or a sudo that cached nothing (`timestamp_timeout=0`), raises
+  `ElevationDeclinedError`. The child then runs as `sudo -n <executable> <argv>`, so sudo never
+  prompts a second time. **Testable logic:** building the argv is `os_agnostic`; the prompt needs a
+  Linux TTY.
 
 ## 6. Credential store -> Secret Service  `save`/`load`/`delete_credential`  [DONE]
 
@@ -254,7 +270,7 @@ box (like the Windows mutating tests need a throwaway Windows VM).
 | Layer                                                            | Marker                                                | Where it runs                           |
 |------------------------------------------------------------------|-------------------------------------------------------|-----------------------------------------|
 | Pure mapping (priority->level, ActiveState->state, uid handling) | `os_agnostic`                                         | anywhere, including the Windows dev box |
-| Live read (journald / pwd-grp / ListUnits)                       | new `os_linux` (+ `local_only` for anything mutating) | a Linux box or CI ubuntu                |
+| Live read (journald / pwd-grp / ListUnits)                       | `os_linux` (+ `local_only` for anything mutating)     | a Linux box or CI ubuntu                |
 | Mutating (start/stop, useradd, register timer)                   | `local_only` + `os_linux`                             | a throwaway root Linux box              |
 
 Isolate the D-Bus / journald / sudo I/O behind the pure mapping functions so the untested-on-Windows

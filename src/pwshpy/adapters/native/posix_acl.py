@@ -250,12 +250,19 @@ def _resolve_gid(group: str) -> int:
         raise native_error(f"no such group {group!r}", exc) from exc
 
 
-def _parse_trustee(trustee: str) -> tuple[_AclTag, int]:
-    """A ``user:NAME`` / ``group:NAME`` (or bare -> user) trustee -> (named tag, resolved id)."""
+class _NamedTrustee(NamedTuple):
+    """A named ACL entry's identity: its tag and the uid/gid, as :class:`_XattrAclEntry` spells them."""
+
+    tag: _AclTag
+    entry_id: int
+
+
+def _parse_trustee(trustee: str) -> _NamedTrustee:
+    """A ``user:NAME`` / ``group:NAME`` (or bare -> user) trustee -> its named tag and resolved id."""
     if trustee.startswith("group:"):
-        return _AclTag.GROUP, _resolve_gid(trustee[len("group:") :])
+        return _NamedTrustee(_AclTag.GROUP, _resolve_gid(trustee[len("group:") :]))
     name = trustee[len("user:") :] if trustee.startswith("user:") else trustee
-    return _AclTag.USER, _resolve_uid(name)
+    return _NamedTrustee(_AclTag.USER, _resolve_uid(name))
 
 
 def _with_recomputed_mask(entries: list[_XattrAclEntry]) -> list[_XattrAclEntry]:
@@ -307,18 +314,18 @@ class PosixAclController:
             raise NativeCallError(
                 "POSIX ACLs are allow-only; there is no deny entry (grant fewer permissions instead)."
             )
-        tag, ident = _parse_trustee(trustee)
+        named = _parse_trustee(trustee)
         perm = rights & 7
-        entries = [e for e in _current_acl(path) if not (e.tag == tag and e.entry_id == ident)]
-        entries.append(_XattrAclEntry(tag, perm, ident))
+        entries = [e for e in _current_acl(path) if not (e.tag == named.tag and e.entry_id == named.entry_id)]
+        entries.append(_XattrAclEntry(named.tag, perm, named.entry_id))
         _write_acl(path, _with_recomputed_mask(entries))
 
     def remove_ace(self, path: str, trustee: str, *, access_type: AceType | None = None) -> None:
         """Remove a named user/group entry from ``path``; the mask is recomputed (dropped if none remain)."""
         if access_type is AceType.DENY:
             return  # POSIX has no deny entries to remove
-        tag, ident = _parse_trustee(trustee)
-        entries = [e for e in _current_acl(path) if not (e.tag == tag and e.entry_id == ident)]
+        named = _parse_trustee(trustee)
+        entries = [e for e in _current_acl(path) if not (e.tag == named.tag and e.entry_id == named.entry_id)]
         _write_acl(path, _with_recomputed_mask(entries))
 
 

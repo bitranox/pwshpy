@@ -93,6 +93,30 @@ def test_restart_computer_builds_shutdown_argv(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.os_agnostic
+def test_stop_computer_builds_shutdown_argv_without_force(monkeypatch: pytest.MonkeyPatch) -> None:
+    """stop_computer builds 'shutdown /s /t N' (no /f unless forced) - and NEVER actually shuts down (mocked).
+
+    Every argument is a plain str: the flag comes from an enum, and subprocess gets its value.
+    """
+    calls: list[list[str]] = []
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+
+    def _fake_run(argv: list[str], **_kwargs: Any) -> _Result:
+        calls.append(argv)
+        return _Result()
+
+    monkeypatch.setattr(pcmod.sys, "platform", "win32")
+    monkeypatch.setattr(pcmod.subprocess, "run", _fake_run)
+    NativeProcessControl(system_directory=lambda: _FAKE_SYSTEM_DIR).stop_computer(delay_seconds=0, force=False)
+    [argv] = calls
+    assert argv == [_FAKE_SHUTDOWN_EXE, "/s", "/t", "0"]
+    assert all(type(arg) is str for arg in argv)
+
+
+@pytest.mark.os_agnostic
 @pytest.mark.parametrize("reported", ["", "System32", r"Windows\System32", r"C:Windows\System32", r"\Windows\System32"])
 def test_a_system_directory_that_is_not_absolute_is_refused_before_shutdown_runs(
     monkeypatch: pytest.MonkeyPatch, reported: str

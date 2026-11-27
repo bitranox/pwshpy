@@ -23,7 +23,8 @@ import pytest
 
 from pwshpy.adapters.native import local_account_control as mod
 from pwshpy.adapters.native.local_account_control import NativeLocalAccountController
-from pwshpy.domain.errors import NativeCallError, PwshPyError
+from pwshpy.adapters.native.local_accounts import AccountModules
+from pwshpy.domain.errors import NativeCallError, PlatformUnsupportedError, PwshPyError
 
 _UF_ACCOUNTDISABLE = 0x0002
 _UF_NORMAL_ACCOUNT = 0x0200
@@ -78,7 +79,16 @@ class _FakeSecurity:
 
 
 def _use(monkeypatch: pytest.MonkeyPatch, net: _FakeNet) -> None:
-    monkeypatch.setattr(mod, "_load", lambda: (net, _FakeSecurity()))
+    monkeypatch.setattr(mod, "_load", lambda: AccountModules(net=net, security=_FakeSecurity()))
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.skipif(sys.platform == "win32", reason="pywin32 is installed on Windows, so the loader succeeds")
+def test_without_pywin32_the_controller_names_itself_in_the_refusal() -> None:
+    """The loader is shared with the read-only source; the refusal still names local-account control."""
+    with pytest.raises(PlatformUnsupportedError) as refused:
+        mod._load()  # pyright: ignore[reportPrivateUsage] - white-box test
+    assert str(refused.value) == "Local-account control requires pywin32 (Windows only); install pwshpy on Windows."
 
 
 @pytest.mark.os_agnostic

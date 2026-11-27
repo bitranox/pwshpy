@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, NamedTuple
 
 from ...domain.errors import PlatformUnsupportedError
 from ...domain.records import LocalGroup, LocalUser
@@ -27,19 +27,49 @@ _FILTER_NORMAL_ACCOUNT = 0x0002  # win32netcon.FILTER_NORMAL_ACCOUNT
 _MAX_PREFERRED_LENGTH = -1  # MAX_PREFERRED_LENGTH ((DWORD)-1): let the API size each buffer to return all rows
 
 
-def _load() -> tuple[Any, Any]:
-    """Import ``win32net`` + ``win32security`` lazily (absent on a portable install)."""
+class AccountModules(NamedTuple):
+    """The two pywin32 modules the local-account source and controller work through.
+
+    Named slots because both are ``Any``: a positional swap would type-check and fail at runtime.
+    """
+
+    #: ``win32net``: the SAM API (users, groups, membership).
+    net: Any
+    #: ``win32security``: name to SID resolution.
+    security: Any
+
+
+def load_account_modules(subsystem: str) -> AccountModules:
+    """Import ``win32net`` + ``win32security`` lazily (absent on a portable install).
+
+    Shared by this source and :mod:`~pwshpy.adapters.native.local_account_control`, which differ
+    only in how the refusal names them.
+
+    Args:
+        subsystem: Opens the refusal sentence (``"<subsystem> requires pywin32 ..."``).
+
+    Returns:
+        The two modules, by name.
+
+    Raises:
+        PlatformUnsupportedError: pywin32 is not installed (a portable, non-Windows install).
+    """
     try:
         net: Any = importlib.import_module("win32net")
         security: Any = importlib.import_module("win32security")
     except ImportError as exc:  # pragma: no cover - only on a portable (non-Windows) install
         raise PlatformUnsupportedError(
-            "The local-accounts subsystem requires pywin32 (Windows only); install pwshpy on Windows."
+            f"{subsystem} requires pywin32 (Windows only); install pwshpy on Windows."
         ) from exc
-    return net, security
+    return AccountModules(net=net, security=security)
 
 
-def _sid_for(security: Any, name: str) -> str:
+def _load() -> AccountModules:
+    """This source's pywin32 modules; the seam a test replaces with doubles."""
+    return load_account_modules("The local-accounts subsystem")
+
+
+def sid_for(security: Any, name: str) -> str:
     """Resolve a principal name to its string SID, or ``""`` if it cannot be looked up."""
     try:
         sid, _domain, _type = security.LookupAccountName(None, name)
@@ -57,18 +87,20 @@ def iter_local_users() -> Iterator[LocalUser]:
         >>> sys.platform != "win32" or isinstance(next(iter_local_users()), LocalUser)
         True
     """
-    net, security = _load()
+    modules = _load()
     resume = 0
     while True:
         try:
-            data, _total, resume = net.NetUserEnum(None, 2, _FILTER_NORMAL_ACCOUNT, resume, _MAX_PREFERRED_LENGTH)
+            data, _total, resume = modules.net.NetUserEnum(
+                None, 2, _FILTER_NORMAL_ACCOUNT, resume, _MAX_PREFERRED_LENGTH
+            )
         except Exception as exc:
             raise native_error(str(exc) or "cannot enumerate local users", exc) from exc
         for entry in data:
             name = str(entry["name"])
             yield LocalUser.model_construct(
                 name=name,
-                sid=_sid_for(security, name),
+                sid=sid_for(modules.security, name),
                 enabled=not (int(entry["flags"]) & _UF_ACCOUNTDISABLE),
                 full_name=str(entry.get("full_name") or ""),
                 description=str(entry.get("comment") or ""),
@@ -86,17 +118,17 @@ def iter_local_groups() -> Iterator[LocalGroup]:
         >>> sys.platform != "win32" or isinstance(next(iter_local_groups()), LocalGroup)
         True
     """
-    net, security = _load()
+    modules = _load()
     resume = 0
     while True:
         try:
-            data, _total, resume = net.NetLocalGroupEnum(None, 1, resume, _MAX_PREFERRED_LENGTH)
+            data, _total, resume = modules.net.NetLocalGroupEnum(None, 1, resume, _MAX_PREFERRED_LENGTH)
         except Exception as exc:
             raise native_error(str(exc) or "cannot enumerate local groups", exc) from exc
         for entry in data:
             name = str(entry["name"])
             yield LocalGroup.model_construct(
-                name=name, sid=_sid_for(security, name), description=str(entry.get("comment") or "")
+                name=name, sid=sid_for(modules.security, name), description=str(entry.get("comment") or "")
             )
         if not resume:
             return

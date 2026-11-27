@@ -444,7 +444,7 @@ class UnitFile(NamedTuple):
     state: UnitFileState
 
 
-def unit_files(bus: Bus, suffix: UnitType) -> list[UnitFile]:
+def unit_files(bus: Bus, suffix: UnitType | str) -> list[UnitFile]:
     """Every unit file of type ``suffix`` (``*.timer`` / ``*.service``) as a :class:`UnitFile`, templates excluded.
 
     ``ListUnitFilesByPatterns`` lets systemd filter (systemd >= 230); an older manager lacks it, so
@@ -454,9 +454,9 @@ def unit_files(bus: Bus, suffix: UnitType) -> list[UnitFile]:
 
     Args:
         bus: The open system-bus connection.
-        suffix: The unit type to list.
+        suffix: The unit type to list, as a :class:`UnitType` or its suffix string (``".timer"``).
     """
-    suffix_text = suffix.value
+    suffix_text = UnitType(suffix).value
     try:
         (files,) = call(bus, "ListUnitFilesByPatterns", "asas", ([], [f"*{suffix_text}"]))
     except NativeCallError:

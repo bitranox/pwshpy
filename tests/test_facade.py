@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
+from typing import Any, cast
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -508,6 +509,7 @@ class _FakeRegistryController:
         self, key: str, name: str, data: str | int | list[str] | None, value_type: RegistryValueType
     ) -> RegistryValue:
         self.calls.append(("set_value", key))
+        self.last_value_type = value_type
         return RegistryValue(hive=RegistryHive.HKCU, key=key, name=name, type=value_type, data=data)
 
     def remove_value(self, key: str, name: str) -> None:
@@ -583,6 +585,7 @@ class _FakeAclController:
 
     def remove_ace(self, path: str, trustee: str, *, access_type: AceType | None = None) -> None:
         self.calls.append(("remove_ace", path, trustee))
+        self.last_remove_type = access_type
 
     def set_owner(self, path: str, owner: str) -> None:
         self.calls.append(("set_owner", path, owner))
@@ -1485,3 +1488,62 @@ def test_the_package_exports_the_known_folder_and_shortcut_types() -> None:
     assert pwshpy.ShortcutInfo is ShortcutInfo
     assert {"KnownFolder", "ShortcutInfo"} <= set(pwshpy.__all__)
     assert "ShortcutSpec" not in pwshpy.__all__
+
+
+@pytest.mark.os_agnostic
+def test_new_item_takes_the_item_type_as_its_value_string(tmp_path: Path) -> None:
+    """``item_type="directory"`` makes a directory: the value string reaches the file system as the member."""
+    target = tmp_path / "sub"
+    created = build_ps().new_item(str(target), item_type=cast(Any, "directory"))
+    assert created.is_directory is True
+    assert target.is_dir()
+
+
+@pytest.mark.os_agnostic
+def test_new_item_refuses_an_unknown_item_type_and_creates_nothing(tmp_path: Path) -> None:
+    """An item type that is no FileItemType value is refused by name, before anything is created."""
+    target = tmp_path / "x"
+    with pytest.raises(ConfigurationError, match=r"^item_type must be one of 'file', 'directory'; got 'folder'$"):
+        build_ps().new_item(str(target), item_type=cast(Any, "folder"))
+    assert not target.exists()
+
+
+@pytest.mark.os_agnostic
+def test_enum_arguments_given_as_value_strings_reach_the_adapters_as_members(injected: _InjectedPs) -> None:
+    """Every enum-typed facade argument accepts its value string; adapters always receive the member.
+
+    The adapters decide with ``is`` (``access_type is AceType.DENY``), so a string that slipped
+    through would turn a deny entry into an allow entry.
+    """
+    facade = injected.facade
+    facade.add_acl_ace("C:/x", "S-1-5-32-545", 1, access_type=cast(Any, "Deny"))
+    assert injected.acl_controller.last_type is AceType.DENY
+    facade.remove_acl_ace("C:/x", "S-1-5-32-545", access_type=cast(Any, "Allow"))
+    assert injected.acl_controller.last_remove_type is AceType.ALLOW
+    facade.remove_acl_ace("C:/x", "S-1-5-32-545")
+    assert injected.acl_controller.last_remove_type is None
+    facade.set_service("Svc", cast(Any, "Disabled"))
+    assert injected.service_controller.last_start_type is ServiceStartType.DISABLED
+    facade.set_item_property("HKCU/S", "N", 1, cast(Any, "REG_DWORD"))
+    assert injected.registry_controller.last_value_type is RegistryValueType.REG_DWORD
+
+
+_UNKNOWN_ENUM_VALUE_CASES: list[tuple[Callable[[Ps], object], str]] = [
+    (lambda f: f.add_acl_ace("C:/x", "S", 1, access_type=cast(Any, "deny")), "access_type"),
+    (lambda f: f.remove_acl_ace("C:/x", "S", access_type=cast(Any, "Grant")), "access_type"),
+    (lambda f: f.set_service("Svc", cast(Any, "Off")), "start_type"),
+    (lambda f: f.set_item_property("HKCU/S", "N", 1, cast(Any, "DWORD")), "value_type"),
+]
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(("verb", "name"), _UNKNOWN_ENUM_VALUE_CASES)
+def test_an_unknown_enum_value_is_refused_before_the_adapter_is_called(
+    injected: _InjectedPs, verb: Callable[[Ps], object], name: str
+) -> None:
+    """A value string that names no member is refused with ConfigurationError; no adapter runs."""
+    with pytest.raises(ConfigurationError, match=rf"^{name} must be one of "):
+        verb(injected.facade)
+    assert injected.acl_controller.calls == []
+    assert injected.service_controller.calls == []
+    assert injected.registry_controller.calls == []

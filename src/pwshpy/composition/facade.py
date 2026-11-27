@@ -16,8 +16,9 @@ import ntpath
 import os
 import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from enum import Enum
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, TypeVar
 
 from ..adapters.native import NativeAclController as _NativeAclController
 from ..adapters.native import NativeCredentialStore as _NativeCredentialStore
@@ -139,7 +140,7 @@ from ..application.ports import (
 )
 from ..domain.cim_methods import CimArgumentValue
 from ..domain.enums import AceType, FileItemType, KnownFolder, RegistryValueType, ServiceStartType
-from ..domain.errors import ElevationRequiredError, NativeCallError, PlatformUnsupportedError
+from ..domain.errors import ConfigurationError, ElevationRequiredError, NativeCallError, PlatformUnsupportedError
 from ..domain.packing import DEFAULT_PACK_OPTIONS, PackOptions
 from ..domain.pipeline import Pipeline
 from ..domain.records import (
@@ -221,6 +222,34 @@ _DEFAULT_WU_CRITERIA = "IsInstalled=0 and Type='Software'"
 #: Windows socket timeouts top out at 2**31-1 ms, so the signed ceiling is safe for any wait
 #: the timeout may reach.  Refused at the call instead of failing (or never firing) later.
 _MAX_WAIT_SECONDS = 2147483
+
+
+_EnumT = TypeVar("_EnumT", bound=Enum)
+
+
+def _enum_arg(kind: type[_EnumT], value: _EnumT | str, *, name: str) -> _EnumT:
+    """Parse an enum-typed facade argument once, so adapters always receive the member.
+
+    The adapters decide with identity (``access_type is AceType.DENY``). A ``str, Enum`` value
+    string passes an unannotated caller's eye and the type checker of an untyped one, so without
+    this parse ``"Deny"`` would be read as ALLOW and ``"directory"`` would create a file.
+
+    Raises:
+        ConfigurationError: ``value`` is neither a member nor the value of one.
+
+    Example:
+        >>> _enum_arg(FileItemType, "directory", name="item_type") is FileItemType.DIRECTORY
+        True
+        >>> _enum_arg(FileItemType, "folder", name="item_type")
+        Traceback (most recent call last):
+        ...
+        pwshpy.domain.errors.ConfigurationError: item_type must be one of 'file', 'directory'; got 'folder'
+    """
+    try:
+        return kind(value)
+    except ValueError as exc:
+        allowed = ", ".join(repr(member.value) for member in kind)
+        raise ConfigurationError(f"{name} must be one of {allowed}; got {value!r}") from exc
 
 
 def _check_wait_limit(timeout: float) -> None:
@@ -675,12 +704,16 @@ class Ps:
                 dependency).
             NativeCallError: The hive is unknown, or the registry call failed (a
                 :class:`NativeAccessDeniedError` when access is denied).
+            ConfigurationError: ``value_type`` is neither a :class:`RegistryValueType` nor its value
+                string; nothing is written.
 
         Example:
             >>> callable(build_ps().set_item_property)
             True
         """
-        return self._registry_controller.set_value(key, name, data, value_type)
+        return self._registry_controller.set_value(
+            key, name, data, _enum_arg(RegistryValueType, value_type, name="value_type")
+        )
 
     def remove_item_property(self, key: str, name: str) -> None:
         """Delete a registry value (native, **mutating**).
@@ -881,12 +914,14 @@ class Ps:
         Raises:
             NativeCallError: The change was refused, the service could not be opened, or (on
                 Linux) ``start_type`` is neither ``AUTOMATIC`` nor ``DISABLED``.
+            ConfigurationError: ``start_type`` is neither a :class:`ServiceStartType` nor its value
+                string; nothing is changed.
 
         Example:
             >>> callable(build_ps().set_service)
             True
         """
-        return self._service_controller.set_startup(name, start_type)
+        return self._service_controller.set_startup(name, _enum_arg(ServiceStartType, start_type, name="start_type"))
 
     def get_win_event(self, log_name: str) -> Pipeline[EventLogEntry]:
         """Return a lazy, STREAMING pipeline over the system event log (native, portable).
@@ -1597,12 +1632,15 @@ class Ps:
                 access is denied.
             PlatformUnsupportedError: Not Windows or Linux (macOS has no ACL backend); nothing
                 is changed.
+            ConfigurationError: ``access_type`` is neither an :class:`AceType` nor its value string
+                (``"Allow"``, ``"Deny"``); nothing is changed.
 
         Example:
             >>> callable(build_ps().add_acl_ace)
             True
         """
-        self._require_acl("add_acl_ace").controller.add_ace(path, trustee, rights, access_type=access_type)
+        kind = _enum_arg(AceType, access_type, name="access_type")
+        self._require_acl("add_acl_ace").controller.add_ace(path, trustee, rights, access_type=kind)
 
     def remove_acl_ace(self, path: str, trustee: str, *, access_type: AceType | None = None) -> None:
         """Remove a trustee's entries from a path's ACL (native, Windows and Linux, **mutating**).
@@ -1622,12 +1660,15 @@ class Ps:
                 written (a :class:`NativeAccessDeniedError` when access is denied).
             PlatformUnsupportedError: Not Windows or Linux (macOS has no ACL backend); nothing
                 is changed.
+            ConfigurationError: ``access_type`` is neither None, an :class:`AceType` nor its value
+                string; nothing is changed.
 
         Example:
             >>> callable(build_ps().remove_acl_ace)
             True
         """
-        self._require_acl("remove_acl_ace").controller.remove_ace(path, trustee, access_type=access_type)
+        kind = None if access_type is None else _enum_arg(AceType, access_type, name="access_type")
+        self._require_acl("remove_acl_ace").controller.remove_ace(path, trustee, access_type=kind)
 
     def set_owner(self, path: str, owner: str) -> None:
         """Set the owner of a filesystem path (native, Windows and Linux, **mutating**; ``chown`` on Linux).
@@ -2236,12 +2277,14 @@ class Ps:
         Raises:
             NativeCallError: The item could not be created (a :class:`NativeAccessDeniedError`
                 when access is denied).
+            ConfigurationError: ``item_type`` is neither a :class:`FileItemType` nor its value
+                string (``"file"``, ``"directory"``); nothing is created.
 
         Example:
             >>> callable(build_ps().new_item)
             True
         """
-        return self._file_system.new_item(path, item_type=item_type)
+        return self._file_system.new_item(path, item_type=_enum_arg(FileItemType, item_type, name="item_type"))
 
     def copy_item(self, source: str, destination: str, *, recurse: bool = False) -> None:
         """Copy a file, or a directory tree when ``recurse`` (native, **mutating**; like Copy-Item).

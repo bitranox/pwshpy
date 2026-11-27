@@ -295,3 +295,11 @@ def test_unit_files_lists_only_the_requested_unit_type() -> None:
     bus = systemd_dbus.Bus(conn=FakeConn([], {}, files), core=FakeCore(), mgr=Address("/org/freedesktop/systemd1"))
     assert [f.name for f in systemd_dbus.unit_files(bus, systemd_dbus.UnitType.TIMER)] == ["a.timer", "c.timer"]
     assert [f.name for f in systemd_dbus.unit_files(bus, systemd_dbus.UnitType.SERVICE)] == ["a.service"]
+
+
+@pytest.mark.os_agnostic
+def test_unit_files_still_takes_the_suffix_as_a_plain_string() -> None:
+    """``unit_files`` also takes the suffix as a plain string (``".timer"``)."""
+    files = frozenset({"a.timer", "a.service"})
+    bus = systemd_dbus.Bus(conn=FakeConn([], {}, files), core=FakeCore(), mgr=Address("/org/freedesktop/systemd1"))
+    assert [f.name for f in systemd_dbus.unit_files(bus, ".timer")] == ["a.timer"]

@@ -26,6 +26,7 @@ from .composition import Ps, build_ps, get_config, ps
 # Domain object model
 from .domain.enums import (
     AceType,
+    AclEntryKind,
     AddressFamily,
     ConnectionState,
     EventLevel,
@@ -182,6 +183,7 @@ __all__ = [
     "KnownFolder",
     "WellKnownSid",
     "AceType",
+    "AclEntryKind",
     # Errors
     "PwshPyError",
     "NativeAccessDeniedError",

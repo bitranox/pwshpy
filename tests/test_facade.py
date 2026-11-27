@@ -19,6 +19,7 @@ from pwshpy.composition import Ps, build_ps
 from pwshpy.domain.cim_methods import CimArgumentValue
 from pwshpy.domain.enums import (
     AceType,
+    AclEntryKind,
     AddressFamily,
     EventLevel,
     FileItemType,
@@ -1475,3 +1476,10 @@ def test_the_package_exports_the_known_folder_and_shortcut_types() -> None:
     assert pwshpy.ShortcutInfo is ShortcutInfo
     assert {"KnownFolder", "ShortcutInfo"} <= set(pwshpy.__all__)
     assert "ShortcutSpec" not in pwshpy.__all__
+
+
+@pytest.mark.os_agnostic
+def test_the_package_exports_the_acl_entry_kind() -> None:
+    """AclEntry.kind is typed AclEntryKind, so a caller comparing it needs the enum from pwshpy."""
+    assert pwshpy.AclEntryKind is AclEntryKind
+    assert "AclEntryKind" in pwshpy.__all__

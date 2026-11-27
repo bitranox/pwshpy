@@ -6,6 +6,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.13.1] - 2026-11-27
+
 ### Changed
 
 - `ps.get_cim_instance()` reads an instance's properties by name once it knows the instance's class:

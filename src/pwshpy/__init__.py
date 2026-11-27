@@ -30,6 +30,7 @@ from .domain.enums import (
     AddressFamily,
     ConnectionState,
     EventLevel,
+    FileItemType,
     ImageArchitecture,
     IntegrityLevel,
     KnownFolder,
@@ -184,6 +185,7 @@ __all__ = [
     "WellKnownSid",
     "AceType",
     "AclEntryKind",
+    "FileItemType",
     # Errors
     "PwshPyError",
     "NativeAccessDeniedError",

@@ -1555,3 +1555,10 @@ def test_the_package_exports_the_acl_entry_kind() -> None:
     """AclEntry.kind is typed AclEntryKind, so a caller comparing it needs the enum from pwshpy."""
     assert pwshpy.AclEntryKind is AclEntryKind
     assert "AclEntryKind" in pwshpy.__all__
+
+
+@pytest.mark.os_agnostic
+def test_the_package_exports_the_file_item_type() -> None:
+    """new_item takes a FileItemType, so a typed caller needs the enum from pwshpy."""
+    assert pwshpy.FileItemType is FileItemType
+    assert "FileItemType" in pwshpy.__all__

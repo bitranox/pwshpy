@@ -326,21 +326,23 @@ never through `categories` or `title`, which the Windows Update agent localizes:
 `.where(lambda u: any(c.category_id == GUID for c in u.category_details))`. `exec` drops the output
 written before a timeout.
 
-CLI and packed-runner exit codes (an error also writes one `ErrorName: message` line, or a `pwshpy: ...`
-line from a runner, to stderr): 0 ok, 1 any other `PwshPyError`, 2 usage error, 13 a native call
-refused for lack of rights (`NativeAccessDeniedError`; 5 on Windows, whatever errno or HRESULT the
-call reported), 22 a refused value
-(`ValueError`; 87 on Windows), 64 a relative or empty `-PwshPyUv` / `--pwshpy-uv`, 70 the runner failed before the script ran
-(the elevated `.ps1` child, an elevated run that cannot return to the caller's directory, or a
-`.ps1` `-PwshPyElevate` on Linux or macOS with no home for root or no `/bin/sh`: `pwshpy: cannot
-elevate:`), or `pwshpy --elevate` refused a directory or script on a `net use` drive (that `pwshpy: cannot elevate:` line too), 77
-elevation declined (`pwshpy --elevate`, `-PwshPyElevate`, `--pwshpy-elevate`; stderr line `pwshpy:
-elevation declined`), 110 `OperationTimeoutError`, 127 a missing or untrusted `uv` (an install
-of uv that failed, or found no curl or wget, counts as missing; run elevated, also an untrusted
-managed Python, pack cache, temporary directory, git configuration file, or an old or untrusted
-git), or no `sudo` for a runner's
-elevation. `pwshpy exec`, `pwshpy --elevate <command>` (a no-op when already elevated) and a
-runner otherwise return the program's, command's or script's own code, so check the stderr line too.
+CLI and packed-runner exit codes (an error also writes one `ErrorName: message` line, or a
+`pwshpy: ...` line from a runner, to stderr): 0 ok, 1 any other `PwshPyError`, 2 usage error, 13 a
+native call refused for lack of rights (`NativeAccessDeniedError`; 5 on Windows, whatever errno or
+HRESULT the call reported), 22 a refused value (`ValueError`; 87 on Windows), 64 a relative or empty
+`-PwshPyUv` / `--pwshpy-uv`, 70 the runner failed before the script ran (the elevated `.ps1` child,
+an elevated run that cannot return to the caller's directory, or a `.ps1` `-PwshPyElevate` on Linux
+or macOS with no home for root or no `/bin/sh`: `pwshpy: cannot elevate:`), or `pwshpy --elevate`
+refused a directory or script on a `net use` drive (that `pwshpy: cannot elevate:` line too), 77
+elevation declined (`pwshpy --elevate`, `-PwshPyElevate`, `--pwshpy-elevate`; stderr line
+`pwshpy: elevation declined`), 78 a configuration `config` or `logdemo` cannot load (a bad `--set`,
+`.env` line, `LOG_*` variable or configuration file) or a permission setting `config-deploy` refuses
+(one `Error:` line per problem), 110 `OperationTimeoutError`, 127 a missing or untrusted `uv` (an
+install of uv that failed, or found no curl or wget, counts as missing; run elevated, also an
+untrusted managed Python, pack cache, temporary directory, git configuration file, or an old or
+untrusted git), or no `sudo` for a runner's elevation. `pwshpy exec`, `pwshpy --elevate <command>`
+(a no-op when already elevated) and a runner otherwise return the program's, command's or script's
+own code, so check the stderr line too.
 
 ## Still writing a `.ps1`? Nine traps
 
@@ -476,16 +478,20 @@ database or no `/bin/sh` the run stops with exit 70.
 
 ## Every public name
 
-From `pwshpy`: the facade `ps` (an instance of `Ps`; `build_ps()` builds a fresh one), `get_config()`
-(the layered configuration the CLI reads) and `print_info()` (the package metadata `pwshpy info`
-prints). Inputs: `TaskPrincipal`, `TaskSettings`, `TaskTrigger`, `OnceTrigger`, `DailyTrigger`, `BootTrigger`,
-`LogonTrigger`, `PackOptions`, `RunnerFormat`. Enums to compare against: `ProcessStatus`,
-`ConnectionState`, `TransportProtocol`, `AddressFamily`, `ServiceState`, `ServiceStartType`, `TaskMultipleInstances`,
-`ServiceKind`, `EventLevel`, `TaskState`, `TaskRunLevel`, `TaskLogonType`, `RegistryHive`,
-`RegistryValueType`, `AceType`, `WellKnownSid` (SID strings), `IntegrityLevel`, `ImageArchitecture`,
-`KnownFolder` (also the input of `get_known_folder`). Errors: listed above. Records (`ProcessInfo`,
-`ServiceInfo`, `WindowsImage`, `WindowsUpdate`, `CurrentIdentity`, `ScheduledTaskInfo`,
-`ShortcutInfo`, ...) are what the calls return; read their fields.
+From `pwshpy`: the facade `ps` (an instance of `Ps`; `build_ps()` builds a fresh one),
+`get_config()` (the layered configuration the CLI reads) and `print_info()` (the package metadata
+`pwshpy info` prints). Object model: `Pipeline` (the lazy stream the listing calls return) and
+`PSRecord` (the frozen base of every record). Inputs: `TaskPrincipal`, `TaskSettings`,
+`TaskTrigger`, `OnceTrigger`, `DailyTrigger`, `BootTrigger`, `LogonTrigger`, `PackOptions`,
+`RunnerFormat`. Enums to compare against: `ProcessStatus`, `ConnectionState`, `TransportProtocol`,
+`AddressFamily`, `ServiceState`, `ServiceStartType`, `TaskMultipleInstances`, `ServiceKind`,
+`EventLevel`, `TaskState`, `TaskRunLevel`, `TaskLogonType`, `RegistryHive`, `RegistryValueType`,
+`AceType` (allow or deny), `AclEntryKind` (whose ACL entry: owner, user, group, mask, ...),
+`FileItemType` (the input of `new_item`), `WellKnownSid` (SID strings), `IntegrityLevel`,
+`ImageArchitecture`, `KnownFolder` (also the input of `get_known_folder`). Errors: listed above.
+Records (`ProcessInfo`, `ServiceInfo`, `WindowsImage`, `WindowsUpdate`, `CurrentIdentity`,
+`ScheduledTaskInfo`, `ShortcutInfo`, `CimInstance`, `CimMethodResult`, `PSObjectRecord`,
+`PSInvocationResult`, ...) are what the calls return; read their fields.
 
 CLI commands (`pwshpy <command> --help` for flags; most use underscores, `is-elevated`, `config-deploy`
 and `config-generate-examples` hyphens), by area:
